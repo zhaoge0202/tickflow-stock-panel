@@ -693,6 +693,18 @@ export interface DataSourceItem {
   path?: string | null
 }
 
+/** 内置可选插件数据源 (plugins/ 目录, 需手动装依赖) */
+export interface PluginDataSourceItem {
+  name: string
+  display_name: string
+  datasets: string[]
+  runtime: string          // node | python | none
+  available: boolean       // 依赖是否已安装
+  status: string           // 可用性原因 (供 UI 显示)
+  description: string
+  install_hint: string     // 未装依赖时显示的安装命令
+}
+
 export interface DataSourceLoadError {
   name?: string
   path: string
@@ -701,6 +713,7 @@ export interface DataSourceLoadError {
 
 export interface DataSourcesResponse {
   builtin: DataSourceItem[]
+  plugins: PluginDataSourceItem[]
   custom: DataSourceItem[]
   errors: DataSourceLoadError[]
   config_dir: string
@@ -857,6 +870,20 @@ export const api = {
   deleteDataSource: (name: string) =>
     request<DataSourcesResponse>(`/api/settings/data-sources/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   reloadDataSources: () => request<DataSourcesResponse>('/api/settings/data-sources/reload', { method: 'POST' }),
+  installPlugin: (name: string) => {
+    // npm install 可能耗时较长, 用 6 分钟超时
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 360_000)
+    return request<DataSourcesResponse & { install_ok: boolean; install_message: string }>(
+      `/api/settings/plugins/${encodeURIComponent(name)}/install`,
+      { method: 'POST', signal: controller.signal },
+    ).finally(() => clearTimeout(timer))
+  },
+  uninstallPlugin: (name: string) =>
+    request<DataSourcesResponse & { uninstall_ok: boolean; uninstall_message: string }>(
+      `/api/settings/plugins/${encodeURIComponent(name)}/install`,
+      { method: 'DELETE' },
+    ),
   testDataSource: (provider: string, dataset: string, symbols?: string[]) =>
     request<DataSourceTestResult>('/api/settings/data-sources/test', {
       method: 'POST',
