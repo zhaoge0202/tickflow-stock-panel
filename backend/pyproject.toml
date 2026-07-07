@@ -26,6 +26,7 @@ dependencies = [
     # Config
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    "pymysql>=1.1",
     # AI(可选,但默认装上)
     "openai>=1.40",               # OpenAI 兼容适配器复用 openai SDK
     "httpx>=0.27",

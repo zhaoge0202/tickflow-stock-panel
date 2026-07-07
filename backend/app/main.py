@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, trade_ticks, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -124,6 +124,11 @@ async def lifespan(app: FastAPI):
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
 
+    # TDX 逐笔成交 MySQL 异步入库 worker。未配置/未开启时只会拒绝入队,不影响实时展示。
+    from app.services.trade_tick_ingest import trade_tick_ingestor
+    trade_tick_ingestor.start()
+    app.state.trade_tick_ingestor = trade_tick_ingestor
+
     # 策略引擎
     from app.strategy.engine import StrategyEngine
     from app.strategy.monitor import StrategyMonitorService
@@ -183,6 +188,9 @@ async def lifespan(app: FastAPI):
     fsc = getattr(app.state, "financial_scheduler", None)
     if fsc:
         fsc.stop()
+    tti = getattr(app.state, "trade_tick_ingestor", None)
+    if tti:
+        tti.stop()
     qs = getattr(app.state, "quote_service", None)
     if qs:
         qs.stop()
@@ -279,6 +287,7 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
+app.include_router(trade_ticks.router)
 
 
 # 能力门控异常 → 403(而非默认 500)

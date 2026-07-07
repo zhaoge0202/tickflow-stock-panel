@@ -3,6 +3,7 @@ import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
+import { StockTradeTicksPanel } from '@/components/StockTradeTicksPanel'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
 import type { ChartMarker, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
@@ -151,14 +152,16 @@ export function StockPanel({
         />
 
         {showIntraday && selectedDate && (
-          <StockIntradayChart
-            symbol={symbol}
-            date={selectedDate}
-            height={height}
-            prevClose={prevClose}
-            onPriceHover={setLinkedPrice}
-            className="flex-1 min-w-0 border-l border-border pl-3"
-          />
+          <div className="flex-1 min-w-0 border-l border-border pl-3">
+            <StockIntradayChart
+              symbol={symbol}
+              date={selectedDate}
+              height={height}
+              prevClose={prevClose}
+              onPriceHover={setLinkedPrice}
+            />
+            <StockTradeTicksPanel symbol={symbol} date={selectedDate} />
+          </div>
         )}
       </div>
     </div>

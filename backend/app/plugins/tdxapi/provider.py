@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -19,7 +19,7 @@ from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
 
-_DATASETS = ("daily", "minute", "realtime")
+_DATASETS = ("daily", "minute", "realtime", "trade_ticks")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
 _KLINE_BATCH = 8
@@ -155,6 +155,41 @@ class TDXAPIProvider:
                     rows.append(row)
         return rows
 
+    # ---- trade ticks ----
+    def get_trade_ticks(
+        self,
+        symbol: str,
+        trade_date: date | datetime | str | None = None,
+        mode: str = "recent",
+        limit: int | None = 500,
+    ) -> list[dict]:
+        """返回单票逐笔成交明细。
+
+        mode:
+          - recent: tdx-api /api/trade, 今日最近约 1800 条; 传 date 时取历史某日。
+          - all:    tdx-api /api/minute-trade-all, 今日/指定日全量分时成交。
+        """
+        app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+        params = {"code": _to_tdx_code(symbol)}
+        date_arg = _tdx_date_arg(trade_date)
+        if date_arg:
+            params["date"] = date_arg
+
+        path = "/api/minute-trade-all" if str(mode or "").lower() == "all" else "/api/trade"
+        data = self._request("GET", path, params=params, timeout=max(self.timeout, 60.0))
+        raw_rows = list((data or {}).get("List") or [])
+
+        rows = [
+            row for row in (
+                self._trade_tick_row(app_symbol, item, seq_in_day=i + 1)
+                for i, item in enumerate(raw_rows)
+            )
+            if row is not None
+        ]
+        if limit and limit > 0:
+            return rows[-limit:]
+        return rows
+
     # ---- instruments ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
         if asset_type != "stock":
@@ -198,6 +233,15 @@ class TDXAPIProvider:
                 "rows": len(rows),
                 "columns": list(head[0].keys()) if head else [],
                 "preview": head,
+            }
+        if dataset == "trade_ticks":
+            rows = self.get_trade_ticks(symbols[0], mode="recent", limit=5)
+            return {
+                "provider": self.name,
+                "dataset": "trade_ticks",
+                "rows": len(rows),
+                "columns": list(rows[0].keys()) if rows else [],
+                "preview": rows[:5],
             }
         raise ValueError(f"tdx-api 不支持数据集: {dataset}")
 
@@ -282,6 +326,30 @@ class TDXAPIProvider:
             "timestamp": _server_time_ms(item.get("ServerTime")),
         }
 
+    @staticmethod
+    def _trade_tick_row(symbol: str, item: dict, seq_in_day: int) -> dict | None:
+        dt = _parse_tdx_time(item.get("Time"))
+        if dt is None:
+            return None
+        price = _price(item.get("Price"))
+        volume = int(_float(item.get("Volume")))
+        raw_status = _int_or_none(item.get("Status"))
+        side, side_label = _trade_side(raw_status)
+        return {
+            "symbol": symbol,
+            "trade_date": dt.date(),
+            "datetime": dt.replace(tzinfo=None),
+            "seq_in_day": int(seq_in_day),
+            "price": price,
+            "volume": volume,
+            "amount": price * volume * 100.0,
+            "side": side,
+            "side_label": side_label,
+            "order_count": _int_or_none(item.get("Number")),
+            "raw_status": raw_status,
+            "source": "tdxapi",
+        }
+
 
 def availability() -> tuple[bool, str]:
     base_url = _base_url()
@@ -322,6 +390,19 @@ def _to_tdx_code(symbol: str | None) -> str:
     if len(text) == 8 and text[:2].lower() in {"sh", "sz", "bj"}:
         return text.lower()
     return text
+
+
+def _tdx_date_arg(value: date | datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.replace("-", "")
 
 
 def _to_app_symbol(code: str | None, exchange) -> str | None:
@@ -412,6 +493,23 @@ def _float(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trade_side(raw_status: int | None) -> tuple[str, str]:
+    if raw_status == 0:
+        return "buy", "主买"
+    if raw_status == 1:
+        return "sell", "主卖"
+    if raw_status == 2:
+        return "neutral", "中性"
+    return "unknown", "未知"
 
 
 def _server_time_ms(value) -> int | None:
