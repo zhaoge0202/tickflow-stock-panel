@@ -13,6 +13,7 @@ const DATASET_LABEL: Record<string, string> = {
   adj_factor: '除权',
   realtime: '实时',
   minute: '分钟',
+  financial: '财务',
 }
 
 export function SettingsDataSourcesPanel() {
@@ -158,7 +159,7 @@ export function SettingsDataSourcesPanel() {
           <span className="text-[10px] uppercase tracking-widest text-muted">当前</span>
           <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
           <span className="text-sm font-medium text-foreground">
-            {activeName === 'tickflow' ? 'TickFlow' : customList.find(s => s.name === activeName)?.display_name || activeName}
+            {activeName === 'tickflow' ? 'TickFlow' : allItems.find(s => s.name === activeName)?.display_name || activeName}
           </span>
         </div>
 
@@ -169,6 +170,7 @@ export function SettingsDataSourcesPanel() {
             const isSelected = selected === item.name
             const plugin = pluginMap.get(item.name)
             const pluginUnavailable = plugin && !plugin.available
+            const runtimeNoneUnavailable = pluginUnavailable && plugin.runtime === 'none'
             const installing = installMut.isPending && installMut.variables === item.name
             const uninstalling = uninstallMut.isPending && uninstallMut.variables === item.name
             return (
@@ -205,7 +207,16 @@ export function SettingsDataSourcesPanel() {
                   )}
                   {/* 右侧操作区: 插件未安装→安装按钮; 已激活→使用中; 否则→使用/卸载 */}
                   {pluginUnavailable ? (
-                    installing ? (
+                    runtimeNoneUnavailable ? (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); reload.mutate() }}
+                        disabled={reload.isPending}
+                        className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-elevated/60 text-muted hover:text-foreground hover:bg-elevated transition-colors disabled:opacity-50"
+                        title={plugin.status}
+                      >
+                        <RefreshCw className={`h-2.5 w-2.5 ${reload.isPending ? 'animate-spin' : ''}`} /> 重试
+                      </button>
+                    ) : installing ? (
                       <span className="inline-flex items-center gap-1 text-[9px] text-accent shrink-0">
                         <RefreshCw className="h-2.5 w-2.5 animate-spin" /> 安装中...
                       </span>

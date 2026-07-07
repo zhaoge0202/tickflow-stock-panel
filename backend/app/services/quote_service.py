@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
@@ -158,6 +159,7 @@ class QuoteService:
             from app.services import preferences
             interval = preferences.get_realtime_quote_interval()
         self._interval = self._clamp_interval(interval)
+        self._prime_quotes_once()
         self._running = True
         self._enabled = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -189,6 +191,7 @@ class QuoteService:
         if not self._running:
             from app.services import preferences
             self._interval = self._clamp_interval(preferences.get_realtime_quote_interval())
+            self._prime_quotes_once()
             self._running = True
             self._thread = threading.Thread(target=self._poll_loop, daemon=True)
             self._thread.start()
@@ -394,6 +397,22 @@ class QuoteService:
         self._fetch_quotes()
         return self.status()
 
+    def _prime_quotes_once(self) -> None:
+        """启动/启用时主动抓取一次最新行情，避免盘后启动只回退到昨日缓存。"""
+        try:
+            self._fetch_quotes()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("启动预热行情失败: %s", e)
+
+    @staticmethod
+    def _invalidate_overview_cache() -> None:
+        """行情刷新后清空看板聚合缓存，避免继续返回旧指数。"""
+        try:
+            from app.api.overview import invalidate_overview_cache
+            invalidate_overview_cache()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("invalidate overview cache skipped: %s", e)
+
     # ================================================================
     # 后台轮询
     # ================================================================
@@ -432,7 +451,12 @@ class QuoteService:
                 try:
                     t0 = time.perf_counter()
                     now_ts = time.perf_counter()
-                    records = custom_sources.get_provider(provider_name).get_realtime()
+                    provider = custom_sources.get_provider(provider_name)
+                    records = list(provider.get_realtime() or [])
+                    index_symbols = self._custom_realtime_index_symbols()
+                    if index_symbols and self._provider_accepts_realtime_symbols(provider):
+                        records.extend(provider.get_realtime(symbols=index_symbols) or [])
+                    records = self._dedupe_quote_records(records)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
@@ -578,6 +602,8 @@ class QuoteService:
         if not etf_daily_df.is_empty() and self._repo:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
 
+        self._invalidate_overview_cache()
+
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
 
@@ -663,12 +689,48 @@ class QuoteService:
                 logger.warning("自选实时日K写盘失败: %s", e)
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
 
+        self._invalidate_overview_cache()
+
         self._broadcast_quote_updated()
         self._evaluate_monitors(daily_df, quote_extra)
 
     # ================================================================
     # 工具
     # ================================================================
+
+    def _custom_realtime_index_symbols(self) -> list[str]:
+        """自定义实时源显式补拉指数，避免核心指数被全市场快照遗漏。"""
+        from app.services import preferences
+
+        if not preferences.get_realtime_pull_index():
+            return []
+
+        symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+        if preferences.get_realtime_index_mode() == "all" and self._repo:
+            symbols.update(self._repo.get_index_symbol_set())
+        return sorted(symbols)
+
+    @staticmethod
+    def _provider_accepts_realtime_symbols(provider) -> bool:
+        try:
+            params = inspect.signature(provider.get_realtime).parameters
+        except (TypeError, ValueError):
+            return False
+        return "symbols" in params or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+
+    @staticmethod
+    def _dedupe_quote_records(records: list[dict]) -> list[dict]:
+        keyed: dict[str, dict] = {}
+        unkeyed: list[dict] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            symbol = str(record.get("symbol") or "").strip()
+            if not symbol:
+                unkeyed.append(record)
+                continue
+            keyed[symbol] = record
+        return [*unkeyed, *keyed.values()]
 
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:

@@ -367,11 +367,12 @@ def build_market_overview(
         as_of: 指定日期,None 则取最新有数据日。
     """
     svc = ScreenerService(repo)
-    as_of = as_of or svc.latest_date()
+    requested_as_of = as_of
+    effective_as_of = as_of or svc.latest_date()
     status = _quote_status(quote_service)
-    indices = _index_quotes(repo, quote_service, as_of)
+    indices = _index_quotes(repo, quote_service, requested_as_of)
 
-    if not as_of:
+    if not effective_as_of:
         return {
             "as_of": None,
             "quote_status": status,
@@ -393,7 +394,7 @@ def build_market_overview(
             "industry_rank": {"leading": [], "lagging": []},
         }
 
-    df = svc._load_enriched_for_date(as_of)
+    df = svc._load_enriched_for_date(effective_as_of)
     if df.is_empty():
         rows: list[dict] = []
     else:
@@ -439,9 +440,9 @@ def build_market_overview(
     fake_up = 0
     fake_down = 0
     if depth_service:
-        up_map = depth_service.get_sealed_map(as_of, is_down=False)
-        down_map = depth_service.get_sealed_map(as_of, is_down=True)
-        sealed_ready = bool(up_map or down_map) and depth_service.is_sealed_ready(as_of)
+        up_map = depth_service.get_sealed_map(effective_as_of, is_down=False)
+        down_map = depth_service.get_sealed_map(effective_as_of, is_down=True)
+        sealed_ready = bool(up_map or down_map) and depth_service.is_sealed_ready(effective_as_of)
         if up_map:
             fake_up = sum(1 for v in up_map.values() if v.get("sealed") is False)
         if down_map:
@@ -530,7 +531,7 @@ def build_market_overview(
         emotion_label = "冰点"
 
     return _json_safe({
-        "as_of": str(as_of),
+        "as_of": str(effective_as_of),
         "quote_status": status,
         "indices": indices,
         "breadth": {

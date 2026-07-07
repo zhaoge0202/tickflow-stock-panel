@@ -157,6 +157,11 @@ export function Indices() {
   const selectedQuote = selectedSymbol ? quoteBySymbol.get(selectedSymbol) : null
   const selectedQuoteValue = selectedQuote?.last_price ?? selectedQuote?.price ?? selectedQuote?.close
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
+  const quoteSourceText = quotes.data?.source === 'realtime'
+    ? `实时缓存 ${quotes.data?.count ?? 0} 只指数`
+    : quotes.data?.source === 'index_daily'
+      ? `日K兜底 ${quotes.data?.count ?? 0} 只指数`
+      : `指数报价 ${quotes.data?.count ?? 0} 只`
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
   const selectedInfo = [...topRows, ...listRows].find(r => r.symbol === selectedSymbol) || daily.data?.index_info
@@ -268,7 +273,7 @@ export function Indices() {
                 {selectedSymbol && <span className={`font-mono text-xs ${Number(selectedQuotePct ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtPct(selectedQuotePct)}</span>}
               </div>
               <div className="mt-1 text-xs text-muted">
-                实时缓存 {quotes.data?.count ?? 0} 只指数 · 日K来源 {daily.data?.source ?? '--'}
+                {quoteSourceText} · 日K来源 {daily.data?.source ?? '--'}
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">

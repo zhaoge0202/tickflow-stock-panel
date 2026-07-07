@@ -1,6 +1,26 @@
 # Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
 # 见 ADR-17 / §8.1。
 services:
+  tdx-api:
+    build:
+      context: ./docs/zhihu/tdx-api
+      dockerfile: Dockerfile
+    container_name: TickFlow_TDX_API
+    ports:
+      - "${TDX_API_PORT:-8080}:8080"
+    env_file:
+      - path: ./docs/zhihu/tdx-api/.env
+        required: false
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -18,7 +38,11 @@ services:
       # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
+      - TDX_API_BASE_URL=http://tdx-api:8080
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
+    depends_on:
+      tdx-api:
+        condition: service_healthy
     restart: unless-stopped
