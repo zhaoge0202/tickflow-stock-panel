@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
 
+    # Trade ticks — TDX 逐笔成交 MySQL 持久化。留空/关闭时只走实时展示。
+    trade_ticks_mysql_url: str = ""
+    trade_ticks_persist_enabled: bool = False
+    trade_ticks_persist_interval_seconds: int = 30
+    trade_ticks_persist_timeout_seconds: int = 120
+
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 

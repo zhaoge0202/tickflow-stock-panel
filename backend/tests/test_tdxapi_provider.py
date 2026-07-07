@@ -146,6 +146,74 @@ def test_get_realtime_with_symbols_survives_codes_failure(monkeypatch):
     assert rows[0]["name"] is None
 
 
+def test_get_trade_ticks_normalizes_recent_rows(monkeypatch):
+    def fake_trade(kwargs):
+        assert kwargs["params"] == {"code": "sz002491", "date": "20260707"}
+        return {
+            "Count": 2,
+            "List": [
+                {
+                    "Time": "2026-07-07T09:25:00+08:00",
+                    "Price": 10460,
+                    "Volume": 5586,
+                    "Status": 2,
+                    "Number": 269,
+                },
+                {
+                    "Time": "2026-07-07T15:28:00+08:00",
+                    "Price": 10470,
+                    "Volume": 19,
+                    "Status": 5,
+                    "Number": 1,
+                },
+            ],
+        }
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/trade"): fake_trade,
+    })
+
+    rows = TDXAPIProvider().get_trade_ticks("002491.SZ", dt.date(2026, 7, 7), mode="recent")
+
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "002491.SZ"
+    assert rows[0]["trade_date"] == dt.date(2026, 7, 7)
+    assert rows[0]["datetime"] == dt.datetime(2026, 7, 7, 9, 25)
+    assert rows[0]["seq_in_day"] == 1
+    assert rows[0]["price"] == 10.46
+    assert rows[0]["volume"] == 5586
+    assert rows[0]["amount"] == 10.46 * 5586 * 100
+    assert rows[0]["side"] == "neutral"
+    assert rows[0]["side_label"] == "中性"
+    assert rows[1]["raw_status"] == 5
+    assert rows[1]["side"] == "unknown"
+
+
+def test_get_trade_ticks_all_uses_minute_trade_all(monkeypatch):
+    def fake_all(kwargs):
+        assert kwargs["params"] == {"code": "sz002491"}
+        return {
+            "Count": 1,
+            "List": [{
+                "Time": "2026-07-07T13:21:00+08:00",
+                "Price": 10450,
+                "Volume": 1,
+                "Status": 1,
+                "Number": 1,
+            }],
+        }
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/minute-trade-all"): fake_all,
+    })
+
+    rows = TDXAPIProvider().get_trade_ticks("002491.SZ", mode="all", limit=None)
+
+    assert len(rows) == 1
+    assert rows[0]["side"] == "sell"
+    assert rows[0]["order_count"] == 1
+
+
 def test_get_daily_continues_when_one_symbol_fails(monkeypatch):
     def fake(self, method, path, **kwargs):
         code = kwargs["params"]["code"]
@@ -230,6 +298,7 @@ def test_plugin_discovered_in_loader():
     assert "daily" in plugins["tdxapi"]["datasets"]
     assert "minute" in plugins["tdxapi"]["datasets"]
     assert "realtime" in plugins["tdxapi"]["datasets"]
+    assert "trade_ticks" in plugins["tdxapi"]["datasets"]
     assert cs.is_builtin("tdxapi")
 
 
@@ -246,6 +315,7 @@ def test_plugin_registered_when_available(monkeypatch):
     assert cs.provider_has_dataset("tdxapi", "daily")
     assert cs.provider_has_dataset("tdxapi", "minute")
     assert cs.provider_has_dataset("tdxapi", "realtime")
+    assert cs.provider_has_dataset("tdxapi", "trade_ticks")
     assert not cs.provider_has_dataset("tdxapi", "financial")
 
 

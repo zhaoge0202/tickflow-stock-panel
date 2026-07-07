@@ -185,6 +185,59 @@ export interface MinuteKlineRow {
   amount: number
 }
 
+export interface TradeTickRow {
+  symbol: string
+  trade_date: string
+  datetime: string
+  seq_in_day: number
+  price: number
+  volume: number
+  amount: number
+  side: 'buy' | 'sell' | 'neutral' | 'unknown'
+  side_label: string
+  order_count?: number | null
+  raw_status?: number | null
+  source?: string
+  ingested_at?: string | null
+  updated_at?: string | null
+}
+
+export interface TradeTicksResponse {
+  symbol: string
+  date: string
+  source: string
+  mode: string
+  order: string
+  time_precision?: 'minute' | 'second' | string
+  sequence_field?: string
+  count: number
+  rows: TradeTickRow[]
+  warning?: string | null
+}
+
+export interface TradeTickPersistStatus {
+  status: string
+  symbol: string
+  date: string
+  rows?: number | null
+  message?: string | null
+  error?: string | null
+  queued_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  elapsed_seconds?: number | null
+  timeout_seconds?: number | null
+  queue_size?: number | null
+  pending_count?: number | null
+  worker_alive?: boolean | null
+  mysql?: {
+    rows?: number
+    last_ingested_at?: string | null
+    last_updated_at?: string | null
+    error?: string
+  } | null
+}
+
 export interface KlineRow {
   symbol?: string
   date: string
@@ -1120,6 +1173,35 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),
+  tradeTicks: (
+    symbol: string,
+    date?: string,
+    source: 'auto' | 'live' | 'mysql' = 'auto',
+    mode: 'recent' | 'all' = 'recent',
+    limit = 300,
+    order: 'asc' | 'desc' = 'desc',
+  ) => {
+    const params = new URLSearchParams({
+      symbol,
+      source,
+      mode,
+      limit: String(limit),
+      order,
+    })
+    if (date) params.set('date', date)
+    return request<TradeTicksResponse>(`/api/trade-ticks?${params.toString()}`)
+  },
+  tradeTicksPersist: (symbol: string, date?: string, force = false) =>
+    request<{ status: string; symbol: string; date: string; message?: string; coalesced?: boolean }>('/api/trade-ticks/persist', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, date, force }),
+    }),
+  tradeTickPersistStatus: (symbol: string, date?: string) =>
+    request<TradeTickPersistStatus>(
+      `/api/trade-ticks/persist-status?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
+    ),
+  tradeTickMysqlStatus: () =>
+    request<{ configured: boolean; enabled: boolean; ok: boolean; table_ready?: boolean; database?: string; message?: string }>('/api/trade-ticks/mysql/status'),
   indexList: () => request<{ results: IndexInstrument[]; count: number }>('/api/index/list'),
   indexSearch: (q: string, limit = 20) =>
     request<{ results: IndexInstrument[] }>(

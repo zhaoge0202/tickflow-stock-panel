@@ -57,6 +57,11 @@ export const QK = {
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
+  tradeTicks:           (symbol: string, date: string, source: string, mode: string, limit: number, order: string) =>
+                             ['trade-ticks', symbol, date, source, mode, limit, order] as const,
+  tradeTickPersistStatus: (symbol: string, date: string) =>
+                             ['trade-tick-persist-status', symbol, date] as const,
+  tradeTickMysqlStatus: ['trade-tick-mysql-status'] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>
