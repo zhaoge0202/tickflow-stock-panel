@@ -242,7 +242,11 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ## 📄 License
 
-[MIT](./LICENSE) © tickflow-stock-panel contributors · 本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款 · 数据源插件 [stock-sdk](https://stock-sdk.linkdiary.cn) 遵循其各自的 ISC 协议。
+[MIT](./LICENSE) © tickflow-stock-panel contributors 
+
+本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款
+
+数据源插件 [stock-sdk](https://stock-sdk.linkdiary.cn) 遵循其各自的 ISC 协议。
 
 ## 社区
 
