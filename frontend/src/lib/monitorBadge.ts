@@ -53,12 +53,13 @@ function getSnapshot() {
 
 /** 轮询更新最新总数 (Layout 层调用)。 */
 export function setCurrentTotal(total: number): void {
-  // total=0 视为未初始化, 不更新 (避免渲染期 data=undefined 传 0 重置 lastSeen)
-  if (total <= 0) return
+  // total=0 是合法状态(告警清空后), 必须同步;
+  // 只有负数/非法值才视为未初始化并忽略。
+  if (!Number.isFinite(total) || total < 0) return
 
-  // 首次初始化: lastSeen <= 0 (从未设置 -1, 或历史为 0) → 把已读基线设为当前总数
-  // 否则 lastSeen=0 + total=1 会被误算成"1条未读" (首次进入就显示徽标的 bug)
-  if (lastSeenTotal <= 0) {
+  // 首次初始化: 仅在从未设置过(-1)时，把已读基线设为当前总数。
+  // 历史已读为 0 仍是合法状态，不能每次都重置，否则真实未读会被吃掉。
+  if (lastSeenTotal < 0) {
     lastSeenTotal = total
     writeSeen(total)
   }
