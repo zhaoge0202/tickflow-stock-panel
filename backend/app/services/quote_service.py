@@ -886,7 +886,7 @@ class QuoteService:
     def _maybe_send_webhook(self, rule_events: list[dict], engine) -> None:
         """把告警通过 Webhook 推送到外部 IM (由规则 webhook_enabled 开关控制)。
 
-        - 全局飞书 URL 未配置: 直接返回
+        - 飞书 / 企业微信任一已配置即生效 (两个都没配才跳过)
         - 仅推送 webhook_enabled=True 的规则触发的告警
         - 失败静默, 不阻断主流程
         - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
@@ -898,10 +898,12 @@ class QuoteService:
             from app.services import preferences
             from app.services import webhook_adapter
 
-            url = preferences.get_feishu_webhook_url()
-            if not url:
+            feishu_url = preferences.get_feishu_webhook_url()
+            feishu_secret = preferences.get_feishu_webhook_secret()
+            wecom_url = preferences.get_wecom_webhook_url()
+            # 两个通道都没配置才跳过
+            if not feishu_url and not wecom_url:
                 return
-            secret = preferences.get_feishu_webhook_secret()
 
             # 反查规则, 过滤出启用推送的事件
             source_labels = {
@@ -909,7 +911,8 @@ class QuoteService:
                 "price": "价格", "market": "异动",
             }
             rules = engine.rules if engine is not None else {}
-            pushed = 0
+            pushed_feishu = 0
+            pushed_wecom = 0
             for ev in rule_events:
                 rule = rules.get(ev.get("rule_id"))
                 if not rule or not rule.get("webhook_enabled"):
@@ -921,10 +924,14 @@ class QuoteService:
                 message = ev.get("message") or ""
                 title = f"TickFlow · {source_label}"
                 body = f"{symbol} {name} {message}".strip() if symbol else (message or name)
-                if webhook_adapter.send_feishu(url, title, body, secret):
-                    pushed += 1
-            if pushed:
-                logger.info("飞书 Webhook 推送: %d 条", pushed)
+                if feishu_url and webhook_adapter.send_feishu(feishu_url, title, body, feishu_secret):
+                    pushed_feishu += 1
+                if wecom_url and webhook_adapter.send_wecom(wecom_url, title, body):
+                    pushed_wecom += 1
+            if pushed_feishu:
+                logger.info("飞书 Webhook 推送: %d 条", pushed_feishu)
+            if pushed_wecom:
+                logger.info("企业微信 Webhook 推送: %d 条", pushed_wecom)
         except Exception as e:  # noqa: BLE001
             logger.debug("Webhook 推送异常 (不影响告警主流程): %s", e)
 
