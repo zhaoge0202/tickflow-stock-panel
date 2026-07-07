@@ -1,0 +1,12 @@
+# tdx-api sidecar 内置数据源插件
+# 依赖外部/sidecar 服务: https://github.com/oficcejo/tdx-api
+
+name: tdxapi
+display_name: "tdx-api（通达信代理池）"
+runtime: none
+entry: app.plugins.tdxapi.provider:TDXAPIProvider
+check: app.plugins.tdxapi.provider:availability
+datasets: [daily, minute, realtime]
+description: "通过本地 tdx-api sidecar 接入通达信行情，支持 SOCKS5 代理池。覆盖日K、分钟K、实时行情；除权因子和财务数据自动回退其他数据源。"
+install_hint: "先启动 tdx-api sidecar，并设置 TDX_API_BASE_URL（默认 http://127.0.0.1:8080）"
+

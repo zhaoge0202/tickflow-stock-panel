@@ -233,6 +233,7 @@ export interface IndexInstrument {
 export interface IndexQuote {
   symbol: string
   name?: string | null
+  source?: 'realtime' | 'index_daily'
   last_price?: number | null
   close?: number | null
   prev_close?: number | null
@@ -890,7 +891,7 @@ export const api = {
       body: JSON.stringify({ provider, dataset, symbols }),
     }),
   updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
-    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
@@ -954,7 +955,7 @@ export const api = {
     ),
   intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
   indexQuotes: (symbols?: string[]) =>
-    request<{ rows: IndexQuote[]; count: number }>(
+    request<{ rows: IndexQuote[]; count: number; source: 'realtime' | 'index_daily' }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
   updateRealtimeMonitorConfig: (cfg: {

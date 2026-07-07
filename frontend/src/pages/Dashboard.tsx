@@ -573,14 +573,19 @@ export function Dashboard() {
     }).catch(() => { /* 查询失败不阻塞, 用户仍可手动点击获取 */ })
   }, [hasNoData, fetchJobId])
 
-  // 手动刷新: 先重建后端 Polars 缓存(解决跨天残留), 再重新拉看板数据
-  const handleRefresh = () => {
+  // 手动刷新: 当前交易日先拉一次实时行情, 再重建后端缓存并刷新看板。
+  const handleRefresh = async () => {
     setManualFetching(true)
-    api.refreshCache()
-      .then(() => qc.invalidateQueries({ queryKey: ['overview-market'] }))
-      .finally(() => {
-        overview.refetch().finally(() => setManualFetching(false))
-      })
+    try {
+      if (!selectedDate || selectedDate === latestDate) {
+        await api.intradayRefresh()
+      }
+      await api.refreshCache()
+      await qc.invalidateQueries({ queryKey: ['overview-market'] })
+      await overview.refetch()
+    } finally {
+      setManualFetching(false)
+    }
   }
 
   if (overview.isLoading && !data) {
@@ -609,7 +614,9 @@ export function Dashboard() {
   const strongDown = data.breadth.strong_down ?? 0
   const latestDate = dataStatus.data?.enriched?.latest_date ?? null
   const currentDate = selectedDate ?? data.as_of ?? ''
-  const quoteRunning = (!selectedDate || selectedDate === latestDate) && data.quote_status?.running
+  const quoteRunning = (!selectedDate || selectedDate === latestDate)
+    && !!data.quote_status?.running
+    && data.quote_status?.quote_age_ms != null
   // 实时模式: none / watchlist / full_market。
   // watchlist (Free 档) 仅自选 ≤5 只实时, 看板呈现的大盘数据实为盘后快照, 需提示避免误读。
   const quoteMode = data.quote_status?.mode as ('none' | 'watchlist' | 'full_market') | undefined
