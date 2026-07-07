@@ -18,6 +18,14 @@ from app.tickflow.client import get_client
 logger = logging.getLogger(__name__)
 
 _EXCHANGES = ["SH", "SZ", "BJ"]
+_INSTRUMENT_META_FIELDS = [
+    "listing_date",
+    "total_shares",
+    "float_shares",
+    "tick_size",
+    "limit_up",
+    "limit_down",
+]
 
 
 def _flatten_instruments(items: list[dict]) -> list[dict]:
@@ -71,24 +79,61 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
+def _fetch_instruments_via_tickflow() -> list[dict]:
+    """走 TickFlow 免费 instruments 元数据接口拉全量股票维表。"""
+    tf = get_client()
+    all_rows: list[dict] = []
+    for ex in _EXCHANGES:
+        try:
+            items = tf.exchanges.get_instruments(ex, instrument_type="stock")
+            if items:
+                rows = _flatten_instruments(items)
+                all_rows.extend(rows)
+                logger.info("instruments %s: %d stocks", ex, len(rows))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("get_instruments(%s) failed: %s", ex, e)
+    return all_rows
+
+
+def _merge_instrument_rows(primary_rows: list[dict], fallback_rows: list[dict]) -> list[dict]:
+    """主数据源优先，缺失的元数据列用 TickFlow instruments 补齐。"""
+    merged: dict[str, dict] = {}
+
+    for row in fallback_rows:
+        symbol = row.get("symbol")
+        if symbol:
+            merged[str(symbol)] = dict(row)
+
+    for row in primary_rows:
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+        key = str(symbol)
+        base = merged.get(key, {}).copy()
+        base.update(row)
+        for field in _INSTRUMENT_META_FIELDS:
+            if base.get(field) in (None, ""):
+                fallback_val = merged.get(key, {}).get(field)
+                if fallback_val not in (None, ""):
+                    base[field] = fallback_val
+        merged[key] = base
+
+    return list(merged.values())
+
+
 def sync_instruments(data_dir: Path) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
     返回写入的行数。
     """
-    all_rows = _fetch_instruments_via_provider()
-    if all_rows is None:
-        # 未命中非 tickflow provider → 走 tickflow 直连
-        tf = get_client()
-        all_rows = []
-        for ex in _EXCHANGES:
-            try:
-                items = tf.exchanges.get_instruments(ex, instrument_type="stock")
-                if items:
-                    all_rows.extend(_flatten_instruments(items))
-                    logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
-                logger.warning("get_instruments(%s) failed: %s", ex, e)
+    provider_rows = _fetch_instruments_via_provider()
+    if provider_rows is None:
+        all_rows = _fetch_instruments_via_tickflow()
+    else:
+        tickflow_rows = _fetch_instruments_via_tickflow()
+        all_rows = _merge_instrument_rows(provider_rows, tickflow_rows) if tickflow_rows else provider_rows
+        logger.info("instruments merged: provider=%d, tickflow=%d, final=%d",
+                    len(provider_rows), len(tickflow_rows), len(all_rows))
 
     if not all_rows:
         return 0
