@@ -27,10 +27,17 @@ interface Props {
 }
 
 function fmtTime(dt: string): string {
+  // 后端当前返回的分钟K datetime 已是本地交易时间(如 2026-07-07T09:31:00)，
+  // 不应再做 UTC→北京时间的 +8 小时换算；仅当字符串自带时区信息时交给 Date 解析。
+  if (/[Zz]|[+-]\d{2}:\d{2}$/.test(dt)) {
+    const parsed = new Date(dt)
+    if (!Number.isNaN(parsed.getTime())) {
+      return `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`
+    }
+  }
   const match = dt.match(/(\d{2}):(\d{2})/)
   if (!match) return dt.slice(11, 16)
-  const h = (parseInt(match[1]) + 8) % 24
-  return `${String(h).padStart(2, '0')}:${match[2]}`
+  return `${match[1]}:${match[2]}`
 }
 
 function computeAvgPrice(data: MinuteKlineRow[]): number[] {
