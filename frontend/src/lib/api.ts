@@ -481,7 +481,7 @@ export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'level' | 'ladder'
   scope: 'symbols' | 'all' | 'sector'
   symbols: string[]
   sector?: string | null
@@ -528,6 +528,161 @@ export interface AlertEvent {
   strategy_id?: string
   conditions?: MonitorCondition[]
   logic?: 'and' | 'or'
+}
+
+// ===== Decision Desk =====
+export type DecisionStatus = 'pending' | 'waiting' | 'planned' | 'manual_done' | 'ignored'
+export type DecisionSide = 'watch' | 'buy_watch' | 'sell_risk' | 'risk'
+
+export interface ManualPosition {
+  symbol: string
+  shares: number
+  cost_price: number
+  stop_loss_price?: number | null
+  take_profit_price?: number | null
+  target_position_pct?: number | null
+  opened_at?: number | string | null
+  updated_at?: number | string | null
+  note?: string
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  unrealized_pnl_pct?: number | null
+  distance_to_stop_pct?: number | null
+  distance_to_take_profit_pct?: number | null
+  risk_amount?: number | null
+  risk_level?: string
+  position_action_hint?: string
+}
+
+export interface SignalFrame {
+  symbol: string
+  name?: string | null
+  ts: number
+  price: number
+  latest_price: number
+  change_pct?: number | null
+  amount?: number | null
+  volume?: number | null
+  volume_ratio?: number | null
+  vwap?: number | null
+  vwap_intraday?: number | null
+  price_vs_vwap?: number | null
+  vwap_distance?: number | null
+  open_range_position?: number | null
+  ret_1m?: number | null
+  ret_3m?: number | null
+  ret_5m?: number | null
+  ret_15m?: number | null
+  amount_1m?: number | null
+  amount_5m?: number | null
+  amount_ratio_5m?: number | null
+  open_range_high?: number | null
+  open_range_low?: number | null
+  intraday_high?: number | null
+  intraday_low?: number | null
+  day_high_distance?: number | null
+  day_low_distance?: number | null
+  nearest_support?: number | null
+  nearest_resistance?: number | null
+  support_distance?: number | null
+  resistance_distance?: number | null
+  active_signals: string[]
+  risk_flags: string[]
+  decision_score: number
+  reason_text: string
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  source: string
+  position?: ManualPosition | null
+  levels?: Record<string, PriceLevel[]>
+  bars_5s?: any[]
+  bars_1m?: any[]
+  bars_3m?: any[]
+  bars_5m?: any[]
+  bars_15m?: any[]
+  tick_buy_amount?: number | null
+  tick_sell_amount?: number | null
+  tick_net_amount?: number | null
+  large_buy_amount?: number | null
+  large_sell_amount?: number | null
+  aggressive_buy_ratio?: number | null
+  large_order_count?: number | null
+  tick_sample_count?: number | null
+}
+
+export interface DecisionTimelineEvent {
+  kind: 'alert' | 'journal'
+  ts: number
+  symbol: string
+  title: string
+  message?: string | null
+  source?: string
+  type?: string
+  action?: string
+  status?: DecisionStatus
+  side?: string | null
+  price?: number | null
+  severity?: string
+  signals?: string[]
+}
+
+export interface DecisionItem {
+  id: string
+  trade_date: string
+  symbol: string
+  name?: string | null
+  side: DecisionSide
+  priority: number
+  status: DecisionStatus
+  source_tags: string[]
+  latest_price?: number | null
+  change_pct?: number | null
+  amount?: number | null
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  reasons: string[]
+  signals: string[]
+  risk_flags: string[]
+  position?: ManualPosition | null
+  risk?: Record<string, any> | null
+  last_event_ts?: number | null
+  signal_frame?: SignalFrame | null
+  alert_count: number
+  timeline?: DecisionTimelineEvent[]
+}
+
+export interface QuoteTickQuality {
+  source: string
+  source_latency_ms?: number | null
+  ingest_lag_ms?: number | null
+  symbol_count: number
+  missing_symbols: string[]
+  stale_symbols: string[]
+  duplicate_count?: number
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  checked_at?: number
+}
+
+export interface DecisionQueueResponse {
+  trade_date: string
+  items: DecisionItem[]
+  total: number
+  pending: number
+  done: number
+  quality: QuoteTickQuality
+}
+
+export interface DecisionSummaryResponse {
+  trade_date: string
+  total: number
+  pending: number
+  done: number
+  quality: QuoteTickQuality
+}
+
+export interface DecisionActionPayload {
+  action: 'mark_wait' | 'mark_plan' | 'mark_manual_done' | 'mark_ignore' | 'note' | 'position_update'
+  side?: string | null
+  price?: number | null
+  note?: string
 }
 
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
@@ -1954,6 +2109,107 @@ export const api = {
   /** 生成演示触发记录 (Dev 页用) */
   alertSeed: (count = 12, recent = true) =>
     request<{ ok: boolean; generated: number }>(`/api/alerts/seed?count=${count}&recent=${recent}`, { method: 'POST' }),
+
+  // ===== Decision Desk =====
+  decisionQueue: (params?: { date?: string; status?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.date) qs.set('date', params.date)
+    if (params?.status) qs.set('status', params.status)
+    const s = qs.toString()
+    return request<DecisionQueueResponse>(`/api/decision/queue${s ? `?${s}` : ''}`)
+  },
+
+  decisionSummary: (params?: { date?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.date) qs.set('date', params.date)
+    const s = qs.toString()
+    return request<DecisionSummaryResponse>(`/api/decision/summary${s ? `?${s}` : ''}`)
+  },
+
+  decisionItem: (symbol: string, date?: string) => {
+    const qs = new URLSearchParams()
+    if (date) qs.set('date', date)
+    const s = qs.toString()
+    return request<DecisionItem>(`/api/decision/items/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`)
+  },
+
+  decisionAction: (symbol: string, payload: DecisionActionPayload) =>
+    request<{ ok: boolean; event: DecisionTimelineEvent; item: DecisionItem }>(
+      `/api/decision/items/${encodeURIComponent(symbol)}/action`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+
+  decisionTimeline: (symbol: string, date?: string) => {
+    const qs = new URLSearchParams()
+    if (date) qs.set('date', date)
+    const s = qs.toString()
+    return request<{ symbol: string; events: DecisionTimelineEvent[] }>(
+      `/api/decision/timeline/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`,
+    )
+  },
+
+  manualPositions: () =>
+    request<{ positions: ManualPosition[] }>('/api/manual-positions'),
+
+  manualPositionSave: (symbol: string, position: Partial<ManualPosition>) =>
+    request<{ ok: boolean; position: ManualPosition }>(
+      `/api/manual-positions/${encodeURIComponent(symbol)}`,
+      { method: 'PUT', body: JSON.stringify({ ...position, symbol }) },
+    ),
+
+  manualPositionDelete: (symbol: string) =>
+    request<{ ok: boolean }>(`/api/manual-positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
+
+  quoteTicksLatest: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<{ rows: any[]; count: number }>(`/api/quote-ticks/latest${qs}`)
+  },
+
+  quoteTicksBars: (symbol: string, params?: { freq?: string; date?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.freq) qs.set('freq', params.freq)
+    if (params?.date) qs.set('date', params.date)
+    qs.set('symbol', symbol)
+    return request<{ symbol: string; freq: string; rows: any[]; count: number }>(`/api/quote-ticks/bars?${qs}`)
+  },
+
+  quoteTicksQuality: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<QuoteTickQuality>(`/api/quote-ticks/quality${qs}`)
+  },
+
+  signalFrameLatest: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<{ frames: SignalFrame[]; count: number }>(`/api/signal-frame/latest${qs}`)
+  },
+
+  signalFrameDetail: (symbol: string) =>
+    request<SignalFrame>(`/api/signal-frame/detail/${encodeURIComponent(symbol)}`),
+
+  alertOutcomes: (params?: { days?: number; strategy_id?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.days) qs.set('days', String(params.days))
+    if (params?.strategy_id) qs.set('strategy_id', params.strategy_id)
+    const s = qs.toString()
+    return request<{ outcomes: any[]; total: number }>(`/api/alert-outcomes${s ? `?${s}` : ''}`)
+  },
+
+  alertOutcomeSummary: (params?: { group_by?: string; days?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.group_by) qs.set('group_by', params.group_by)
+    if (params?.days) qs.set('days', String(params.days))
+    const s = qs.toString()
+    return request<{ group_by: string; items: any[]; total: number }>(`/api/alert-outcomes/summary${s ? `?${s}` : ''}`)
+  },
+
+  alertOutcomeTrack: () =>
+    request<{ ok: boolean; updated: number }>('/api/alert-outcomes/track', { method: 'POST' }),
+
+  intradayReplay: (payload: { date: string; symbols: string[]; start_time?: string; end_time?: string }) =>
+    request<any>('/api/replay/intraday', { method: 'POST', body: JSON.stringify(payload) }),
+
+  intradayReplayTask: (taskId: string) =>
+    request<any>(`/api/replay/intraday/${encodeURIComponent(taskId)}`),
 
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>

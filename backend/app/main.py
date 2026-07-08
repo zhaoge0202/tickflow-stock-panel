@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, trade_ticks, watchlist
+from app.api import alert_outcomes, alerts, analysis, auth as auth_api, backtest, data, decision, ext_data, financials, indices, intraday, kline, manual_positions, market_recap, monitor_rules, overview, pipeline, quote_ticks, replay, rps, screener, settings as settings_api, signal_frame, signals, stock_analysis, strategy, trade_ticks, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -129,6 +129,12 @@ async def lifespan(app: FastAPI):
     trade_tick_ingestor.start()
     app.state.trade_tick_ingestor = trade_tick_ingestor
 
+    # 告警后验收益追踪: 独立读取 alerts.jsonl + quote_ticks, 不改写原告警流水。
+    from app.services.alert_outcome import AlertOutcomeTracker
+    alert_outcome_tracker = AlertOutcomeTracker(store.data_dir)
+    alert_outcome_tracker.start()
+    app.state.alert_outcome_tracker = alert_outcome_tracker
+
     # 策略引擎
     from app.strategy.engine import StrategyEngine
     from app.strategy.monitor import StrategyMonitorService
@@ -191,6 +197,9 @@ async def lifespan(app: FastAPI):
     tti = getattr(app.state, "trade_tick_ingestor", None)
     if tti:
         tti.stop()
+    aot = getattr(app.state, "alert_outcome_tracker", None)
+    if aot:
+        aot.stop()
     qs = getattr(app.state, "quote_service", None)
     if qs:
         # 进程退出/热重载只是清理后台线程, 不能把用户的实时行情开关写成关闭。
@@ -287,6 +296,12 @@ app.include_router(strategy.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
+app.include_router(decision.router)
+app.include_router(manual_positions.router)
+app.include_router(quote_ticks.router)
+app.include_router(signal_frame.router)
+app.include_router(alert_outcomes.router)
+app.include_router(replay.router)
 app.include_router(rps.router)
 app.include_router(trade_ticks.router)
 

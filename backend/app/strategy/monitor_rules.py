@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.strategy.custom_signals import ALLOWED_FIELDS
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder"}
+RULE_TYPES = {"strategy", "signal", "price", "market", "level", "ladder"}
 SCOPES = {"symbols", "all", "sector"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
@@ -183,7 +183,7 @@ def normalize(rule: dict) -> dict:
     r.setdefault("message", "")
     r.setdefault("webhook_url", "")
     r.setdefault("webhook_enabled", False)
-    r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    r.setdefault("created_at", datetime.now(UTC).isoformat())
     return r
 
 

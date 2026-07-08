@@ -316,6 +316,38 @@ def test_quote_row_maps_sh_index_close_as_last_price():
     assert abs(row["change_pct"] - ((3991.33 - 4041.24) / 4041.24)) < 1e-12
 
 
+def test_server_time_decodes_tdx_compact_time(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 7, 8, 18, 0, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    ts = tp._server_time_ms("15329240")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.date() == dt.date(2026, 7, 8)
+    assert decoded.hour == 15
+    assert decoded.minute == 32
+    assert decoded.second == 55
+
+
+def test_server_time_keeps_unix_seconds():
+    assert tp._server_time_ms("1730617200") == 1730617200 * 1000
+
+
+def test_server_time_rejects_invalid_future_compact_value(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 7, 8, 18, 0, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    assert tp._server_time_ms("9251501000") is None
+
+
 def test_plugin_discovered_in_loader():
     from app.data_providers import custom as cs
 

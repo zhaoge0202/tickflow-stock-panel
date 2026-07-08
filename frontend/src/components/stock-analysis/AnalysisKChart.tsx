@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
+import { Bell } from 'lucide-react'
 
 /**
  * 个股分析专用日 K 图表。
@@ -105,6 +106,8 @@ interface Props {
   ranges?: ChartRange[]
   /** 预留:点击某根 K 线 */
   onDateClick?: (date: string) => void
+  /** 将关键价位转为监控提醒 */
+  onCreateLevelAlert?: (level: PriceLevel) => void
   height?: number
   className?: string
 }
@@ -120,6 +123,7 @@ export function AnalysisKChart({
   markers,
   ranges,
   onDateClick,
+  onCreateLevelAlert,
   height = 460,
   className,
 }: Props) {
@@ -478,6 +482,7 @@ export function AnalysisKChart({
           close={rows.length ? rows[rows.length - 1].close : undefined}
           hoveredKey={hoveredKey}
           onHover={setHoveredKey}
+          onCreateLevelAlert={onCreateLevelAlert}
         />
       )}
     </div>
@@ -486,7 +491,7 @@ export function AnalysisKChart({
 
 // ===== 价位统计面板(图表下方,结构化文本展示) =====
 function LevelOverview({
-  levels, activeTypes, pivotRank, close, hoveredKey, onHover,
+  levels, activeTypes, pivotRank, close, hoveredKey, onHover, onCreateLevelAlert,
 }: {
   levels: Record<LevelType, PriceLevel[]>
   activeTypes: Set<LevelType>
@@ -494,6 +499,7 @@ function LevelOverview({
   close?: number
   hoveredKey: string | null
   onHover: (k: string | null) => void
+  onCreateLevelAlert?: (level: PriceLevel) => void
 }) {
   // 收集当前显示的点位(同 collectPriceLines 的过滤逻辑)
   const visible: PriceLevel[] = []
@@ -541,6 +547,15 @@ function LevelOverview({
         <span className={`text-[11px] w-24 shrink-0 truncate ${hit ? 'text-foreground font-medium' : 'text-secondary'}`}>{p.label}</span>
         <span className={`text-[11px] font-mono ${hit ? 'text-foreground font-bold' : 'text-foreground'}`}>{p.value.toFixed(2)}</span>
         <span className="text-[9px] font-mono text-muted">{fmtPct(p.value)}</span>
+        {onCreateLevelAlert && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onCreateLevelAlert(p) }}
+            className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded text-muted transition-colors hover:bg-elevated hover:text-accent"
+            title="对该价位设提醒"
+          >
+            <Bell className="h-3 w-3" />
+          </button>
+        )}
       </div>
     )
   }
