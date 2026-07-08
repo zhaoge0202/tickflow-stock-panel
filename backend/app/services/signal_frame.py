@@ -75,7 +75,7 @@ def build_frames_from_tick_rows(
     target_date = target_date or cn_today()
     enriched_by_symbol = _enriched_map(repo)
     name_map = _safe_name_map(repo, sorted(wanted))
-    positions = manual_positions.by_symbol(data_dir)
+    positions = manual_positions.by_symbol(data_dir, repo)
     out = []
     for symbol in sorted(wanted):
         latest = latest_by_symbol.get(symbol) or _latest_tick(ticks_by_symbol.get(symbol, []))
@@ -120,7 +120,6 @@ def build_detail(
     frame["bars_3m"] = quote_tick_store.bars(data_dir, symbol, freq="3m", target_date=target_date)
     frame["bars_5m"] = quote_tick_store.bars(data_dir, symbol, freq="5m", target_date=target_date)
     frame["bars_15m"] = quote_tick_store.bars(data_dir, symbol, freq="15m", target_date=target_date)
-    frame.update(_trade_tick_summary(data_dir, symbol, target_date or cn_today()))
     return frame
 
 

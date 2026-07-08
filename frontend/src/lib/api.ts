@@ -2171,7 +2171,7 @@ export const api = {
   },
 
   decisionAction: (symbol: string, payload: DecisionActionPayload) =>
-    request<{ ok: boolean; event: DecisionTimelineEvent; item: DecisionItem }>(
+    request<{ ok: boolean; event: DecisionTimelineEvent }>(
       `/api/decision/items/${encodeURIComponent(symbol)}/action`,
       { method: 'POST', body: JSON.stringify(payload) },
     ),

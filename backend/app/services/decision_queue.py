@@ -16,6 +16,7 @@ from app.services import (
     quote_tick_store,
     signal_frame,
 )
+from app.services.symbols import normalize_symbol
 
 ACTIVE_STATUSES = {"pending", "waiting", "planned"}
 DONE_STATUSES = {"manual_done", "ignored"}
@@ -29,9 +30,9 @@ def build_queue(
     status: str | None = None,
 ) -> dict:
     target_date = target_date or cn_today()
-    alerts = _alerts_for_date(data_dir, target_date)
-    positions = manual_positions.by_symbol(data_dir)
-    latest_status = decision_journal.latest_status_map(data_dir, target_date=target_date)
+    alerts = _alerts_for_date(data_dir, target_date, repo)
+    positions = manual_positions.by_symbol(data_dir, repo)
+    latest_status = _latest_status_map(data_dir, repo, target_date)
     symbols = _symbols_from_inputs(alerts, positions, latest_status)
     frames = {
         f["symbol"]: f
@@ -58,7 +59,7 @@ def build_queue(
     if status:
         items = [item for item in items if item["status"] == status]
     items.sort(key=lambda item: (item["priority"], item.get("last_event_ts") or 0), reverse=True)
-    quality = quote_tick_store.quality(data_dir, sorted(symbols))
+    quality = quote_tick_store.quality(data_dir, sorted(symbols), target_date=target_date)
     return {
         "trade_date": target_date.isoformat(),
         "items": items,
@@ -69,16 +70,16 @@ def build_queue(
     }
 
 
-def summary(data_dir: Path, *, target_date: date | None = None) -> dict:
+def summary(data_dir: Path, repo=None, *, target_date: date | None = None) -> dict:
     """轻量状态条摘要。
 
-    完整队列会构建 signal frame，盘中或数据量大时可能较慢；状态条只需要数量和
-    quote quality，应避免被完整队列拖住。
+    完整队列会构建 signal frame, 盘中或数据量大时可能较慢; 状态条只需要数量和
+    quote quality, 应避免被完整队列拖住。
     """
     target_date = target_date or cn_today()
-    alerts = _alerts_for_date(data_dir, target_date)
-    positions = manual_positions.by_symbol(data_dir)
-    latest_status = decision_journal.latest_status_map(data_dir, target_date=target_date)
+    alerts = _alerts_for_date(data_dir, target_date, repo)
+    positions = manual_positions.by_symbol(data_dir, repo)
+    latest_status = _latest_status_map(data_dir, repo, target_date)
     symbols = _symbols_from_inputs(alerts, positions, latest_status)
     statuses = {
         symbol: (latest_status.get(symbol) or {}).get("status") or "pending"
@@ -86,7 +87,7 @@ def summary(data_dir: Path, *, target_date: date | None = None) -> dict:
     }
     pending = sum(1 for status in statuses.values() if status in ACTIVE_STATUSES)
     done = sum(1 for status in statuses.values() if status in DONE_STATUSES)
-    quality = quote_tick_store.quality(data_dir, sorted(symbols))
+    quality = quote_tick_store.quality(data_dir, sorted(symbols), target_date=target_date)
     if not symbols:
         quality = {
             **quality,
@@ -104,42 +105,39 @@ def summary(data_dir: Path, *, target_date: date | None = None) -> dict:
 
 def get_item(data_dir: Path, repo, symbol: str, *, target_date: date | None = None) -> dict | None:
     target_date = target_date or cn_today()
-    queue = build_queue(data_dir, repo, target_date=target_date)
-    target = symbol.upper()
-    for item in queue["items"]:
-        if item["symbol"] == target:
-            detail = signal_frame.build_detail(data_dir, repo, target, target_date=target_date)
-            item["signal_frame"] = detail or item.get("signal_frame")
-            item["timeline"] = timeline(data_dir, target, target_date=target_date)
-            return item
+    target = _normalize_symbol(symbol, repo)
+    alerts = [
+        alert
+        for alert in _alerts_for_date(data_dir, target_date, repo)
+        if alert.get("symbol") == target
+    ]
     detail = signal_frame.build_detail(data_dir, repo, target, target_date=target_date)
-    if not detail:
-        return None
+    positions = manual_positions.by_symbol(data_dir, repo)
+    journal = _latest_status_map(data_dir, repo, target_date).get(target)
     item = _build_item(
         target_date=target_date,
         symbol=target,
-        alerts=[],
+        alerts=alerts,
         frame=detail,
-        position=manual_positions.by_symbol(data_dir).get(target),
-        journal=decision_journal.latest_status_map(data_dir, target_date=target_date).get(target),
+        position=positions.get(target),
+        journal=journal,
     )
     if item:
-        item["signal_frame"] = detail
-        item["timeline"] = timeline(data_dir, target, target_date=target_date)
+        item["signal_frame"] = detail or item.get("signal_frame")
+        item["timeline"] = timeline(data_dir, target, repo, target_date=target_date)
     return item
 
 
 def record_action(data_dir: Path, repo, symbol: str, payload: dict) -> dict:
     event = dict(payload)
-    event["symbol"] = symbol.upper()
+    event["symbol"] = _normalize_symbol(symbol, repo)
     row = decision_journal.append_action(data_dir, event)
-    item = get_item(data_dir, repo, symbol, target_date=date.fromisoformat(row["trade_date"]))
-    return {"ok": True, "event": row, "item": item}
+    return {"ok": True, "event": row}
 
 
-def timeline(data_dir: Path, symbol: str, *, target_date: date | None = None) -> list[dict]:
+def timeline(data_dir: Path, symbol: str, repo=None, *, target_date: date | None = None) -> list[dict]:
     target_date = target_date or cn_today()
-    target = symbol.upper()
+    target = _normalize_symbol(symbol, repo)
     alerts = [
         {
             "kind": "alert",
@@ -153,7 +151,7 @@ def timeline(data_dir: Path, symbol: str, *, target_date: date | None = None) ->
             "severity": ev.get("severity"),
             "signals": ev.get("signals") or [],
         }
-        for ev in _alerts_for_date(data_dir, target_date)
+        for ev in _alerts_for_date(data_dir, target_date, repo)
         if ev.get("symbol") == target
     ]
     journals = [
@@ -168,7 +166,7 @@ def timeline(data_dir: Path, symbol: str, *, target_date: date | None = None) ->
             "side": ev.get("side"),
             "price": ev.get("price"),
         }
-        for ev in decision_journal.timeline(data_dir, target, target_date=target_date)
+        for ev in _journal_timeline(data_dir, target, repo, target_date)
     ]
     out = alerts + journals
     out.sort(key=lambda r: r.get("ts") or 0, reverse=True)
@@ -230,13 +228,13 @@ def _build_item(
     }
 
 
-def _alerts_for_date(data_dir: Path, target_date: date) -> list[dict]:
+def _alerts_for_date(data_dir: Path, target_date: date, repo=None) -> list[dict]:
     # alerts_store 只能按最近 days 查, 这里再按交易日精确过滤。
     events = alert_store.list_recent(data_dir, days=30, limit=5000)
     ds = target_date.isoformat()
     out = []
     for ev in events:
-        symbol = str(ev.get("symbol") or "").strip().upper()
+        symbol = _normalize_symbol(ev.get("symbol"), repo)
         if not symbol:
             continue
         ts = int(ev.get("ts") or 0)
@@ -246,6 +244,36 @@ def _alerts_for_date(data_dir: Path, target_date: date) -> list[dict]:
         row["symbol"] = symbol
         out.append(row)
     return out
+
+
+def _latest_status_map(data_dir: Path, repo, target_date: date) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for row in decision_journal.latest_status_map(data_dir, target_date=target_date).values():
+        symbol = _normalize_symbol(row.get("symbol"), repo)
+        if not symbol:
+            continue
+        normalized = dict(row)
+        normalized["symbol"] = symbol
+        prev = out.get(symbol)
+        if prev is None or int(normalized.get("ts") or 0) >= int(prev.get("ts") or 0):
+            out[symbol] = normalized
+    return out
+
+
+def _journal_timeline(data_dir: Path, target: str, repo, target_date: date) -> list[dict]:
+    out = []
+    for row in decision_journal.list_recent(data_dir, target_date=target_date):
+        symbol = _normalize_symbol(row.get("symbol"), repo)
+        if symbol != target:
+            continue
+        normalized = dict(row)
+        normalized["symbol"] = symbol
+        out.append(normalized)
+    return out
+
+
+def _normalize_symbol(value, repo=None) -> str:
+    return normalize_symbol(str(value or ""), repo)
 
 
 def _symbols_from_inputs(alerts: list[dict], positions: dict[str, dict], journals: dict[str, dict]) -> set[str]:

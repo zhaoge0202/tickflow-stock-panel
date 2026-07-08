@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.services import quote_tick_store
 
 CN = ZoneInfo("Asia/Shanghai")
+TRADE_DATE = date(2026, 7, 8)
 
 
 def _ms(hour: int, minute: int, second: int = 0) -> int:
@@ -45,9 +46,9 @@ def test_quote_tick_store_appends_latest_bars_and_quality(tmp_path):
     ]
 
     summary = quote_tick_store.append_many(tmp_path, rows, source="tdxapi", force_flush=True)
-    latest = quote_tick_store.latest(tmp_path, ["002491.SZ"])
-    bars = quote_tick_store.bars(tmp_path, "002491.SZ", freq="5s")
-    quality = quote_tick_store.quality(tmp_path, ["002491.SZ", "300750.SZ"])
+    latest = quote_tick_store.latest(tmp_path, ["002491.SZ"], target_date=TRADE_DATE)
+    bars = quote_tick_store.bars(tmp_path, "002491.SZ", freq="5s", target_date=TRADE_DATE)
+    quality = quote_tick_store.quality(tmp_path, ["002491.SZ", "300750.SZ"], target_date=TRADE_DATE)
 
     assert summary["source"] == "tdxapi"
     assert latest[0]["symbol"] == "002491.SZ"

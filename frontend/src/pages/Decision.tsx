@@ -89,8 +89,12 @@ export function Decision() {
     queryFn: () => api.decisionItem(selected),
     enabled: !!selected,
     refetchInterval: 5000,
-    placeholderData: prev => prev,
   })
+  const detailItem = detailQ.data?.symbol === selected ? detailQ.data : undefined
+  const detailLoading =
+    detailQ.isLoading ||
+    (!!selected && detailQ.isFetching && !detailItem) ||
+    (!!detailQ.data && detailQ.data.symbol !== selected)
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['decision'] })
@@ -145,8 +149,8 @@ export function Decision() {
                 }}
               />
               <DecisionDetail
-                item={detailQ.data}
-                loading={detailQ.isLoading}
+                item={detailItem}
+                loading={detailLoading}
                 onChanged={invalidate}
               />
             </div>
@@ -331,7 +335,7 @@ function DecisionQueue({ items, selected, loading, onSelect, onAddPosition }: {
   const grouped = useMemo(() => {
     const used = new Set<string>()
     const out = GROUPS.map(group => {
-      const rows = items.filter(item => group.match(item))
+      const rows = items.filter(item => !used.has(item.id) && group.match(item))
       rows.forEach(item => used.add(item.id))
       return { ...group, rows }
     })
@@ -731,9 +735,10 @@ function PositionDialog({ symbol, position, latestPrice, onClose, onSaved }: {
   onClose: () => void
   onSaved: (symbol: string) => void
 }) {
-  const [symbolInput, setSymbolInput] = useState(position?.symbol ?? symbol ?? '')
+  const initialSymbol = normalizePositionSymbol(position?.symbol ?? symbol ?? '')
+  const [symbolInput, setSymbolInput] = useState(initialSymbol)
   const [form, setForm] = useState<Partial<ManualPosition>>({
-    symbol: position?.symbol ?? symbol ?? '',
+    symbol: initialSymbol,
     shares: position?.shares ?? 0,
     cost_price: position?.cost_price ?? latestPrice ?? 0,
     stop_loss_price: position?.stop_loss_price ?? undefined,
@@ -811,8 +816,8 @@ function normalizePositionSymbol(value: string): string {
   if (text.includes('.')) return text
   if (/^(SH|SZ|BJ)\d{6}$/.test(text)) return `${text.slice(2)}.${text.slice(0, 2)}`
   if (/^\d{6}$/.test(text)) {
-    if (text.startsWith('6')) return `${text}.SH`
-    if (text.startsWith('0') || text.startsWith('3')) return `${text}.SZ`
+    if (text.startsWith('5') || text.startsWith('6')) return `${text}.SH`
+    if (text.startsWith('0') || text.startsWith('1') || text.startsWith('3')) return `${text}.SZ`
     if (text.startsWith('8') || text.startsWith('43') || text.startsWith('92')) return `${text}.BJ`
   }
   return text

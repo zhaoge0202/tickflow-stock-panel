@@ -1,6 +1,6 @@
 """全局实时行情服务。
 
-集中管理全市场行情拉取 + enriched 缓存，供盘中选股、自选股等所有模块复用。
+集中管理全市场行情拉取 + enriched 缓存, 供盘中选股、自选股等所有模块复用。
 
 架构:
   - 后台线程轮询 TickFlow get_by_universes(["CN_Equity_A", "CN_Index"])
@@ -17,7 +17,7 @@
   6. 通知 SSE
 
 生命周期:
-  - 服务启动时读取 preferences，若 enabled 则自动启动线程
+  - 服务启动时读取 preferences, 若 enabled 则自动启动线程
   - 运行中可通过 API 切换开关
   - 关闭时停止线程
 """
@@ -28,7 +28,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, time as dt_time
+from contextlib import suppress
+from datetime import date
+from datetime import time as dt_time
+from typing import ClassVar
 
 import polars as pl
 
@@ -37,7 +40,7 @@ from app.market_time import cn_now, cn_today
 logger = logging.getLogger(__name__)
 
 # Webhook(飞书等)投递专用线程池 —— 与行情轮询线程隔离。
-# send_feishu 内置重试(最坏 ~3×5s 超时 + 退避), 若在 _poll_loop 上同步投递,
+# send_feishu 内置重试(最坏 ~3x5s 超时 + 退避), 若在 _poll_loop 上同步投递,
 # webhook 慢/宕机会逐条累加, 拖垮整条实时行情+告警轮询。这里 fire-and-forget,
 # 失败由 webhook_adapter 记 WARNING(可见), 但绝不阻塞热路径。
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="feishu-webhook")
@@ -121,13 +124,13 @@ class QuoteService:
     CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
 
     # 档位 → 最小轮询间隔 (秒)
-    TIER_MIN_INTERVAL = {
+    TIER_MIN_INTERVAL: ClassVar[dict[str, float]] = {
         "expert": 1.0,
         "pro": 2.0,
         "starter": 3.0,
         "free": 6.0,
     }
-    PROVIDER_MIN_INTERVAL = {
+    PROVIDER_MIN_INTERVAL: ClassVar[dict[str, float]] = {
         "tdxapi": 3.0,
     }
     DEFAULT_INTERVAL = 10.0
@@ -195,7 +198,7 @@ class QuoteService:
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
-        """开启自动行情 (不立即启动线程，等下一个交易时段)。
+        """开启自动行情 (不立即启动线程, 等下一个交易时段)。
 
         none 档无实时行情权限,拒绝开启并返回 False;
         free 档开启自选股实时,starter+ 开启全市场实时。返回值表示是否真正开启。
@@ -221,7 +224,7 @@ class QuoteService:
         logger.info("行情服务已关闭")
 
     def boot_check(self) -> None:
-        """启动时检查 preferences，若 enabled 则自动启动。
+        """启动时检查 preferences, 若 enabled 则自动启动。
 
         none 档无实时行情权限:即使 preferences 标记为 enabled,
         也不启动,并同步 preferences 为关闭(避免 UI 误显示已开启)。
@@ -244,7 +247,7 @@ class QuoteService:
         self._app_state = app_state
 
     def set_interval(self, interval: float) -> float:
-        """运行时更新轮询间隔（立即生效）。"""
+        """运行时更新轮询间隔(立即生效)。"""
         clamped = self._clamp_interval(interval)
         self._interval = clamped
         from app.services import preferences
@@ -314,7 +317,7 @@ class QuoteService:
 
     @staticmethod
     def _current_tier() -> str:
-        """获取当前档位名（小写）。"""
+        """获取当前档位名(小写)。"""
         from app.tickflow.policy import tier_label
         return tier_label().split()[0].split("+")[0].strip().lower()
 
@@ -428,19 +431,19 @@ class QuoteService:
         return self.status()
 
     def _prime_quotes_once(self) -> None:
-        """启动/启用时主动抓取一次最新行情，避免盘后启动只回退到昨日缓存。"""
+        """启动/启用时主动抓取一次最新行情, 避免盘后启动只回退到昨日缓存。"""
         try:
             self._fetch_quotes()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("启动预热行情失败: %s", e)
 
     @staticmethod
     def _invalidate_overview_cache() -> None:
-        """行情刷新后清空看板聚合缓存，避免继续返回旧指数。"""
+        """行情刷新后清空看板聚合缓存, 避免继续返回旧指数。"""
         try:
             from app.api.overview import invalidate_overview_cache
             invalidate_overview_cache()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("invalidate overview cache skipped: %s", e)
 
     # ================================================================
@@ -465,7 +468,7 @@ class QuoteService:
                             logger.warning("%s 最终行情同步失败, 将继续重试", "午休" if phase == "morning_final" else "收盘")
                 else:
                     logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("行情轮询异常: %s", e)
 
             waited = 0.0
@@ -498,11 +501,11 @@ class QuoteService:
                     now_ts = time.perf_counter()
                     provider = custom_sources.get_provider(provider_name)
                     records = list(provider.get_realtime() or [])
-                    index_symbols = self._custom_realtime_index_symbols()
-                    if index_symbols and self._provider_accepts_realtime_symbols(provider):
-                        records.extend(provider.get_realtime(symbols=index_symbols) or [])
+                    supplement_symbols = self._custom_realtime_supplement_symbols()
+                    if supplement_symbols and self._provider_accepts_realtime_symbols(provider):
+                        records.extend(provider.get_realtime(symbols=supplement_symbols) or [])
                     records = self._dedupe_quote_records(records)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
                 self._process_full_market_records(records, t0=t0, now_ts=now_ts)
@@ -540,7 +543,7 @@ class QuoteService:
             resp = []
             if universes:
                 _u0 = time.perf_counter()
-                logger.info("拉取全市场行情 (universes=%s, SDK超时=30s×重试3)", universes)
+                logger.info("拉取全市场行情 (universes=%s, SDK超时=30sx重试3)", universes)
                 resp.extend(tf.quotes.get_by_universes(universes=universes) or [])
                 logger.info("全市场行情拉取完成: %d 条 (%.2fs)", len(resp), time.perf_counter() - _u0)
             if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "core":
@@ -548,7 +551,7 @@ class QuoteService:
                 _core_syms = sorted(core_index_symbols)
                 resp.extend(tf.quotes.get(symbols=_core_syms) or [])
                 logger.info("核心指数行情拉取完成: %d 只 (%.2fs)", len(_core_syms), time.perf_counter() - _i0)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("行情拉取失败 (%.2fs): %s", time.perf_counter() - t0, e)
             return
 
@@ -635,14 +638,14 @@ class QuoteService:
         if not daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily(daily_df)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("日K写盘失败: %s", e)
 
         etf_daily_df = self._build_daily(etf_records)
         if not etf_daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily_asset("etf", etf_daily_df)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("ETF 日K写盘失败: %s", e)
 
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
@@ -682,7 +685,7 @@ class QuoteService:
         now_ts = time.perf_counter()
         try:
             resp = tf.quotes.get(symbols=symbols) or []
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("自选实时拉取失败: %s", e)
             return
 
@@ -738,7 +741,7 @@ class QuoteService:
         if not daily_df.is_empty() and self._repo:
             try:
                 self._repo.merge_live_daily_asset("stock", daily_df)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("自选实时日K写盘失败: %s", e)
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
 
@@ -770,11 +773,11 @@ class QuoteService:
                 records,
                 source="tdxapi",
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("quote_ticks 追加失败: %s", e)
 
     def _custom_realtime_index_symbols(self) -> list[str]:
-        """自定义实时源显式补拉指数，避免核心指数被全市场快照遗漏。"""
+        """自定义实时源显式补拉指数, 避免核心指数被全市场快照遗漏。"""
         from app.services import preferences
 
         if not preferences.get_realtime_pull_index():
@@ -783,6 +786,39 @@ class QuoteService:
         symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
         if preferences.get_realtime_index_mode() == "all" and self._repo:
             symbols.update(self._repo.get_index_symbol_set())
+        return sorted(symbols)
+
+    def _custom_realtime_manual_position_symbols(self) -> list[str]:
+        """自定义实时源显式补拉手动持仓, 确保决策台持仓有秒级价格。"""
+        if not self._repo or not getattr(self._repo, "store", None):
+            return []
+        try:
+            from app.services import manual_positions
+
+            rows = manual_positions.load_all(self._repo.store.data_dir, self._repo)
+        except Exception as e:
+            logger.warning("手动持仓实时补拉列表读取失败: %s", e)
+            return []
+        symbols: list[str] = []
+        for row in rows:
+            symbol = str((row or {}).get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            try:
+                shares = float((row or {}).get("shares") or 0)
+            except (TypeError, ValueError):
+                shares = 0.0
+            if shares <= 0 or symbol in symbols:
+                continue
+            symbols.append(symbol)
+        return symbols
+
+    def _custom_realtime_supplement_symbols(self) -> list[str]:
+        """自定义实时源需要精确补拉的 symbol 集合。"""
+        symbols = {
+            *self._custom_realtime_index_symbols(),
+            *self._custom_realtime_manual_position_symbols(),
+        }
         return sorted(symbols)
 
     @staticmethod
@@ -862,11 +898,11 @@ class QuoteService:
 
     @staticmethod
     def _build_index_quotes(records: list[dict]) -> pl.DataFrame:
-        """构建指数实时行情缓存，不落股票 parquet。
+        """构建指数实时行情缓存, 不落股票 parquet。
 
         注意: API 返回的 change_pct/amplitude 是小数 (0.0366 = 3.66%),
         统一转成百分比输出, 与 _fallback_index_quotes_from_daily 口径一致
-        (前端指数侧不×100, 直接 toFixed(2)% 展示)。
+        (前端指数侧不x100, 直接 toFixed(2)% 展示)。
         """
         if not records:
             return pl.DataFrame()
@@ -1000,7 +1036,7 @@ class QuoteService:
                                         name_map.setdefault(row["symbol"], row["name"])
                         if name_map:
                             engine.set_name_map(name_map)
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         logger.debug("name_map 构建失败 (不影响监控): %s", e)
                     # 连板梯队封单监控: 有 ladder 规则时, 从 depth_service 注入封单量到 enriched
                     eval_df = enriched_today
@@ -1018,7 +1054,7 @@ class QuoteService:
                                 rule_events = rule_events + engine.evaluate(
                                     etf_enriched, asset_type="etf", reset_strategy_results=False,
                                 )
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             logger.warning("ETF 监控评估失败 (不影响股票告警): %s", e)
                     if rule_events:
                         # 落盘到 alerts.jsonl
@@ -1027,7 +1063,7 @@ class QuoteService:
                             alert_store.append_many(
                                 self._app_state.repo.store.data_dir, rule_events,
                             )
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             logger.warning("告警落盘失败: %s", e)
                         # 转为 SSE 推送格式 (兼容旧 alert schema)
                         for ev in rule_events:
@@ -1065,7 +1101,7 @@ class QuoteService:
             if rule_events:
                 self._maybe_send_webhook(rule_events, engine)
 
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("监控评估失败: %s", e)
 
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
@@ -1100,7 +1136,7 @@ class QuoteService:
             # 若已有残留列先移除 (避免重复 join 报错)
             df = enriched_today.drop("_sealed_vol") if "_sealed_vol" in enriched_today.columns else enriched_today
             return df.join(sealed_df, on="symbol", how="left")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("封单注入失败 (ladder 规则将不触发): %s", e)
             return enriched_today
 
@@ -1116,8 +1152,7 @@ class QuoteService:
         以便反查引擎规则判断是否启用推送。
         """
         try:
-            from app.services import preferences
-            from app.services import webhook_adapter
+            from app.services import preferences, webhook_adapter
 
             feishu_url = preferences.get_feishu_webhook_url()
             feishu_secret = preferences.get_feishu_webhook_secret()
@@ -1159,7 +1194,7 @@ class QuoteService:
                     enqueued += 1
             if enqueued:
                 logger.info("Webhook 已提交 %d 条 (异步投递, 按渠道独立投递, 失败记 WARNING)", enqueued)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Webhook 提交异常 (不影响告警主流程): %s", e)
 
     def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
@@ -1171,8 +1206,7 @@ class QuoteService:
         - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
         """
         try:
-            from app.services import preferences
-            from app.services import notify_adapter
+            from app.services import notify_adapter, preferences
 
             if not preferences.get_system_notify_enabled():
                 return
@@ -1190,14 +1224,11 @@ class QuoteService:
                 message = ev.get("message") or ""
 
                 # 正文: 优先用现成 message, 拼上 symbol/name 让用户一眼定位
-                if symbol:
-                    body = f"{symbol} {name} {message}".strip()
-                else:
-                    body = message or name
+                body = f"{symbol} {name} {message}".strip() if symbol else message or name
 
                 title = f"TickFlow · {source_label}"
                 notify_adapter.notify(title, body)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
 
     @staticmethod
@@ -1258,6 +1289,7 @@ class QuoteService:
                     return
 
                 from datetime import timedelta
+
                 from app.indicators.pipeline import compute_enriched
 
                 logger.info("enriched 全量计算 (live_agg=%s, 上次日期=%s)",
@@ -1286,10 +1318,8 @@ class QuoteService:
                 factor_path = self._repo.store.data_dir / factor_dir / "all.parquet"
                 factors = pl.DataFrame()
                 if factor_path.exists():
-                    try:
+                    with suppress(Exception):
                         factors = pl.read_parquet(factor_path)
-                    except Exception:
-                        pass
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
                 enriched_full = compute_enriched(full_df, factors=factors, instruments=instruments)
@@ -1308,5 +1338,5 @@ class QuoteService:
             mode_label = "增量" if use_incremental else "全量"
             logger.info("enriched %s: %d 只, %s, 耗时 %.0fms",
                         mode_label, len(enriched_today), today, elapsed * 1000)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("enriched 计算失败: %s", e)

@@ -21,10 +21,12 @@ def test_signal_frame_exposes_minute_and_trade_summary(monkeypatch, tmp_path):
         {"symbol": "002491.SZ", "last_price": 10.3, "prev_close": 9.8, "open": 10.0, "high": 10.3, "low": 9.9, "volume": 180, "amount": 180_000, "timestamp": _ms(8, 9, 36)},
     ]
     quote_tick_store.append_many(tmp_path, rows, source="tdxapi", force_flush=True)
-    monkeypatch.setattr(
-        signal_frame,
-        "_trade_tick_summary",
-        lambda *args, **kwargs: {
+    calls = 0
+
+    def fake_trade_tick_summary(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {
             "tick_buy_amount": 200_000,
             "tick_sell_amount": 50_000,
             "tick_net_amount": 150_000,
@@ -33,8 +35,9 @@ def test_signal_frame_exposes_minute_and_trade_summary(monkeypatch, tmp_path):
             "aggressive_buy_ratio": 0.8,
             "large_order_count": 1,
             "tick_sample_count": 2,
-        },
-    )
+        }
+
+    monkeypatch.setattr(signal_frame, "_trade_tick_summary", fake_trade_tick_summary)
 
     frame = signal_frame.build_detail(tmp_path, None, "002491.SZ", target_date=datetime(2026, 7, 8, tzinfo=CN).date())
 
@@ -44,6 +47,7 @@ def test_signal_frame_exposes_minute_and_trade_summary(monkeypatch, tmp_path):
     assert frame["tick_net_amount"] == 150_000
     assert "aggressive_buy_ratio_high" in frame["active_signals"]
     assert "large_order_net_inflow" in frame["active_signals"]
+    assert calls == 1
 
 
 def test_intraday_replay_uses_signal_frame_rules_and_outputs_returns(tmp_path):

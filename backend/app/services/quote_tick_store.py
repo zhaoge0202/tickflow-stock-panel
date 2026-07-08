@@ -153,10 +153,15 @@ def bars(
     return [_json_safe(row) for row in df.iter_rows(named=True)]
 
 
-def quality(data_dir: Path, symbols: list[str] | None = None) -> dict:
+def quality(
+    data_dir: Path,
+    symbols: list[str] | None = None,
+    *,
+    target_date: date | None = None,
+) -> dict:
     """返回数据质量摘要, 供决策台顶部状态展示。"""
     key = str(data_dir)
-    latest_rows = latest(data_dir, symbols)
+    latest_rows = latest(data_dir, symbols, target_date=target_date)
     now_ms = int(time.time() * 1000)
     missing = []
     if symbols:
