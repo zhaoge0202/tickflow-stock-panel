@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles } from 'lucide-react'
+import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download } from 'lucide-react'
 import { api, type StrategyDetail, type StrategyParamDef } from '@/lib/api'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { color } from '@/lib/colors'
@@ -317,6 +317,20 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
     } finally { setDeleting(false) }
   }
 
+  const handleDownload = async () => {
+    if (!strategyId || !detail || (detail.source !== 'ai' && detail.source !== 'custom')) return
+    const src = await api.strategyGetSource(strategyId)
+    const blob = new Blob([src.code], { type: 'text/x-python;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${strategyId}.py`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   if (!strategyId) return null
 
   return (
@@ -335,7 +349,20 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
               {detail && <span className="text-[10px] px-1.5 py-0.5 rounded bg-elevated text-muted">{{ builtin: '内置', custom: '自定义', ai: 'AI' }[detail.source] ?? detail.source}</span>}
               <span className="text-[10px] text-muted/40 font-mono">{strategyId}</span>
             </div>
-            <button aria-label="关闭" onClick={onClose} className="p-1.5 rounded-lg hover:bg-elevated transition-colors cursor-pointer"><X className="h-4 w-4 text-muted" /></button>
+            <div className="flex items-center gap-2">
+              {detail && (detail.source === 'ai' || detail.source === 'custom') && (
+                <button
+                  aria-label="下载策略"
+                  title="下载策略"
+                  onClick={handleDownload}
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-border/60 bg-surface text-xs text-secondary hover:text-accent hover:border-accent/30 transition-colors cursor-pointer"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  下载策略
+                </button>
+              )}
+              <button aria-label="关闭" onClick={onClose} className="p-1.5 rounded-lg hover:bg-elevated transition-colors cursor-pointer"><X className="h-4 w-4 text-muted" /></button>
+            </div>
           </div>
 
           {/* 内容 */}

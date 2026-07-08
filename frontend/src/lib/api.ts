@@ -395,6 +395,27 @@ export interface StrategyDetail {
   limit: number
 }
 
+export interface StrategyBuildResult {
+  code: string
+  meta: Record<string, any>
+  valid: boolean
+  error: string | null
+}
+
+export type StrategyBuildStreamEvent =
+  | { type: 'meta'; strategy_id?: string; step?: number }
+  | { type: 'delta'; content: string }
+  | ({ type: 'result' } & StrategyBuildResult)
+  | { type: 'error'; message: string }
+
+export interface StrategyCodeSaveResult {
+  ok: boolean
+  strategy_id: string
+  source: 'ai' | 'custom'
+  path: string
+  meta: Record<string, any>
+}
+
 // ===== Custom Signals (自定义信号) =====
 export interface CustomSignalCondition {
   left: string     // 字段名
@@ -1899,10 +1920,65 @@ export const api = {
   strategyGetSource: (id: string) =>
     request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
   strategyBuild: (step: number, payload: Record<string, any>) =>
-    request<{ code: string; meta: Record<string, any>; valid: boolean; error: string | null }>(
+    request<StrategyBuildResult>(
       '/api/strategies/build',
       { method: 'POST', body: JSON.stringify({ step, ...payload }) },
     ),
+
+  async *strategyBuildStream(step: number, payload: Record<string, any>): AsyncGenerator<StrategyBuildStreamEvent> {
+    const res = await fetch('/api/strategies/build/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step, ...payload }),
+    })
+    if (!res.ok) {
+      let detail = ''
+      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+      const msg = detail || `${res.status} ${res.statusText}`
+      toast(msg, 'error')
+      throw new Error(msg)
+    }
+    if (!res.body) throw new Error('响应无 body')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        const s = line.trim()
+        if (!s) continue
+        try { yield JSON.parse(s) } catch { /* ignore */ }
+      }
+    }
+    if (buf.trim()) {
+      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+    }
+  },
+
+  strategyValidateCode: (payload: { code: string; strategy_id?: string; name?: string; description?: string; strict?: boolean }) =>
+    request<StrategyBuildResult>('/api/strategies/code/validate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  strategySaveCodeV2: (payload: {
+    strategy_id: string
+    code: string
+    target_source: 'ai' | 'custom'
+    mode: 'create' | 'update'
+    name?: string
+    description?: string
+    strict?: boolean
+  }) =>
+    request<StrategyCodeSaveResult>('/api/strategies/code/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   /** 保存 AI 生成的策略文件 */
   strategySaveCode: (strategyId: string, code: string, meta?: { name?: string; description?: string }) =>

@@ -863,7 +863,7 @@ export function Screener() {
               description: detail.description ?? '',
               direction: 'long',
               rules: storage.strategyRules.get({})[settingsStrategyId] ?? '',
-              code: src.code, step: 2, strategyId: settingsStrategyId,
+              code: src.code, step: 2, strategyId: settingsStrategyId, source: src.source as any,
             })
             setSettingsStrategyId(null)
             setBuilderMode('modify')
