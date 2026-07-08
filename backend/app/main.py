@@ -193,7 +193,8 @@ async def lifespan(app: FastAPI):
         tti.stop()
     qs = getattr(app.state, "quote_service", None)
     if qs:
-        qs.stop()
+        # 进程退出/热重载只是清理后台线程, 不能把用户的实时行情开关写成关闭。
+        qs.stop(persist_enabled=False)
     dsvc = getattr(app.state, "depth_service", None)
     if dsvc:
         dsvc.stop_polling()

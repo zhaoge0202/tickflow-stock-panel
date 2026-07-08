@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, Loader2, RefreshCw } from 'lucide-react'
 import { api, type TradeTickPersistStatus, type TradeTickRow } from '@/lib/api'
@@ -12,16 +12,38 @@ interface Props {
 
 const LIMIT = 300
 
+function todayLocalISO() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
 export function StockTradeTicksPanel({ symbol, date }: Props) {
   const qc = useQueryClient()
   const persistKeyRef = useRef('')
-  const isToday = date === new Date().toISOString().slice(0, 10)
+  const isToday = date === todayLocalISO()
+  const queryKey = useMemo(
+    () => QK.tradeTicks(symbol, date, 'auto', 'recent', LIMIT, 'desc'),
+    [date, symbol],
+  )
 
   const ticks = useQuery({
-    queryKey: QK.tradeTicks(symbol, date, 'auto', 'recent', LIMIT, 'desc'),
-    queryFn: () => api.tradeTicks(symbol, date, 'auto', 'recent', LIMIT, 'desc'),
+    queryKey,
+    queryFn: () => api.tradeTicks(
+      symbol,
+      date,
+      'auto',
+      'recent',
+      LIMIT,
+      'desc',
+      isToday ? Date.now() : undefined,
+    ),
     enabled: !!symbol && !!date,
+    staleTime: 0,
     refetchInterval: isToday ? 3000 : false,
+    refetchIntervalInBackground: true,
   })
 
   const persistStatus = useQuery({
@@ -34,6 +56,8 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
       return status === 'queued' || status === 'running' ? 3000 : false
     },
   })
+  const refetchTicks = ticks.refetch
+  const refetchPersistStatus = persistStatus.refetch
 
   const autoPersist = useMutation({
     mutationFn: () => api.tradeTicksPersist(symbol, date, false),
@@ -42,6 +66,7 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: QK.tradeTickPersistStatus(symbol, date) })
+      qc.invalidateQueries({ queryKey })
     },
   })
 
@@ -52,6 +77,7 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: QK.tradeTickPersistStatus(symbol, date) })
+      qc.invalidateQueries({ queryKey })
     },
   })
 
@@ -62,6 +88,11 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
     persistKeyRef.current = key
     autoPersist.mutate()
   }, [symbol, date])
+
+  const refreshTicks = useCallback(async () => {
+    await refetchTicks({ cancelRefetch: true })
+    await refetchPersistStatus()
+  }, [refetchPersistStatus, refetchTicks])
 
   const rows = useMemo(() => ticks.data?.rows ?? [], [ticks.data?.rows])
   const mysqlRows = persistStatus.data?.mysql?.rows ?? 0
@@ -74,6 +105,7 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-foreground">分笔成交</span>
+          <span className="rounded bg-muted/10 px-1.5 py-0.5 font-mono text-[10px] text-muted">{date}</span>
           <span className="font-mono text-[10px] text-muted">{rows.length}</span>
           {ticks.data?.source && (
             <span className="rounded bg-muted/10 px-1.5 py-0.5 text-[10px] text-muted">{ticks.data.source}</span>
@@ -105,8 +137,8 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
             {requestPersisting ? '保存中' : '保存'}
           </button>
           <button
-            onClick={() => ticks.refetch()}
-            disabled={ticks.isFetching}
+            onClick={() => { void refreshTicks() }}
+            disabled={ticks.isLoading}
             className="inline-flex h-7 w-7 items-center justify-center rounded-btn border border-border bg-elevated text-secondary hover:text-foreground disabled:opacity-50"
             title="刷新"
           >

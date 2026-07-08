@@ -425,6 +425,11 @@ class KlineRepository:
             and self._live_agg_cache is not None
         )
 
+    @property
+    def enriched_warming(self) -> bool:
+        """enriched 后台预热是否仍在运行。"""
+        return self._enriched_warming
+
     def clear_cache(self) -> None:
         """清空所有 Polars 内存缓存。
 
@@ -483,7 +488,10 @@ class KlineRepository:
 
             step = time.perf_counter()
             logger.info("enriched refresh step start: read latest parquet %s", target_parquet)
-            df_latest = pl.read_parquet(target_parquet)
+            df_latest = self._dedupe_symbol_date(
+                pl.read_parquet(target_parquet),
+                f"enriched 最新分区 {target_parquet}",
+            )
             logger.info("enriched refresh step done: read latest parquet rows=%d (%.2fs)", len(df_latest), time.perf_counter() - step)
             if df_latest.is_empty():
                 logger.info("enriched refresh skipped: latest parquet empty (%.2fs)", time.perf_counter() - started)
@@ -506,7 +514,10 @@ class KlineRepository:
 
                 step = time.perf_counter()
                 logger.info("enriched refresh step start: collect history from %s", start_full)
-                df_hist = lf.select(read_cols).collect()
+                df_hist = self._dedupe_symbol_date(
+                    lf.select(read_cols).collect(),
+                    "enriched 历史缓存",
+                )
                 logger.info("enriched refresh step done: collect history rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
                 if not df_hist.is_empty():
                     instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
@@ -786,7 +797,10 @@ class KlineRepository:
         read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close", "volume",
                                  "raw_close", "raw_high", "raw_low"]
                      if c in lf.collect_schema().names()]
-        df_hist = lf.select(read_cols).collect()
+        df_hist = self._dedupe_symbol_date(
+            lf.select(read_cols).collect(),
+            "live_agg parquet 历史",
+        )
 
         if df_hist.is_empty():
             return df_hist, pl.DataFrame()
@@ -821,7 +835,10 @@ class KlineRepository:
                 return
             latest = date.fromisoformat(dates[-1])
             target_parquet = enriched_dir / f"date={dates[-1]}" / "part.parquet"
-            df_latest = pl.read_parquet(target_parquet)
+            df_latest = self._dedupe_symbol_date(
+                pl.read_parquet(target_parquet),
+                f"ETF enriched 最新分区 {target_parquet}",
+            )
             if df_latest.is_empty():
                 return
 
@@ -831,13 +848,18 @@ class KlineRepository:
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                      "volume", "amount", "raw_close", "raw_high", "raw_low"]
                          if c in df_latest.columns]
-            df_hist = (
-                pl.scan_parquet(self._etf_enriched_glob,
-                                cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
-                .filter(pl.col("date") >= start_full)
-                .select(read_cols)
-                .sort(["symbol", "date"])
-                .collect()
+            df_hist = self._dedupe_symbol_date(
+                (
+                    pl.scan_parquet(
+                        self._etf_enriched_glob,
+                        cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+                    )
+                    .filter(pl.col("date") >= start_full)
+                    .select(read_cols)
+                    .sort(["symbol", "date"])
+                    .collect()
+                ),
+                "ETF enriched 历史缓存",
             )
             if df_hist.is_empty():
                 self._etf_enriched_cache = df_latest.sort(["symbol"])
@@ -1619,6 +1641,18 @@ class KlineRepository:
         df.write_parquet(tmp)
         tmp.replace(out)  # 同目录 rename, POSIX/NTFS 均为原子操作
 
+    @staticmethod
+    def _dedupe_symbol_date(df: pl.DataFrame, context: str) -> pl.DataFrame:
+        """按 symbol/date 去重, 防止坏分区把后续 join 放大到爆内存。"""
+        if df.is_empty() or not {"symbol", "date"}.issubset(df.columns):
+            return df
+        before = len(df)
+        deduped = df.unique(subset=["symbol", "date"], keep="last")
+        removed = before - len(deduped)
+        if removed > 0:
+            logger.warning("%s 去重: 移除 %d 行重复 symbol/date", context, removed)
+        return deduped
+
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""
         base = self.store.data_dir / table
@@ -1665,6 +1699,7 @@ class KlineRepository:
         """按 symbol 合并当天 enriched 分区和内存缓存。用于少量自选实时。"""
         if df.is_empty() or "date" not in df.columns:
             return
+        df = self._dedupe_symbol_date(df, f"{asset_type} merge_live_enriched 入参")
         dt = df["date"][0]
         if asset_type == "stock":
             table = "kline_daily_enriched"
@@ -1742,6 +1777,7 @@ class KlineRepository:
         """覆写当天指定资产 enriched 分区 (实时 enriched 落盘, 非merge)。"""
         if df.is_empty() or "date" not in df.columns:
             return
+        df = self._dedupe_symbol_date(df, f"{asset_type} flush_live_enriched 入参")
         dt = df["date"][0]
         if asset_type == "stock":
             self._enriched_cache = df.sort(["symbol"])

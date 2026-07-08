@@ -1162,17 +1162,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(symbols),
     }),
-  klineMinute: (symbol: string, date?: string) =>
-    request<{
+  klineMinute: (symbol: string, date?: string, cacheBust?: number) => {
+    const params = new URLSearchParams({ symbol })
+    if (date) params.set('date', date)
+    if (cacheBust != null) params.set('_', String(cacheBust))
+    return request<{
       symbol: string
       name?: string
       stock_info?: { name?: string; total_shares?: number; float_shares?: number }
       date: string | null
       rows: MinuteKlineRow[]
       source?: 'local' | 'live' | 'none'
-    }>(
-      `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
-    ),
+    }>(`/api/kline/minute?${params.toString()}`)
+  },
   tradeTicks: (
     symbol: string,
     date?: string,
@@ -1180,6 +1182,7 @@ export const api = {
     mode: 'recent' | 'all' = 'recent',
     limit = 300,
     order: 'asc' | 'desc' = 'desc',
+    cacheBust?: number,
   ) => {
     const params = new URLSearchParams({
       symbol,
@@ -1189,6 +1192,7 @@ export const api = {
       order,
     })
     if (date) params.set('date', date)
+    if (cacheBust != null) params.set('_', String(cacheBust))
     return request<TradeTicksResponse>(`/api/trade-ticks?${params.toString()}`)
   },
   tradeTicksPersist: (symbol: string, date?: string, force = false) =>

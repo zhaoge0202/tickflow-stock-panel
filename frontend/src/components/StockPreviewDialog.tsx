@@ -72,6 +72,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const handleRefresh = () => {
     if (!symbol) return
     qc.invalidateQueries({ queryKey: ['kline', symbol!] })
+    qc.invalidateQueries({ queryKey: ['trade-ticks', symbol!] })
+    qc.invalidateQueries({ queryKey: ['trade-tick-persist-status', symbol!] })
     if (showIntraday) {
       qc.invalidateQueries({ queryKey: ['kline-minute', symbol!] })
     }

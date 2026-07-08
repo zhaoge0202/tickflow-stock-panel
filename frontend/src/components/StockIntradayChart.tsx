@@ -14,6 +14,14 @@ interface Props {
   onPriceHover?: (price: number | null) => void
 }
 
+function todayLocalISO() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
 export function StockIntradayChart({
   symbol,
   date,
@@ -24,11 +32,15 @@ export function StockIntradayChart({
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
+  const isToday = date === todayLocalISO()
 
   const minute = useQuery({
     queryKey: QK.klineMinute(symbol, date ?? ''),
-    queryFn: () => api.klineMinute(symbol, date ?? undefined),
+    queryFn: () => api.klineMinute(symbol, date ?? undefined, isToday ? Date.now() : undefined),
     enabled: !!symbol && !!date,
+    staleTime: 0,
+    refetchInterval: isToday ? 15_000 : false,
+    refetchIntervalInBackground: true,
   })
 
   const fetchMinute = useMutation({

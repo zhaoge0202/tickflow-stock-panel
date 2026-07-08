@@ -37,6 +37,22 @@ interface Props {
 
 export { getDefaultRange }
 
+type SelectedDateSource = 'auto' | 'user'
+
+function todayLocalISO() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function defaultIntradayDate(rows: StockDailyKChartResult['rows'], rangeEnd: string): string | null {
+  // 今日分时/分笔走实时源；即使日 K 缓存尚未生成今日 K 线，也应默认看今天。
+  if (rangeEnd === todayLocalISO()) return rangeEnd
+  return rows[rows.length - 1]?.date ?? null
+}
+
 export function StockPanel({
   symbol,
   height = 520,
@@ -55,6 +71,7 @@ export function StockPanel({
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedDateSource, setSelectedDateSource] = useState<SelectedDateSource>('auto')
   const [dailyResult, setDailyResult] = useState<StockDailyKChartResult | null>(null)
   // 信息条指标配置提升到此层：同时供 StockInfoBar 渲染与 StockDailyKChart 请求 ext 数据
   const [fields, setFields] = useState<ColumnConfig[]>(loadInfoFields)
@@ -79,6 +96,7 @@ export function StockPanel({
   const dateRange = externalDateRange ?? getDefaultRange()
 
   const handleDateClick = useCallback((date: string) => {
+    setSelectedDateSource('user')
     setSelectedDate(date)
     onSelectDate?.(date)
   }, [onSelectDate])
@@ -96,16 +114,19 @@ export function StockPanel({
     if (prevSymbol.current === symbol) return
     prevSymbol.current = symbol
     setSelectedDate(null)
+    setSelectedDateSource('auto')
     setLinkedPrice(null)
     setDailyResult(null)
   }, [symbol])
 
-  // 当分时开启、无选中日期时，自动选中最新日期
+  // 当分时开启且日期未被用户手选时，自动跟随默认分时日期。
   useEffect(() => {
-    if (showIntraday && !selectedDate && rows.length > 0) {
-      setSelectedDate(rows[rows.length - 1].date)
+    if (!showIntraday || selectedDateSource === 'user') return
+    const next = defaultIntradayDate(rows, dateRange.end)
+    if (next && selectedDate !== next) {
+      setSelectedDate(next)
     }
-  }, [showIntraday, selectedDate, rows])
+  }, [dateRange.end, rows, selectedDate, selectedDateSource, showIntraday])
 
   const selectedIdx = selectedDate ? rows.findIndex(r => r.date === selectedDate) : -1
   const prevClose = selectedIdx > 0
