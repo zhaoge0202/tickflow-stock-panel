@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.services import kline_sync
+from app.services.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,7 @@ def get_daily(
     import polars as pl
 
     repo = request.app.state.repo
+    symbol = normalize_symbol(symbol, repo)
     end = date.fromisoformat(end_date) if end_date else date.today()
     if start_date:
         start = date.fromisoformat(start_date)
@@ -359,6 +361,7 @@ def get_daily_batch(request: Request, body: dict):
     days = max(5, min(60, days))
 
     repo = request.app.state.repo
+    symbols = [normalize_symbol(sym, repo) for sym in symbols]
     import polars as pl
     from datetime import date, timedelta
 
@@ -366,7 +369,36 @@ def get_daily_batch(request: Request, body: dict):
     start = end - timedelta(days=days * 2)  # 多取一些确保交易日够
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
-    df = repo.get_daily_batch(symbols, start, end, columns=cols)
+    etf_set = repo.get_etf_symbol_set()
+    stock_syms = [s for s in symbols if s not in etf_set]
+    etf_syms = [s for s in symbols if s in etf_set]
+
+    parts: list[pl.DataFrame] = []
+    if stock_syms:
+        stock_df = repo.get_daily_batch(stock_syms, start, end, columns=cols)
+        if not stock_df.is_empty():
+            parts.append(stock_df)
+    for sym in etf_syms:
+        etf_df = repo.get_daily_asset("etf", sym, start, end, columns=cols)
+        if not etf_df.is_empty():
+            parts.append(etf_df)
+
+    present_symbols: set[str] = set()
+    for part in parts:
+        if "symbol" in part.columns:
+            present_symbols.update(part["symbol"].cast(pl.Utf8).to_list())
+    missing_etfs = [sym for sym in etf_syms if sym not in present_symbols]
+    if missing_etfs:
+        try:
+            live_etf_df = kline_sync.sync_daily_batch(missing_etfs, count=days + 30)
+        except Exception as e:
+            logger.debug("ETF daily-batch live fallback failed: %s", e)
+            live_etf_df = pl.DataFrame()
+        if not live_etf_df.is_empty():
+            existing = [c for c in cols if c in live_etf_df.columns]
+            parts.append(live_etf_df.select(existing).filter(pl.col("symbol").is_in(missing_etfs)))
+
+    df = pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
 
     if df.is_empty():
         return {"data": {}}
@@ -399,6 +431,7 @@ def get_minute_batch(request: Request, body: dict):
         return {"data": {}}
 
     repo = request.app.state.repo
+    symbols = [normalize_symbol(sym, repo) for sym in symbols]
     capset = request.app.state.capabilities
 
     # 权限守卫: 分钟K批量是 Pro+ 能力
@@ -492,6 +525,7 @@ def get_minute(
     - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
     """
     repo = request.app.state.repo
+    symbol = normalize_symbol(symbol, repo)
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
@@ -551,6 +585,7 @@ def sync_symbol(
 ):
     """手动触发单股同步(Free 用户在 K 线页用)。"""
     repo = request.app.state.repo
+    symbol = normalize_symbol(symbol, repo)
     capset = request.app.state.capabilities
     n = kline_sync.sync_and_persist_daily_batch([symbol], repo, capset, count=days)
     return {"symbol": symbol, "rows_written": n}
@@ -563,6 +598,7 @@ def sync_batch(
     days: int = Query(250, ge=10, le=2000),
 ):
     repo = request.app.state.repo
+    symbols = [normalize_symbol(sym, repo) for sym in symbols]
     capset = request.app.state.capabilities
     n = kline_sync.sync_and_persist_daily_batch(symbols, repo, capset, count=days)
     return {"symbols": symbols, "rows_written": n}

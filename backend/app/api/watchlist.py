@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
 from app.services import watchlist
+from app.services.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +49,29 @@ def list_all(request: Request):
 
 @router.post("")
 def add_one(req: AddRequest, request: Request):
-    rows = watchlist.add(req.symbol, req.note)
+    symbol = normalize_symbol(req.symbol, request.app.state.repo)
+    rows = watchlist.add(symbol, req.note)
     return {"symbols": _with_names(rows, request)}
 
 
 @router.post("/batch")
 def add_batch(req: BatchAddRequest, request: Request):
+    repo = request.app.state.repo
     for sym in req.symbols:
-        watchlist.add(sym, req.note)
+        watchlist.add(normalize_symbol(sym, repo), req.note)
     return {"symbols": _with_names(watchlist.list_symbols(), request), "added": len(req.symbols)}
 
 
 @router.post("/{symbol}/top")
 def move_one_to_top(symbol: str, request: Request):
+    symbol = normalize_symbol(symbol, request.app.state.repo)
     rows = watchlist.move_to_top(symbol)
     return {"symbols": _with_names(rows, request)}
 
 
 @router.delete("/{symbol}")
 def remove_one(symbol: str, request: Request):
+    symbol = normalize_symbol(symbol, request.app.state.repo)
     rows = watchlist.remove(symbol)
     return {"symbols": _with_names(rows, request)}
 
