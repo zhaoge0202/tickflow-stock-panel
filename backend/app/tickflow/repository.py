@@ -28,6 +28,11 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def enriched_dirname(asset_type: str) -> str:
+    """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
+    return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
+
+
 class DataStore:
     """唯一的存储入口 — 进程启动时创建。"""
 
@@ -906,12 +911,17 @@ class KlineRepository:
             return pl.DataFrame(), self._enriched_cache_date
         return self._enriched_cache, self._enriched_cache_date
 
-    def get_enriched_latest_asset(self, asset_type: str) -> tuple[pl.DataFrame, date | None]:
-        """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。"""
+    def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
+        """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。
+
+        refresh=False: 缓存冷时不触发同步 _refresh_etf_enriched(300 天 scan+compute)。
+        供行情轮询线程使用 —— 避免在热路径上做重活阻塞股票行情/告警;缓存由 ETF 实时
+        flush 焐热, 未焐热(无 ETF 实时数据)时返回空表, 本轮跳过 ETF 评估即可。
+        """
         if asset_type == "stock":
             return self.get_enriched_latest()
         if asset_type == "etf":
-            if self._etf_enriched_cache is None:
+            if self._etf_enriched_cache is None and refresh:
                 self._refresh_etf_enriched()
             if self._etf_enriched_cache is None:
                 return pl.DataFrame(), self._etf_enriched_cache_date
@@ -1477,6 +1487,25 @@ class KlineRepository:
         except Exception:
             return None
         return None
+
+    def symbols_lagging(self, reference_date: date, min_gap_days: int = 3) -> list[str]:
+        """返回日K覆盖落后的标的: 其最新 bar 早于 reference_date - min_gap_days。
+
+        全局 max(date) 只要有一只票有今日数据就成立, 会掩盖停牌/复牌/一直拉失败而
+        掉队的个股缺口。此方法按 symbol 聚合最新日期, 找出掉队者。只读, 不改数据。
+        """
+        from datetime import timedelta
+        try:
+            cutoff = reference_date - timedelta(days=min_gap_days)
+            with self._lock:
+                rows = self.db.execute(
+                    "SELECT symbol, max(date) AS mx FROM kline_daily "
+                    "GROUP BY symbol HAVING max(date) < ? ORDER BY mx",
+                    [cutoff],
+                ).fetchall()
+            return [r[0] for r in rows if r and r[0]]
+        except Exception:
+            return []
 
     def _latest_enriched_date_duckdb(self) -> date | None:
         try:

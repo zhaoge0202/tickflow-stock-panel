@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, time as dt_time
 
 import polars as pl
@@ -33,6 +34,12 @@ import polars as pl
 from app.market_time import cn_now, cn_today
 
 logger = logging.getLogger(__name__)
+
+# Webhook(飞书等)投递专用线程池 —— 与行情轮询线程隔离。
+# send_feishu 内置重试(最坏 ~3×5s 超时 + 退避), 若在 _poll_loop 上同步投递,
+# webhook 慢/宕机会逐条累加, 拖垮整条实时行情+告警轮询。这里 fire-and-forget,
+# 失败由 webhook_adapter 记 WARNING(可见), 但绝不阻塞热路径。
+_WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="feishu-webhook")
 
 
 class QuoteSubscriber:
@@ -752,10 +759,26 @@ class QuoteService:
     @staticmethod
     def _is_trading_hours() -> bool:
         # 显式北京时间: 容器/服务器本地时区可能是 UTC, 用 naive now() 会整体错开轮询窗口
+        # 注: 这是**轮询**窗口(含 9:15 集合竞价与 15:05 收盘缓冲, 用于盘前预热/收盘捕捉),
+        # 比连续竞价宽。监控告警用更严格的 _is_continuous_trading。
         now = cn_now()
         t = now.time()
         morning = dt_time(9, 15) <= t <= dt_time(11, 35)
         afternoon = dt_time(12, 55) <= t <= dt_time(15, 5)
+        return now.weekday() < 5 and (morning or afternoon)
+
+    @staticmethod
+    def _is_continuous_trading() -> bool:
+        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。
+
+        比 _is_trading_hours 严格: 排除 9:15-9:30 集合竞价(指示价, 非成交价)、
+        午间与 15:00 后收盘缓冲。监控评估只在此窗口进行, 不对竞价/收盘后的陈旧价告警。
+        (节假日由 _evaluate_monitors 里的「快照日期=当日」新鲜度判据兜底, 无需交易日历。)
+        """
+        now = cn_now()
+        t = now.time()
+        morning = dt_time(9, 30) <= t <= dt_time(11, 30)
+        afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
         return now.weekday() < 5 and (morning or afternoon)
 
     @staticmethod
@@ -770,9 +793,20 @@ class QuoteService:
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
+            # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
+            # 缓冲。轮询窗口(_is_trading_hours)更宽是为盘前预热/收盘捕捉, 但告警不应
+            # 基于这些非连续竞价价格。
+            if not self._is_continuous_trading():
+                return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
             if enriched_today.is_empty():
+                return
+            # 快照日期必须是北京当日: 节假日或数据未刷新时 enriched_date 会落后于当日,
+            # 说明市场未在交易 → 跳过。无需维护 A股交易日历即可挡住节假日与陈旧价告警。
+            if enriched_date != cn_today():
+                logger.debug("监控评估跳过: enriched 快照日期 %s 非当日 %s (节假日/数据未刷新)",
+                             enriched_date, cn_today())
                 return
 
             all_alerts: list[dict] = []
@@ -783,22 +817,44 @@ class QuoteService:
             if self._app_state:
                 engine = getattr(self._app_state, "monitor_engine", None)
                 if engine and engine.rule_count > 0:
-                    # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)
+                    # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)。
+                    # 含股票 + ETF 维表, 保证 ETF 监控告警也能回填名称。
                     try:
+                        name_map: dict[str, str] = {}
                         inst_df = self._app_state.repo.get_instruments()
                         if not inst_df.is_empty() and "symbol" in inst_df.columns and "name" in inst_df.columns:
-                            engine.set_name_map({
-                                row["symbol"]: row["name"]
-                                for row in inst_df.select(["symbol", "name"]).iter_rows(named=True)
-                                if row.get("name")
-                            })
+                            for row in inst_df.select(["symbol", "name"]).iter_rows(named=True):
+                                if row.get("name"):
+                                    name_map[row["symbol"]] = row["name"]
+                        # 仅当存在 ETF 规则时补 ETF 维表 (股票名优先, setdefault 不覆盖股票)
+                        if engine.has_asset_rules("etf"):
+                            etf_inst = self._app_state.repo.get_etf_instruments()
+                            if not etf_inst.is_empty() and "symbol" in etf_inst.columns and "name" in etf_inst.columns:
+                                for row in etf_inst.select(["symbol", "name"]).iter_rows(named=True):
+                                    if row.get("name"):
+                                        name_map.setdefault(row["symbol"], row["name"])
+                        if name_map:
+                            engine.set_name_map(name_map)
                     except Exception as e:  # noqa: BLE001
                         logger.debug("name_map 构建失败 (不影响监控): %s", e)
                     # 连板梯队封单监控: 有 ladder 规则时, 从 depth_service 注入封单量到 enriched
                     eval_df = enriched_today
                     if engine.has_rule_type("ladder"):
                         eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
-                    rule_events = engine.evaluate(eval_df)
+                    rule_events = engine.evaluate(eval_df, asset_type="stock")
+                    # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
+                    # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
+                    # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
+                    # flush 焐热; 未焐热说明无 ETF 实时数据, 跳过本轮 ETF 评估)。
+                    if engine.has_asset_rules("etf") and self._repo is not None:
+                        try:
+                            etf_enriched, _ = self._repo.get_enriched_latest_asset("etf", refresh=False)
+                            if not etf_enriched.is_empty():
+                                rule_events = rule_events + engine.evaluate(
+                                    etf_enriched, asset_type="etf", reset_strategy_results=False,
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("ETF 监控评估失败 (不影响股票告警): %s", e)
                     if rule_events:
                         # 落盘到 alerts.jsonl
                         try:
@@ -911,8 +967,7 @@ class QuoteService:
                 "price": "价格", "market": "异动",
             }
             rules = engine.rules if engine is not None else {}
-            pushed_feishu = 0
-            pushed_wecom = 0
+            enqueued = 0
             for ev in rule_events:
                 rule = rules.get(ev.get("rule_id"))
                 if not rule or not rule.get("webhook_enabled"):
@@ -924,16 +979,19 @@ class QuoteService:
                 message = ev.get("message") or ""
                 title = f"TickFlow · {source_label}"
                 body = f"{symbol} {name} {message}".strip() if symbol else (message or name)
-                if feishu_url and webhook_adapter.send_feishu(feishu_url, title, body, feishu_secret):
-                    pushed_feishu += 1
-                if wecom_url and webhook_adapter.send_wecom(wecom_url, title, body):
-                    pushed_wecom += 1
-            if pushed_feishu:
-                logger.info("飞书 Webhook 推送: %d 条", pushed_feishu)
-            if pushed_wecom:
-                logger.info("企业微信 Webhook 推送: %d 条", pushed_wecom)
+                # 提交到独立线程池, 不阻塞行情轮询线程 (webhook 慢/重试不拖累实时行情+告警)。
+                # 飞书 + 企业微信双通道; 应用内 alerts.jsonl 记录与 SSE 已在前面完成, 不依赖
+                # webhook 成败, 失败由 webhook_adapter 记 WARNING(可见)。
+                if feishu_url:
+                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_feishu, feishu_url, title, body, feishu_secret)
+                    enqueued += 1
+                if wecom_url:
+                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_wecom, wecom_url, title, body)
+                    enqueued += 1
+            if enqueued:
+                logger.info("Webhook 已提交 %d 条 (异步投递, 飞书+企业微信, 失败记 WARNING)", enqueued)
         except Exception as e:  # noqa: BLE001
-            logger.debug("Webhook 推送异常 (不影响告警主流程): %s", e)
+            logger.warning("Webhook 提交异常 (不影响告警主流程): %s", e)
 
     def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
         """把告警转发到操作系统通知中心 (由 preferences 开关控制)。
