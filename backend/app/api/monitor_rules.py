@@ -39,7 +39,8 @@ class RuleModel(BaseModel):
     id: str
     name: str
     enabled: bool = True
-    type: str          # strategy | signal | price | market | level
+    type: str          # strategy | signal | price | market | level | ladder
+    asset_type: str = "stock"   # stock | etf (etf: strategy 型走 ETF 历史加载器)
     scope: str = "symbols"   # symbols | all | sector
     symbols: list[str] = []
     sector: str | None = None
@@ -49,8 +50,9 @@ class RuleModel(BaseModel):
     logic: str = "and"        # and | or
     cooldown_seconds: int = 3600
     severity: str = "info"    # info | warn | critical
-    webhook_url: str = ""     # Webhook 推送地址 (飞书/企微/自定义通知)
-    webhook_enabled: bool = False
+    webhook_url: str = ""     # Webhook 推送地址 (飞书/企微等外部通知)
+    webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
+    webhook_channels: list[str] = []  # 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
     message: str = ""
     # ladder 专属 (连板梯队封单监控)
     metric: str = "sealed_vol"   # sealed_vol=封单量(手) | sealed_amount=封单额(元)

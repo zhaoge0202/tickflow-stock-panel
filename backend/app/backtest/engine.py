@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -126,6 +127,10 @@ class PanelCache:
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl_seconds
+        # 跨请求单例, SSE 回测在各自 daemon 线程并发访问 OrderedDict。
+        # 无锁的 move_to_end/del/popitem check-then-act 会抛 "OrderedDict mutated"。
+        # 用实例锁守护所有 OrderedDict 变更; compute_fn (重扫盘) 放锁外避免串行化。
+        self._lock = threading.Lock()
 
     def get_or_compute(
         self,
@@ -134,34 +139,39 @@ class PanelCache:
         end: date,
         columns: list[str] | None,
         compute_fn,
+        asset_type: str = "stock",
     ) -> pl.DataFrame:
-        key = self._make_key(symbols, start, end, columns)
+        key = self._make_key(symbols, start, end, columns, asset_type)
         now = time.monotonic()
 
-        if key in self._cache:
-            entry = self._cache[key]
-            if now - entry.ts < self._ttl:
-                self._cache.move_to_end(key)
-                return entry.df
-            del self._cache[key]
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache[key]
+                if now - entry.ts < self._ttl:
+                    self._cache.move_to_end(key)
+                    return entry.df
+                del self._cache[key]
 
-        df = compute_fn(symbols, start, end, columns)
-        self._cache[key] = _CacheEntry(df=df, ts=now)
-        if len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
+        # 计算在锁外 (可能重扫 parquet, 耗时); 并发相同 key 至多重复算一次, 不会崩
+        df = compute_fn(symbols, start, end, columns, asset_type)
+        with self._lock:
+            self._cache[key] = _CacheEntry(df=df, ts=now)
+            if len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
         return df
 
     def invalidate(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     @staticmethod
-    def _make_key(symbols: list[str] | None, start: date, end: date, columns: list[str] | None) -> str:
+    def _make_key(symbols: list[str] | None, start: date, end: date, columns: list[str] | None, asset_type: str = "stock") -> str:
         if symbols is None:
             h = "all"
         else:
             h = hashlib.md5(",".join(sorted(symbols)).encode()).hexdigest()[:12]
         cols = "all" if columns is None else hashlib.md5(",".join(sorted(columns)).encode()).hexdigest()[:8]
-        return f"{h}:{start}:{end}:{cols}"
+        return f"{asset_type}:{h}:{start}:{end}:{cols}"
 
 
 # ================================================================
@@ -183,9 +193,10 @@ class BacktestEngine:
         start: date,
         end: date,
         columns: list[str] | None = None,
+        asset_type: str = "stock",
     ) -> pl.DataFrame:
-        """加载 enriched 数据面板，带缓存。"""
-        return self._cache.get_or_compute(symbols, start, end, columns, self._load_panel_inner)
+        """加载 enriched 数据面板，带缓存。asset_type='etf' 时读 ETF enriched。"""
+        return self._cache.get_or_compute(symbols, start, end, columns, self._load_panel_inner, asset_type=asset_type)
 
     def _load_panel_inner(
         self,
@@ -193,12 +204,13 @@ class BacktestEngine:
         start: date,
         end: date,
         columns: list[str] | None = None,
+        asset_type: str = "stock",
     ) -> pl.DataFrame:
         t0 = time.perf_counter()
 
-        # 近期区间优先复用 repository 的预计算 enriched 历史缓存，避免重复 scan_parquet + compute_all。
+        # 近期区间优先复用 repository 的预计算 enriched 历史缓存 (仅 stock: 该缓存为股票专用)。
         try:
-            if self.repo is not None and hasattr(self.repo, "get_enriched_range"):
+            if asset_type == "stock" and self.repo is not None and hasattr(self.repo, "get_enriched_range"):
                 cached = self.repo.get_enriched_range(start, end, symbols=symbols, columns=columns)
                 if cached is not None and not cached.is_empty():
                     elapsed = (time.perf_counter() - t0) * 1000
@@ -207,7 +219,8 @@ class BacktestEngine:
         except Exception as e:  # noqa: BLE001
             logger.debug("backtest load panel cache miss: %s", e)
 
-        enriched_glob = str(self.repo.store.data_dir / "kline_daily_enriched" / "**" / "*.parquet")
+        from app.tickflow.repository import enriched_dirname
+        enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
 
         try:
             lf = pl.scan_parquet(enriched_glob)
@@ -242,7 +255,9 @@ class BacktestEngine:
             return df
 
         from app.indicators.pipeline import compute_all
-        instruments = self.repo.get_instruments()
+        # 按 asset_type 取维表: ETF 回测须用 ETF 维表, 否则名称 JOIN 失败(全 null)、
+        # 涨停信号算在错误的 instruments 上。
+        instruments = self.repo.get_instruments_asset(asset_type)
         df = compute_all(df, instruments=instruments)
         if not instruments.is_empty() and "name" not in df.columns:
             inst_cols = [c for c in ["symbol", "name"] if c in instruments.columns]
@@ -1281,6 +1296,66 @@ class BacktestEngine:
     # ── 统计计算 ──────────────────────────────────────
 
     @staticmethod
+    def _sortino_ratio(returns: np.ndarray, periods_per_year: int = 252) -> float | None:
+        """Sortino 比率: 用下行偏差 (仅惩罚负收益) 替代总标准差, 年化。
+
+        下行偏差 = sqrt(mean(min(r, 0)^2)), MAR=0 的目标半方差 (对全部样本求均, 非仅负样本)。
+        无下行波动 (无亏损) 时 Sortino 未定义, 返回 None (与 profit_factor 的 None 约定一致,
+        不虚报 0 或 inf)。样本不足 (<2) 返回 0.0 (与 sharpe 的退化约定一致)。
+        """
+        returns = returns[np.isfinite(returns)]  # 剔除 inf/nan, 防止污染均值/序列化出非法 JSON
+        if len(returns) < 2:
+            return 0.0
+        mean = float(np.mean(returns))
+        downside = np.minimum(returns, 0.0)
+        downside_dev = float(np.sqrt(np.mean(downside ** 2)))
+        if downside_dev <= 0:
+            return None
+        return mean / downside_dev * float(np.sqrt(periods_per_year))
+
+    @staticmethod
+    def _mc_drawdown_percentiles(pnls: np.ndarray, n_sims: int = 1000) -> dict:
+        """自助重抽样交易序列, 估计最大回撤的分布 — 回答"仅因成交顺序运气, 回撤能有多坏"。
+
+        对每笔收益有放回重抽样 n_sims 次, 各自算最大回撤, 取分位:
+        - mc_maxdd_p50: 中位场景最大回撤
+        - mc_maxdd_p95: 95% 置信最坏场景 (= 分布 5 分位, 更负)
+
+        固定种子保证可复现/可测。样本 <3 无统计意义, 返回 None。
+        大样本 (如 full 模式数千笔) 时按 2M 单元上限压降模拟次数, 防止瞬时数组 OOM。
+        """
+        pnls = pnls[np.isfinite(pnls)]  # 剔除 inf/nan, 否则 cumprod 传播 nan 导致分位为 nan
+        n = len(pnls)
+        if n < 3:
+            return {"mc_maxdd_p50": None, "mc_maxdd_p95": None}
+        # 内存护栏: samples/equity/peak/dd 各占 eff_sims*n*8B, 控总单元 <= 2M (~64MB 峰值)
+        eff_sims = min(n_sims, max(200, 2_000_000 // n))
+        rng = np.random.default_rng(42)
+        samples = rng.choice(pnls, size=(eff_sims, n), replace=True)
+        equity = np.cumprod(1.0 + samples, axis=1)
+        peak = np.maximum.accumulate(equity, axis=1)
+        dd = (equity - peak) / peak
+        maxdds = dd.min(axis=1)
+        return {
+            "mc_maxdd_p50": round(float(np.percentile(maxdds, 50)), 4),
+            "mc_maxdd_p95": round(float(np.percentile(maxdds, 5)), 4),
+        }
+
+    @staticmethod
+    def _per_trade_block(pnls: np.ndarray, durations: np.ndarray) -> dict:
+        """per-trade 明细字段: best/worst/median_pnl/avg_holding_days。"""
+        pnls = pnls[np.isfinite(pnls)]  # 剔除 inf/nan, 防 best/worst 出非法值
+        durations = durations[np.isfinite(durations)] if len(durations) else durations
+        if not len(pnls):
+            return {"best": 0.0, "worst": 0.0, "median_pnl": 0.0, "avg_holding_days": 0.0}
+        return {
+            "best": round(float(np.max(pnls)), 4),
+            "worst": round(float(np.min(pnls)), 4),
+            "median_pnl": round(float(np.median(pnls)), 4),
+            "avg_holding_days": round(float(np.mean(durations)), 1) if len(durations) else 0.0,
+        }
+
+    @staticmethod
     def _calc_stats(
         trades: list[TradeRecord],
         initial_capital: float,
@@ -1332,14 +1407,19 @@ class BacktestEngine:
         # 夏普 — 用交易收益标准差近似
         sharpe = float(np.mean(pnls) / np.std(pnls)) * np.sqrt(252) if np.std(pnls) > 0 else 0.0
 
+        # Sortino — 与 sharpe 同基准 (逐笔收益), 仅惩罚下行波动
+        sortino = BacktestEngine._sortino_ratio(pnls)
+
         # Calmar
         calmar = annual_return / abs(max_dd) if abs(max_dd) > 0.001 else 0.0
 
+        durations = np.array([t.duration for t in trades], dtype=float)
         return {
             "total_return": round(float(total_return), 4),
             "annual_return": round(float(annual_return), 4),
             "max_drawdown": round(float(max_dd), 4),
             "sharpe": round(float(sharpe), 2),
+            "sortino": round(float(sortino), 2) if sortino is not None else None,
             "calmar": round(float(calmar), 2),
             "win_rate": round(float(win_rate), 4),
             "profit_factor": round(float(profit_factor), 2) if np.isfinite(profit_factor) else None,
@@ -1347,6 +1427,8 @@ class BacktestEngine:
             "avg_pnl": round(float(np.mean(pnls)), 4),
             "avg_win": round(avg_win, 4),
             "avg_loss": round(avg_loss, 4),
+            **BacktestEngine._per_trade_block(pnls, durations),
+            **BacktestEngine._mc_drawdown_percentiles(pnls),
         }
 
     @staticmethod
@@ -1441,6 +1523,7 @@ class BacktestEngine:
         max_drawdown = float(drawdowns.min()) if len(drawdowns) else 0.0
         daily = np.array(daily_avg, dtype=float)
         sharpe = float(np.mean(daily) / np.std(daily) * np.sqrt(252)) if len(daily) > 1 and np.std(daily) > 0 else 0.0
+        sortino = BacktestEngine._sortino_ratio(daily)
 
         lo, hi, nbins = -0.20, 0.20, 20
         clipped = np.clip(pnls, lo, hi)
@@ -1471,8 +1554,10 @@ class BacktestEngine:
             "total_return": round(float(total_return), 4),
             "max_drawdown": round(float(max_drawdown), 4),
             "sharpe": round(float(sharpe), 2),
+            "sortino": round(float(sortino), 2) if sortino is not None else None,
             "return_distribution": dist,
             "execution": execution_stats,
+            **BacktestEngine._mc_drawdown_percentiles(pnls),
         }
 
         return SimResult(
@@ -1500,7 +1585,9 @@ class BacktestEngine:
         drawdowns = values / peaks - 1
         max_drawdown = float(drawdowns.min()) if len(drawdowns) else 0.0
         sharpe = float(np.mean(daily) / np.std(daily) * np.sqrt(252)) if len(daily) and np.std(daily) > 0 else 0.0
+        sortino = BacktestEngine._sortino_ratio(daily)
         pnls = np.array([t.pnl_pct for t in trades], dtype=float) if trades else np.array([])
+        durations = np.array([t.duration for t in trades], dtype=float) if trades else np.array([])
         exposures = np.array([float(r.get("exposure", 0.0)) for r in equity_curve], dtype=float)
         wins = pnls[pnls > 0]
         losses = pnls[pnls <= 0]
@@ -1511,6 +1598,7 @@ class BacktestEngine:
             "annual_return": round(float(annual_return), 4),
             "max_drawdown": round(float(max_drawdown), 4),
             "sharpe": round(float(sharpe), 2),
+            "sortino": round(float(sortino), 2) if sortino is not None else None,
             "calmar": round(float(annual_return / abs(max_drawdown)), 2) if abs(max_drawdown) > 0.001 else 0.0,
             "win_rate": round(float(len(wins) / len(pnls)), 4) if len(pnls) else 0.0,
             "profit_factor": round(float(avg_win / avg_loss), 2) if avg_loss > 0 else None,
@@ -1518,6 +1606,8 @@ class BacktestEngine:
             "avg_pnl": round(float(np.mean(pnls)), 4) if len(pnls) else 0.0,
             "avg_win": round(avg_win, 4),
             "avg_loss": round(avg_loss, 4),
+            **BacktestEngine._per_trade_block(pnls, durations),
+            **BacktestEngine._mc_drawdown_percentiles(pnls),
             "final_equity": round(final_equity, 2),
             "initial_capital": round(float(initial_capital), 2),
             "avg_exposure": round(float(np.mean(exposures)), 4) if len(exposures) else 0.0,
