@@ -1905,10 +1905,10 @@ export const api = {
     ),
 
   /** 保存 AI 生成的策略文件 */
-  strategySaveCode: (strategyId: string, code: string) =>
+  strategySaveCode: (strategyId: string, code: string, meta?: { name?: string; description?: string }) =>
     request<{ ok: boolean; path: string }>('/api/strategies/ai/save', {
       method: 'POST',
-      body: JSON.stringify({ strategy_id: strategyId, code }),
+      body: JSON.stringify({ strategy_id: strategyId, code, name: meta?.name ?? '', description: meta?.description ?? '' }),
     }),
 }
 

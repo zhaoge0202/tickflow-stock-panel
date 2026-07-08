@@ -178,13 +178,18 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
 
   const handleClose = () => { if (name || rules || code) persist(); onClose() }
 
+  const resolveStrategyId = () => {
+    if (mode === 'create' && strategyId && !strategyId.startsWith('ai_')) return slugId()
+    return strategyId || slugId()
+  }
+
   // Step 1: 生成
   const handleGenerate = async () => {
     if (!name.trim() || !rules.trim()) return
     if (!aiStatus?.configured) { setError('AI 未配置，请在设置页面配置 API Key'); return }
     setLoading(true); setError('')
     try {
-      const id = strategyId || slugId()
+      const id = resolveStrategyId()
       setStrategyId(id)
       const res = await api.strategyBuild(1, { name: name.trim(), description: description.trim(), direction, rules: rules.trim(), strategy_id: id })
       if (!res.valid) { setError(res.error ?? '生成失败'); return }
@@ -193,8 +198,6 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       const genRules = parseRules(res.code)
       if (genDesc) setDescription(genDesc)
       if (genRules) setRules(genRules)
-      await api.strategySaveCode(id, res.code)
-      if (genRules) { const sr = storage.strategyRules.get({}); sr[id] = genRules; storage.strategyRules.set(sr) }
     } catch (e: any) {
       const msg = String(e?.message ?? '')
       setError(msg.includes('API Key') || msg.includes('api_key') ? 'AI API Key 未配置或无效' : (msg || '生成失败'))
@@ -206,18 +209,13 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     if (!instruction.trim() || !code) return
     setLoading(true); setError('')
     try {
-      const res = await api.strategyBuild(2, { current_code: code, instruction: instruction.trim() })
+      const res = await api.strategyBuild(2, { current_code: code, instruction: instruction.trim(), strategy_id: strategyId })
       if (!res.valid) { setError(res.error ?? '修改失败'); return }
       setCode(res.code); setInstruction('')
       const genDesc = parseMetaField(res.code, 'description')
       const updatedRules = parseRules(res.code)
       if (genDesc) setDescription(genDesc)
       if (updatedRules) setRules(updatedRules)
-      const idMatch = res.code.match(/"id"\s*:\s*"([^"]+)"/)
-      if (idMatch) {
-        await api.strategySaveCode(idMatch[1], res.code)
-        const sr = storage.strategyRules.get({}); sr[idMatch[1]] = updatedRules; storage.strategyRules.set(sr)
-      }
     } catch (e: any) { setError(String(e?.message ?? '修改失败')) }
     finally { setLoading(false) }
   }
@@ -227,9 +225,9 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     if (!code) return
     setSaving(true)
     try {
-      const idMatch = code.match(/"id"\s*:\s*"([^"]+)"/)
-      const id = idMatch?.[1] || strategyId || slugId()
-      await api.strategySaveCode(id, code)
+      const id = resolveStrategyId()
+      setStrategyId(id)
+      await api.strategySaveCode(id, code, { name: name.trim(), description: description.trim() })
       const genRules = parseRules(code)
       const finalRules = (genRules || rules).trim()
       if (finalRules) { const saved = storage.strategyRules.get({}); saved[id] = finalRules; storage.strategyRules.set(saved) }
