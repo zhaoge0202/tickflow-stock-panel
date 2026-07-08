@@ -15,6 +15,7 @@ import httpx
 import polars as pl
 
 from app.data_providers.normalizer import normalize_daily
+from app.services.symbols import guess_exchange_suffix
 from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
@@ -390,6 +391,10 @@ def _to_tdx_code(symbol: str | None) -> str:
         return f"{prefix}{code}" if prefix else code
     if len(text) == 8 and text[:2].lower() in {"sh", "sz", "bj"}:
         return text.lower()
+    if len(text) == 6 and text.isdigit():
+        suffix = guess_exchange_suffix(text)
+        prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(str(suffix or "").upper())
+        return f"{prefix}{text}" if prefix else text
     return text
 
 
@@ -442,9 +447,9 @@ def _exchange_suffix(exchange, code: str | None = None) -> str | None:
     if isinstance(exchange, int):
         return {0: "SZ", 1: "SH", 2: "BJ"}.get(exchange)
     text = str(code or "")
-    if text.startswith("6"):
+    if text.startswith(("5", "6")):
         return "SH"
-    if text.startswith(("0", "3")):
+    if text.startswith(("0", "1", "3")):
         return "SZ"
     if text.startswith(("8", "43", "92")):
         return "BJ"

@@ -290,6 +290,8 @@ def test_symbol_helpers():
     assert tp._to_tdx_code("000001.SH") == "sh000001"
     assert tp._to_tdx_code("399001.SZ") == "sz399001"
     assert tp._to_tdx_code("sz002491") == "sz002491"
+    assert tp._to_tdx_code("589020") == "sh589020"
+    assert tp._to_tdx_code("159915") == "sz159915"
     assert tp._to_app_symbol("002491", None) == "002491.SZ"
     assert tp._to_app_symbol("sh000001", None) == "000001.SH"
     assert tp._to_app_symbol("sz002491", None) == "002491.SZ"
