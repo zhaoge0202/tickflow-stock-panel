@@ -18,6 +18,7 @@ export interface WFFold {
   best_params: Record<string, any> | null
   is_score: number | null
   oos_objective: number | null
+  oos_degraded: boolean | null
   oos_stats: Record<string, any>
 }
 
@@ -33,9 +34,12 @@ export interface WFSummary {
 
 export interface WalkForwardResult {
   objective: string
+  direction: string
   n_folds: number
+  n_skipped: number
   n_planned_folds: number
   folds: WFFold[]
+  skipped: { index: number; test_start: string; test_end: string; reason: string }[]
   summary: WFSummary
   elapsed_ms: number
 }

@@ -35,6 +35,32 @@ function Stat({ label, value, hint, color }: { label: string; value: string; hin
   )
 }
 
+/** OOS 拼接净值曲线 (逐折复利) — walk-forward 核心产出的极简 SVG 折线。 */
+function OosEquityChart({ curve }: { curve: { fold: number; date: string; value: number }[] }) {
+  if (!curve.length) return null
+  const W = 600, H = 120, pad = 8
+  const vals = curve.map(p => p.value)
+  const lo = Math.min(1, ...vals), hi = Math.max(1, ...vals)
+  const span = hi - lo || 1
+  // 起点补一个 value=1 基准, 让曲线从 1.0 起步
+  const pts = [1, ...vals]
+  const x = (i: number) => pad + (i / (pts.length - 1 || 1)) * (W - 2 * pad)
+  const y = (v: number) => pad + (1 - (v - lo) / span) * (H - 2 * pad)
+  const d = pts.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  const last = vals[vals.length - 1]
+  const up = last >= 1
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium text-secondary">OOS 拼接净值 (逐折复利)</div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="none" style={{ height: 120 }}>
+        <line x1={pad} y1={y(1)} x2={W - pad} y2={y(1)} stroke="currentColor" strokeWidth="0.5" className="text-border" strokeDasharray="3 3" />
+        <path d={d} fill="none" stroke={up ? '#34d399' : '#f87171'} strokeWidth="1.5" />
+      </svg>
+      <div className="mt-0.5 text-[10px] text-secondary">终值 {last.toFixed(4)} · {curve.length} 折</div>
+    </div>
+  )
+}
+
 export function StrategyWalkForward() {
   const task = useWalkForwardTask()
   const { data: stratData } = useQuery({ queryKey: ['strategies'], queryFn: api.strategyList })
@@ -167,7 +193,12 @@ export function StrategyWalkForward() {
           />
         )}
 
-        {result && summary && (
+        {result && result.n_folds === 0 && (
+          <EmptyState title="未产生有效折"
+            description={`计划 ${result.n_planned_folds} 折, 但 ${result.n_skipped} 折因训练区间未优化出参数或 OOS 回测失败被跳过。请检查数据范围或放宽参数网格。`} />
+        )}
+
+        {result && summary && result.n_folds > 0 && (
           <div className="space-y-4">
             {/* 汇总卡 */}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -177,13 +208,16 @@ export function StrategyWalkForward() {
                 value={summary.degradation != null ? summary.degradation.toFixed(3) : '—'}
                 hint={summary.degradation != null && summary.degradation > 0 ? '样本外退化=过拟合' : '样本外未退化'}
                 color={summary.degradation != null && summary.degradation > 0 ? '#f87171' : '#34d399'} />
-              <Stat label="一致性" value={fmtPct(summary.consistency)} hint="OOS 目标为正的折占比" />
-              <Stat label="折数" value={String(result.n_folds)} />
+              <Stat label="一致性" value={fmtPct(summary.consistency)} hint="OOS 盈利折占比" />
+              <Stat label="有效折" value={result.n_skipped > 0 ? `${result.n_folds} (跳过${result.n_skipped})` : String(result.n_folds)} />
             </div>
 
             <div className="text-xs text-secondary">
               IS 目标均值 {summary.avg_is_objective ?? '—'} · OOS 目标均值 {summary.avg_oos_objective ?? '—'} · 耗时 {(result.elapsed_ms / 1000).toFixed(1)}s
             </div>
+
+            {/* OOS 拼接净值曲线 (walk-forward 核心产出) */}
+            <OosEquityChart curve={summary.oos_equity_curve} />
 
             {/* 每折表 */}
             <div className="overflow-x-auto">
@@ -202,7 +236,8 @@ export function StrategyWalkForward() {
                   {result.folds.map(f => {
                     const is = f.is_score
                     const oos = f.oos_objective
-                    const degraded = is != null && oos != null && oos < is
+                    // 用后端方向感知的退化标志 (min 类目标 oos<is 未必是退化)
+                    const degraded = f.oos_degraded === true
                     return (
                       <tr key={f.index} className="border-b border-border/40 hover:bg-elevated/50">
                         <td className="px-2 py-1.5 text-secondary">{f.index + 1}</td>

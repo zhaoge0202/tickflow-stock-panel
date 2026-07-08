@@ -30,10 +30,17 @@ def test_folds_rolling_windows():
     f0 = folds[0]
     assert f0.train_start == date(2024, 1, 1)
     assert f0.train_end == date(2024, 3, 31)     # +90d (2024 闰年)
-    assert f0.test_start == date(2024, 3, 31)    # 紧接训练
-    assert f0.test_end == date(2024, 4, 30)      # +30d
+    assert f0.test_start == date(2024, 4, 1)     # train_end + 1天 (隔断前视泄漏)
+    assert f0.test_end == date(2024, 5, 1)       # +30d
     # 滚动: 下一折训练起点 +step
     assert folds[1].train_start == date(2024, 1, 31)  # +30d
+
+
+def test_folds_test_starts_day_after_train_end():
+    """无前视泄漏: 每折 test_start 严格晚于 train_end (不共享同一天)。"""
+    folds = generate_folds(date(2024, 1, 1), date(2024, 12, 31), train_days=90, test_days=30, step_days=30)
+    for f in folds:
+        assert f.test_start > f.train_end
 
 
 def test_folds_no_test_beyond_end():
@@ -63,6 +70,7 @@ def _rec(index, is_score, total_return, obj):
         "test_end": date(2024, 1, 1),
         "best_params": {"p": index},
         "is_score": is_score,
+        "oos_objective": obj,
         "oos_stats": {"total_return": total_return, "sortino": obj},
     }
 
@@ -85,10 +93,20 @@ def test_aggregate_is_oos_degradation():
 
 
 def test_aggregate_consistency_fraction_positive():
-    # 3 折 OOS sortino: 1.5>0, -0.2<=0, 0.8>0 -> 2/3 正
+    # consistency 按 OOS 总收益 > 0 的折占比: total_return 0.1>0, -0.1<=0, 0.1>0 -> 2/3
     recs = [_rec(0, 1, 0.1, 1.5), _rec(1, 1, -0.1, -0.2), _rec(2, 1, 0.1, 0.8)]
     agg = aggregate_oos(recs, objective="sortino")
     assert agg["consistency"] == round(2 / 3, 4)  # 0.6667
+
+
+def test_aggregate_degradation_direction_aware_for_min_objective():
+    """min 类目标 (avg_holding_days, 越小越好): OOS 持仓天数更大 = 退化, degradation>0。"""
+    # IS 持仓 3 天, OOS 持仓 5 天 (更长=更差) -> 退化
+    recs = [{"index": 0, "test_end": date(2024, 1, 1), "is_score": 3.0,
+             "oos_objective": 5.0, "oos_stats": {"total_return": 0.05}}]
+    agg = aggregate_oos(recs, objective="avg_holding_days", direction="min")
+    # 归一空间: norm(3)=-3, norm(5)=-5 -> degradation = -3 - (-5) = 2 > 0 = 退化
+    assert agg["degradation"] == round(2.0, 4)
 
 
 def test_aggregate_empty_folds():
@@ -162,6 +180,42 @@ def test_walkforward_reports_degradation():
     assert out["summary"]["avg_is_objective"] == 2.0
     assert out["summary"]["avg_oos_objective"] == 1.0
     assert abs(out["summary"]["degradation"] - 1.0) < 1e-9
+
+
+class _NoParamsOptimizer(_FakeOptimizer):
+    """模拟训练区间全组失败: best_params=None。"""
+    def optimize(self, cfg, progress_cb=None, cancel_event=None):
+        self.train_ranges.append((cfg.start, cfg.end))
+        return {"best_params": None, "best_score": None, "results": [], "n_completed": 0}
+
+
+class _ErrorService(_FakeService):
+    """模拟 OOS 回测失败。"""
+    def run(self, config, progress_cb=None, cancel_event=None):
+        self.calls.append({"start": config.start, "end": config.end, "params": dict(config.params or {})})
+        return _FakeResult(stats={}, error="no data")
+
+
+def test_walkforward_skips_folds_without_optimized_params():
+    """训练区间没优化出参数 (best_params=None) -> 跳过, 不用默认参数硬跑 OOS 伪装成有效折。"""
+    opt, svc = _NoParamsOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    out = wf.run(_wf_cfg())
+    assert out["n_folds"] == 0           # 无有效折
+    assert out["n_skipped"] > 0          # 全部跳过
+    assert svc.calls == []               # 不跑 OOS
+    assert out["summary"]["compounded_oos_return"] == 0.0  # 无效折不污染净值
+
+
+def test_walkforward_skips_oos_error_folds():
+    """OOS 回测失败的折 -> 跳过, 不把空/0 收益混入复利曲线。"""
+    opt, svc = _FakeOptimizer(), _ErrorService()
+    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    out = wf.run(_wf_cfg())
+    assert out["n_folds"] == 0
+    assert out["n_skipped"] > 0
+    assert len(svc.calls) > 0            # OOS 跑了但失败
+    assert out["summary"]["compounded_oos_return"] == 0.0  # 失败折不计入
 
 
 def test_walkforward_cancel_stops():

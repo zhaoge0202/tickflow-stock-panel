@@ -44,7 +44,9 @@ def generate_folds(
     train_start = start
     while True:
         train_end = train_start + timedelta(days=train_days)
-        test_start = train_end
+        # 测试区间从训练末日的次日开始: 回测区间是闭区间, 若 test_start==train_end 则
+        # 该日 K 线同时进训练优化与 OOS 首日, 构成前视泄漏。后移一天隔断。
+        test_start = train_end + timedelta(days=1)
         test_end = test_start + timedelta(days=test_days)
         if test_end > end:
             break
@@ -60,14 +62,21 @@ def generate_folds(
     return folds
 
 
-def aggregate_oos(fold_records: list[dict], objective: str) -> dict:
-    """从各折 OOS 结果聚合: 复利净值曲线 / IS-OOS 退化 / 一致性。
+def _norm(v: float, direction: str) -> float:
+    """把目标值归一到"越大越好"空间, 以便跨目标一致地算退化 (min 类目标取负)。"""
+    return -v if direction == "min" else v
 
-    fold_records: [{index, test_end, best_params, is_score, oos_stats}]
+
+def aggregate_oos(fold_records: list[dict], objective: str, direction: str = "max") -> dict:
+    """从**有效折** (IS 与 OOS 都成功) 聚合: 复利净值 / IS-OOS 退化 / 一致性。
+
+    调用方只传有效折 (best_params 非空且 OOS 未 error), 故此处每折 is_score/oos_objective
+    均有值, 无需 .get 默认兜底 —— 无效折被伪装成 0 收益混入曾是 H1/H2 的根因。
+
     - compounded_oos_return: 各折 OOS 总收益复利
-    - avg_is_objective / avg_oos_objective / degradation: IS 目标均值 - OOS 目标均值,
-      正值 = 样本外退化 = 过拟合信号
-    - consistency: OOS 目标 > 0 的折占比
+    - degradation: 归一空间下 IS 目标均值 - OOS 目标均值, 正值 = 样本外退化 (过拟合信号),
+      对"越小越好"目标 (max_drawdown 等) 方向也正确
+    - consistency: OOS 总收益 > 0 的折占比 (与目标方向无关, 直观)
     """
     n = len(fold_records)
     if n == 0:
@@ -83,20 +92,22 @@ def aggregate_oos(fold_records: list[dict], objective: str) -> dict:
 
     equity = 1.0
     curve: list[dict] = []
+    n_positive = 0
     for f in fold_records:
         r = float(f["oos_stats"].get("total_return", 0.0) or 0.0)
         equity *= (1 + r)
+        if r > 0:
+            n_positive += 1
         curve.append({"fold": f["index"], "date": str(f["test_end"]), "value": round(equity, 4)})
 
     is_vals = [f["is_score"] for f in fold_records if f["is_score"] is not None]
-    oos_vals = [f["oos_stats"].get(objective) for f in fold_records]
-    oos_vals = [v for v in oos_vals if v is not None]
-
+    oos_vals = [f["oos_objective"] for f in fold_records if f["oos_objective"] is not None]
     avg_is = round(float(sum(is_vals) / len(is_vals)), 4) if is_vals else None
     avg_oos = round(float(sum(oos_vals) / len(oos_vals)), 4) if oos_vals else None
-    degradation = round(avg_is - avg_oos, 4) if (avg_is is not None and avg_oos is not None) else None
-    n_positive = sum(1 for v in oos_vals if v > 0)
-    consistency = round(n_positive / len(oos_vals), 4) if oos_vals else 0.0
+    degradation = (
+        round(_norm(avg_is, direction) - _norm(avg_oos, direction), 4)
+        if (avg_is is not None and avg_oos is not None) else None
+    )
 
     return {
         "n_folds": n,
@@ -104,7 +115,7 @@ def aggregate_oos(fold_records: list[dict], objective: str) -> dict:
         "avg_is_objective": avg_is,
         "avg_oos_objective": avg_oos,
         "degradation": degradation,
-        "consistency": consistency,
+        "consistency": round(n_positive / n, 4),
         "oos_equity_curve": curve,
     }
 
@@ -141,14 +152,17 @@ class WalkForwardService:
         progress_cb=None,
         cancel_event=None,
     ) -> dict:
-        from app.backtest.optimizer import OptimizeConfig
+        from app.backtest.optimizer import OptimizeConfig, default_direction
         from app.backtest.strategy import StrategyBacktestConfig
 
         t0 = time.perf_counter()
+        direction = cfg.direction or default_direction(cfg.objective)
         folds = generate_folds(cfg.start, cfg.end, cfg.train_days, cfg.test_days, cfg.step_days)
         n_total = len(folds)
 
-        fold_records: list[dict] = []
+        valid_records: list[dict] = []   # IS 与 OOS 都成功, 计入聚合
+        skipped: list[dict] = []          # 无优化结果 或 OOS 失败, 不计入聚合 (避免伪装成有效折)
+        done = 0
         for f in folds:
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -170,9 +184,25 @@ class WalkForwardService:
             opt_res = self.optimizer.optimize(opt_cfg, cancel_event=cancel_event)
             best_params = opt_res.get("best_params")
             is_score = opt_res.get("best_score")
+            done += 1
+
+            base = {
+                "index": f.index,
+                "train_start": str(f.train_start),
+                "train_end": str(f.train_end),
+                "test_start": str(f.test_start),
+                "test_end": str(f.test_end),
+            }
+
+            # 训练区间没优化出参数 (全组失败/取消) -> 跳过, 不用默认参数硬跑 OOS 伪装成有效折
+            if best_params is None:
+                skipped.append({**base, "reason": "训练区间未优化出参数"})
+                if progress_cb is not None:
+                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
+                continue
 
             # 测试区间: 用最优参数做样本外回测
-            merged = {**cfg.base_params, **(best_params or {})}
+            merged = {**cfg.base_params, **best_params}
             oos_cfg = StrategyBacktestConfig(
                 strategy_id=cfg.strategy_id,
                 symbols=cfg.symbols,
@@ -183,34 +213,41 @@ class WalkForwardService:
                 **cfg.backtest_kwargs,
             )
             oos_res = self.service.run(oos_cfg, cancel_event=cancel_event)
-            oos_stats = {} if oos_res.error else oos_res.stats
 
-            fold_records.append({
-                "index": f.index,
-                "train_start": str(f.train_start),
-                "train_end": str(f.train_end),
-                "test_start": str(f.test_start),
-                "test_end": str(f.test_end),
+            # OOS 失败 (含 cancelled) -> 跳过, 不把空/0 收益混入复利曲线
+            if oos_res.error:
+                skipped.append({**base, "best_params": best_params, "reason": f"OOS 回测失败: {oos_res.error}"})
+                if progress_cb is not None:
+                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
+                continue
+
+            oos_objective = oos_res.stats.get(cfg.objective)
+            # 该折 OOS 是否较 IS 退化 (方向感知: min 类目标数值更大才是退化)
+            oos_degraded = (
+                _norm(oos_objective, direction) < _norm(is_score, direction)
+                if (oos_objective is not None and is_score is not None) else None
+            )
+            valid_records.append({
+                **base,
                 "best_params": best_params,
                 "is_score": is_score,
-                "oos_objective": oos_stats.get(cfg.objective),
-                "oos_stats": oos_stats,
+                "oos_objective": oos_objective,
+                "oos_degraded": oos_degraded,
+                "oos_stats": oos_res.stats,
             })
 
             if progress_cb is not None:
-                progress_cb({
-                    "type": "walkforward_progress",
-                    "done": len(fold_records),
-                    "total": n_total,
-                    "fold": f.index,
-                })
+                progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
 
-        summary = aggregate_oos(fold_records, cfg.objective)
+        summary = aggregate_oos(valid_records, cfg.objective, direction)
         return {
             "objective": cfg.objective,
-            "n_folds": len(fold_records),
+            "direction": direction,
+            "n_folds": len(valid_records),
+            "n_skipped": len(skipped),
             "n_planned_folds": n_total,
-            "folds": fold_records,
+            "folds": valid_records,
+            "skipped": skipped,
             "summary": summary,
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
         }
