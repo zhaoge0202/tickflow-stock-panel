@@ -719,3 +719,158 @@ async def optimize_cancel(request: Request):
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
 
+
+# ══════════════════════════════════════════════════════════════
+# Walk-forward 优化 — 每折训练区间优化 + 测试区间 OOS 验证 (复用优化器 + job_key 回吐)
+# ══════════════════════════════════════════════════════════════
+
+def _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig) -> str:
+    raw = f"WF|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|{direction}|{windows}|{bt_sig}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+@router.get("/walkforward/stream")
+async def walkforward_stream(
+    request: Request,
+    strategy_id: str,
+    param_grid: str,
+    objective: str = "sortino",
+    direction: str | None = None,
+    train_days: int = 252,
+    test_days: int = 63,
+    step_days: int = 63,
+    max_workers: int = 4,
+    symbols: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    matching: str = "open_t+1",
+    fees_pct: float = 0.0002,
+    commission_pct: float | None = None,
+    stamp_tax_pct: float | None = None,
+    slippage_bps: float = 5.0,
+    max_positions: int = 10,
+    max_exposure_pct: float = 1.0,
+    initial_capital: float = 1_000_000.0,
+    position_sizing: str = "equal",
+    mode: str = "position",
+    holding_days: int = 5,
+):
+    """SSE 流式 walk-forward: 每折训练区间网格优化 -> 测试区间 OOS 回测。
+
+    事件: job {key} / progress {type:walkforward_progress,done,total,fold} / done {result} / error {message}
+    """
+    from app.backtest.optimizer import StrategyOptimizer
+    from app.backtest.strategy import StrategyBacktestService
+    from app.backtest.walkforward import WalkForwardConfig, WalkForwardService
+
+    direction = direction or None
+    engine = _get_engine(request)
+    strategy_engine = request.app.state.strategy_engine
+    svc = StrategyBacktestService(engine, strategy_engine)
+    optimizer = StrategyOptimizer(svc, strategy_engine)
+
+    end_date = date.fromisoformat(end) if end else date.today()
+    if start:
+        start_date = date.fromisoformat(start)
+    else:
+        earliest = request.app.state.repo.earliest_daily_date()
+        start_date = earliest or (end_date - timedelta(days=STRATEGY_DEFAULT_DAYS))
+
+    bt_kwargs = _opt_backtest_kwargs(
+        matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
+        max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+    )
+    bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
+    windows = f"{train_days}/{test_days}/{step_days}"
+    job_key = _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig)
+
+    _cleanup_stale_jobs()
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
+        if job is None:
+            job = _BacktestJob(job_key)
+            _running_jobs[job_key] = job
+            is_new = True
+        else:
+            is_new = False
+
+    async def event_generator():
+        yield f"event: job\ndata: {json.dumps({'key': job_key}, ensure_ascii=False)}\n\n"
+
+        if is_new and not job.done:
+            try:
+                grid = json.loads(param_grid)
+            except (json.JSONDecodeError, TypeError):
+                grid = None
+            if not isinstance(grid, dict) or not grid:
+                job.error = "param_grid 必须是非空的参数网格对象"
+                job.done = True
+                job.finish_ts = time.time()
+                grid = None
+
+            if grid is not None:
+                wf_cfg = WalkForwardConfig(
+                    strategy_id=strategy_id,
+                    symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
+                    start=start_date,
+                    end=end_date,
+                    param_grid=grid,
+                    objective=objective,
+                    direction=direction,
+                    train_days=int(train_days),
+                    test_days=int(test_days),
+                    step_days=int(step_days),
+                    max_workers=int(max_workers),
+                    backtest_kwargs=bt_kwargs,
+                )
+
+                def _run_wf():
+                    try:
+                        wf = WalkForwardService(optimizer, svc, strategy_engine)
+                        job.result = wf.run(wf_cfg, lambda d: job.progress.append(d), job.cancel_event)
+                        job.done = True
+                        job.finish_ts = time.time()
+                    except Exception as e:
+                        job.error = str(e)
+                        job.done = True
+                        job.finish_ts = time.time()
+
+                threading.Thread(target=_run_wf, daemon=True).start()
+
+        cursor = 0
+        tick = 0
+        try:
+            while True:
+                if job.done:
+                    if job.error:
+                        yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                    elif job.cancel_event.is_set():
+                        yield f"event: error\ndata: {json.dumps({'message': 'walk-forward 已取消'}, ensure_ascii=False)}\n\n"
+                    elif job.result is not None:
+                        yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
+                    return
+                tick += 1
+                if tick % 4 == 0 and await request.is_disconnected():
+                    break
+                while cursor < len(job.progress):
+                    msg = job.progress[cursor]
+                    cursor += 1
+                    yield f"event: progress\ndata: {json.dumps(msg, ensure_ascii=False, default=str)}\n\n"
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/walkforward/cancel")
+async def walkforward_cancel(request: Request):
+    """取消 walk-forward 任务 — 传 stream 首事件回吐的 job_key。"""
+    body = await request.json()
+    job_key = body.get("job_key", "")
+    job = _running_jobs.get(job_key)
+    if job and not job.done:
+        job.cancel_event.set()
+        return {"ok": True}
+    return {"ok": False, "message": "任务不存在或已完成"}
+
