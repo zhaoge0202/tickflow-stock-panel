@@ -396,13 +396,24 @@ def _tdx_date_arg(value: date | datetime | str | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.strftime("%Y%m%d")
+        return None if value.date() == _cn_today() else value.strftime("%Y%m%d")
     if isinstance(value, date):
-        return value.strftime("%Y%m%d")
+        return None if value == _cn_today() else value.strftime("%Y%m%d")
     text = str(value).strip()
     if not text:
         return None
-    return text.replace("-", "")
+    normalized = text.replace("-", "")
+    if len(normalized) == 8 and normalized.isdigit():
+        try:
+            if date.fromisoformat(f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}") == _cn_today():
+                return None
+        except ValueError:
+            pass
+    return normalized
+
+
+def _cn_today() -> date:
+    return datetime.now(_CN_TZ).date()
 
 
 def _to_app_symbol(code: str | None, exchange) -> str | None:

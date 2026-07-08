@@ -120,6 +120,9 @@ class QuoteService:
         "starter": 3.0,
         "free": 6.0,
     }
+    PROVIDER_MIN_INTERVAL = {
+        "tdxapi": 3.0,
+    }
     DEFAULT_INTERVAL = 10.0
     MAX_INTERVAL = 60.0
 
@@ -167,14 +170,18 @@ class QuoteService:
         self._save_enabled(True)
         logger.info("行情服务已启动, 轮询间隔 %.1fs", self._interval)
 
-    def stop(self) -> None:
-        """停止后台行情轮询线程。"""
+    def stop(self, *, persist_enabled: bool = True) -> None:
+        """停止后台行情轮询线程。
+
+        persist_enabled=False 用于进程退出/热重载清理线程, 不代表用户关闭实时行情。
+        """
         self._running = False
         self._enabled = False
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
-        self._save_enabled(False)
+        if persist_enabled:
+            self._save_enabled(False)
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
@@ -321,6 +328,10 @@ class QuoteService:
 
     @classmethod
     def _tier_min_interval(cls) -> float:
+        from app.services import preferences
+        provider = preferences.get_realtime_data_provider()
+        if provider in cls.PROVIDER_MIN_INTERVAL:
+            return cls.PROVIDER_MIN_INTERVAL[provider]
         tier = cls._current_tier()
         return cls.TIER_MIN_INTERVAL.get(tier, cls.DEFAULT_INTERVAL)
 
@@ -766,7 +777,7 @@ class QuoteService:
                     .otherwise(pl.col(col))
                     .alias(col)
                 )
-        return result
+        return result.unique(subset=["symbol", "date"], keep="last").sort(["symbol", "date"])
 
     @staticmethod
     def _build_quote_extra(records: list[dict]) -> pl.DataFrame:
@@ -783,7 +794,7 @@ class QuoteService:
         ] if c in df.columns]
         if not keep or "symbol" not in keep:
             return pl.DataFrame()
-        return df.select(keep)
+        return df.select(keep).unique(subset=["symbol"], keep="last").sort("symbol")
 
     @staticmethod
     def _build_index_quotes(records: list[dict]) -> pl.DataFrame:
@@ -1081,6 +1092,10 @@ class QuoteService:
 
             # ---- 全量回退路径 ----
             if not use_incremental:
+                if asset_type == "stock" and getattr(self._repo, "enriched_warming", False):
+                    logger.info("enriched 后台预热中, 跳过本轮实时全量计算")
+                    return
+
                 from datetime import timedelta
                 from app.indicators.pipeline import compute_enriched
 

@@ -597,19 +597,25 @@ export function Watchlist() {
     queryFn: api.watchlistList,
   })
 
+  // 实时行情状态: 列表行情和分时图刷新共用。
+  const quoteStatus = useQuoteStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+  const watchlistRefreshInterval = realtimeRunning
+    ? Math.max(3_000, Math.min(15_000, Math.round((quoteStatus.data?.interval_s ?? 15) * 1000)))
+    : false
+
   // enriched 数据 — 传入 ext_columns 参数
+  // SSE 仍是首选触发方式; 这里加页面级轮询兜底, 避免 SSE/页面配置异常时自选列表停在旧行情。
   const enriched = useQuery({
     queryKey: QK.watchlistEnriched(extColumnsParam),
     queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
     enabled: (list.data?.symbols.length ?? 0) > 0,
+    refetchInterval: watchlistRefreshInterval,
+    refetchIntervalInBackground: true,
   })
 
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
   const symbolsKey = symbols.join(',')
-
-  // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
-  const quoteStatus = useQuoteStatus()
-  const realtimeRunning = quoteStatus.data?.running ?? false
 
   // 批量日k数据 (天数由列配置决定)
   const klineBatch = useQuery({

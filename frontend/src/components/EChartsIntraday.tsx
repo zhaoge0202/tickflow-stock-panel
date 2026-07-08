@@ -86,6 +86,17 @@ function generateFullDayTimes(): string[] {
 
 const FULL_DAY_TIMES = generateFullDayTimes()
 
+function fullDayIndexFromAxisValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value)
+  }
+  if (typeof value === 'string') {
+    const idx = FULL_DAY_TIMES.indexOf(value)
+    return idx >= 0 ? idx : null
+  }
+  return null
+}
+
 /** 根据 symbol 判断涨跌停幅度 (创业板/科创板 ±20%, 北交所 ±30%, 其余 ±10%) */
 function getLimitPct(symbol?: string): number {
   if (!symbol) return 0.10
@@ -416,12 +427,13 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
   const chartRef = useRef<ECharts | null>(null)
   const roRef = useRef<ResizeObserver | null>(null)
   const moRef = useRef<MutationObserver | null>(null)
+  const chartClickHandlerRef = useRef<((event: MouseEvent) => void) | null>(null)
   const dataRef = useRef(data)
   dataRef.current = data
-  const onPriceHoverRef = useRef(onPriceHover)
-  onPriceHoverRef.current = onPriceHover
   // 全日索引 → 数据数组索引 的映射 (ref 避免重建 chart)
   const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
+  const lockedInfoIdxRef = useRef<number | null>(null)
+  const infoIdxRef = useRef(data.length - 1)
 
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
@@ -435,9 +447,28 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
   const lineColor = lineIsFlat ? '#A1A1AA' : lineIsUp ? '#C74040' : '#2D9B65'
   const areaFill = lineIsFlat ? 'rgba(180,180,190,0.40)' : lineIsUp ? 'rgba(199,64,64,0.40)' : 'rgba(34,197,94,0.40)'
 
+  const updateInfoIdx = (next: number) => {
+    infoIdxRef.current = next
+    setInfoIdx(next)
+  }
+
   useEffect(() => {
-    setInfoIdx(data.length - 1)
+    const latestIdx = data.length - 1
+    const lockedIdx = lockedInfoIdxRef.current
+    if (lockedIdx != null && lockedIdx >= data.length) {
+      lockedInfoIdxRef.current = null
+      updateInfoIdx(latestIdx)
+      return
+    }
+    if (lockedIdx == null) {
+      updateInfoIdx(latestIdx)
+    }
   }, [data.length])
+
+  useEffect(() => {
+    const current = infoIdx >= 0 && infoIdx < data.length ? data[infoIdx] : null
+    onPriceHover?.(current?.close ?? null)
+  }, [data, infoIdx, onPriceHover])
 
   useEffect(() => {
     const el = containerRef.current
@@ -464,18 +495,17 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
       roRef.current.observe(el)
 
       chart.on('updateAxisPointer', (event: any) => {
+        if (lockedInfoIdxRef.current != null) return
         const axesInfo = event.axesInfo
         if (!axesInfo) return
         for (const info of Object.values(axesInfo)) {
           const val = (info as any)?.value
           if (val == null) continue
-          const fullDayIdx = typeof val === 'number' ? val : -1
-          if (fullDayIdx >= 0) {
+          const fullDayIdx = fullDayIndexFromAxisValue(val)
+          if (fullDayIdx != null && fullDayIdx >= 0) {
             const dataIdx = fullDayToDataIdx.current.get(fullDayIdx) ?? -1
-            setInfoIdx(dataIdx)
-            const d = dataRef.current
-            if (dataIdx >= 0 && dataIdx < d.length) {
-              onPriceHoverRef.current?.(d[dataIdx].close)
+            if (dataIdx >= 0) {
+              updateInfoIdx(dataIdx)
             }
             return
           }
@@ -483,8 +513,35 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
       })
 
       chart.on('globalout', () => {
-        onPriceHoverRef.current?.(null)
+        if (lockedInfoIdxRef.current != null) return
+        updateInfoIdx(dataRef.current.length - 1)
       })
+
+      const handleChartClick = (event: MouseEvent) => {
+        if (lockedInfoIdxRef.current != null) {
+          lockedInfoIdxRef.current = null
+          updateInfoIdx(dataRef.current.length - 1)
+          return
+        }
+
+        const rect = el.getBoundingClientRect()
+        const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top]
+        const inMainGrid = chart!.containPixel({ gridIndex: 0 }, point)
+        const inVolumeGrid = chart!.containPixel({ gridIndex: 1 }, point)
+        if (!inMainGrid && !inVolumeGrid) return
+
+        const converted = chart!.convertFromPixel({ xAxisIndex: inVolumeGrid ? 1 : 0 }, point)
+        const xValue = Array.isArray(converted) ? converted[0] : converted
+
+        const fullDayIdx = fullDayIndexFromAxisValue(xValue)
+        const dataIdx = fullDayIdx == null ? infoIdxRef.current : fullDayToDataIdx.current.get(fullDayIdx)
+        if (dataIdx == null) return
+
+        lockedInfoIdxRef.current = dataIdx
+        updateInfoIdx(dataIdx)
+      }
+      chartClickHandlerRef.current = handleChartClick
+      el.addEventListener('click', handleChartClick)
     }
 
     if (data.length > 0) {
@@ -508,6 +565,9 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
 
   useEffect(() => {
     return () => {
+      if (containerRef.current && chartClickHandlerRef.current) {
+        containerRef.current.removeEventListener('click', chartClickHandlerRef.current)
+      }
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
       moRef.current?.disconnect()
@@ -516,6 +576,7 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
       chartRef.current = null
       moRef.current = null
       roRef.current = null
+      chartClickHandlerRef.current = null
     }
   }, [])
 

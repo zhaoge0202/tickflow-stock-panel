@@ -189,6 +189,33 @@ def test_get_trade_ticks_normalizes_recent_rows(monkeypatch):
     assert rows[1]["side"] == "unknown"
 
 
+def test_get_trade_ticks_today_omits_date_for_live_endpoint(monkeypatch):
+    monkeypatch.setattr(tp, "_cn_today", lambda: dt.date(2026, 7, 8))
+
+    def fake_trade(kwargs):
+        assert kwargs["params"] == {"code": "sz000725"}
+        return {
+            "Count": 1,
+            "List": [{
+                "Time": "2026-07-08T09:30:00+08:00",
+                "Price": 7690,
+                "Volume": 96668,
+                "Status": 1,
+                "Number": 2609,
+            }],
+        }
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/trade"): fake_trade,
+    })
+
+    rows = TDXAPIProvider().get_trade_ticks("000725.SZ", dt.date(2026, 7, 8), mode="recent")
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "000725.SZ"
+    assert rows[0]["trade_date"] == dt.date(2026, 7, 8)
+
+
 def test_get_trade_ticks_all_uses_minute_trade_all(monkeypatch):
     def fake_all(kwargs):
         assert kwargs["params"] == {"code": "sz002491"}
