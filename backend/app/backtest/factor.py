@@ -140,6 +140,8 @@ class FactorBacktestService:
         if panel.is_empty():
             return _err("过滤后无有效数据")
 
+        panel = panel.sort(["symbol", "date"])
+
         n_symbols = panel["symbol"].n_unique()
         n_dates = panel["date"].n_unique()
 
@@ -218,8 +220,8 @@ class FactorBacktestService:
             .group_by("date")
             .agg(
                 pl.corr(
-                    pl.col(factor_col).rank(method="random"),
-                    pl.col("_next_return").rank(method="random"),
+                    pl.col(factor_col).rank(method="average"),
+                    pl.col("_next_return").rank(method="average"),
                 ).alias("ic")
             )
             .sort("date")
@@ -231,8 +233,8 @@ class FactorBacktestService:
     def _calc_period_return(panel: pl.DataFrame, rebalance: str) -> pl.DataFrame:
         """计算到下个调仓日的收益。
 
-        weekly: 下周一的 open / 今日 close - 1
-        monthly: 下月首个交易日的 open / 今日 close - 1
+        weekly: 下个周调仓日 close / 今日 close - 1
+        monthly: 下个月调仓日 close / 今日 close - 1
         只在调仓日标记行有效，其他行为 null。
         """
         import datetime as _dt
@@ -273,7 +275,6 @@ class FactorBacktestService:
             # 最后一个调仓日没有下一个，不计算收益
 
         # 构建 (date, symbol) → next_rebalance_date 的 close 价格映射
-        # 简化: 用下个调仓日的 close / 当前 close
         panel = panel.sort(["symbol", "date"])
         dates_col = panel["date"].to_list()
         close_col = panel["close"].to_list()
@@ -311,13 +312,36 @@ class FactorBacktestService:
 
     @staticmethod
     def _add_groups(panel: pl.DataFrame, factor_col: str, n_groups: int) -> pl.DataFrame:
-        """截面分位数分组。"""
-        return panel.with_columns(
-            pl.col(factor_col)
-            .qcut(n_groups, labels=[f"Q{i+1}" for i in range(n_groups)])
-            .over("date")
-            .alias("_group")
+        """截面序号分桶，避免 qcut 在重复因子值截面上抛错。"""
+        return (
+            panel.sort(["date", factor_col, "symbol"])
+            .with_columns(
+                (pl.cum_count("symbol").over("date") - 1).alias("_factor_ord"),
+                pl.len().over("date").alias("_factor_count"),
+            )
+            .with_columns(
+                (
+                    ((pl.col("_factor_ord") * n_groups) / pl.col("_factor_count"))
+                    .floor()
+                    .cast(pl.Int64)
+                    + 1
+                )
+                .clip(1, n_groups)
+                .cast(pl.Utf8)
+                .map_elements(lambda v: f"Q{v}", return_dtype=pl.Utf8)
+                .alias("_group")
+            )
+            .drop(["_factor_ord", "_factor_count"])
         )
+
+    @staticmethod
+    def _group_sort_key(group: str) -> int:
+        if group.startswith("Q"):
+            try:
+                return int(group[1:])
+            except ValueError:
+                pass
+        return 0
 
     # ── 分组净值 ──
 
@@ -337,7 +361,7 @@ class FactorBacktestService:
         if pivot.is_empty():
             return []
 
-        group_cols = [c for c in pivot.columns if c != "date"]
+        group_cols = sorted([c for c in pivot.columns if c != "date"], key=FactorBacktestService._group_sort_key)
 
         # 累乘净值曲线
         result: list[dict] = []
@@ -362,12 +386,15 @@ class FactorBacktestService:
         if not group_nav:
             return []
 
-        group_cols = [k for k in group_nav[0] if k != "date"]
+        group_cols = sorted(
+            [k for k in group_nav[0] if k != "date"],
+            key=FactorBacktestService._group_sort_key,
+        )
         n_days = max((end - start).days, 1)
         years = n_days / 365.25
 
         stats = []
-        for i, c in enumerate(sorted(group_cols)):
+        for i, c in enumerate(group_cols):
             values = [r[c] for r in group_nav if r.get(c) is not None]
             if not values:
                 continue
@@ -419,7 +446,10 @@ class FactorBacktestService:
         if not group_nav:
             return [], {}
 
-        group_cols = sorted([k for k in group_nav[0] if k != "date"])
+        group_cols = sorted(
+            [k for k in group_nav[0] if k != "date"],
+            key=FactorBacktestService._group_sort_key,
+        )
         if len(group_cols) < 2:
             return [], {}
 
