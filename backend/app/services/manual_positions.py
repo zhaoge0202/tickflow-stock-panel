@@ -9,6 +9,9 @@ import logging
 import threading
 import time
 from pathlib import Path
+from typing import Any
+
+from app.services.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ def path(data_dir: Path) -> Path:
     return p
 
 
-def load_all(data_dir: Path) -> list[dict]:
+def load_all(data_dir: Path, repo: Any = None) -> list[dict]:
     p = path(data_dir)
     if not p.exists():
         return []
@@ -34,26 +37,26 @@ def load_all(data_dir: Path) -> list[dict]:
     out = []
     for row in rows or []:
         try:
-            out.append(normalize(row))
+            out.append(normalize(row, repo))
         except ValueError:
             continue
     return out
 
 
-def save_one(data_dir: Path, position: dict) -> dict:
-    row = normalize(position)
+def save_one(data_dir: Path, position: dict, repo: Any = None) -> dict:
+    row = normalize(position, repo)
     with _lock:
-        rows = [r for r in load_all(data_dir) if r["symbol"] != row["symbol"]]
+        rows = [r for r in load_all(data_dir, repo) if r["symbol"] != row["symbol"]]
         rows.append(row)
         rows.sort(key=lambda r: r["symbol"])
         _write(data_dir, rows)
     return row
 
 
-def delete_one(data_dir: Path, symbol: str) -> bool:
-    target = _symbol(symbol)
+def delete_one(data_dir: Path, symbol: str, repo: Any = None) -> bool:
+    target = _symbol(symbol, repo)
     with _lock:
-        rows = load_all(data_dir)
+        rows = load_all(data_dir, repo)
         kept = [r for r in rows if r["symbol"] != target]
         if len(kept) == len(rows):
             return False
@@ -61,9 +64,9 @@ def delete_one(data_dir: Path, symbol: str) -> bool:
         return True
 
 
-def import_many(data_dir: Path, positions: list[dict]) -> list[dict]:
-    normalized = [normalize(row) for row in positions]
-    by_symbol = {row["symbol"]: row for row in load_all(data_dir)}
+def import_many(data_dir: Path, positions: list[dict], repo: Any = None) -> list[dict]:
+    normalized = [normalize(row, repo) for row in positions]
+    by_symbol = {row["symbol"]: row for row in load_all(data_dir, repo)}
     for row in normalized:
         by_symbol[row["symbol"]] = row
     rows = sorted(by_symbol.values(), key=lambda r: r["symbol"])
@@ -72,12 +75,12 @@ def import_many(data_dir: Path, positions: list[dict]) -> list[dict]:
     return rows
 
 
-def by_symbol(data_dir: Path) -> dict[str, dict]:
-    return {row["symbol"]: row for row in load_all(data_dir)}
+def by_symbol(data_dir: Path, repo: Any = None) -> dict[str, dict]:
+    return {row["symbol"]: row for row in load_all(data_dir, repo)}
 
 
-def normalize(row: dict) -> dict:
-    symbol = _symbol(row.get("symbol"))
+def normalize(row: dict, repo: Any = None) -> dict:
+    symbol = _symbol(row.get("symbol"), repo)
     now_ms = int(time.time() * 1000)
     shares = _num(row.get("shares"), default=0.0)
     cost_price = _num(row.get("cost_price"), default=0.0)
@@ -145,8 +148,8 @@ def _write(data_dir: Path, rows: list[dict]) -> None:
     )
 
 
-def _symbol(value) -> str:
-    symbol = str(value or "").strip().upper()
+def _symbol(value, repo: Any = None) -> str:
+    symbol = normalize_symbol(value, repo)
     if not symbol:
         raise ValueError("symbol 不能为空")
     return symbol

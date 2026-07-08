@@ -51,6 +51,7 @@ def summary(
 ):
     return decision_queue.summary(
         _data_dir(request),
+        request.app.state.repo,
         target_date=_parse_date(date_),
     )
 
@@ -93,5 +94,10 @@ def timeline(
 ):
     return {
         "symbol": symbol.upper(),
-        "events": decision_queue.timeline(_data_dir(request), symbol, target_date=_parse_date(date_)),
+        "events": decision_queue.timeline(
+            _data_dir(request),
+            symbol,
+            request.app.state.repo,
+            target_date=_parse_date(date_),
+        ),
     }
