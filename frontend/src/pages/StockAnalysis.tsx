@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
@@ -7,7 +7,7 @@ import { StockFinancialSearch } from '@/components/financials/StockFinancialSear
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
-import { api } from '@/lib/api'
+import { api, genRuleId, type MonitorRule } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -117,15 +117,12 @@ export function StockAnalysis() {
                 AI 个股分析
               </button>
               <button
-                onClick={() => toast('点位提醒功能开发中,敬请期待', 'error')}
+                onClick={() => toast('在下方关键价位列表点击铃铛即可设提醒', 'success')}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-border/40 bg-elevated/40 text-muted text-xs font-medium hover:border-border/70 hover:text-secondary transition-all"
-                title="当价格触及关键价位时提醒(开发中)"
+                title="当价格触及关键价位时提醒"
               >
                 <Bell className="h-3.5 w-3.5" />
                 点位提醒
-                <span className="rounded-full bg-amber-400/15 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider text-amber-400">
-                  开发中
-                </span>
               </button>
             </>
           )}
@@ -171,6 +168,7 @@ export function StockAnalysis() {
 
 // ===== 分析看板:日 K + 关键价位 =====
 function StockAnalysisBoard({ symbol }: { symbol: string }) {
+  const qc = useQueryClient()
   const kline = useQuery({
     queryKey: ['kline', symbol, ''],
     queryFn: () => api.klineDaily(symbol, 250),
@@ -183,6 +181,32 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     queryFn: () => api.stockAnalysisLevels(symbol, 250),
     enabled: !!symbol,
     staleTime: 60_000,
+  })
+
+  const levelAlertMut = useMutation({
+    mutationFn: (level: PriceLevel) => {
+      const op = level.side === 'support' ? '<=' : '>='
+      const sideLabel = level.side === 'support' ? '支撑' : level.side === 'resistance' ? '压力' : '关键价位'
+      const rule: MonitorRule = {
+        id: genRuleId(),
+        name: `${symbol} ${sideLabel}提醒 ${level.value.toFixed(2)}`,
+        enabled: true,
+        type: 'level',
+        scope: 'symbols',
+        symbols: [symbol],
+        direction: level.side === 'support' ? 'down' : 'up',
+        conditions: [{ field: 'close', op, value: level.value }],
+        logic: 'and',
+        cooldown_seconds: 300,
+        severity: level.side === 'support' ? 'warn' : 'info',
+        message: `${level.label} ${op} ${level.value.toFixed(2)}`,
+      }
+      return api.monitorRuleSave(rule)
+    },
+    onSuccess: () => {
+      toast('关键价位提醒已创建', 'success')
+      qc.invalidateQueries({ queryKey: QK.monitorRules })
+    },
   })
 
   if (kline.isLoading) {
@@ -228,6 +252,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           seriesDates={levelsQ.data?.dates}
           defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
           height={480}
+          onCreateLevelAlert={(level) => levelAlertMut.mutate(level)}
         />
       </div>
     </div>

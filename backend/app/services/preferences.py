@@ -498,7 +498,7 @@ def set_wecom_webhook_url(url: str) -> str:
 def get_webhook_enabled_default() -> bool:
     """新建监控规则时是否默认勾选「飞书推送」。
 
-    数据模型当前只有一个 webhook_enabled 布尔 (即飞书), QMT/ptrade 待定。
+    数据模型当前只有一个 webhook_enabled 布尔 (即飞书), 不接券商委托。
     此默认值供规则编辑器新建规则时预填, 单条规则仍可独立修改。
     """
     return load().get("webhook_enabled_default", False)

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import time as _time
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -37,7 +39,7 @@ class RuleModel(BaseModel):
     id: str
     name: str
     enabled: bool = True
-    type: str          # strategy | signal | price | market
+    type: str          # strategy | signal | price | market | level
     scope: str = "symbols"   # symbols | all | sector
     symbols: list[str] = []
     sector: str | None = None
@@ -47,7 +49,7 @@ class RuleModel(BaseModel):
     logic: str = "and"        # and | or
     cooldown_seconds: int = 3600
     severity: str = "info"    # info | warn | critical
-    webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
+    webhook_url: str = ""     # Webhook 推送地址 (飞书/企微/自定义通知)
     webhook_enabled: bool = False
     message: str = ""
     # ladder 专属 (连板梯队封单监控)
@@ -60,7 +62,8 @@ class RuleModel(BaseModel):
 def get_options(request: Request):
     """返回可选字段、信号列、运算符、枚举,供前端表单使用。"""
     from app.indicators.pipeline import ENRICHED_COLUMNS
-    from app.strategy.custom_signals import ALLOWED_FIELDS, load_all as load_csg
+    from app.strategy.custom_signals import ALLOWED_FIELDS
+    from app.strategy.custom_signals import load_all as load_csg
 
     # 阈值字段 (带中文标签)
     threshold_fields = [
@@ -93,6 +96,7 @@ def get_options(request: Request):
         "types": [
             {"key": "signal", "label": "个股信号"},
             {"key": "price", "label": "价格/涨跌"},
+            {"key": "level", "label": "关键价位"},
             {"key": "market", "label": "市场异动"},
             {"key": "strategy", "label": "策略监控"},
         ],
@@ -148,7 +152,7 @@ def save_rule(req: RuleModel, request: Request):
     try:
         monitor_rules.validate(rule)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     monitor_rules.save_one(_data_dir(request), rule)
     _sync_engine(request)
     return {"ok": True, "rule": rule}
@@ -167,9 +171,6 @@ def delete_rule(rule_id: str, request: Request):
 
 
 # ── 演示数据生成 (仅 Dev 页用) ─────────────────────────
-
-import time as _time
-from datetime import datetime, timezone
 
 
 def _demo_rule(rule_id: str, name: str, rtype: str, scope: str, symbols: list[str],
@@ -228,7 +229,7 @@ def seed_demo_rules(request: Request):
     ts = int(_time.time() * 1000)
     created = []
     i = 0
-    for (name, rtype, scope, symbols, conditions, logic, severity, sev) in _DEMO_RULES_TEMPLATE:
+    for (name, rtype, scope, symbols, conditions, logic, _severity, sev) in _DEMO_RULES_TEMPLATE:
         rule_id = f"demo_{ts}_{i}"
         rule = _demo_rule(rule_id, name, rtype, scope, symbols, conditions, logic, 3600, sev)
         monitor_rules.save_one(_data_dir(request), rule)
@@ -371,6 +372,7 @@ def trigger_ladder(request: Request):
     让用户看到真实的预警通知。绕过 cooldown 强制触发。
     """
     import time
+
     from app.services import alert_store
 
     repo = request.app.state.repo
@@ -413,7 +415,7 @@ def trigger_ladder(request: Request):
         inst = repo.get_instruments()
         if not inst.is_empty() and "name" in inst.columns:
             name_map = {r["symbol"]: r["name"] for r in inst.select(["symbol", "name"]).iter_rows(named=True) if r.get("name")}
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     for rule in engine.rules.values():
@@ -464,10 +466,8 @@ def trigger_ladder(request: Request):
         raise HTTPException(status_code=400, detail="当前无 ladder 规则满足触发条件 (封单均 > 阈值)")
 
     # 1. 落盘到 alerts.jsonl
-    try:
+    with suppress(Exception):
         alert_store.append_many(repo.store.data_dir, rule_events)
-    except Exception as e:  # noqa: BLE001
-        pass  # 落盘失败不阻断推送
 
     # 2. SSE 推送 (入 pending_alerts 队列)
     if quote_svc:
@@ -478,17 +478,13 @@ def trigger_ladder(request: Request):
             "signals": ev["signals"], "severity": ev["severity"],
             "conditions": ev["conditions"], "logic": ev["logic"],
         } for ev in rule_events]
-        try:
+        with suppress(Exception):
             quote_svc.push_alerts(sse_alerts)
-        except Exception:  # noqa: BLE001
-            pass
 
     # 3. 飞书推送
     if quote_svc:
-        try:
+        with suppress(Exception):
             quote_svc._maybe_send_webhook(rule_events, engine)
-        except Exception:  # noqa: BLE001
-            pass
 
     return {
         "ok": True,

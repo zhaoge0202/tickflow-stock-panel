@@ -588,6 +588,8 @@ class QuoteService:
 
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
+        self._append_quote_ticks_if_tdxapi(records)
+
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
         daily_df = self._build_daily(stock_records)
         if not daily_df.is_empty() and self._repo:
@@ -708,6 +710,28 @@ class QuoteService:
     # ================================================================
     # 工具
     # ================================================================
+
+    def _append_quote_ticks_if_tdxapi(self, records: list[dict]) -> None:
+        """tdxapi 实时行情追加到秒级事实层。
+
+        quote_ticks 是决策台事实来源。为了避免混入 TickFlow 快照, 这里只在
+        实时数据源明确为 tdxapi 时写入。
+        """
+        if not self._repo or not records:
+            return
+        try:
+            from app.services import preferences, quote_tick_store
+
+            provider_name = preferences.get_realtime_data_provider()
+            if provider_name != "tdxapi":
+                return
+            quote_tick_store.append_many(
+                self._repo.store.data_dir,
+                records,
+                source="tdxapi",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("quote_ticks 追加失败: %s", e)
 
     def _custom_realtime_index_symbols(self) -> list[str]:
         """自定义实时源显式补拉指数，避免核心指数被全市场快照遗漏。"""

@@ -105,6 +105,7 @@ export function useQuoteStream(
               // 实时刷新触发记录列表 + 监控中心徽标
               qc.invalidateQueries({ queryKey: ['alerts'] })
               qc.invalidateQueries({ queryKey: ['alerts-total'] })
+              qc.invalidateQueries({ queryKey: ['decision'] })
             }
         } catch {
           // 忽略解析错误

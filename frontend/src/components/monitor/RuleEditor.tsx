@@ -19,7 +19,7 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '个股信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控',
+  signal: '个股信号监控', price: '价格监控', level: '关键价位监控', market: '市场异动监控', strategy: '策略监控',
 }
 
 const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
@@ -376,7 +376,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </label>
       </div>
 
-      {/* Webhook 推送 — 飞书可用, QMT/ptrade 待定 */}
+      {/* Webhook 推送 — 仅用于外部通知, 不接券商委托。 */}
       <div className="rounded-btn border border-border/40 bg-base/40 p-3 space-y-2">
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] font-medium text-foreground">Webhook 推送</span>
@@ -400,20 +400,6 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 {feishuConfigured ? '已配置' : '未配置'}
               </span>
             )}
-          </label>
-
-          {/* QMT (待定) */}
-          <label className="flex items-center gap-2 cursor-not-allowed opacity-50">
-            <input type="checkbox" disabled className="h-3 w-3 accent-accent" />
-            <span className="text-[11px] text-secondary">QMT</span>
-            <span className="rounded bg-muted/10 px-1 py-px text-[9px] text-muted">待定</span>
-          </label>
-
-          {/* ptrade (待定) */}
-          <label className="flex items-center gap-2 cursor-not-allowed opacity-50">
-            <input type="checkbox" disabled className="h-3 w-3 accent-accent" />
-            <span className="text-[11px] text-secondary">ptrade</span>
-            <span className="rounded bg-muted/10 px-1 py-px text-[9px] text-muted">待定</span>
           </label>
         </div>
 

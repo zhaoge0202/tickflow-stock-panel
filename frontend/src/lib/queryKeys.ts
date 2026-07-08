@@ -80,6 +80,15 @@ export const QK = {
   monitorRuleOptions:   ['monitor-rule-options'] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
 
+  // Decision Desk
+  decisionQueue:         (date?: string, status?: string) => ['decision', 'queue', date ?? 'today', status ?? 'all'] as const,
+  decisionSummary:       (date?: string) => ['decision', 'summary', date ?? 'today'] as const,
+  decisionItem:          (symbol: string, date?: string) => ['decision', 'item', symbol, date ?? 'today'] as const,
+  decisionTimeline:      (symbol: string, date?: string) => ['decision', 'timeline', symbol, date ?? 'today'] as const,
+  manualPositions:       ['manual-positions'] as const,
+  quoteTickQuality:      (symbols?: string) => ['quote-tick-quality', symbols ?? 'all'] as const,
+  alertOutcomes:         (days?: number) => ['alert-outcomes', days ?? 7] as const,
+
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,
 
@@ -97,4 +106,5 @@ export const SSE_INVALIDATE_PREFIXES = [
   'overview-market',
   'limit-ladder',
   'screener',
+  'decision',
 ] as const

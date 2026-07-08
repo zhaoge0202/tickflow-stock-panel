@@ -855,7 +855,7 @@ class WebhookEnabledDefaultIn(BaseModel):
 def update_webhook_enabled_default(req: WebhookEnabledDefaultIn) -> dict:
     """新建监控规则时是否默认勾选「飞书推送」。
 
-    数据模型当前只有飞书一个可用渠道 (QMT/ptrade 待定),故此处仅一个布尔。
+    数据模型当前只有飞书一个默认开关, 不接券商委托, 故此处仅一个布尔。
     单条规则仍可在规则编辑页独立修改此项。
     """
     from app.services import preferences
@@ -1300,4 +1300,3 @@ def update_review_push(req: ReviewPushIn) -> dict:
     from app.services import preferences
     saved = preferences.set_review_push_channels(req.channels)
     return {"review_push_channels": saved}
-

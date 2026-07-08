@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -312,6 +312,7 @@ class TDXAPIProvider:
         return {
             "symbol": symbol,
             "name": name_map.get(symbol),
+            "source": "tdxapi",
             "last_price": last_price,
             "prev_close": prev_close,
             "open": _price(k.get("Open")),
@@ -525,9 +526,47 @@ def _trade_side(raw_status: int | None) -> tuple[str, str]:
 
 def _server_time_ms(value) -> int | None:
     try:
-        return int(value) * 1000
+        raw = int(value)
     except (TypeError, ValueError):
         return None
+
+    now = datetime.now(_CN_TZ)
+    now_ms = int(now.timestamp() * 1000)
+    max_future_ms = now_ms + 24 * 60 * 60 * 1000
+
+    if 946_684_800_000 <= raw <= max_future_ms:
+        return raw
+    if 946_684_800 <= raw <= max_future_ms // 1000:
+        return raw * 1000
+
+    return _tdx_compact_time_ms(raw, now=now)
+
+
+def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    head = text[:-6]
+    try:
+        hour = int(head) if head else 0
+        tail = text[-6:].zfill(6)
+        marker = int(tail[:2])
+        if marker < 60:
+            minute = marker
+            second = int(tail[2:]) * 60 / 10_000.0
+        else:
+            raw_tail = int(tail)
+            minute = int(raw_tail * 60 / 1_000_000)
+            second = ((raw_tail * 60) % 1_000_000) * 60 / 1_000_000.0
+    except ValueError:
+        return None
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second < 60):
+        return None
+
+    midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=second)
+    return int(decoded.timestamp() * 1000)
 
 
 def _preview(provider: str, dataset: str, df: pl.DataFrame) -> dict:

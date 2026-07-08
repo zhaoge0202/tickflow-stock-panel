@@ -8,6 +8,7 @@ import { Onboarding } from './pages/Onboarding'
 import { Auth } from './pages/Auth'
 import { Data } from './pages/Data'
 import { Monitor } from './pages/Monitor'
+import { Decision } from './pages/Decision'
 import { Trading } from './pages/Trading'
 import { Dashboard } from './pages/Dashboard'
 import { AnalysisDetail } from './pages/AnalysisDetail'
@@ -71,6 +72,7 @@ export const router = createBrowserRouter([
       { path: 'stock-analysis', element: <StockAnalysis /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
+      { path: 'decision', element: <Decision /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'financials', element: <Financials /> },
