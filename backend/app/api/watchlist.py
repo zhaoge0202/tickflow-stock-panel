@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from datetime import date
 
 import polars as pl
 from fastapi import APIRouter, Query, Request

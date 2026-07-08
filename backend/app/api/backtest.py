@@ -86,6 +86,7 @@ class BacktestRequest(BaseModel):
     fees_pct: float = 0.0002
     slippage_bps: float = 5
     matching: Literal["close_t", "open_t+1"] = "close_t"
+    asset_type: str = "stock"
 
 
 @router.post("/run")
@@ -107,6 +108,7 @@ def run(req: BacktestRequest, request: Request):
         fees_pct=req.fees_pct,
         slippage_bps=req.slippage_bps,
         matching=req.matching,
+        asset_type=req.asset_type,
     )
     try:
         result = svc.run(cfg)
@@ -140,6 +142,7 @@ class FactorBacktestRequest(BaseModel):
     weight: Literal["equal", "factor_weight"] = "equal"
     fees_pct: float = 0.0002
     slippage_bps: float = 5.0
+    asset_type: str = "stock"
 
 
 @router.post("/factor/run")
@@ -170,6 +173,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
         weight=req.weight,
         fees_pct=req.fees_pct,
         slippage_bps=req.slippage_bps,
+        asset_type=req.asset_type,
     )
     result = svc.run(cfg)
     return asdict(result)
@@ -200,6 +204,7 @@ class StrategyBacktestRequest(BaseModel):
     position_sizing: Literal["equal", "score_weight"] = "equal"
     mode: Literal["position", "full"] = "position"
     holding_days: int = 5
+    asset_type: str = "stock"
 
 
 @router.post("/strategy/run")
@@ -235,6 +240,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         position_sizing=req.position_sizing,
         mode=req.mode,
         holding_days=req.holding_days,
+        asset_type=req.asset_type,
     )
     result = svc.run(cfg)
     return asdict(result)
@@ -265,13 +271,18 @@ _running_jobs: dict[str, _BacktestJob] = {}
 _jobs_lock = threading.Lock()
 _JOB_TTL = 300  # 完成后保留 5 分钟
 
+# 并发回测上限: 多个重回测同时跑会 OOM (服务器内存约 1.8GB)。用信号量限并发,
+# 超出的任务在 _run_backtest 里排队, SSE 连接照常保持, run 一开始就有进度。
+_backtest_semaphore = threading.Semaphore(2)
+
 
 def _cleanup_stale_jobs():
-    """清理过期任务 (完成超过 TTL 的)。"""
+    """清理过期任务 (完成超过 TTL 的)。全程持 _jobs_lock: 迭代+pop 与其他访问互斥。"""
     now = time.time()
-    stale = [k for k, j in _running_jobs.items() if j.done and now - j.finish_ts > _JOB_TTL]
-    for k in stale:
-        _running_jobs.pop(k, None)
+    with _jobs_lock:
+        stale = [k for k, j in _running_jobs.items() if j.done and now - j.finish_ts > _JOB_TTL]
+        for k in stale:
+            _running_jobs.pop(k, None)
 
 
 def _make_job_key(
@@ -282,8 +293,9 @@ def _make_job_key(
     params: str | None, overrides: str | None,
     mode: str = "position", holding_days: int = 5,
     commission_pct: float | None = None, stamp_tax_pct: float | None = None,
+    asset_type: str = "stock",
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -309,6 +321,7 @@ async def strategy_stream(
     overrides: str | None = None,
     mode: str = "position",
     holding_days: int = 5,
+    asset_type: str = "stock",
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -349,6 +362,7 @@ async def strategy_stream(
         params, overrides,
         mode, holding_days,
         commission_pct, stamp_tax_pct,
+        asset_type=asset_type,
     )
 
     _cleanup_stale_jobs()
@@ -391,9 +405,13 @@ async def strategy_stream(
                 position_sizing=position_sizing,
                 mode=mode,
                 holding_days=int(holding_days),
+                asset_type=asset_type,
             )
 
             def _run_backtest():
+                # 信号量限并发: 超额任务在此阻塞排队, 不并发吃满内存 (等待期间 cancel_event
+                # 仍可置位, svc.run 会据此提前返回 cancelled)。持槽跑完在 finally 释放。
+                _backtest_semaphore.acquire()
                 try:
                     result = svc.run(cfg, lambda d: job.progress.append(d), job.cancel_event)
                     job.result = result
@@ -403,6 +421,8 @@ async def strategy_stream(
                     job.error = str(e)
                     job.done = True
                     job.finish_ts = time.time()
+                finally:
+                    _backtest_semaphore.release()
 
             # 启动后台线程 (不阻塞事件循环)
             threading.Thread(target=_run_backtest, daemon=True).start()
@@ -481,8 +501,11 @@ async def strategy_cancel(request: Request):
         int(_get("holding_days", "5")),
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
+        asset_type=_get("asset_type", "stock"),
     )
-    job = _running_jobs.get(job_key)
+    # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
     if job and not job.done:
         job.cancel_event.set()
         return {"ok": True}

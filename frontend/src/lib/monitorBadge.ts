@@ -48,7 +48,7 @@ function subscribe(fn: () => void) {
 }
 
 function getSnapshot() {
-  return Math.max(0, currentTotal - lastSeenTotal)
+  return Math.max(0, currentTotal - Math.max(0, lastSeenTotal))
 }
 
 /** 轮询更新最新总数 (Layout 层调用)。 */
