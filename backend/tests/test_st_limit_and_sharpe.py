@@ -1,7 +1,7 @@
 """回归测试:
 
-1. ST 5% 涨跌停限幅仅适用于主板风险警示股; 创业板/科创板 ST 仍执行 20%。
-   (修正前 _is_st 无条件套 5%, 会误报/漏报这批股的涨停。)
+1. 主板 ST 涨跌幅限制需按日期切换: 2026-07-06 前 5%, 之后 10%;
+   创业板/科创板 ST 仍执行 20%。
 2. 因子回测 Sharpe 的年化系数须匹配调仓频率 (月频 √12 / 周频 √52 / 日频 √252);
    (修正前一律 √252, 月频 Sharpe 被高估 √21 ≈ 4.6 倍。)
 """
@@ -24,21 +24,40 @@ def test_near_limit_pct_st_only_on_main_board():
     lp = df.with_columns(_limit_pct().alias("lp"))["lp"].to_list()
     assert lp[0] == 0.20  # 创业板 ST → 20% (不再是 5%)
     assert lp[1] == 0.20  # 科创板 ST → 20%
-    assert lp[2] == 0.05  # 主板 ST → 5%
+    assert lp[2] == 0.10  # 主板 ST 新规后 → 10%
     assert lp[3] == 0.10  # 主板普通 → 10%
     assert lp[4] == 0.30  # 北交所 → 30%
 
 
-def _two_day(symbol: str, prev_close: float, today_close: float) -> pl.DataFrame:
+def test_near_limit_pct_keeps_historical_main_board_st_5pct():
+    df = pl.DataFrame({
+        "symbol": ["600001", "600001"],
+        "name": ["*ST主板", "*ST主板"],
+        "date": [date(2026, 7, 3), date(2026, 7, 6)],
+    })
+    lp = df.with_columns(_limit_pct("date").alias("lp"))["lp"].to_list()
+    assert lp == [0.05, 0.10]
+
+
+def _two_day(
+    symbol: str,
+    prev_close: float,
+    today_close: float,
+    *,
+    prev_date: date = date(2024, 1, 2),
+    today_date: date = date(2024, 1, 3),
+    today_high: float | None = None,
+) -> pl.DataFrame:
     """2 日最小输入: 首日平收, 次日收于 today_close。"""
+    today_high = today_close if today_high is None else today_high
     return pl.DataFrame({
         "symbol": [symbol, symbol],
-        "date": [date(2024, 1, 2), date(2024, 1, 3)],
+        "date": [prev_date, today_date],
         "raw_close": [prev_close, today_close],
         "close": [prev_close, today_close],
-        "raw_high": [prev_close, today_close],
+        "raw_high": [prev_close, today_high],
         "open": [prev_close, today_close],
-        "high": [prev_close, today_close],
+        "high": [prev_close, today_high],
         "low": [prev_close, today_close],
         "change_pct": [0.0, today_close / prev_close - 1],
         "vol_ratio_5d": [1.0, 1.0],
@@ -66,9 +85,40 @@ def test_st_chinext_plus5pct_is_not_a_false_limit_up():
 
 
 def test_st_main_board_still_limits_at_5pct():
-    # 主板 *ST 昨收 10.00 → 今日 +5% 至 10.50 仍应识别为涨停
+    # 新规前: 主板 *ST 昨收 10.00 → 今日 +5% 至 10.50 仍应识别为涨停
     sig, _ = _last_limit_up("600001", "*ST主板", 10.0, 10.5)
     assert sig is True
+
+
+def test_st_main_board_uses_10pct_after_20260706():
+    # 新规后: 主板 ST 昨收 10.00 → 今日 +5% 不应再误报涨停
+    df = _two_day(
+        "600001",
+        10.0,
+        10.5,
+        prev_date=date(2026, 7, 8),
+        today_date=date(2026, 7, 9),
+    )
+    inst = pl.DataFrame({"symbol": ["600001"], "name": ["*ST主板"]})
+    out = compute_limit_signals(df, inst).sort("date")
+    assert out["signal_limit_up"].to_list()[-1] is False
+
+
+def test_st_main_board_broken_limit_after_20260706():
+    # ST洲际场景: 昨收 2.41, 10% 涨停价 2.65, 最高触板但收 2.61 → 炸板。
+    df = _two_day(
+        "600759.SH",
+        2.41,
+        2.61,
+        prev_date=date(2026, 7, 8),
+        today_date=date(2026, 7, 9),
+        today_high=2.65,
+    )
+    inst = pl.DataFrame({"symbol": ["600759.SH"], "name": ["ST洲际"]})
+    out = compute_limit_signals(df, inst).sort("date")
+    assert out["signal_limit_up"].to_list()[-1] is False
+    assert out["signal_broken_limit_up"].to_list()[-1] is True
+    assert out["consecutive_limit_ups"].to_list()[-1] == 0
 
 
 def test_sharpe_annualization_matches_rebalance_frequency():
