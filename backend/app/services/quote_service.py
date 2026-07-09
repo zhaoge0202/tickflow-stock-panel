@@ -28,9 +28,8 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
-from datetime import date
-from datetime import time as dt_time
+from contextlib import contextmanager, suppress
+from datetime import date, time as dt_time
 from typing import ClassVar
 
 import polars as pl
@@ -157,6 +156,10 @@ class QuoteService:
         self._fetch_lock = threading.Lock()
         self._running = False
         self._enabled = False      # 全局开关 (持久化到 preferences)
+        # 暂停态: 盘后管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
+        # 与 _enabled 不同 — pause 不改 preferences、不 stop 线程, 仅让轮询循环跳过取数;
+        # 进程重启后 _paused 归零, 从 preferences 恢复真实开关态, 无"假关闭"副作用。
+        self._paused = False
         self._interval = self.DEFAULT_INTERVAL
         self._thread: threading.Thread | None = None
         self._repo = None          # 延迟注入, 避免循环导入
@@ -237,6 +240,44 @@ class QuoteService:
         self.stop()
         logger.info("行情服务已关闭")
 
+    # ================================================================
+    # 临时暂停 (盘后管道/数据修正期间, 防止写盘竞态)
+    # ================================================================
+
+    def pause(self) -> None:
+        """临时暂停行情轮询取数 (不关闭线程、不改 preferences)。
+
+        用于盘后管道/数据修正运行期间, 防止实时行情覆写管道正在写的 parquet。
+        与 stop() 的区别: 线程继续存活但跳过 _fetch_quotes; preferences 开关态不变,
+        管道结束调用 resume() 即恢复。线程级检查, 即时生效, 无 join 等待。
+        """
+        self._paused = True
+        logger.info("行情轮询已临时暂停 (管道/修正运行中)")
+
+    def resume(self) -> None:
+        """恢复暂停的行情轮询取数 (对应 pause)。"""
+        self._paused = False
+        logger.info("行情轮询已恢复")
+
+    def is_paused(self) -> bool:
+        """是否处于临时暂停态 (管道运行期间)。"""
+        return self._paused
+
+    @contextmanager
+    def paused(self):
+        """上下文管理器: 进入时暂停轮询取数, 退出时(含异常)自动恢复。
+
+        供盘后管道/数据修正复用:
+            with quote_service.paused():
+                run_pipeline(...)
+        无论正常结束还是异常/crash, finally 都会 resume (除非进程直接被 kill)。
+        """
+        self.pause()
+        try:
+            yield
+        finally:
+            self.resume()
+
     def boot_check(self) -> None:
         """启动时检查 preferences, 若 enabled 则自动启动。
 
@@ -294,6 +335,10 @@ class QuoteService:
             return list(self._subscribers)
 
     def _broadcast_quote_updated(self) -> None:
+        # 实时行情刷新后清空总览聚合缓存, 使看板 (overview-market) 在 SSE 触发的
+        # 重取中拿到最新指数/聚合值。与 _broadcast 同时进行, 与侧栏 /intraday/indices
+        # (无缓存, 直读实时缓存) 行为对齐, 避免看板落后于侧栏。
+        self._invalidate_overview_cache()
         for sub in self._snapshot_subscribers():
             sub.notify_quote()
 
@@ -422,6 +467,7 @@ class QuoteService:
         return {
             "enabled": self._enabled,
             "running": self._running,
+            "paused": self._paused,
             "mode": mode,
             "realtime_allowed": mode != "none",
             "watchlist_symbol_count": len(preferences.get_realtime_watchlist_symbols()),
@@ -467,6 +513,11 @@ class QuoteService:
     def _poll_loop(self) -> None:
         while self._running and self._enabled:
             try:
+                # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
+                if self._paused:
+                    time.sleep(0.5)
+                    continue
+
                 phase = self._market_phase()
                 if self._should_fetch_for_phase(phase):
                     is_final = phase in {"morning_final", "close_final"}
@@ -482,11 +533,11 @@ class QuoteService:
                             logger.warning("%s 最终行情同步失败, 将继续重试", "午休" if phase == "morning_final" else "收盘")
                 else:
                     logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("行情轮询异常: %s", e)
 
             waited = 0.0
-            while self._running and self._enabled and waited < self._interval:
+            while self._running and self._enabled and not self._paused and waited < self._interval:
                 time.sleep(0.5)
                 waited += 0.5
 
@@ -672,8 +723,6 @@ class QuoteService:
         if not etf_daily_df.is_empty() and self._repo:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
 
-        self._invalidate_overview_cache()
-
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
 
@@ -758,8 +807,6 @@ class QuoteService:
             except Exception as e:
                 logger.warning("自选实时日K写盘失败: %s", e)
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
-
-        self._invalidate_overview_cache()
 
         self._broadcast_quote_updated()
         self._evaluate_monitors(daily_df, quote_extra)
