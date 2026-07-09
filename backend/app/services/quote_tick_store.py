@@ -43,12 +43,30 @@ MICROSTRUCTURE_FIELD_NAMES = [
 AUCTION_EXTRA_FIELD_NAMES = [
     "auction_unmatched_ratio", "auction_pressure_score",
 ]
+TEXT_FIELD_NAMES = {
+    "symbol", "name", "source", "trade_date", "hour", "market_phase",
+    "price_type", "auction_unmatched_side", "raw",
+}
+INT_FIELD_NAMES = {"event_ts", "ingest_ts"}
+FLOAT_FIELD_NAMES = {
+    "last_price", "prev_close", "open", "high", "low", "volume", "amount",
+    "bid1", "ask1", "bid1_vol", "ask1_vol", "auction_price",
+    "auction_matched_volume", "auction_unmatched_volume", "auction_change_pct",
+    *DEPTH_FIELD_NAMES, *MICROSTRUCTURE_FIELD_NAMES, *AUCTION_EXTRA_FIELD_NAMES,
+}
+QUOTE_TICK_SCHEMA_OVERRIDES = {
+    **{field: pl.Utf8 for field in TEXT_FIELD_NAMES},
+    **{field: pl.Int64 for field in INT_FIELD_NAMES},
+    **{field: pl.Float64 for field in FLOAT_FIELD_NAMES},
+}
 
 _lock = threading.Lock()
+_partition_cache_lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
 _rings: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=RING_MAX_ROWS))
 _last_flush: dict[str, float] = defaultdict(float)
 _quality: dict[str, dict] = {}
+_partition_cache: dict[tuple[str, str], dict[str, object]] = {}
 
 
 def append_many(
@@ -104,7 +122,7 @@ def flush(data_dir: Path) -> int:
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / f"part-{int(time.time() * 1000)}-{id(part_rows)}.parquet"
         try:
-            pl.DataFrame(part_rows).write_parquet(path)
+            _quote_tick_frame(part_rows).write_parquet(path)
             written += len(part_rows)
         except Exception as e:
             logger.warning("quote_ticks 写入失败(%s): %s", path, e)
@@ -120,8 +138,22 @@ def latest(
     target_date: date | None = None,
 ) -> list[dict]:
     """返回每个 symbol 最新一条 tick, 优先读热缓存, 不足再扫当天 parquet。"""
+    target_date = target_date or cn_today()
     wanted = {s.upper() for s in symbols or [] if s}
-    rows = _recent_rows(data_dir, target_date=target_date or cn_today())
+    if wanted:
+        hot_rows = [
+            r for r in _hot_rows(data_dir, target_date=target_date)
+            if str(r.get("symbol", "")).upper() in wanted
+        ]
+        if _symbols_covered(hot_rows, wanted):
+            return _latest_by_symbol(hot_rows)
+        recent_rows = [
+            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
+            if str(r.get("symbol", "")).upper() in wanted
+        ]
+        if _symbols_covered(recent_rows, wanted):
+            return _latest_by_symbol(recent_rows)
+    rows = _recent_rows(data_dir, target_date=target_date)
     if wanted:
         rows = [r for r in rows if str(r.get("symbol", "")).upper() in wanted]
     return _latest_by_symbol(rows)
@@ -137,15 +169,34 @@ def bars(
     """从 quote_ticks 聚合 5s/1m/3m/5m/15m bar。"""
     target_date = target_date or cn_today()
     rows = [
-        r for r in _recent_rows(data_dir, target_date=target_date)
+        r for r in _hot_rows(data_dir, target_date=target_date)
         if str(r.get("symbol", "")).upper() == symbol.upper()
     ]
     if not rows:
+        rows = [
+            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
+            if str(r.get("symbol", "")).upper() == symbol.upper()
+        ]
+    if not rows:
+        rows = [
+            r for r in _recent_rows(data_dir, target_date=target_date)
+            if str(r.get("symbol", "")).upper() == symbol.upper()
+        ]
+    if not rows:
         return []
+    return _bars_from_rows(rows, symbol, freq)
+
+
+def _bars_from_rows(rows: list[dict], symbol: str, freq: str) -> list[dict]:
+    """从已过滤的单标的 tick 聚合 bar, 避免详情页反复扫全量分区。"""
+    rows = [
+        r for r in rows
+        if str(r.get("symbol", "")).upper() == symbol.upper()
+    ]
     trade_rows = [r for r in rows if r.get("price_type") != "auction_reference"]
     if trade_rows:
         rows = trade_rows
-    df = pl.DataFrame(rows)
+    df = _quote_tick_frame(rows)
     if "event_ts" not in df.columns or "last_price" not in df.columns:
         return []
     every = _freq_to_every(freq)
@@ -208,10 +259,27 @@ def read_ticks(
     *,
     target_date: date | None = None,
     symbols: list[str] | None = None,
+    prefer_hot: bool = False,
 ) -> list[dict]:
     """读取某天 ticks, 用于 outcome 和盘中回放。"""
-    rows = _recent_rows(data_dir, target_date=target_date or cn_today())
+    target_date = target_date or cn_today()
     wanted = {s.upper() for s in symbols or [] if s}
+    if prefer_hot and wanted:
+        hot_rows = [
+            r for r in _hot_rows(data_dir, target_date=target_date)
+            if str(r.get("symbol", "")).upper() in wanted
+        ]
+        if _symbols_covered(hot_rows, wanted):
+            hot_rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
+            return hot_rows
+        recent_rows = [
+            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
+            if str(r.get("symbol", "")).upper() in wanted
+        ]
+        if _symbols_covered(recent_rows, wanted):
+            recent_rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
+            return recent_rows
+    rows = _recent_rows(data_dir, target_date=target_date)
     if wanted:
         rows = [r for r in rows if str(r.get("symbol", "")).upper() in wanted]
     rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
@@ -219,32 +287,147 @@ def read_ticks(
 
 
 def _recent_rows(data_dir: Path, *, target_date: date) -> list[dict]:
+    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    disk_rows = _read_partition(data_dir, target_date.isoformat())
+    return _dedupe_rows(disk_rows + hot_rows)
+
+
+def _hot_rows(data_dir: Path, *, target_date: date) -> list[dict]:
     key = str(data_dir)
     ds = target_date.isoformat()
     with _lock:
         ring_rows = [dict(r) for r in _rings.get(key, []) if r.get("trade_date") == ds]
         buffered = [dict(r) for r in _buffers.get(key, []) if r.get("trade_date") == ds]
-    disk_rows = _read_partition(data_dir, ds)
-    return _dedupe_rows(disk_rows + ring_rows + buffered)
+    return _dedupe_rows(ring_rows + buffered)
+
+
+def _symbols_covered(rows: list[dict], wanted: set[str]) -> bool:
+    if not wanted:
+        return bool(rows)
+    got = {str(r.get("symbol", "")).upper() for r in rows}
+    return wanted.issubset(got)
+
+
+def _read_recent_partition(data_dir: Path, ds: str, *, max_files: int) -> list[dict]:
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    if not base.exists():
+        return []
+    paths = _recent_partition_paths(base, max_files=max_files)
+    meta = _partition_meta(paths)
+    rows, _ = _read_parquet_paths(paths, base, meta)
+    return rows
+
+
+def _recent_partition_paths(base: Path, *, max_files: int) -> list[Path]:
+    paths = []
+    for path in base.rglob("*.parquet"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        paths.append((stat.st_mtime_ns, path))
+    paths.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in paths[:max_files]]
 
 
 def _read_partition(data_dir: Path, ds: str) -> list[dict]:
     base = data_dir / "quote_ticks" / f"date={ds}"
     if not base.exists():
         return []
-    paths = list(base.rglob("*.parquet"))
+    paths = sorted(base.rglob("*.parquet"))
     if not paths:
         return []
+    meta = _partition_meta(paths)
+    cache_key = (str(data_dir), ds)
+    with _partition_cache_lock:
+        cached = _partition_cache.get(cache_key)
+        cached_meta = cached.get("meta") if cached else None
+        cached_rows = cached.get("rows") if cached else None
+        if cached_meta == meta and isinstance(cached_rows, list):
+            return [dict(row) for row in cached_rows]
+        if (
+            isinstance(cached_meta, dict)
+            and isinstance(cached_rows, list)
+            and _meta_is_append_only(cached_meta, meta)
+        ):
+            known_paths = set(cached_meta)
+            rows = [dict(row) for row in cached_rows]
+            read_paths = [Path(p) for p in meta if p not in known_paths]
+        else:
+            rows = []
+            read_paths = [Path(p) for p in meta]
+
+    new_rows, read_meta = _read_parquet_paths(read_paths, base, meta)
+    rows.extend(new_rows)
+    cached_meta_for_write = (
+        cached_meta if isinstance(cached_meta, dict) and _meta_is_append_only(cached_meta, meta) else {}
+    )
+    cached_meta_for_write = {**cached_meta_for_write, **read_meta}
+    with _partition_cache_lock:
+        _partition_cache[cache_key] = {
+            "meta": cached_meta_for_write,
+            "rows": [dict(row) for row in rows],
+        }
+    return [dict(row) for row in rows]
+
+
+def _partition_meta(paths: list[Path]) -> dict[str, tuple[int, int]]:
+    meta: dict[str, tuple[int, int]] = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        meta[str(path)] = (stat.st_mtime_ns, stat.st_size)
+    return meta
+
+
+def _meta_is_append_only(
+    cached_meta: dict[str, tuple[int, int]],
+    current_meta: dict[str, tuple[int, int]],
+) -> bool:
+    if len(current_meta) < len(cached_meta):
+        return False
+    for path, cached_sig in cached_meta.items():
+        if current_meta.get(path) != cached_sig:
+            return False
+    return True
+
+
+def _read_parquet_paths(
+    paths: list[Path],
+    base: Path,
+    meta: dict[str, tuple[int, int]],
+) -> tuple[list[dict], dict[str, tuple[int, int]]]:
+    if not paths:
+        return [], {}
+    frames = []
+    read_meta: dict[str, tuple[int, int]] = {}
+    for path in paths:
+        try:
+            frames.append(pl.read_parquet(str(path)))
+            key = str(path)
+            if key in meta:
+                read_meta[key] = meta[key]
+        except Exception as e:
+            logger.warning("quote_ticks 读取失败(%s): %s", path, e)
+    if not frames:
+        return [], read_meta
     try:
-        frames = [pl.read_parquet(str(p)) for p in paths]
         df = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
-        return [
-            _json_safe(row)
-            for row in df.iter_rows(named=True)
-        ]
+        return [_json_safe(row) for row in df.iter_rows(named=True)], read_meta
     except Exception as e:
-        logger.warning("quote_ticks 读取失败(%s): %s", base, e)
-        return []
+        logger.warning("quote_ticks 合并失败(%s): %s", base, e)
+        return [], {}
+
+
+def _quote_tick_frame(rows: list[dict]) -> pl.DataFrame:
+    """用固定 schema 构造 quote_ticks DataFrame, 避免全市场批次类型推断漂移。"""
+    return pl.DataFrame(
+        rows,
+        schema_overrides=QUOTE_TICK_SCHEMA_OVERRIDES,
+        infer_schema_length=None,
+    )
 
 
 def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | None:

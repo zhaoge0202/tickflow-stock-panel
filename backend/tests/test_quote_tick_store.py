@@ -4,7 +4,10 @@ import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import polars as pl
+
 from app.services import quote_tick_store
+from app.services.quote_service import QuoteService
 
 CN = ZoneInfo("Asia/Shanghai")
 TRADE_DATE = date(2026, 7, 8)
@@ -98,3 +101,73 @@ def test_latest_can_read_historical_date_without_duplicate_rows(tmp_path):
 
     assert latest_7[0]["last_price"] == 9.9
     assert [row["last_price"] for row in ticks_8] == [10.1]
+
+
+def test_quote_tick_store_writes_when_late_numeric_columns_appear(tmp_path):
+    rows = [
+        {
+            "symbol": f"000{i:03d}.SZ",
+            "last_price": 10 + i / 100,
+            "timestamp": _ms(10, 0, min(i % 60, 59)),
+            "amount": None,
+            "bid_depth_amount": None,
+        }
+        for i in range(120)
+    ]
+    rows.append({
+        "symbol": "300750.SZ",
+        "last_price": 319.1,
+        "timestamp": _ms(10, 3, 0),
+        "amount": 319_108_120.0,
+        "bid_depth_amount": 319_108_120.0,
+    })
+
+    quote_tick_store.append_many(tmp_path, rows, source="tdxapi", force_flush=True)
+
+    latest = quote_tick_store.latest(tmp_path, ["300750.SZ"], target_date=TRADE_DATE)
+    assert latest[0]["amount"] == 319_108_120.0
+    assert latest[0]["bid_depth_amount"] == 319_108_120.0
+
+
+def test_quote_service_realtime_frames_write_late_numeric_columns():
+    records = [
+        {
+            "symbol": f"000{i:03d}.SZ",
+            "name": f"测试{i}",
+            "last_price": 10 + i / 100,
+            "open": None,
+            "high": None,
+            "low": None,
+            "volume": None,
+            "amount": None,
+            "prev_close": None,
+            "change_pct": None,
+            "change_amount": None,
+            "amplitude": None,
+            "turnover_rate": None,
+        }
+        for i in range(120)
+    ]
+    records.append({
+        "symbol": "300750.SZ",
+        "name": "宁德时代",
+        "last_price": 319.1,
+        "open": 318.0,
+        "high": 321.0,
+        "low": 317.0,
+        "volume": 1_000_000.0,
+        "amount": 319_108_120.0,
+        "prev_close": 318.0,
+        "change_pct": 0.00345,
+        "change_amount": 1.1,
+        "amplitude": 0.0125,
+        "turnover_rate": 0.8,
+    })
+
+    daily = QuoteService._build_daily(records)
+    extra = QuoteService._build_quote_extra(records)
+
+    daily_row = daily.filter(pl.col("symbol") == "300750.SZ").row(0, named=True)
+    extra_row = extra.filter(pl.col("symbol") == "300750.SZ").row(0, named=True)
+    assert daily_row["amount"] == 319_108_120.0
+    assert extra_row["change_amount"] == 1.1

@@ -38,6 +38,16 @@ from app.market_time import cn_now, cn_today
 
 logger = logging.getLogger(__name__)
 
+REALTIME_TEXT_FIELDS = {"symbol", "name", "session"}
+REALTIME_NUMERIC_FIELDS = {
+    "last_price", "prev_close", "open", "high", "low", "volume", "amount",
+    "change_pct", "change_amount", "amplitude", "turnover_rate",
+}
+REALTIME_RECORD_SCHEMA_OVERRIDES = {
+    **{field: pl.Utf8 for field in REALTIME_TEXT_FIELDS},
+    **{field: pl.Float64 for field in REALTIME_NUMERIC_FIELDS},
+}
+
 # Webhook(飞书等)投递专用线程池 —— 与行情轮询线程隔离。
 # send_feishu 内置重试(最坏 ~3x5s 超时 + 退避), 若在 _poll_loop 上同步投递,
 # webhook 慢/宕机会逐条累加, 拖垮整条实时行情+告警轮询。这里 fire-and-forget,
@@ -57,6 +67,15 @@ def _is_trade_price_record(record: dict) -> bool:
         return float(record.get("last_price") or record.get("close") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _realtime_records_frame(records: list[dict]) -> pl.DataFrame:
+    """用固定 schema 构造实时行情 DataFrame, 避免全市场批次类型推断漂移。"""
+    return pl.DataFrame(
+        records,
+        schema_overrides=REALTIME_RECORD_SCHEMA_OVERRIDES,
+        infer_schema_length=None,
+    )
 
 
 class QuoteSubscriber:
@@ -910,7 +929,7 @@ class QuoteService:
         records = [r for r in records if _is_trade_price_record(r)]
         if not records:
             return pl.DataFrame()
-        df = pl.DataFrame(records)
+        df = _realtime_records_frame(records)
         cols_map = {
             "symbol": "symbol",
             "last_price": "close",
@@ -950,7 +969,7 @@ class QuoteService:
         records = [r for r in records if _is_trade_price_record(r)]
         if not records:
             return pl.DataFrame()
-        df = pl.DataFrame(records)
+        df = _realtime_records_frame(records)
         keep = [c for c in [
             "symbol", "prev_close", "change_pct", "change_amount",
             "amplitude", "turnover_rate",
@@ -969,7 +988,7 @@ class QuoteService:
         """
         if not records:
             return pl.DataFrame()
-        df = pl.DataFrame(records)
+        df = _realtime_records_frame(records)
         keep = [c for c in [
             "symbol", "name", "last_price", "prev_close", "open", "high", "low",
             "volume", "amount", "change_pct", "change_amount", "amplitude", "timestamp", "session",
