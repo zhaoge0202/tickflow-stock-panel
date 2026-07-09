@@ -331,6 +331,7 @@ export interface MarketSnapshotRow {
   volume?: number | null
   turnover_rate?: number | null
   vol_ratio_5d?: number | null
+  realtime_vol_ratio?: number | null
   total_shares?: number | null
   float_shares?: number | null
   market_cap?: number | null

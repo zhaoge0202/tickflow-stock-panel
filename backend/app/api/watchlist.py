@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date, time as dt_time
 
 import polars as pl
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from app.market_time import cn_now, cn_today
 from app.services import watchlist
 from app.services.symbols import normalize_symbol
 
@@ -86,7 +88,7 @@ _WATCHLIST_COLS = [
     "symbol", "close", "change_pct", "change_amount", "amount",
     "turnover_rate",
     "amplitude", "annual_vol_20d",
-    "vol_ratio_5d",
+    "vol_ratio_5d", "realtime_vol_ratio",
     "ma5", "ma10", "ma20", "ma60",
     "vol_ma5", "vol_ma10",
     "high_60d", "low_60d",
@@ -171,6 +173,7 @@ def watchlist_enriched(
     df = df.with_columns(
         pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name")
     )
+    df = _attach_realtime_vol_ratio(df, repo, stock_symbols, as_of)
 
     # 选择内置需要的列
     keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares"] if c in df.columns]
@@ -243,6 +246,118 @@ def watchlist_enriched(
     rows = df.to_dicts()
     elapsed = (time.perf_counter() - t0) * 1000
     return {"rows": rows, "as_of": str(as_of) if as_of else None, "elapsed_ms": elapsed}
+
+
+def _attach_realtime_vol_ratio(
+    df: pl.DataFrame,
+    repo,
+    symbols: list[str],
+    as_of: date | str | None,
+) -> pl.DataFrame:
+    """给自选页补盘中量比展示值，不改变策略使用的 vol_ratio_5d 口径。"""
+    if df.is_empty() or "volume" not in df.columns or "symbol" not in df.columns:
+        return df
+
+    as_of_date = _coerce_date(as_of)
+    elapsed = _trading_day_elapsed_fraction(as_of_date)
+    if as_of_date is None or elapsed is None or elapsed <= 0:
+        return _ensure_realtime_vol_ratio_null(df)
+
+    avg_by_symbol = _load_prev5_volume_avg(repo, symbols, as_of_date)
+    if not avg_by_symbol:
+        return _ensure_realtime_vol_ratio_null(df)
+
+    avg_df = pl.DataFrame({
+        "symbol": list(avg_by_symbol.keys()),
+        "_prev5_vol_avg": list(avg_by_symbol.values()),
+    })
+    df = df.join(avg_df, on="symbol", how="left")
+    df = df.with_columns(
+        pl.when(
+            pl.col("volume").is_not_null()
+            & pl.col("_prev5_vol_avg").is_not_null()
+            & (pl.col("_prev5_vol_avg") > 0)
+        )
+        .then(pl.col("volume").cast(pl.Float64) / (pl.col("_prev5_vol_avg") * elapsed))
+        .otherwise(None)
+        .alias("realtime_vol_ratio")
+    )
+    return df.drop("_prev5_vol_avg")
+
+
+def _ensure_realtime_vol_ratio_null(df: pl.DataFrame) -> pl.DataFrame:
+    if "realtime_vol_ratio" in df.columns:
+        return df
+    return df.with_columns(pl.lit(None).cast(pl.Float64).alias("realtime_vol_ratio"))
+
+
+def _load_prev5_volume_avg(repo, symbols: list[str], as_of: date) -> dict[str, float]:
+    if not symbols or not hasattr(repo, "execute_all"):
+        return {}
+    unique_symbols = [s for s in dict.fromkeys(symbols) if s]
+    if not unique_symbols:
+        return {}
+
+    placeholders = ",".join("?" for _ in unique_symbols)
+    try:
+        rows = repo.execute_all(
+            f"""
+            WITH ranked AS (
+                SELECT
+                    symbol,
+                    CAST(volume AS DOUBLE) AS volume,
+                    row_number() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
+                FROM kline_daily
+                WHERE symbol IN ({placeholders}) AND date < ?
+            )
+            SELECT symbol, avg(volume) AS avg_volume
+            FROM ranked
+            WHERE rn <= 5
+            GROUP BY symbol
+            """,
+            [*unique_symbols, as_of],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("load prev5 volume avg failed: %s", e)
+        return {}
+    return {str(symbol): float(avg) for symbol, avg in rows if avg not in (None, 0)}
+
+
+def _trading_day_elapsed_fraction(as_of: date | None) -> float | None:
+    """A 股当日已交易进度；非当天按完整交易日处理。"""
+    if as_of is None:
+        return None
+    if as_of != cn_today():
+        return 1.0
+
+    t = cn_now().time()
+    minutes = _minutes_since_open(t)
+    if minutes <= 0:
+        return None
+    return min(minutes / 240.0, 1.0)
+
+
+def _minutes_since_open(t: dt_time) -> int:
+    if t < dt_time(9, 30):
+        return 0
+    if t < dt_time(11, 30):
+        return (t.hour - 9) * 60 + t.minute - 30
+    if t < dt_time(13, 0):
+        return 120
+    if t < dt_time(15, 0):
+        return 120 + (t.hour - 13) * 60 + t.minute
+    return 240
+
+
+def _coerce_date(value: date | str | None) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:

@@ -30,7 +30,7 @@ FACTOR_COLUMNS: list[dict] = [
     {"id": "rsi_24",       "label": "RSI(24)",     "group": "超买超卖", "desc": "24日相对强弱指标"},
     {"id": "annual_vol_20d","label": "20日波动率", "group": "波动率",   "desc": "20日年化波动率"},
     {"id": "atr_14",       "label": "ATR(14)",     "group": "波动率",   "desc": "14日平均真实波幅"},
-    {"id": "vol_ratio_5d", "label": "量比(5日)",   "group": "量价",     "desc": "当日成交量 / 5日均量"},
+    {"id": "vol_ratio_5d", "label": "5日放量倍数", "group": "量价",     "desc": "当日成交量 / 5日均量"},
     {"id": "turnover_rate", "label": "换手率",     "group": "量价",     "desc": "当日换手率"},
     {"id": "macd_hist",    "label": "MACD柱",      "group": "趋势",     "desc": "MACD柱状图值"},
     {"id": "kdj_k",        "label": "KDJ-K",       "group": "趋势",     "desc": "KDJ指标K值"},

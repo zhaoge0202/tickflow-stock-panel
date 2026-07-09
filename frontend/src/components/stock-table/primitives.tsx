@@ -72,14 +72,16 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
       return <td key={col.id} className={`${numCls} text-secondary`}>{fmtBigNum(r.amount)}</td>
     case 'float_val':
       return <td key={col.id} className={`${numCls} text-secondary`}>{r.float_shares && r.close ? fmtBigNum(r.float_shares * r.close) : '—'}</td>
-    case 'vol_ratio':
+    case 'vol_ratio': {
+      const volRatio = r.realtime_vol_ratio ?? r.vol_ratio_5d
       return (
         <td key={col.id} className={numCls}>
-          <span className={r.vol_ratio_5d >= 2 ? 'text-accent font-medium' : ''}>
-            {fmtMaybePrice(r.vol_ratio_5d)}
+          <span className={volRatio >= 2 ? 'text-accent font-medium' : ''}>
+            {fmtMaybePrice(volRatio)}
           </span>
         </td>
       )
+    }
     case 'annual_vol':
       return <td key={col.id} className={numCls}>{r.annual_vol_20d != null ? fmtPct(r.annual_vol_20d) : '—'}</td>
     // 均线

@@ -485,7 +485,7 @@ function DecisionDetail({ item, loading, onChanged }: {
               <div className="grid grid-cols-3 gap-2">
                 <Metric label="成交额" value={fmtBigNum(item.amount)} />
                 <Metric label="VWAP 偏离" value={fmtPct(frame?.vwap_distance)} />
-                <Metric label="量比" value={frame?.volume_ratio == null ? '—' : frame.volume_ratio.toFixed(2)} />
+                <Metric label="5日放量" value={frame?.volume_ratio == null ? '—' : frame.volume_ratio.toFixed(2)} />
                 <Metric label="最近支撑" value={fmtPrice(frame?.nearest_support)} />
                 <Metric label="最近压力" value={fmtPrice(frame?.nearest_resistance)} />
                 <Metric label="数据源" value={frame?.source || 'tdxapi'} />

@@ -34,7 +34,7 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:turnover', source: { type: 'builtin', key: 'turnover' }, label: '换手率', visible: false, align: 'right' },
   { id: 'builtin:amount', source: { type: 'builtin', key: 'amount' }, label: '成交额', visible: true, align: 'right' },
   { id: 'builtin:float_val', source: { type: 'builtin', key: 'float_val' }, label: '流通值', visible: false, align: 'right' },
-  { id: 'builtin:vol_ratio', source: { type: 'builtin', key: 'vol_ratio' }, label: '量比', visible: true, align: 'right' },
+  { id: 'builtin:vol_ratio', source: { type: 'builtin', key: 'vol_ratio' }, label: '5日放量', visible: true, align: 'right' },
   { id: 'builtin:annual_vol', source: { type: 'builtin', key: 'annual_vol' }, label: '年化波动', visible: false, align: 'right' },
   // 均线
   { id: 'builtin:ma5', source: { type: 'builtin', key: 'ma5' }, label: 'MA5', visible: false, align: 'right' },

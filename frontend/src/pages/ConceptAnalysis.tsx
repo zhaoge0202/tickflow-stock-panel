@@ -700,7 +700,7 @@ function ConceptFocus({ stat, onStockClick }: { stat: ConceptStat | null; onStoc
             <MiniStat label="中位" value={stat.medianPct != null ? fmtPct(stat.medianPct) : '—'} cls={priceColorClass(stat.medianPct)} />
             <MiniStat label="强势" value={`${stat.strongCount}`} cls="text-bull" />
             <MiniStat label="弱势" value={`${stat.weakCount}`} cls="text-bear" />
-            <MiniStat label="量比" value={stat.avgVolRatio != null ? stat.avgVolRatio.toFixed(2) : '—'} cls="text-foreground" />
+            <MiniStat label="5日放量" value={stat.avgVolRatio != null ? stat.avgVolRatio.toFixed(2) : '—'} cls="text-foreground" />
           </div>
         </div>
       </div>
@@ -720,7 +720,7 @@ function ConceptFocus({ stat, onStockClick }: { stat: ConceptStat | null; onStoc
               <th className="px-4 py-2 font-medium">换手率</th>
               <th className="px-4 py-2 font-medium">成交额</th>
               <th className="px-4 py-2 font-medium">流通市值</th>
-              <th className="px-4 py-2 font-medium">量比</th>
+              <th className="px-4 py-2 font-medium">5日放量</th>
               <th className="px-4 py-2 font-medium">龙头分</th>
             </tr>
           </thead>
@@ -791,14 +791,14 @@ function ScoreExplain({ stock }: { stock?: EnrichedStock }) {
     <div className="rounded-xl border border-border/60 bg-surface p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-medium text-foreground">主龙头评分拆解</span>
-        <span className="text-[11px] text-muted">涨幅 / 换手 / 成交 / 市值 / 量比 / 连板</span>
+        <span className="text-[11px] text-muted">涨幅 / 换手 / 成交 / 市值 / 5日放量 / 连板</span>
       </div>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
         <Part label="动能" value={parts.momentum} cls="bg-rose-400" />
         <Part label="换手" value={parts.turnover} cls="bg-orange-400" />
         <Part label="成交" value={parts.amount} cls="bg-blue-400" />
         <Part label="市值" value={parts.cap} cls="bg-cyan-400" />
-        <Part label="量比" value={parts.volume} cls="bg-purple-400" />
+        <Part label="5日放量" value={parts.volume} cls="bg-purple-400" />
         <Part label="连板" value={parts.boards} cls="bg-amber-300" />
       </div>
     </div>

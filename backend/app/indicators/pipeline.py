@@ -118,7 +118,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     # ── 量价 ─────────────────────────────────────────────
     "vol_ma5":                 "5日成交均量",
     "vol_ma10":                "10日成交均量",
-    "vol_ratio_5d":            "量比 (成交量/5日均量)",
+    "vol_ratio_5d":            "5日放量倍数 (成交量/5日均量)",
     # ── 极值 ─────────────────────────────────────────────
     "high_60d":                "60日最高价",
     "low_60d":                 "60日最低价",
@@ -146,7 +146,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "signal_n_day_low":        "创60日新低",
     "signal_boll_breakout_upper": "突破布林上轨",
     "signal_boll_breakdown_lower": "跌破布林下轨",
-    "signal_volume_surge":     "放量 (量比≥2.0)",
+    "signal_volume_surge":     "放量 (5日放量倍数≥2.0)",
     "signal_limit_up":         "涨停",
     "signal_limit_down":       "跌停",
     "signal_limit_down_recovery": "跌停翘板(跌停后回升)",
@@ -444,7 +444,7 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
             (3 * pl.col("kdj_k") - 2 * pl.col("kdj_d")).alias("kdj_j"),
         ])
 
-    # Pass 4: ATR + 量比 + 动量 + 波动 + 涨跌幅 + 涨跌额 + 振幅
+    # Pass 4: ATR + 5日放量倍数 + 动量 + 波动 + 涨跌幅 + 涨跌额 + 振幅
     if "atr_14" in want:
         df = df.with_columns(
             pl.col("_tr").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("atr_14"),
@@ -1370,7 +1370,7 @@ def compute_enriched_today(
             .alias(f"rsi_{n}"),
         ])
 
-    # ---- 量比 ----
+    # ---- 5日放量倍数 ----
     vol_ma5 = (pl.col("_vol_ma5_partial_sum") + pl.col("volume")) / 5
     vol_ma10 = (pl.col("_vol_ma10_partial_sum") + pl.col("volume")) / 10
     df = df.with_columns([

@@ -18,7 +18,7 @@ Object.assign(FIELD_LABEL, {
   change_pct: '涨跌幅', consecutive_limit_ups: '连板',
   momentum_60d: '60D动量', turnover_rate: '换手率',
   rsi_14: 'RSI14', rsi_6: 'RSI6', rsi_24: 'RSI24',
-  vol_ratio_5d: '量比', vol_ratio_20d: '20日量比',
+  vol_ratio_5d: '5日放量倍数', vol_ratio_20d: '20日放量倍数',
   macd_dif: 'MACD-DIF', macd_dea: 'MACD-DEA', macd_hist: 'MACD柱',
   boll_upper: '布林上轨', boll_lower: '布林下轨',
 })

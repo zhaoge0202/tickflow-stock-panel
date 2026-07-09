@@ -151,7 +151,7 @@ const FIELD_LABELS: Record<string, string> = {
   boll_upper: '布林上轨', boll_lower: '布林下轨',
   kdj_k: 'KDJ-K', kdj_d: 'KDJ-D', kdj_j: 'KDJ-J',
   rsi_6: 'RSI6', rsi_14: 'RSI14', rsi_24: 'RSI24',
-  vol_ratio_5d: '5日量比', vol_ratio_20d: '20日量比',
+  vol_ratio_5d: '5日放量倍数', vol_ratio_20d: '20日放量倍数',
   vol_ma5: '5日均量', vol_ma10: '10日均量',
   high_60d: '60日最高', low_60d: '60日最低',
   momentum_5d: '5日动量', momentum_20d: '20日动量', momentum_60d: '60日动量',
