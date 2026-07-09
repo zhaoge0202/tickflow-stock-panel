@@ -146,6 +146,48 @@ def test_get_realtime_with_symbols_survives_codes_failure(monkeypatch):
     assert rows[0]["name"] is None
 
 
+def test_get_realtime_maps_preopen_auction_reference(monkeypatch):
+    def fake_codes(kwargs):
+        return {"codes": [{"code": "002491", "name": "通鼎互联", "exchange": "sz"}]}
+
+    def fake_quote(kwargs):
+        assert kwargs["json"]["codes"] == ["sz002491"]
+        return [
+            {
+                "Exchange": 0,
+                "Code": "002491",
+                "K": {"Last": 22610, "Open": 0, "High": 0, "Low": 0, "Close": 0},
+                "TotalHand": 0,
+                "Amount": 5.877471754111438e-39,
+                "ServerTime": "9203601",
+                "BuyLevel": [
+                    {"Buy": True, "Price": 22660, "Number": 1111},
+                    {"Buy": True, "Price": 0, "Number": 930},
+                ],
+                "SellLevel": [
+                    {"Buy": False, "Price": 22660, "Number": 1111},
+                    {"Buy": False, "Price": 0, "Number": 0},
+                ],
+            },
+        ]
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/codes"): fake_codes,
+        ("POST", "/api/batch-quote"): fake_quote,
+    })
+
+    row = TDXAPIProvider().get_realtime(symbols=["002491.SZ"])[0]
+
+    assert row["price_type"] == "auction_reference"
+    assert row["market_phase"] == "preopen_auction"
+    assert row["last_price"] == 22.66
+    assert row["auction_price"] == 22.66
+    assert row["auction_matched_volume"] == 1111
+    assert row["auction_unmatched_side"] == "buy"
+    assert row["auction_unmatched_volume"] == 930
+    assert row["amount"] is None
+
+
 def test_get_trade_ticks_normalizes_recent_rows(monkeypatch):
     def fake_trade(kwargs):
         assert kwargs["params"] == {"code": "sz002491", "date": "20260707"}

@@ -37,7 +37,14 @@ def build_latest_frames(
         return []
 
     ticks_by_symbol: dict[str, list[dict]] = {}
+    auction_by_symbol: dict[str, dict] = {}
     for row in quote_tick_store.read_ticks(data_dir, target_date=target_date, symbols=sorted(wanted)):
+        if _is_auction_tick(row):
+            sym = row["symbol"]
+            prev = auction_by_symbol.get(sym)
+            if prev is None or _row_ts(row) >= _row_ts(prev):
+                auction_by_symbol[sym] = row
+            continue
         ticks_by_symbol.setdefault(row["symbol"], []).append(row)
 
     return build_frames_from_tick_rows(
@@ -45,6 +52,7 @@ def build_latest_frames(
         repo,
         ticks_by_symbol=ticks_by_symbol,
         latest_by_symbol=latest_by_symbol,
+        auction_by_symbol=auction_by_symbol,
         symbols=sorted(wanted),
         target_date=target_date,
         include_levels=include_levels,
@@ -58,6 +66,7 @@ def build_frames_from_tick_rows(
     *,
     ticks_by_symbol: dict[str, list[dict]],
     latest_by_symbol: dict[str, dict] | None = None,
+    auction_by_symbol: dict[str, dict] | None = None,
     symbols: list[str] | None = None,
     target_date: date | None = None,
     include_levels: bool = True,
@@ -69,9 +78,11 @@ def build_frames_from_tick_rows(
     截止当时的 ticks, 避免用当前最新价污染历史判断。
     """
     latest_by_symbol = latest_by_symbol or {}
+    auction_by_symbol = auction_by_symbol or {}
     wanted = set(symbols or ticks_by_symbol.keys() or latest_by_symbol.keys())
     wanted.update(ticks_by_symbol.keys())
     wanted.update(latest_by_symbol.keys())
+    wanted.update(auction_by_symbol.keys())
     target_date = target_date or cn_today()
     enriched_by_symbol = _enriched_map(repo)
     name_map = _safe_name_map(repo, sorted(wanted))
@@ -87,6 +98,7 @@ def build_frames_from_tick_rows(
             name=(name_map.get(symbol) or latest.get("name")) if latest else name_map.get(symbol),
             latest=latest,
             ticks=ticks_by_symbol.get(symbol, []),
+            auction=auction_by_symbol.get(symbol) or (latest if _is_auction_tick(latest) else None),
             enriched=enriched,
             position=positions.get(symbol),
             levels=levels,
@@ -129,6 +141,7 @@ def _build_one(
     name: str | None,
     latest: dict | None,
     ticks: list[dict],
+    auction: dict | None,
     enriched: dict,
     position: dict | None,
     levels: dict,
@@ -161,6 +174,7 @@ def _build_one(
         support=nearest_support,
         resistance=nearest_resistance,
         position=pos,
+        auction=auction,
     )
     support_distance = _distance(latest_price, nearest_support)
     resistance_distance = _distance(latest_price, nearest_resistance)
@@ -208,6 +222,7 @@ def _build_one(
         "reason_text": reason_text,
         "quote_freshness": freshness,
         "source": (latest or {}).get("source") or "tdxapi",
+        **_auction_summary(auction, prev_close),
         "position": pos,
         "levels": levels,
         **trade_summary,
@@ -227,9 +242,22 @@ def _signals(
     support: float | None,
     resistance: float | None,
     position: dict | None,
+    auction: dict | None = None,
 ) -> tuple[list[str], list[str]]:
     signals: list[str] = []
     risks: list[str] = []
+    auction_change = _num((auction or {}).get("auction_change_pct"))
+    auction_unmatched_side = (auction or {}).get("auction_unmatched_side")
+    auction_unmatched_volume = _num((auction or {}).get("auction_unmatched_volume")) or 0
+    if auction_change is not None:
+        if auction_change >= 0.02:
+            signals.append("auction_strength")
+        if auction_change <= -0.02:
+            risks.append("auction_weakness")
+    if auction_unmatched_side == "buy" and auction_unmatched_volume > 0:
+        signals.append("auction_buy_imbalance")
+    if auction_unmatched_side == "sell" and auction_unmatched_volume > 0:
+        risks.append("auction_sell_imbalance")
     if vwap:
         if latest_price > vwap * 1.002:
             signals.append("vwap_breakout")
@@ -301,6 +329,14 @@ def _reason_text(
         parts.append("逐笔摘要显示大单净流入")
     if "large_order_selloff" in risk_flags:
         parts.append("逐笔摘要显示大单卖出压力")
+    if "auction_strength" in active_signals:
+        parts.append("集合竞价参考价明显高于昨收")
+    if "auction_buy_imbalance" in active_signals:
+        parts.append("集合竞价买方未匹配量占优")
+    if "auction_weakness" in risk_flags:
+        parts.append("集合竞价参考价明显低于昨收")
+    if "auction_sell_imbalance" in risk_flags:
+        parts.append("集合竞价卖方未匹配量占优")
     if "vwap_breakout" in active_signals and vwap:
         parts.append(f"当前价高于 VWAP {((price - vwap) / vwap) * 100:.1f}%")
     if "vwap_breakdown" in active_signals and vwap:
@@ -334,8 +370,16 @@ def _score(signals: list[str], risks: list[str], position: dict | None, latest: 
         score += 20
     if "large_order_net_inflow" in signals:
         score += 20
+    if "auction_strength" in signals:
+        score += 20
+    if "auction_buy_imbalance" in signals:
+        score += 10
     if "large_order_selloff" in risks:
         score -= 30
+    if "auction_weakness" in risks:
+        score -= 20
+    if "auction_sell_imbalance" in risks:
+        score -= 10
     if "near_resistance" in risks:
         score -= 10
     if latest and latest.get("ingest_ts") and int(time.time() * 1000) - int(latest["ingest_ts"]) > 60_000:
@@ -407,6 +451,38 @@ def _safe_name_map(repo, symbols: list[str]) -> dict[str, str]:
         return repo.get_name_map(symbols)
     except Exception:
         return {}
+
+
+def _auction_summary(auction: dict | None, prev_close: float | None) -> dict:
+    if not auction:
+        return {
+            "auction_price": None,
+            "auction_change_pct": None,
+            "auction_matched_volume": None,
+            "auction_unmatched_side": None,
+            "auction_unmatched_volume": None,
+        }
+    price = _num(auction.get("auction_price")) or _num(auction.get("last_price"))
+    change_pct = _num(auction.get("auction_change_pct"))
+    if change_pct is None and price is not None and prev_close:
+        change_pct = (price - prev_close) / prev_close
+    return {
+        "auction_price": price,
+        "auction_change_pct": change_pct,
+        "auction_matched_volume": _num(auction.get("auction_matched_volume")),
+        "auction_unmatched_side": auction.get("auction_unmatched_side"),
+        "auction_unmatched_volume": _num(auction.get("auction_unmatched_volume")),
+    }
+
+
+def _is_auction_tick(row: dict | None) -> bool:
+    return bool(row and row.get("price_type") == "auction_reference")
+
+
+def _row_ts(row: dict | None) -> int:
+    if not row:
+        return 0
+    return int(row.get("event_ts") or row.get("ingest_ts") or 0)
 
 
 def _vwap(ticks: list[dict], amount: float | None, volume: float | None) -> float | None:

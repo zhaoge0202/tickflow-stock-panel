@@ -50,6 +50,35 @@ def test_signal_frame_exposes_minute_and_trade_summary(monkeypatch, tmp_path):
     assert calls == 1
 
 
+def test_signal_frame_keeps_auction_reference_as_separate_signal(tmp_path):
+    quote_tick_store.append_many(tmp_path, [
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.2,
+            "prev_close": 10.0,
+            "timestamp": _ms(8, 9, 20),
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "auction_price": 10.2,
+            "auction_matched_volume": 1200,
+            "auction_unmatched_side": "buy",
+            "auction_unmatched_volume": 800,
+            "auction_change_pct": 0.02,
+        },
+        {"symbol": "002491.SZ", "last_price": 10.0, "prev_close": 10.0, "open": 10.0, "high": 10.0, "low": 10.0, "volume": 100, "amount": 100_000, "timestamp": _ms(8, 9, 30)},
+        {"symbol": "002491.SZ", "last_price": 10.1, "prev_close": 10.0, "open": 10.0, "high": 10.1, "low": 10.0, "volume": 110, "amount": 111_000, "timestamp": _ms(8, 9, 31)},
+    ], source="tdxapi", force_flush=True)
+
+    frame = signal_frame.build_detail(tmp_path, None, "002491.SZ", target_date=datetime(2026, 7, 8, tzinfo=CN).date())
+
+    assert frame is not None
+    assert frame["auction_price"] == 10.2
+    assert frame["auction_unmatched_side"] == "buy"
+    assert "auction_strength" in frame["active_signals"]
+    assert "auction_buy_imbalance" in frame["active_signals"]
+    assert frame["open_range_low"] == 10.0
+
+
 def test_intraday_replay_uses_signal_frame_rules_and_outputs_returns(tmp_path):
     quote_tick_store.append_many(tmp_path, [
         {"symbol": "002491.SZ", "last_price": 10.0, "prev_close": 9.8, "open": 10.0, "high": 10.0, "low": 9.9, "volume": 100, "amount": 100_000, "timestamp": _ms(8, 9, 30)},

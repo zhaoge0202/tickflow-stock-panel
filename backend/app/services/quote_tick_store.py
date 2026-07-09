@@ -125,6 +125,9 @@ def bars(
     ]
     if not rows:
         return []
+    trade_rows = [r for r in rows if r.get("price_type") != "auction_reference"]
+    if trade_rows:
+        rows = trade_rows
     df = pl.DataFrame(rows)
     if "event_ts" not in df.columns or "last_price" not in df.columns:
         return []
@@ -216,9 +219,11 @@ def _read_partition(data_dir: Path, ds: str) -> list[dict]:
     if not paths:
         return []
     try:
+        frames = [pl.read_parquet(str(p)) for p in paths]
+        df = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
         return [
             _json_safe(row)
-            for row in pl.read_parquet([str(p) for p in paths]).iter_rows(named=True)
+            for row in df.iter_rows(named=True)
         ]
     except Exception as e:
         logger.warning("quote_ticks 读取失败(%s): %s", base, e)
@@ -236,7 +241,13 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
     event_dt = datetime.fromtimestamp(event_ts / 1000, tz=CN_TZ)
     raw = {
         k: v for k, v in record.items()
-        if k not in {"symbol", "name", "last_price", "close", "prev_close", "open", "high", "low", "volume", "amount", "change_pct", "timestamp"}
+        if k not in {
+            "symbol", "name", "last_price", "close", "prev_close", "open", "high", "low",
+            "volume", "amount", "change_pct", "timestamp", "market_phase", "price_type",
+            "auction_price", "auction_matched_volume", "auction_unmatched_side",
+            "auction_unmatched_volume", "auction_change_pct", "bid1", "ask1", "bid1_vol",
+            "ask1_vol",
+        }
     }
     return {
         "symbol": symbol,
@@ -257,6 +268,13 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
         "ask1": _float_or_none(record.get("ask1")),
         "bid1_vol": _float_or_none(record.get("bid1_vol")),
         "ask1_vol": _float_or_none(record.get("ask1_vol")),
+        "market_phase": record.get("market_phase"),
+        "price_type": record.get("price_type") or "trade",
+        "auction_price": _float_or_none(record.get("auction_price")),
+        "auction_matched_volume": _float_or_none(record.get("auction_matched_volume")),
+        "auction_unmatched_side": record.get("auction_unmatched_side"),
+        "auction_unmatched_volume": _float_or_none(record.get("auction_unmatched_volume")),
+        "auction_change_pct": _float_or_none(record.get("auction_change_pct")),
         "raw": json.dumps(raw, ensure_ascii=False) if raw else None,
     }
 
