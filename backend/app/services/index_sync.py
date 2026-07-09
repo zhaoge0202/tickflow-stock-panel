@@ -125,6 +125,17 @@ def sync_index_instruments(
     index_parts: list[pl.DataFrame] = []
     etf_parts: list[pl.DataFrame] = []
 
+    # 0) 当前启用 tdxapi 时,先用 sidecar 补 ETF/核心指数维表。
+    if _tdxapi_enabled():
+        if pull_index:
+            index_df = _fetch_tdxapi_instruments("index")
+            if not index_df.is_empty():
+                index_parts.append(index_df)
+        if pull_etf:
+            etf_df = _fetch_tdxapi_instruments("etf")
+            if not etf_df.is_empty():
+                etf_parts.append(etf_df)
+
     # 1) 免费通道:按开关分别拉 index / etf
     if pull_index:
         index_df = _fetch_instruments_by_type("index", "index")
@@ -181,12 +192,59 @@ def sync_index_instruments(
 
 def sync_etf_instruments(repo: KlineRepository) -> int:
     """单独同步 ETF 标的维表(返回 ETF 数量)。"""
+    parts = []
+    if _tdxapi_enabled():
+        tdx_df = _fetch_tdxapi_instruments("etf")
+        if not tdx_df.is_empty():
+            parts.append(tdx_df)
     etf_df = _fetch_instruments_by_type("etf", "etf")
     if etf_df.is_empty():
+        etf_df = pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
+    elif parts:
+        etf_df = pl.concat([*parts, etf_df], how="diagonal_relaxed")
+    if etf_df.is_empty():
         return 0
+    etf_df = etf_df.unique(subset=["symbol"], keep="last").sort("symbol")
     repo.save_etf_instruments(etf_df)
     repo.refresh_index_views()
     return etf_df.height
+
+
+def _tdxapi_enabled() -> bool:
+    return "tdxapi" in {
+        preferences.get_daily_data_provider(),
+        preferences.get_realtime_data_provider(),
+        preferences.get_minute_data_provider(),
+    }
+
+
+def _fetch_tdxapi_instruments(asset_type: str) -> pl.DataFrame:
+    try:
+        from app.plugins.tdxapi.provider import TDXAPIProvider
+        provider = TDXAPIProvider()
+        try:
+            rows = provider.get_instruments(asset_type)
+        finally:
+            provider.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("tdx-api %s 维表补全跳过: %s", asset_type, e)
+        return pl.DataFrame()
+    normalized = []
+    for row in rows or []:
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+        normalized.append({
+            "symbol": str(symbol),
+            "name": row.get("name") or str(symbol),
+            "code": row.get("code") or str(symbol).split(".")[0],
+            "exchange": row.get("exchange") or str(symbol).split(".")[-1],
+            "asset_type": asset_type,
+            "source": "tdxapi",
+        })
+    if not normalized:
+        return pl.DataFrame()
+    return pl.DataFrame(normalized).unique(subset=["symbol"], keep="last").sort("symbol")
 
 
 def sync_and_persist_index_daily(

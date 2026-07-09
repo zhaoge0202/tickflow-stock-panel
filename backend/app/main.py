@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import alert_outcomes, alerts, analysis, auth as auth_api, backtest, data, decision, ext_data, financials, indices, intraday, kline, manual_positions, market_recap, monitor_rules, overview, pipeline, quote_ticks, replay, rps, screener, settings as settings_api, signal_frame, signals, stock_analysis, strategy, trade_ticks, watchlist
+from app.api import alert_outcomes, alerts, analysis, auth as auth_api, backtest, data, decision, ext_data, financials, indices, intraday, kline, manual_positions, market_breadth, market_recap, monitor_rules, overview, pipeline, quote_ticks, replay, rps, screener, settings as settings_api, signal_frame, signals, stock_analysis, strategy, trade_ticks, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -303,6 +303,7 @@ app.include_router(decision.router)
 app.include_router(manual_positions.router)
 app.include_router(quote_ticks.router)
 app.include_router(signal_frame.router)
+app.include_router(market_breadth.router)
 app.include_router(alert_outcomes.router)
 app.include_router(replay.router)
 app.include_router(rps.router)

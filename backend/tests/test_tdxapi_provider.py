@@ -121,6 +121,70 @@ def test_get_realtime_batches_and_maps_quote(monkeypatch):
     assert abs(rows[0]["change_pct"] - (0.5 / 12.0)) < 1e-12
 
 
+def test_get_realtime_maps_depth_and_activity_fields(monkeypatch):
+    def fake_codes(kwargs):
+        return {"codes": [{"code": "002491", "name": "通鼎互联", "exchange": "sz"}]}
+
+    def fake_quote(kwargs):
+        assert kwargs["json"]["codes"] == ["sz002491"]
+        return [
+            {
+                "Exchange": 0,
+                "Code": "002491",
+                "K": {"Last": 9900, "Open": 9950, "High": 10100, "Low": 9900, "Close": 10000},
+                "TotalHand": 100,
+                "Amount": 1_000_000,
+                "ServerTime": "1730617200",
+                "BuyLevel": [
+                    {"Buy": True, "Price": 9990, "Number": 100},
+                    {"Buy": True, "Price": 9980, "Number": 90},
+                    {"Buy": True, "Price": 9970, "Number": 80},
+                    {"Buy": True, "Price": 9960, "Number": 70},
+                    {"Buy": True, "Price": 9950, "Number": 60},
+                ],
+                "SellLevel": [
+                    {"Buy": False, "Price": 10010, "Number": 50},
+                    {"Buy": False, "Price": 10020, "Number": 40},
+                    {"Buy": False, "Price": 10030, "Number": 30},
+                    {"Buy": False, "Price": 10040, "Number": 20},
+                    {"Buy": False, "Price": 10050, "Number": 10},
+                ],
+                "InsideDish": 300,
+                "OuterDisc": 600,
+                "Intuition": 88,
+                "Rate": 0.8,
+                "Active1": 12,
+                "Active2": 34,
+            },
+        ]
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/codes"): fake_codes,
+        ("POST", "/api/batch-quote"): fake_quote,
+    })
+
+    row = TDXAPIProvider().get_realtime(symbols=["002491.SZ"])[0]
+
+    assert row["bid1"] == row["bid1_price"] == 9.99
+    assert row["ask1"] == row["ask1_price"] == 10.01
+    assert row["bid5_price"] == 9.95
+    assert row["ask5_vol"] == 10
+    assert abs(row["spread"] - 0.02) < 1e-12
+    assert row["spread_pct"] == row["spread"] / 10.0
+    assert row["bid_depth_vol"] == 400
+    assert row["ask_depth_vol"] == 150
+    assert row["bid_depth_amount"] > row["ask_depth_amount"]
+    assert row["depth_imbalance"] > 0
+    assert row["current_volume"] == 88
+    assert row["inside_volume"] == 300
+    assert row["outside_volume"] == 600
+    assert row["outside_inside_ratio"] == 2
+    assert row["active_net_volume"] == 300
+    assert row["speed_rate"] == 0.8
+    assert row["active1"] == 12
+    assert row["active2"] == 34
+
+
 def test_get_realtime_with_symbols_survives_codes_failure(monkeypatch):
     def fake(self, method, path, **kwargs):
         if path == "/api/codes":
@@ -185,7 +249,83 @@ def test_get_realtime_maps_preopen_auction_reference(monkeypatch):
     assert row["auction_matched_volume"] == 1111
     assert row["auction_unmatched_side"] == "buy"
     assert row["auction_unmatched_volume"] == 930
+    assert row["auction_unmatched_ratio"] == 930 / (1111 + 930)
+    assert row["auction_pressure_score"] == row["auction_unmatched_ratio"]
     assert row["amount"] is None
+
+
+def test_get_market_breadth_maps_stats_and_major_indices(monkeypatch):
+    def fake_stats(kwargs):
+        return {
+            "sh": {"total": 3, "up": 2, "down": 1, "flat": 0},
+            "sz": {"total": 3, "up": 1, "down": 2, "flat": 0},
+            "bj": {"total": 1, "up": 1, "down": 0, "flat": 0},
+            "update_time": "2026-07-08T10:00:00+08:00",
+        }
+
+    def fake_quote(kwargs):
+        assert "sh000001" in kwargs["json"]["codes"]
+        return [
+            {
+                "Exchange": 1,
+                "Code": "000001",
+                "K": {"Last": 3200000, "Open": 3205000, "High": 3210000, "Low": 3190000, "Close": 3216000},
+                "TotalHand": 10,
+                "Amount": 1000000,
+                "ServerTime": "1783485600",
+            },
+        ]
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/market-stats"): fake_stats,
+        ("POST", "/api/batch-quote"): fake_quote,
+    })
+
+    snapshot = TDXAPIProvider().get_market_breadth(major_symbols=["000001.SH"])
+
+    assert snapshot["up_count"] == 4
+    assert snapshot["down_count"] == 3
+    assert snapshot["flat_count"] == 0
+    assert snapshot["total_count"] == 7
+    assert snapshot["up_down_ratio"] == 4 / 3
+    assert snapshot["market_temperature"] == "warm"
+    assert snapshot["major_indices"][0]["symbol"] == "000001.SH"
+    assert snapshot["major_index_change_pct"] == snapshot["major_indices"][0]["change_pct"]
+
+
+def test_get_instruments_supports_tdx_etf_and_core_index(monkeypatch):
+    def fake_etf(kwargs):
+        return {
+            "list": [
+                {"code": "589020", "name": "科创半导体设备ETF鹏华", "exchange": "sh", "last_price": 3.42},
+            ],
+        }
+
+    def fake_quote(kwargs):
+        return [
+            {
+                "Exchange": 1,
+                "Code": "000001",
+                "K": {"Last": 3200000, "Open": 3205000, "High": 3210000, "Low": 3190000, "Close": 3216000},
+                "TotalHand": 10,
+                "Amount": 1000000,
+                "ServerTime": "1783485600",
+            },
+        ]
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/etf"): fake_etf,
+        ("POST", "/api/batch-quote"): fake_quote,
+    })
+
+    provider = TDXAPIProvider()
+    etfs = provider.get_instruments("etf")
+    indices = provider.get_instruments("index")
+
+    assert etfs[0]["symbol"] == "589020.SH"
+    assert etfs[0]["name"] == "科创半导体设备ETF鹏华"
+    assert etfs[0]["asset_type"] == "etf"
+    assert any(row["symbol"] == "000001.SH" and row["asset_type"] == "index" for row in indices)
 
 
 def test_get_trade_ticks_normalizes_recent_rows(monkeypatch):
@@ -283,6 +423,58 @@ def test_get_trade_ticks_all_uses_minute_trade_all(monkeypatch):
     assert rows[0]["order_count"] == 1
 
 
+def test_get_trade_history_full_normalizes_lowercase_rows(monkeypatch):
+    def fake_history(kwargs):
+        assert kwargs["params"] == {
+            "code": "sz002491",
+            "start_date": "20260707",
+            "end_date": "20260707",
+            "limit": 2,
+        }
+        return {
+            "code": "002491",
+            "count": 2,
+            "list": [
+                {
+                    "time": "2026-07-07T09:30:00+08:00",
+                    "price": 10.46,
+                    "volume": 100,
+                    "status": 1,
+                    "number": 3,
+                },
+                {
+                    "time": "2026-07-07T09:31:00+08:00",
+                    "price": 10.5,
+                    "volume": 20,
+                    "status": 2,
+                    "number": 1,
+                },
+            ],
+        }
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/trade-history/full"): fake_history,
+    })
+
+    rows = TDXAPIProvider().get_trade_history_full(
+        "002491.SZ",
+        start_date=dt.date(2026, 7, 7),
+        end_date=dt.date(2026, 7, 7),
+        limit=2,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "002491.SZ"
+    assert rows[0]["trade_date"] == dt.date(2026, 7, 7)
+    assert rows[0]["datetime"] == dt.datetime(2026, 7, 7, 9, 30)
+    assert rows[0]["price"] == 10.46
+    assert rows[0]["amount"] == 10.46 * 100 * 100
+    assert rows[0]["side"] == "sell"
+    assert rows[0]["order_count"] == 3
+    assert rows[0]["source"] == "tdxapi_trade_history_minute_precision"
+    assert rows[1]["side"] == "neutral"
+
+
 def test_get_daily_continues_when_one_symbol_fails(monkeypatch):
     def fake(self, method, path, **kwargs):
         code = kwargs["params"]["code"]
@@ -318,6 +510,7 @@ def test_get_instruments_from_codes(monkeypatch):
                 {"code": "002491", "name": "通鼎互联", "exchange": "sz"},
             ],
         },
+        ("GET", "/api/etf-codes"): {"count": 0, "list": []},
     })
 
     rows = TDXAPIProvider().get_instruments("stock")

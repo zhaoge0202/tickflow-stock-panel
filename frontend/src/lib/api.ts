@@ -578,6 +578,48 @@ export interface ManualPosition {
   position_action_hint?: string
 }
 
+export interface OrderBookLevel {
+  level: number
+  price?: number | null
+  volume?: number | null
+  amount?: number | null
+}
+
+export interface OrderBookSnapshot {
+  bids: OrderBookLevel[]
+  asks: OrderBookLevel[]
+}
+
+export interface MicrostructureSnapshot {
+  status?: 'ready' | 'missing' | string
+  order_book?: OrderBookSnapshot
+  spread?: number | null
+  spread_pct?: number | null
+  depth_imbalance?: number | null
+  bid_depth_vol?: number | null
+  ask_depth_vol?: number | null
+  bid_depth_amount?: number | null
+  ask_depth_amount?: number | null
+  best_bid_amount?: number | null
+  best_ask_amount?: number | null
+  limit_seal_amount?: number | null
+  seal_strength?: number | null
+  nearest_sell_wall_price?: number | null
+  sell_wall_distance?: number | null
+  nearest_buy_wall_price?: number | null
+  buy_wall_distance?: number | null
+  current_volume?: number | null
+  inside_volume?: number | null
+  outside_volume?: number | null
+  outside_inside_ratio?: number | null
+  active_net_volume?: number | null
+  speed_rate?: number | null
+  active1?: number | null
+  active2?: number | null
+  microstructure_score?: number | null
+  [key: string]: any
+}
+
 export interface SignalFrame {
   symbol: string
   name?: string | null
@@ -611,10 +653,40 @@ export interface SignalFrame {
   auction_matched_volume?: number | null
   auction_unmatched_side?: 'buy' | 'sell' | null
   auction_unmatched_volume?: number | null
+  auction_unmatched_ratio?: number | null
+  auction_pressure_score?: number | null
   nearest_support?: number | null
   nearest_resistance?: number | null
   support_distance?: number | null
   resistance_distance?: number | null
+  microstructure?: MicrostructureSnapshot
+  order_book?: OrderBookSnapshot
+  spread_pct?: number | null
+  depth_imbalance?: number | null
+  bid_depth_amount?: number | null
+  ask_depth_amount?: number | null
+  seal_strength?: number | null
+  sell_wall_distance?: number | null
+  buy_wall_distance?: number | null
+  outside_inside_ratio?: number | null
+  active_net_volume?: number | null
+  speed_rate?: number | null
+  current_volume?: number | null
+  inside_volume?: number | null
+  outside_volume?: number | null
+  microstructure_score?: number | null
+  market_context?: MarketBreadthSnapshot & {
+    market_risk_level?: string
+    text?: string
+  }
+  market_status?: string
+  market_temperature?: string
+  market_risk_level?: string
+  market_up_count?: number | null
+  market_down_count?: number | null
+  market_up_down_ratio?: number | null
+  major_index_change_pct?: number | null
+  market_context_text?: string
   active_signals: string[]
   risk_flags: string[]
   decision_score: number
@@ -688,6 +760,28 @@ export interface QuoteTickQuality {
   duplicate_count?: number
   quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
   checked_at?: number
+}
+
+export interface MarketBreadthSnapshot {
+  source: string
+  status?: string
+  error?: string
+  event_ts?: number | null
+  ingest_ts?: number | null
+  up_count?: number | null
+  down_count?: number | null
+  flat_count?: number | null
+  total_count?: number | null
+  up_down_ratio?: number | null
+  market_temperature?: string
+  major_index_change_pct?: number | null
+  major_indices?: Array<{
+    symbol: string
+    name?: string | null
+    last_price?: number | null
+    change_pct?: number | null
+    trend_15m?: string | null
+  }>
 }
 
 export interface DecisionQueueResponse {
@@ -2193,6 +2287,9 @@ export const api = {
 
   manualPositions: () =>
     request<{ positions: ManualPosition[] }>('/api/manual-positions'),
+
+  marketBreadthLatest: () =>
+    request<MarketBreadthSnapshot>('/api/market-breadth/latest'),
 
   manualPositionSave: (symbol: string, position: Partial<ManualPosition>) =>
     request<{ ok: boolean; position: ManualPosition }>(

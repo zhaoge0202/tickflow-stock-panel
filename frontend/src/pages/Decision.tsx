@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Clock3,
   Edit3,
+  Gauge,
   History,
   ListChecks,
   Loader2,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { api, type DecisionActionPayload, type DecisionItem, type DecisionStatus, type DecisionSummaryResponse, type ManualPosition } from '@/lib/api'
+import { api, type DecisionActionPayload, type DecisionItem, type DecisionStatus, type DecisionSummaryResponse, type ManualPosition, type MarketBreadthSnapshot } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
@@ -73,6 +74,13 @@ export function Decision() {
     refetchIntervalInBackground: true,
     placeholderData: prev => prev,
   })
+  const breadthQ = useQuery({
+    queryKey: QK.marketBreadth,
+    queryFn: () => api.marketBreadthLatest(),
+    refetchInterval: 15000,
+    refetchIntervalInBackground: true,
+    placeholderData: prev => prev,
+  })
   const items = queueQ.data?.items ?? []
 
   useEffect(() => {
@@ -112,7 +120,7 @@ export function Decision() {
       <PageHeader title="盘中决策台" subtitle="秒级提醒 · 人工确认 · 手动处理记录" />
       <div className="flex-1 min-h-0 px-5 py-4">
         <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
-          <StatusStrip queue={queueQ.data} summary={summaryQ.data} loading={queueQ.isLoading} summaryLoading={summaryQ.isLoading} />
+          <StatusStrip queue={queueQ.data} summary={summaryQ.data} market={breadthQ.data} loading={queueQ.isLoading} summaryLoading={summaryQ.isLoading} />
           <div className="flex items-center justify-between gap-3">
             <div className="inline-flex w-fit rounded-lg border border-border bg-surface p-1">
               <button onClick={() => setMode('live')} className={cn('inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs transition-colors', mode === 'live' ? 'bg-accent text-white' : 'text-muted hover:bg-elevated hover:text-foreground')}>
@@ -286,9 +294,10 @@ function ReplayPanel({ defaultSymbols }: { defaultSymbols: string[] }) {
   )
 }
 
-function StatusStrip({ queue, summary, loading, summaryLoading }: {
+function StatusStrip({ queue, summary, market, loading, summaryLoading }: {
   queue: any
   summary?: DecisionSummaryResponse
+  market?: MarketBreadthSnapshot
   loading: boolean
   summaryLoading: boolean
 }) {
@@ -297,10 +306,12 @@ function StatusStrip({ queue, summary, loading, summaryLoading }: {
   const total = summary?.total ?? queue?.total
   const pending = summary?.pending ?? queue?.pending
   const statsLoading = summaryLoading && total == null
+  const marketTone = marketToneOf(market?.market_temperature)
   return (
-    <div className="grid grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <Stat icon={RadioTower} label="实时源" value={q?.source || 'tdxapi'} tone={freshness === 'live' ? 'ok' : freshness === 'unknown' ? 'muted' : 'warn'} />
       <Stat icon={Clock3} label="数据状态" value={freshnessLabel(freshness)} tone={freshness === 'live' ? 'ok' : 'warn'} />
+      <Stat icon={Gauge} label="市场环境" value={marketLabel(market)} tone={marketTone} />
       <Stat icon={Bell} label="今日提醒" value={statsLoading ? '...' : String(total ?? 0)} />
       <Stat icon={ListChecks} label="未处理" value={statsLoading || loading && pending == null ? '...' : String(pending ?? 0)} tone={(pending ?? 0) > 0 ? 'warn' : 'ok'} />
       <Stat icon={AlertTriangle} label="缺失/延迟" value={`${q?.missing_symbols?.length ?? 0}/${q?.stale_symbols?.length ?? 0}`} tone={(q?.missing_symbols?.length || q?.stale_symbols?.length) ? 'warn' : 'ok'} />
@@ -392,6 +403,7 @@ function DecisionQueue({ items, selected, loading, onSelect, onAddPosition }: {
 }
 
 function QueueCard({ item, active, onClick }: { item: DecisionItem; active: boolean; onClick: () => void }) {
+  const microTags = decisionMicroTags(item)
   return (
     <button
       onClick={onClick}
@@ -410,6 +422,7 @@ function QueueCard({ item, active, onClick }: { item: DecisionItem; active: bool
             <Badge className={SIDE_STYLE[item.side] ?? SIDE_STYLE.watch}>{SIDE_LABEL[item.side] ?? item.side}</Badge>
             <Badge>{STATUS_LABEL[item.status]}</Badge>
             <Badge>{freshnessLabel(item.quote_freshness)}</Badge>
+            {microTags.map(tag => <Badge key={tag.label} className={tag.className}>{tag.label}</Badge>)}
           </div>
           <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-secondary">
             {item.reasons[0] || '等待新信号'}
@@ -494,6 +507,8 @@ function DecisionDetail({ item, loading, onChanged }: {
               <TagList title="风险标签" items={item.risk_flags} danger />
             </Panel>
 
+            <OrderBookPanel frame={frame} />
+
             <Panel title="分钟/逐笔摘要" icon={History}>
               <div className="grid grid-cols-4 gap-2">
                 <Metric label="1m涨跌" value={fmtPct(frame?.ret_1m)} />
@@ -562,6 +577,58 @@ function DecisionDetail({ item, loading, onChanged }: {
         />
       )}
     </section>
+  )
+}
+
+function OrderBookPanel({ frame }: { frame?: DecisionItem['signal_frame'] }) {
+  const micro = frame?.microstructure
+  const book = micro?.order_book ?? frame?.order_book
+  const bids = book?.bids ?? []
+  const asks = book?.asks ?? []
+  const hasBook = bids.length > 0 || asks.length > 0
+  return (
+    <Panel title="盘口快照" icon={RadioTower}>
+      <div className="grid grid-cols-4 gap-2">
+        <Metric label="盘口不平衡" value={fmtPct(micro?.depth_imbalance ?? frame?.depth_imbalance)} />
+        <Metric label="买盘厚度" value={fmtBigNum(micro?.bid_depth_amount ?? frame?.bid_depth_amount)} />
+        <Metric label="卖盘厚度" value={fmtBigNum(micro?.ask_depth_amount ?? frame?.ask_depth_amount)} />
+        <Metric label="买卖价差" value={fmtPct(micro?.spread_pct ?? frame?.spread_pct)} />
+        <Metric label="外/内盘" value={fmtRatio(micro?.outside_inside_ratio ?? frame?.outside_inside_ratio)} />
+        <Metric label="现量" value={fmtBigNum(micro?.current_volume ?? frame?.current_volume)} />
+        <Metric label="涨速" value={fmtSpeed(micro?.speed_rate ?? frame?.speed_rate)} />
+        <Metric label="盘口评分" value={fmtSigned(micro?.microstructure_score ?? frame?.microstructure_score)} />
+      </div>
+
+      {!hasBook ? (
+        <div className="mt-3 rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+          盘口字段缺失,当前只展示价格与量能信号。
+        </div>
+      ) : (
+        <div className="mt-3 overflow-hidden rounded-md border border-border/50">
+          <div className="grid grid-cols-[44px_1fr_1fr_1fr] bg-elevated/45 px-2 py-1 text-[10px] text-muted">
+            <span>档位</span>
+            <span className="text-right">价格</span>
+            <span className="text-right">手数</span>
+            <span className="text-right">金额</span>
+          </div>
+          <div className="divide-y divide-border/35">
+            {[...asks].reverse().map(level => <DepthRow key={`ask-${level.level}`} side="ask" level={level} />)}
+            {bids.map(level => <DepthRow key={`bid-${level.level}`} side="bid" level={level} />)}
+          </div>
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+function DepthRow({ side, level }: { side: 'bid' | 'ask'; level: any }) {
+  return (
+    <div className="grid grid-cols-[44px_1fr_1fr_1fr] px-2 py-1 text-[11px]">
+      <span className={side === 'bid' ? 'text-bull' : 'text-bear'}>{side === 'bid' ? `买${level.level}` : `卖${level.level}`}</span>
+      <span className="text-right font-mono text-foreground">{fmtPrice(level.price)}</span>
+      <span className="text-right font-mono text-secondary">{fmtPrice(level.volume, 0)}</span>
+      <span className="text-right font-mono text-secondary">{fmtBigNum(level.amount)}</span>
+    </div>
   )
 }
 
@@ -678,6 +745,25 @@ function TagList({ title, items, danger }: { title: string; items: string[]; dan
       </div>
     </div>
   )
+}
+
+function decisionMicroTags(item: DecisionItem): Array<{ label: string; className: string }> {
+  const signals = new Set(item.signals ?? [])
+  const risks = new Set(item.risk_flags ?? [])
+  const tags: Array<{ label: string; className: string }> = []
+  const good = 'border-bull/20 bg-bull/10 text-bull'
+  const bad = 'border-warning/25 bg-warning/10 text-warning'
+  if (signals.has('depth_bid_dominant')) tags.push({ label: '买盘强', className: good })
+  if (risks.has('depth_ask_dominant')) tags.push({ label: '卖压重', className: bad })
+  if (signals.has('seal_strengthening')) tags.push({ label: '封单强', className: good })
+  if (risks.has('weak_seal')) tags.push({ label: '封单弱', className: bad })
+  if (signals.has('outside_disk_dominant')) tags.push({ label: '外盘占优', className: good })
+  if (signals.has('speed_up')) tags.push({ label: '涨速快', className: good })
+  if (signals.has('market_tailwind')) tags.push({ label: '市场暖', className: good })
+  if (risks.has('market_breadth_weak')) tags.push({ label: '弱市追涨', className: bad })
+  if (risks.has('wide_spread')) tags.push({ label: '价差宽', className: bad })
+  if (risks.has('tdx_snapshot_stale')) tags.push({ label: '快照滞后', className: bad })
+  return tags.slice(0, 3)
 }
 
 function ActionButton({ icon: Icon, label, onClick }: { icon: any; label: string; onClick: () => void }) {
@@ -843,6 +929,40 @@ function Badge({ children, className }: { children: React.ReactNode; className?:
 
 function freshnessLabel(v: string) {
   return { live: '实时', stale: '延迟', snapshot: '快照', unknown: '未知' }[v] ?? v
+}
+
+function marketLabel(market?: MarketBreadthSnapshot) {
+  if (!market || market.status === 'unavailable') return '未知'
+  const temp = {
+    hot: '强势',
+    warm: '偏暖',
+    neutral: '均衡',
+    cool: '偏弱',
+    cold: '弱势',
+    unknown: '未知',
+  }[market.market_temperature || 'unknown'] ?? market.market_temperature ?? '未知'
+  const up = market.up_count ?? 0
+  const down = market.down_count ?? 0
+  const indexPct = market.major_index_change_pct
+  return `${temp} ${up}/${down}${indexPct == null ? '' : ` ${fmtPct(indexPct)}`}`
+}
+
+function marketToneOf(v?: string): 'ok' | 'warn' | 'muted' {
+  if (v === 'hot' || v === 'warm') return 'ok'
+  if (v === 'cool' || v === 'cold') return 'warn'
+  return 'muted'
+}
+
+function fmtRatio(v?: number | null) {
+  return v == null || !Number.isFinite(v) ? '—' : `${v.toFixed(2)}x`
+}
+
+function fmtSpeed(v?: number | null) {
+  return v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}`
+}
+
+function fmtSigned(v?: number | null) {
+  return v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(1)}`
 }
 
 function fmtTime(ts?: number) {

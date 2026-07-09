@@ -187,7 +187,7 @@ class DataStore:
         for sql in statements:
             try:
                 self.db.execute(sql)
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # 空数据目录(首次启动)或权限问题时 DuckDB 会抛 IOException;
                 # 跨版本/平台也可能抛 CatalogException 等。空目录缺视图不影响启动
                 # (后续同步写入数据后会重新刷新视图),这里一律降级为 debug 日志。
@@ -1109,13 +1109,13 @@ class KlineRepository:
         return "stock"
 
     def get_name_map(self, symbols: list[str] | None = None) -> dict[str, str]:
-        """返回 {symbol: name} 映射, 合并股票 + ETF instruments (股票优先去重)。
+        """返回 {symbol: name} 映射, 合并股票 + ETF + 指数 instruments。
 
         自选列表/名称批查等场景的统一名称解析入口, 避免各调用方自行合并两份缓存。
         symbols 非 None 时只返回命中的条目。
         """
         name_map: dict[str, str] = {}
-        for df in (self.get_instruments(), self.get_etf_instruments()):
+        for df in (self.get_instruments(), self.get_etf_instruments(), self.get_index_instruments()):
             if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
                 continue
             if symbols is not None:

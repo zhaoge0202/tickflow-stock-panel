@@ -16,11 +16,21 @@ class _Repo:
         self._frames = {
             "stock": pl.DataFrame([{"symbol": "002491.SZ", "code": "002491", "name": "通鼎互联"}]),
             "etf": pl.DataFrame([{"symbol": "589020.SH", "code": "589020", "name": "科创半导体设备ETF鹏华"}]),
-            "index": pl.DataFrame(),
+            "index": pl.DataFrame([{"symbol": "000001.SH", "code": "000001", "name": "上证指数", "asset_type": "index"}]),
         }
 
     def get_instruments_asset(self, asset_type: str):
         return self._frames.get(asset_type, pl.DataFrame())
+
+    def get_name_map(self, symbols):
+        out = {}
+        for df in self._frames.values():
+            if df.is_empty():
+                continue
+            for row in df.select(["symbol", "name"]).iter_rows(named=True):
+                if symbols is None or row["symbol"] in symbols:
+                    out[row["symbol"]] = row["name"]
+        return out
 
     def get_etf_symbol_set(self) -> set[str]:
         return {"589020.SH"}
@@ -79,3 +89,27 @@ def test_daily_batch_fetches_missing_etf_live(monkeypatch) -> None:
     assert calls == [(["589020.SH"], 35)]
     assert set(resp["data"]) == {"589020.SH"}
     assert resp["data"]["589020.SH"][0]["close"] == 3.09
+
+
+def test_instrument_search_returns_etf_and_index() -> None:
+    repo = _Repo()
+
+    etf_resp = kline.search_instruments(_request(repo), q="589020", limit=20, asset_types="stock,etf,index")
+    index_resp = kline.search_instruments(_request(repo), q="上证", limit=20, asset_types="stock,etf,index")
+
+    assert etf_resp["results"][0]["symbol"] == "589020.SH"
+    assert etf_resp["results"][0]["name"] == "科创半导体设备ETF鹏华"
+    assert etf_resp["results"][0]["asset_type"] == "etf"
+    assert index_resp["results"][0]["symbol"] == "000001.SH"
+    assert index_resp["results"][0]["asset_type"] == "index"
+
+
+def test_instrument_names_include_etf_and_index() -> None:
+    repo = _Repo()
+
+    resp = kline.instruments_names(_request(repo), ["589020.SH", "000001.SH"])
+
+    assert resp["names"] == {
+        "589020.SH": "科创半导体设备ETF鹏华",
+        "000001.SH": "上证指数",
+    }

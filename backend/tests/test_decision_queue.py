@@ -183,6 +183,16 @@ def test_decision_queue_normalizes_legacy_bare_etf_position(tmp_path):
         "volume": 100,
         "amount": 342_000,
         "timestamp": _ms(10, 5),
+        "bid1_price": 3.41,
+        "bid1_vol": 8000,
+        "ask1_price": 3.42,
+        "ask1_vol": 1000,
+        "bid_depth_amount": 2_728_000,
+        "ask_depth_amount": 342_000,
+        "depth_imbalance": 0.777,
+        "outside_volume": 1200,
+        "inside_volume": 500,
+        "outside_inside_ratio": 2.4,
     }], source="tdxapi", force_flush=True)
 
     queue = decision_queue.build_queue(tmp_path, FakeRepo(), target_date=TRADE_DATE)
@@ -193,8 +203,69 @@ def test_decision_queue_normalizes_legacy_bare_etf_position(tmp_path):
     assert item["symbol"] == "589020.SH"
     assert item["latest_price"] == 3.42
     assert item["position"]["symbol"] == "589020.SH"
+    assert "depth_bid_dominant" in item["signals"]
+    assert item["signal_frame"]["microstructure"]["depth_imbalance"] == 0.777
 
     detail = decision_queue.get_item(tmp_path, FakeRepo(), "589020", target_date=TRADE_DATE)
 
     assert detail is not None
     assert detail["symbol"] == "589020.SH"
+    assert "买盘厚度占优" in detail["reasons"][0]
+
+
+def test_decision_queue_marks_chasing_as_risk_when_market_breadth_is_weak(monkeypatch, tmp_path):
+    monkeypatch.setattr(decision_queue.signal_frame.market_breadth, "cached", lambda data_dir: {
+        "source": "tdxapi",
+        "status": "ready",
+        "event_ts": _ms(9, 31),
+        "ingest_ts": _ms(9, 31),
+        "up_count": 600,
+        "down_count": 2600,
+        "flat_count": 120,
+        "total_count": 3320,
+        "up_down_ratio": 600 / 2600,
+        "market_temperature": "cold",
+        "major_index_change_pct": -0.018,
+    })
+    quote_tick_store.append_many(tmp_path, [
+        {
+            "symbol": "002491.SZ",
+            "name": "测试股",
+            "last_price": 10.0,
+            "prev_close": 9.8,
+            "open": 10.0,
+            "high": 10.0,
+            "low": 9.9,
+            "volume": 100,
+            "amount": 100_000,
+            "timestamp": _ms(9, 30),
+        },
+        {
+            "symbol": "002491.SZ",
+            "name": "测试股",
+            "last_price": 10.2,
+            "prev_close": 9.8,
+            "open": 10.0,
+            "high": 10.2,
+            "low": 9.9,
+            "volume": 180,
+            "amount": 500_000,
+            "timestamp": _ms(9, 31),
+            "speed_rate": 0.8,
+        },
+    ], source="tdxapi", force_flush=True)
+    manual_positions.save_one(tmp_path, {
+        "symbol": "002491.SZ",
+        "shares": 1000,
+        "cost_price": 9.8,
+    })
+
+    queue = decision_queue.build_queue(tmp_path, FakeRepo(), target_date=TRADE_DATE)
+
+    assert queue["total"] == 1
+    item = queue["items"][0]
+    assert item["side"] == "risk"
+    assert "speed_up" in item["signals"]
+    assert "market_breadth_weak" in item["risk_flags"]
+    assert item["signal_frame"]["market_context"]["up_down_ratio"] == 600 / 2600
+    assert any("市场广度偏弱" in reason for reason in item["reasons"])

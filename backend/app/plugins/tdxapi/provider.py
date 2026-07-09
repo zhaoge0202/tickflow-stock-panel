@@ -26,6 +26,15 @@ _QUOTE_BATCH = 50
 _KLINE_BATCH = 8
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+_CORE_INDEXES = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000852.SH": "中证1000",
+    "000016.SH": "上证50",
+}
 
 
 @dataclass
@@ -50,7 +59,7 @@ class TDXAPIProvider:
         self.base_url = _base_url()
         self.timeout = float(os.getenv("TDX_API_TIMEOUT", "30") or 30)
         self._client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
-        self._instrument_cache: list[dict] | None = None
+        self._instrument_cache: dict[str, list[dict]] = {}
 
     def close(self) -> None:
         self._client.close()
@@ -191,12 +200,62 @@ class TDXAPIProvider:
             return rows[-limit:]
         return rows
 
+    def get_trade_history_full(
+        self,
+        symbol: str,
+        before: date | datetime | str | None = None,
+        limit: int | None = None,
+        *,
+        start_date: date | datetime | str | None = None,
+        end_date: date | datetime | str | None = None,
+        include_today: bool = False,
+    ) -> list[dict]:
+        """返回 `/api/trade-history/full` 的分钟精度历史分笔。
+
+        sidecar 该接口返回 `data.list`, 且价格已经是正常小数价格; 不复用
+        `/api/trade` 的千分价解析, 避免二次缩放。
+        """
+        app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+        params: dict[str, str | int | bool] = {"code": _to_tdx_code(symbol)}
+        if start_date is not None:
+            params["start_date"] = _history_date_arg(start_date)
+        if end_date is not None:
+            params["end_date"] = _history_date_arg(end_date)
+        elif before is not None:
+            params["before"] = _history_date_arg(before)
+        if limit and limit > 0:
+            params["limit"] = int(limit)
+        if include_today:
+            params["include_today"] = "true"
+
+        data = self._request("GET", "/api/trade-history/full", params=params, timeout=max(self.timeout, 90.0))
+        raw_rows = list((data or {}).get("list") or (data or {}).get("List") or [])
+        rows = [
+            row for row in (
+                self._trade_history_tick_row(app_symbol, item, seq_in_day=i + 1)
+                for i, item in enumerate(raw_rows)
+            )
+            if row is not None
+        ]
+        if limit and limit > 0:
+            return rows[-limit:]
+        return rows
+
     # ---- instruments ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
+        asset_type = str(asset_type or "stock").lower()
+        if asset_type in self._instrument_cache:
+            return self._instrument_cache[asset_type]
+        if asset_type == "etf":
+            out = self._etf_instruments()
+            self._instrument_cache[asset_type] = out
+            return out
+        if asset_type == "index":
+            out = self._index_instruments()
+            self._instrument_cache[asset_type] = out
+            return out
         if asset_type != "stock":
             return []
-        if self._instrument_cache is not None:
-            return self._instrument_cache
         data = self._request("GET", "/api/codes", params={"exchange": "all"})
         out: list[dict] = []
         for item in (data or {}).get("codes") or []:
@@ -213,8 +272,132 @@ class TDXAPIProvider:
                 "type": "stock",
                 "ext": {},
             })
-        self._instrument_cache = out
+        self._instrument_cache[asset_type] = out
         return out
+
+    def get_market_breadth(self, major_symbols: list[str] | None = None) -> dict:
+        """读取 TDX 市场广度和核心指数快照。"""
+        data = self._request("GET", "/api/market-stats")
+        exchanges = {
+            key: _market_exchange_stats((data or {}).get(key) or {})
+            for key in ("sh", "sz", "bj")
+        }
+        up_count = sum(item["up"] for item in exchanges.values())
+        down_count = sum(item["down"] for item in exchanges.values())
+        flat_count = sum(item["flat"] for item in exchanges.values())
+        total_count = sum(item["total"] for item in exchanges.values())
+        up_down_ratio = up_count / down_count if down_count > 0 else None
+        indices = self._major_index_snapshots(major_symbols or list(_CORE_INDEXES))
+        major_change = indices[0].get("change_pct") if indices else None
+        now_ms = int(datetime.now(_CN_TZ).timestamp() * 1000)
+        return {
+            "source": "tdxapi",
+            "event_ts": _parse_update_time_ms((data or {}).get("update_time")) or now_ms,
+            "ingest_ts": now_ms,
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+            "total_count": total_count,
+            "up_down_ratio": up_down_ratio,
+            "market_temperature": _market_temperature(up_count, down_count, total_count),
+            "major_index_change_pct": major_change,
+            "major_indices": indices,
+            "exchanges": exchanges,
+            "raw": data,
+        }
+
+    def _etf_instruments(self) -> list[dict]:
+        try:
+            data = self._request("GET", "/api/etf", params={"exchange": "all"})
+            items = (data or {}).get("list") or []
+            out = []
+            for item in items:
+                symbol = _to_app_symbol(item.get("code"), item.get("exchange"))
+                if not symbol:
+                    continue
+                exchange = symbol.split(".")[-1]
+                out.append({
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "code": symbol.split(".")[0],
+                    "exchange": exchange,
+                    "region": "CN",
+                    "type": "etf",
+                    "asset_type": "etf",
+                    "ext": {"source": "tdxapi", "last_price": item.get("last_price")},
+                })
+            if out:
+                return _unique_instruments(out)
+        except Exception as e:
+            logger.debug("tdx-api ETF 列表拉取失败,回退 etf-codes: %s", e)
+
+        data = self._request("GET", "/api/etf-codes", params={"prefix": "true"})
+        out = []
+        for code in (data or {}).get("list") or []:
+            symbol = _to_app_symbol(code, None)
+            if not symbol:
+                continue
+            exchange = symbol.split(".")[-1]
+            out.append({
+                "symbol": symbol,
+                "name": symbol,
+                "code": symbol.split(".")[0],
+                "exchange": exchange,
+                "region": "CN",
+                "type": "etf",
+                "asset_type": "etf",
+                "ext": {"source": "tdxapi"},
+            })
+        return _unique_instruments(out)
+
+    def _index_instruments(self) -> list[dict]:
+        snapshots = self._major_index_snapshots(list(_CORE_INDEXES))
+        seen = {item["symbol"]: item for item in snapshots}
+        out = []
+        for symbol, name in _CORE_INDEXES.items():
+            snap = seen.get(symbol) or {}
+            exchange = symbol.split(".")[-1]
+            out.append({
+                "symbol": symbol,
+                "name": snap.get("name") or name,
+                "code": symbol.split(".")[0],
+                "exchange": exchange,
+                "region": "CN",
+                "type": "index",
+                "asset_type": "index",
+                "ext": {
+                    "source": "tdxapi",
+                    "last_price": snap.get("last_price"),
+                    "change_pct": snap.get("change_pct"),
+                },
+            })
+        return out
+
+    def _major_index_snapshots(self, symbols: list[str]) -> list[dict]:
+        name_map = {symbol: _CORE_INDEXES.get(symbol, symbol) for symbol in symbols}
+        rows = []
+        for chunk in chunked(symbols, _QUOTE_BATCH):
+            try:
+                data = self._request(
+                    "POST",
+                    "/api/batch-quote",
+                    json={"codes": [_to_tdx_code(symbol) for symbol in chunk]},
+                )
+            except Exception as e:
+                logger.debug("tdx-api 核心指数快照拉取失败(%s): %s", ",".join(chunk), e)
+                continue
+            for item in data or []:
+                row = self._quote_row(item, name_map)
+                if not row:
+                    continue
+                rows.append({
+                    "symbol": row["symbol"],
+                    "name": row.get("name") or name_map.get(row["symbol"]) or row["symbol"],
+                    "last_price": row.get("last_price"),
+                    "change_pct": row.get("change_pct"),
+                    "trend_15m": None,
+                })
+        return rows
 
     # ---- settings test ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
@@ -331,7 +514,8 @@ class TDXAPIProvider:
             "turnover_rate": None,
             "timestamp": _server_time_ms(item.get("ServerTime")),
         }
-        row.update(_best_level_fields(item))
+        row.update(_level_fields(item, last_price=last_price, prev_close=prev_close))
+        row.update(_activity_fields(item))
         if is_auction_reference:
             row.update({
                 "price_type": "auction_reference",
@@ -366,20 +550,127 @@ class TDXAPIProvider:
             "source": "tdxapi",
         }
 
+    @staticmethod
+    def _trade_history_tick_row(symbol: str, item: dict, seq_in_day: int) -> dict | None:
+        dt = _parse_tdx_time(item.get("time") if item.get("time") is not None else item.get("Time"))
+        if dt is None:
+            return None
+        if item.get("price") is not None:
+            price = _float(item.get("price"))
+        else:
+            price = _price(item.get("Price"))
+        volume = int(_float(item.get("volume") if item.get("volume") is not None else item.get("Volume")))
+        raw_status = _int_or_none(item.get("status") if item.get("status") is not None else item.get("Status"))
+        side, side_label = _trade_side(raw_status)
+        return {
+            "symbol": symbol,
+            "trade_date": dt.date(),
+            "datetime": dt.replace(tzinfo=None),
+            "seq_in_day": int(seq_in_day),
+            "price": price,
+            "volume": volume,
+            "amount": price * volume * 100.0,
+            "side": side,
+            "side_label": side_label,
+            "order_count": _int_or_none(item.get("number") if item.get("number") is not None else item.get("Number")),
+            "raw_status": raw_status,
+            "source": "tdxapi_trade_history_minute_precision",
+        }
 
-def _best_level_fields(item: dict) -> dict:
-    """从 TDX 五档快照取一档价格/量。
+
+def _level_fields(item: dict, *, last_price: float | None, prev_close: float | None) -> dict:
+    """从 TDX 五档快照取盘口价格、数量和轻量衍生指标。
 
     集合竞价期间 TDX 会把虚拟参考价放在买一/卖一同价位置, 所以这里
     只做原始字段透传, 业务语义由 _auction_fields 单独识别。
     """
-    buy1 = _level(item.get("BuyLevel"), 0)
-    sell1 = _level(item.get("SellLevel"), 0)
+    out: dict[str, float | int | None] = {}
+    bid_depth_vol = 0
+    ask_depth_vol = 0
+    bid_depth_amount = 0.0
+    ask_depth_amount = 0.0
+    for idx in range(1, 6):
+        buy = _level(item.get("BuyLevel"), idx - 1)
+        sell = _level(item.get("SellLevel"), idx - 1)
+        bid_price = _price_or_none(buy.get("Price"))
+        ask_price = _price_or_none(sell.get("Price"))
+        bid_vol = _int_or_none(buy.get("Number"))
+        ask_vol = _int_or_none(sell.get("Number"))
+        out[f"bid{idx}_price"] = bid_price
+        out[f"ask{idx}_price"] = ask_price
+        out[f"bid{idx}_vol"] = bid_vol
+        out[f"ask{idx}_vol"] = ask_vol
+        if bid_price and bid_vol:
+            bid_depth_vol += bid_vol
+            bid_depth_amount += bid_price * bid_vol * 100.0
+        if ask_price and ask_vol:
+            ask_depth_vol += ask_vol
+            ask_depth_amount += ask_price * ask_vol * 100.0
+
+    bid1 = out.get("bid1_price")
+    ask1 = out.get("ask1_price")
+    spread = (ask1 - bid1) if isinstance(bid1, float) and isinstance(ask1, float) else None
+    spread_pct = spread / last_price if spread is not None and last_price else None
+    depth_total = bid_depth_amount + ask_depth_amount
+    depth_imbalance = (
+        (bid_depth_amount - ask_depth_amount) / depth_total
+        if depth_total > 0
+        else None
+    )
+    best_bid_amount = (bid1 * out["bid1_vol"] * 100.0) if bid1 and out.get("bid1_vol") else None
+    best_ask_amount = (ask1 * out["ask1_vol"] * 100.0) if ask1 and out.get("ask1_vol") else None
+    limit_seal_amount = None
+    # 这里只记录 TDX 快照看到的一档封单事实, 不推断真实排队量。
+    if (
+        last_price
+        and bid1
+        and out.get("bid1_vol")
+        and prev_close
+        and abs(last_price - bid1) / max(last_price, 1e-9) <= 0.001
+        and last_price >= prev_close * 1.095
+    ):
+        limit_seal_amount = best_bid_amount
+
+    out.update({
+        "bid1": bid1,
+        "ask1": ask1,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "bid_depth_vol": bid_depth_vol or None,
+        "ask_depth_vol": ask_depth_vol or None,
+        "bid_depth_amount": bid_depth_amount or None,
+        "ask_depth_amount": ask_depth_amount or None,
+        "depth_imbalance": depth_imbalance,
+        "best_bid_amount": best_bid_amount,
+        "best_ask_amount": best_ask_amount,
+        "limit_seal_amount": limit_seal_amount,
+    })
+    return out
+
+
+def _activity_fields(item: dict) -> dict:
+    current_volume = _int_or_none(item.get("Intuition"))
+    inside_volume = _int_or_none(item.get("InsideDish"))
+    outside_volume = _int_or_none(item.get("OuterDisc"))
+    outside_inside_ratio = (
+        outside_volume / inside_volume
+        if outside_volume is not None and inside_volume and inside_volume > 0
+        else None
+    )
+    active_net_volume = (
+        outside_volume - inside_volume
+        if outside_volume is not None and inside_volume is not None
+        else None
+    )
     return {
-        "bid1": _price_or_none(buy1.get("Price")),
-        "ask1": _price_or_none(sell1.get("Price")),
-        "bid1_vol": _int_or_none(buy1.get("Number")),
-        "ask1_vol": _int_or_none(sell1.get("Number")),
+        "current_volume": current_volume,
+        "inside_volume": inside_volume,
+        "outside_volume": outside_volume,
+        "outside_inside_ratio": outside_inside_ratio,
+        "active_net_volume": active_net_volume,
+        "speed_rate": _float_or_none(item.get("Rate")),
+        "active1": _float_or_none(item.get("Active1")),
+        "active2": _float_or_none(item.get("Active2")),
     }
 
 
@@ -421,12 +712,19 @@ def _auction_fields(item: dict, prev_close: float | None) -> dict:
         unmatched_volume = unmatched_sell
 
     change_pct = (buy_price - prev_close) / prev_close if prev_close else None
+    total_virtual = (buy_vol or 0) + unmatched_volume
+    unmatched_ratio = unmatched_volume / total_virtual if total_virtual > 0 else None
+    pressure_score = None
+    if unmatched_ratio is not None:
+        pressure_score = unmatched_ratio if unmatched_side == "buy" else -unmatched_ratio if unmatched_side == "sell" else 0.0
     return {
         "auction_price": buy_price,
         "auction_matched_volume": buy_vol,
         "auction_unmatched_side": unmatched_side,
         "auction_unmatched_volume": unmatched_volume,
         "auction_change_pct": change_pct,
+        "auction_unmatched_ratio": unmatched_ratio,
+        "auction_pressure_score": pressure_score,
     }
 
 
@@ -501,6 +799,16 @@ def _tdx_date_arg(value: date | datetime | str | None) -> str | None:
     return normalized
 
 
+def _history_date_arg(value: date | datetime | str) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value).strip()
+    normalized = text.replace("-", "")
+    return normalized
+
+
 def _cn_today() -> date:
     return datetime.now(_CN_TZ).date()
 
@@ -516,6 +824,56 @@ def _to_app_symbol(code: str | None, exchange) -> str | None:
         raw_code = raw_code[2:]
     suffix = _exchange_suffix(exchange, raw_code)
     return f"{raw_code}.{suffix}" if suffix else None
+
+
+def _unique_instruments(rows: list[dict]) -> list[dict]:
+    keyed: dict[str, dict] = {}
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol:
+            keyed[str(symbol)] = row
+    return [keyed[symbol] for symbol in sorted(keyed)]
+
+
+def _market_exchange_stats(value: dict) -> dict:
+    up = int(_float(value.get("up")))
+    down = int(_float(value.get("down")))
+    flat = int(_float(value.get("flat")))
+    total = int(_float(value.get("total"))) or up + down + flat
+    return {"total": total, "up": up, "down": down, "flat": flat}
+
+
+def _market_temperature(up_count: int, down_count: int, total_count: int) -> str:
+    if total_count <= 0:
+        return "unknown"
+    ratio = up_count / max(down_count, 1)
+    up_share = up_count / total_count
+    if ratio >= 2.0 and up_share >= 0.55:
+        return "hot"
+    if ratio >= 1.2:
+        return "warm"
+    if ratio <= 0.5:
+        return "cold"
+    if ratio <= 0.85:
+        return "cool"
+    return "neutral"
+
+
+def _parse_update_time_ms(value) -> int | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for candidate in (text, text.replace(" ", "T")):
+        try:
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_CN_TZ)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            pass
+    return None
 
 
 def _exchange_suffix(exchange, code: str | None = None) -> str | None:
@@ -598,6 +956,16 @@ def _float(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        return f
+    except (TypeError, ValueError):
+        return None
 
 
 def _int_or_none(value) -> int | None:

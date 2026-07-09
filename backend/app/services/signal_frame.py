@@ -14,7 +14,7 @@ from pathlib import Path
 
 from app.indicators.levels import compute_levels
 from app.market_time import cn_today
-from app.services import manual_positions, quote_tick_store
+from app.services import manual_positions, market_breadth, quote_tick_store
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ def build_frames_from_tick_rows(
     target_date: date | None = None,
     include_levels: bool = True,
     include_trade_summary: bool = False,
+    market_context: dict | None = None,
 ) -> list[dict]:
     """基于已切好的 quote_ticks 构建 SignalFrame。
 
@@ -87,6 +88,7 @@ def build_frames_from_tick_rows(
     enriched_by_symbol = _enriched_map(repo)
     name_map = _safe_name_map(repo, sorted(wanted))
     positions = manual_positions.by_symbol(data_dir, repo)
+    market_context = _market_context(data_dir, market_context)
     out = []
     for symbol in sorted(wanted):
         latest = latest_by_symbol.get(symbol) or _latest_tick(ticks_by_symbol.get(symbol, []))
@@ -103,6 +105,7 @@ def build_frames_from_tick_rows(
             position=positions.get(symbol),
             levels=levels,
             trade_summary=trade_summary,
+            market_context=market_context,
         )
         if frame:
             out.append(frame)
@@ -146,6 +149,7 @@ def _build_one(
     position: dict | None,
     levels: dict,
     trade_summary: dict | None = None,
+    market_context: dict | None = None,
 ) -> dict | None:
     latest_price = _num((latest or {}).get("last_price")) or _num(enriched.get("close"))
     if latest_price is None:
@@ -162,6 +166,15 @@ def _build_one(
     pos = manual_positions.enrich(position, latest_price)
     minute = _minute_metrics(ticks, latest_price, open_price)
     trade_summary = trade_summary or {}
+    market_context = _market_context_fields(market_context)
+    microstructure = _microstructure_metrics(
+        latest=latest,
+        ticks=ticks,
+        enriched=enriched,
+        latest_price=latest_price,
+        prev_close=prev_close,
+        amount=amount,
+    )
     active_signals, risk_flags = _signals(
         latest_price=latest_price,
         open_price=open_price,
@@ -175,10 +188,13 @@ def _build_one(
         resistance=nearest_resistance,
         position=pos,
         auction=auction,
+        microstructure=microstructure,
+        latest=latest,
+        market_context=market_context,
     )
     support_distance = _distance(latest_price, nearest_support)
     resistance_distance = _distance(latest_price, nearest_resistance)
-    score = _score(active_signals, risk_flags, pos, latest)
+    score = _score(active_signals, risk_flags, pos, latest, microstructure=microstructure, market_context=market_context)
     reason_text = _reason_text(
         active_signals=active_signals,
         risk_flags=risk_flags,
@@ -187,6 +203,8 @@ def _build_one(
         support_distance=support_distance,
         resistance_distance=resistance_distance,
         position=pos,
+        microstructure=microstructure,
+        market_context=market_context,
     )
     now_ms = int(time.time() * 1000)
     ingest_ts = int((latest or {}).get("ingest_ts") or 0)
@@ -220,6 +238,18 @@ def _build_one(
         "risk_flags": risk_flags,
         "decision_score": score,
         "reason_text": reason_text,
+        "market_context": market_context,
+        "market_status": market_context.get("status"),
+        "market_temperature": market_context.get("market_temperature"),
+        "market_risk_level": market_context.get("market_risk_level"),
+        "market_up_count": market_context.get("up_count"),
+        "market_down_count": market_context.get("down_count"),
+        "market_up_down_ratio": market_context.get("up_down_ratio"),
+        "major_index_change_pct": market_context.get("major_index_change_pct"),
+        "market_context_text": market_context.get("text"),
+        "microstructure": microstructure,
+        "order_book": microstructure.get("order_book"),
+        **_microstructure_flat_fields(microstructure),
         "quote_freshness": freshness,
         "source": (latest or {}).get("source") or "tdxapi",
         **_auction_summary(auction, prev_close),
@@ -227,6 +257,300 @@ def _build_one(
         "levels": levels,
         **trade_summary,
     }
+
+
+def _microstructure_metrics(
+    *,
+    latest: dict | None,
+    ticks: list[dict],
+    enriched: dict,
+    latest_price: float,
+    prev_close: float | None,
+    amount: float | None,
+) -> dict:
+    latest = latest or {}
+    order_book = _order_book(latest)
+    bids = order_book["bids"]
+    asks = order_book["asks"]
+    bid_depth_amount = _num(latest.get("bid_depth_amount"))
+    ask_depth_amount = _num(latest.get("ask_depth_amount"))
+    if bid_depth_amount is None:
+        bid_depth_amount = sum(_num(row.get("amount")) or 0 for row in bids) or None
+    if ask_depth_amount is None:
+        ask_depth_amount = sum(_num(row.get("amount")) or 0 for row in asks) or None
+    bid_depth_vol = _num(latest.get("bid_depth_vol"))
+    ask_depth_vol = _num(latest.get("ask_depth_vol"))
+    if bid_depth_vol is None:
+        bid_depth_vol = sum(_num(row.get("volume")) or 0 for row in bids) or None
+    if ask_depth_vol is None:
+        ask_depth_vol = sum(_num(row.get("volume")) or 0 for row in asks) or None
+
+    spread = _num(latest.get("spread"))
+    if spread is None and bids and asks:
+        bid1 = _num(bids[0].get("price"))
+        ask1 = _num(asks[0].get("price"))
+        spread = ask1 - bid1 if bid1 is not None and ask1 is not None else None
+    spread_pct = _num(latest.get("spread_pct"))
+    if spread_pct is None and spread is not None and latest_price:
+        spread_pct = spread / latest_price
+
+    depth_imbalance = _num(latest.get("depth_imbalance"))
+    if depth_imbalance is None and bid_depth_amount and ask_depth_amount:
+        total = bid_depth_amount + ask_depth_amount
+        depth_imbalance = (bid_depth_amount - ask_depth_amount) / total if total else None
+
+    best_bid_amount = _num(latest.get("best_bid_amount")) or (_num(bids[0].get("amount")) if bids else None)
+    best_ask_amount = _num(latest.get("best_ask_amount")) or (_num(asks[0].get("amount")) if asks else None)
+    limit_up = _num(enriched.get("limit_up"))
+    near_limit_up = (
+        abs(latest_price - limit_up) / limit_up <= 0.001
+        if limit_up
+        else bool(prev_close and latest_price >= prev_close * 1.095)
+    )
+    limit_seal_amount = _num(latest.get("limit_seal_amount"))
+    if limit_seal_amount is None and near_limit_up:
+        limit_seal_amount = best_bid_amount
+    seal_strength = None
+    if limit_seal_amount is not None:
+        if amount and amount > 0:
+            seal_strength = limit_seal_amount / amount
+        else:
+            total_depth = (bid_depth_amount or 0) + (ask_depth_amount or 0)
+            seal_strength = limit_seal_amount / total_depth if total_depth > 0 else None
+
+    sell_wall = _nearest_wall(asks, latest_price, side="ask")
+    buy_wall = _nearest_wall(bids, latest_price, side="bid")
+    outside_inside_ratio = _num(latest.get("outside_inside_ratio"))
+    outside_volume = _num(latest.get("outside_volume"))
+    inside_volume = _num(latest.get("inside_volume"))
+    if outside_inside_ratio is None and outside_volume is not None and inside_volume and inside_volume > 0:
+        outside_inside_ratio = outside_volume / inside_volume
+    active_net_volume = _num(latest.get("active_net_volume"))
+    if active_net_volume is None and outside_volume is not None and inside_volume is not None:
+        active_net_volume = outside_volume - inside_volume
+    speed_rate = _num(latest.get("speed_rate"))
+    score = 0.0
+    if depth_imbalance is not None:
+        score += depth_imbalance * 18
+    if outside_inside_ratio is not None:
+        score += max(min((outside_inside_ratio - 1.0) * 8, 8), -8)
+    if speed_rate is not None:
+        score += max(min(speed_rate * 4, 6), -6)
+    if sell_wall.get("distance") is not None and 0 <= sell_wall["distance"] <= 0.005:
+        score -= 6
+    if buy_wall.get("distance") is not None and 0 <= buy_wall["distance"] <= 0.005:
+        score += 4
+    if seal_strength is not None:
+        score += max(min(seal_strength * 10, 8), -8)
+
+    out = {
+        "status": "ready" if bids or asks else "missing",
+        "order_book": order_book,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "bid_depth_vol": bid_depth_vol,
+        "ask_depth_vol": ask_depth_vol,
+        "bid_depth_amount": bid_depth_amount,
+        "ask_depth_amount": ask_depth_amount,
+        "depth_imbalance": depth_imbalance,
+        "best_bid_amount": best_bid_amount,
+        "best_ask_amount": best_ask_amount,
+        "limit_seal_amount": limit_seal_amount,
+        "seal_strength": seal_strength,
+        "nearest_sell_wall_price": sell_wall.get("price"),
+        "sell_wall_distance": sell_wall.get("distance"),
+        "nearest_buy_wall_price": buy_wall.get("price"),
+        "buy_wall_distance": buy_wall.get("distance"),
+        "current_volume": _num(latest.get("current_volume")),
+        "inside_volume": inside_volume,
+        "outside_volume": outside_volume,
+        "outside_inside_ratio": outside_inside_ratio,
+        "active_net_volume": active_net_volume,
+        "speed_rate": speed_rate,
+        "active1": _num(latest.get("active1")),
+        "active2": _num(latest.get("active2")),
+        "microstructure_score": max(min(score, 20), -20),
+        "tick_count": len(ticks),
+    }
+    for side in ("bid", "ask"):
+        levels = bids if side == "bid" else asks
+        for idx in range(1, 6):
+            row = levels[idx - 1] if len(levels) >= idx else {}
+            out[f"{side}{idx}_price"] = row.get("price")
+            out[f"{side}{idx}_vol"] = row.get("volume")
+            out[f"{side}{idx}_amount"] = row.get("amount")
+    return out
+
+
+def _order_book(latest: dict) -> dict:
+    return {
+        "bids": [_book_level(latest, "bid", idx) for idx in range(1, 6) if _book_level(latest, "bid", idx)],
+        "asks": [_book_level(latest, "ask", idx) for idx in range(1, 6) if _book_level(latest, "ask", idx)],
+    }
+
+
+def _book_level(latest: dict, side: str, idx: int) -> dict | None:
+    price = _num(latest.get(f"{side}{idx}_price") if latest.get(f"{side}{idx}_price") is not None else latest.get(side + str(idx)))
+    volume = _num(latest.get(f"{side}{idx}_vol"))
+    if price is None and volume is None:
+        return None
+    amount = price * volume * 100.0 if price and volume else None
+    return {
+        "level": idx,
+        "price": price,
+        "volume": volume,
+        "amount": amount,
+    }
+
+
+def _nearest_wall(levels: list[dict], latest_price: float, *, side: str) -> dict:
+    amounts = [_num(row.get("amount")) for row in levels]
+    amounts = [v for v in amounts if v is not None and v > 0]
+    if not amounts:
+        return {"price": None, "distance": None}
+    avg_amount = statistics.fmean(amounts)
+    threshold = max(avg_amount * 1.8, 200_000)
+    candidates = [
+        row for row in levels
+        if (_num(row.get("amount")) or 0) >= threshold and _num(row.get("price")) is not None
+    ]
+    if not candidates:
+        return {"price": None, "distance": None}
+    if side == "ask":
+        candidates.sort(key=lambda row: _num(row.get("price")) or float("inf"))
+        price = _num(candidates[0].get("price"))
+        distance = (price - latest_price) / latest_price if price and latest_price else None
+    else:
+        candidates.sort(key=lambda row: _num(row.get("price")) or 0, reverse=True)
+        price = _num(candidates[0].get("price"))
+        distance = (latest_price - price) / latest_price if price and latest_price else None
+    return {"price": price, "distance": distance}
+
+
+def _microstructure_flat_fields(microstructure: dict) -> dict:
+    keys = [
+        "spread", "spread_pct", "depth_imbalance", "bid_depth_amount", "ask_depth_amount",
+        "bid_depth_vol", "ask_depth_vol", "best_bid_amount", "best_ask_amount",
+        "limit_seal_amount", "seal_strength", "sell_wall_distance", "buy_wall_distance",
+        "nearest_sell_wall_price", "nearest_buy_wall_price", "outside_inside_ratio",
+        "active_net_volume", "speed_rate", "current_volume", "inside_volume",
+        "outside_volume", "microstructure_score",
+    ]
+    for side in ("bid", "ask"):
+        for idx in range(1, 6):
+            keys.extend([f"{side}{idx}_price", f"{side}{idx}_vol", f"{side}{idx}_amount"])
+    return {key: microstructure.get(key) for key in keys}
+
+
+def _near_limit_up(latest_price: float, microstructure: dict) -> bool:
+    seal_amount = _num(microstructure.get("limit_seal_amount"))
+    if seal_amount is not None:
+        return True
+    best_bid = _num(microstructure.get("bid1_price"))
+    return bool(best_bid and latest_price and abs(latest_price - best_bid) / latest_price <= 0.001)
+
+
+def _market_context(data_dir: Path, snapshot: dict | None) -> dict:
+    if snapshot is not None:
+        return _market_context_fields(snapshot)
+    try:
+        return _market_context_fields(market_breadth.cached(data_dir))
+    except Exception as e:
+        logger.debug("SignalFrame 市场广度读取失败: %s", e)
+        return _market_context_fields(market_breadth.unavailable(str(e)))
+
+
+def _market_context_fields(snapshot: dict | None) -> dict:
+    snapshot = snapshot or {}
+    temperature = str(snapshot.get("market_temperature") or "unknown")
+    up_down_ratio = _num(snapshot.get("up_down_ratio"))
+    major_change = _num(snapshot.get("major_index_change_pct"))
+    risk_level = _market_risk_level(temperature, up_down_ratio, major_change)
+    out = {
+        "source": snapshot.get("source") or "tdxapi",
+        "status": snapshot.get("status") or "ready",
+        "event_ts": snapshot.get("event_ts"),
+        "ingest_ts": snapshot.get("ingest_ts"),
+        "up_count": _num(snapshot.get("up_count")),
+        "down_count": _num(snapshot.get("down_count")),
+        "flat_count": _num(snapshot.get("flat_count")),
+        "total_count": _num(snapshot.get("total_count")),
+        "up_down_ratio": up_down_ratio,
+        "market_temperature": temperature,
+        "market_risk_level": risk_level,
+        "major_index_change_pct": major_change,
+        "major_indices": list(snapshot.get("major_indices") or [])[:5],
+        "text": _market_context_text(snapshot, risk_level),
+    }
+    if snapshot.get("error"):
+        out["error"] = str(snapshot.get("error"))
+    return out
+
+
+def _market_risk_level(temperature: str, up_down_ratio: float | None, major_change: float | None) -> str:
+    if temperature == "cold" or (up_down_ratio is not None and up_down_ratio < 0.5):
+        return "high"
+    if major_change is not None and major_change <= -0.02:
+        return "high"
+    if temperature == "cool" or (up_down_ratio is not None and up_down_ratio < 0.8):
+        return "elevated"
+    if major_change is not None and major_change <= -0.01:
+        return "elevated"
+    if temperature in {"hot", "warm"}:
+        return "supportive"
+    return "neutral"
+
+
+def _market_context_text(snapshot: dict, risk_level: str) -> str:
+    temperature = str(snapshot.get("market_temperature") or "unknown")
+    up_count = _num(snapshot.get("up_count"))
+    down_count = _num(snapshot.get("down_count"))
+    major_change = _num(snapshot.get("major_index_change_pct"))
+    parts = []
+    if risk_level in {"high", "elevated"}:
+        parts.append("市场逆风")
+    elif risk_level == "supportive":
+        parts.append("市场偏暖")
+    elif temperature != "unknown":
+        parts.append("市场中性")
+    else:
+        parts.append("市场环境未知")
+    if up_count is not None and down_count is not None:
+        parts.append(f"上涨 {int(up_count)} / 下跌 {int(down_count)}")
+    if major_change is not None:
+        parts.append(f"核心指数 {major_change * 100:.1f}%")
+    return ", ".join(parts)
+
+
+def _market_headwind(market_context: dict | None) -> bool:
+    if not market_context:
+        return False
+    risk_level = market_context.get("market_risk_level")
+    if risk_level in {"high", "elevated"}:
+        return True
+    temperature = market_context.get("market_temperature")
+    ratio = _num(market_context.get("up_down_ratio"))
+    return bool(temperature in {"cool", "cold"} or (ratio is not None and ratio < 0.8))
+
+
+def _market_tailwind(market_context: dict | None) -> bool:
+    if not market_context:
+        return False
+    temperature = market_context.get("market_temperature")
+    ratio = _num(market_context.get("up_down_ratio"))
+    major_change = _num(market_context.get("major_index_change_pct"))
+    if temperature not in {"hot", "warm"}:
+        return False
+    if ratio is not None and ratio < 1.1:
+        return False
+    return major_change is None or major_change > -0.005
+
+
+def _chasing_signals(signals: list[str]) -> bool:
+    return any(
+        item in signals
+        for item in ("open_range_breakout", "vwap_breakout", "speed_up", "intraday_new_high")
+    )
 
 
 def _signals(
@@ -243,12 +567,17 @@ def _signals(
     resistance: float | None,
     position: dict | None,
     auction: dict | None = None,
+    microstructure: dict | None = None,
+    latest: dict | None = None,
+    market_context: dict | None = None,
 ) -> tuple[list[str], list[str]]:
     signals: list[str] = []
     risks: list[str] = []
+    microstructure = microstructure or {}
     auction_change = _num((auction or {}).get("auction_change_pct"))
     auction_unmatched_side = (auction or {}).get("auction_unmatched_side")
     auction_unmatched_volume = _num((auction or {}).get("auction_unmatched_volume")) or 0
+    auction_unmatched_ratio = _num((auction or {}).get("auction_unmatched_ratio"))
     if auction_change is not None:
         if auction_change >= 0.02:
             signals.append("auction_strength")
@@ -256,8 +585,12 @@ def _signals(
             risks.append("auction_weakness")
     if auction_unmatched_side == "buy" and auction_unmatched_volume > 0:
         signals.append("auction_buy_imbalance")
+        if auction_unmatched_ratio is not None and auction_unmatched_ratio >= 0.35:
+            signals.append("auction_buy_pressure")
     if auction_unmatched_side == "sell" and auction_unmatched_volume > 0:
         risks.append("auction_sell_imbalance")
+        if auction_unmatched_ratio is not None and auction_unmatched_ratio >= 0.35:
+            risks.append("auction_sell_pressure")
     if vwap:
         if latest_price > vwap * 1.002:
             signals.append("vwap_breakout")
@@ -295,6 +628,56 @@ def _signals(
     if large_sell > 0 and large_sell >= max(large_buy * 1.5, 100_000):
         signals.append("large_order_selloff")
         risks.append("large_order_selloff")
+    depth_imbalance = _num(microstructure.get("depth_imbalance"))
+    if depth_imbalance is not None:
+        if depth_imbalance >= 0.35:
+            signals.append("depth_bid_dominant")
+        if depth_imbalance <= -0.35:
+            signals.append("depth_ask_dominant")
+            risks.append("depth_ask_dominant")
+    spread_pct = _num(microstructure.get("spread_pct"))
+    if spread_pct is not None and spread_pct >= 0.003:
+        risks.append("wide_spread")
+    total_depth = (_num(microstructure.get("bid_depth_amount")) or 0) + (_num(microstructure.get("ask_depth_amount")) or 0)
+    if total_depth > 0 and total_depth < 500_000:
+        risks.append("thin_liquidity")
+    sell_wall_distance = _num(microstructure.get("sell_wall_distance"))
+    if sell_wall_distance is not None and 0 <= sell_wall_distance <= 0.005:
+        signals.append("sell_wall_nearby")
+        risks.append("ask_wall_pressure")
+    buy_wall_distance = _num(microstructure.get("buy_wall_distance"))
+    if buy_wall_distance is not None and 0 <= buy_wall_distance <= 0.005:
+        signals.append("buy_wall_support")
+    outside_inside_ratio = _num(microstructure.get("outside_inside_ratio"))
+    if outside_inside_ratio is not None:
+        if outside_inside_ratio >= 1.5:
+            signals.append("outside_disk_dominant")
+        elif outside_inside_ratio <= 0.67:
+            signals.append("inside_disk_dominant")
+    speed_rate = _num(microstructure.get("speed_rate"))
+    if speed_rate is not None:
+        ret_1m = _num(minute.get("ret_1m")) or 0
+        if speed_rate >= 0.5 or ret_1m >= 0.01:
+            signals.append("speed_up")
+            if depth_imbalance is not None and depth_imbalance < 0.1:
+                risks.append("speed_up_without_depth")
+        if speed_rate <= -0.5 or ret_1m <= -0.01:
+            signals.append("speed_down")
+            risks.append("speed_down")
+    seal_strength = _num(microstructure.get("seal_strength"))
+    if seal_strength is not None:
+        if seal_strength >= 0.25:
+            signals.append("seal_strengthening")
+        elif seal_strength < 0.08 and _near_limit_up(latest_price, microstructure):
+            signals.append("seal_weakening")
+            risks.append("weak_seal")
+    if latest and latest.get("ingest_ts") and int(time.time() * 1000) - int(latest["ingest_ts"]) > 15_000:
+        risks.append("tdx_snapshot_stale")
+    if _market_tailwind(market_context):
+        signals.append("market_tailwind")
+    if _market_headwind(market_context) and _chasing_signals(signals):
+        risks.append("market_headwind")
+        risks.append("market_breadth_weak")
     if position:
         level = position.get("risk_level")
         if level == "critical":
@@ -315,8 +698,12 @@ def _reason_text(
     support_distance: float | None,
     resistance_distance: float | None,
     position: dict | None,
+    microstructure: dict | None = None,
+    market_context: dict | None = None,
 ) -> str:
     parts: list[str] = []
+    microstructure = microstructure or {}
+    market_context = market_context or {}
     if "stop_loss_break" in risk_flags:
         parts.append("已跌破手动止损,请立即检查")
     elif "stop_loss_near" in risk_flags:
@@ -337,6 +724,36 @@ def _reason_text(
         parts.append("集合竞价参考价明显低于昨收")
     if "auction_sell_imbalance" in risk_flags:
         parts.append("集合竞价卖方未匹配量占优")
+    if "depth_bid_dominant" in active_signals:
+        parts.append("买盘厚度占优")
+    if "depth_ask_dominant" in risk_flags:
+        parts.append("卖盘厚度占优")
+    if "outside_disk_dominant" in active_signals:
+        parts.append("外盘占优")
+    if "inside_disk_dominant" in active_signals:
+        parts.append("内盘占优")
+    if "speed_up" in active_signals:
+        parts.append("涨速走强")
+    if "speed_down" in risk_flags:
+        parts.append("下跌加速")
+    if "ask_wall_pressure" in risk_flags:
+        parts.append("上方卖墙较近")
+    if "buy_wall_support" in active_signals:
+        parts.append("下方买墙提供支撑")
+    if "wide_spread" in risk_flags:
+        parts.append("买卖价差偏宽")
+    if "thin_liquidity" in risk_flags:
+        parts.append("盘口偏薄")
+    if "weak_seal" in risk_flags:
+        parts.append("涨停附近封单偏弱")
+    if "tdx_snapshot_stale" in risk_flags:
+        parts.append("TDX 快照已滞后")
+    if "market_breadth_weak" in risk_flags:
+        parts.append("市场广度偏弱,追涨信号降级")
+    elif "market_headwind" in risk_flags:
+        parts.append(market_context.get("text") or "市场逆风")
+    elif "market_tailwind" in active_signals:
+        parts.append(market_context.get("text") or "市场偏暖")
     if "vwap_breakout" in active_signals and vwap:
         parts.append(f"当前价高于 VWAP {((price - vwap) / vwap) * 100:.1f}%")
     if "vwap_breakdown" in active_signals and vwap:
@@ -352,7 +769,15 @@ def _reason_text(
     return ", ".join(parts)
 
 
-def _score(signals: list[str], risks: list[str], position: dict | None, latest: dict | None) -> int:
+def _score(
+    signals: list[str],
+    risks: list[str],
+    position: dict | None,
+    latest: dict | None,
+    *,
+    microstructure: dict | None = None,
+    market_context: dict | None = None,
+) -> int:
     score = 0
     if position and position.get("risk_level") == "critical":
         score += 100
@@ -374,6 +799,17 @@ def _score(signals: list[str], risks: list[str], position: dict | None, latest: 
         score += 20
     if "auction_buy_imbalance" in signals:
         score += 10
+    micro_score = _num((microstructure or {}).get("microstructure_score"))
+    if micro_score is not None:
+        score += int(max(min(micro_score, 15), -15))
+    if "depth_bid_dominant" in signals:
+        score += 8
+    if "outside_disk_dominant" in signals:
+        score += 5
+    if "speed_up" in signals:
+        score += 6
+    if "market_tailwind" in signals:
+        score += 5
     if "large_order_selloff" in risks:
         score -= 30
     if "auction_weakness" in risks:
@@ -382,6 +818,18 @@ def _score(signals: list[str], risks: list[str], position: dict | None, latest: 
         score -= 10
     if "near_resistance" in risks:
         score -= 10
+    if "ask_wall_pressure" in risks:
+        score -= 8
+    if "wide_spread" in risks or "thin_liquidity" in risks:
+        score -= 8
+    if "tdx_snapshot_stale" in risks:
+        score -= 20
+    if "market_headwind" in risks:
+        score -= 10
+    if "market_breadth_weak" in risks:
+        score -= 8
+    if _market_headwind(market_context) and _chasing_signals(signals):
+        score -= 12
     if latest and latest.get("ingest_ts") and int(time.time() * 1000) - int(latest["ingest_ts"]) > 60_000:
         score -= 40
     return max(0, min(100, score))
@@ -461,6 +909,8 @@ def _auction_summary(auction: dict | None, prev_close: float | None) -> dict:
             "auction_matched_volume": None,
             "auction_unmatched_side": None,
             "auction_unmatched_volume": None,
+            "auction_unmatched_ratio": None,
+            "auction_pressure_score": None,
         }
     price = _num(auction.get("auction_price")) or _num(auction.get("last_price"))
     change_pct = _num(auction.get("auction_change_pct"))
@@ -472,6 +922,8 @@ def _auction_summary(auction: dict | None, prev_close: float | None) -> dict:
         "auction_matched_volume": _num(auction.get("auction_matched_volume")),
         "auction_unmatched_side": auction.get("auction_unmatched_side"),
         "auction_unmatched_volume": _num(auction.get("auction_unmatched_volume")),
+        "auction_unmatched_ratio": _num(auction.get("auction_unmatched_ratio")),
+        "auction_pressure_score": _num(auction.get("auction_pressure_score")),
     }
 
 

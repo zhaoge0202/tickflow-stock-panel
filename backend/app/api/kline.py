@@ -34,12 +34,12 @@ def search_instruments(
     request: Request,
     q: str = Query("", min_length=0, max_length=50, description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
-    asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf"),
+    asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf,index"),
 ):
     """模糊搜索标的 (代码 / 名称)。从内存 instruments 缓存中查。
 
-    默认只搜股票, 保持既有调用方行为不变; 自选等场景传 asset_types=stock,etf
-    可一并搜出 ETF, 结果附带 asset_type 字段供前端区分。
+    默认只搜股票, 保持既有调用方行为不变; 自选等场景传 asset_types=stock,etf,index
+    可一并搜出 ETF / 指数, 结果附带 asset_type 字段供前端区分。
     """
     if not q.strip():
         return {"results": []}
