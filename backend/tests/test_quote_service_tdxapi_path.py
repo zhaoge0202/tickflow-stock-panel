@@ -123,3 +123,26 @@ def test_fetch_full_market_quotes_supplements_manual_positions_for_tdxapi(monkey
 
     assert provider_calls == [None, ["589020.SH"]]
     assert [row["symbol"] for row in captured["records"]] == ["002491.SZ", "589020.SH"]
+
+
+def test_build_daily_skips_tdx_preopen_auction_reference():
+    df = QuoteService._build_daily([
+        {
+            "symbol": "002491.SZ",
+            "name": "通鼎互联",
+            "source": "tdxapi",
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "last_price": 22.66,
+            "prev_close": 22.61,
+            "open": 0,
+            "high": 0,
+            "low": 0,
+            "volume": 0,
+            "amount": None,
+            "auction_price": 22.66,
+            "auction_matched_volume": 1111,
+        }
+    ])
+
+    assert df.is_empty()

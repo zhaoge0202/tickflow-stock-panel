@@ -46,6 +46,20 @@ logger = logging.getLogger(__name__)
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="feishu-webhook")
 
 
+def _is_trade_price_record(record: dict) -> bool:
+    """是否可写入日 K/enriched 的真实成交快照。
+
+    TDX 集合竞价阶段会返回 K.Close=0, 同时把虚拟参考价放在五档里。
+    这类数据对开盘判断有价值,但不是成交价,不能写入日 K。
+    """
+    if record.get("price_type") == "auction_reference":
+        return False
+    try:
+        return float(record.get("last_price") or record.get("close") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 class QuoteSubscriber:
     """一个 SSE 连接对应一个订阅者: 独立事件 + 独立队列。
 
@@ -846,6 +860,7 @@ class QuoteService:
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
         """将 API records 转为日K格式 DataFrame (只有 OHLCV, 写 kline_daily 用)。"""
+        records = [r for r in records if _is_trade_price_record(r)]
         if not records:
             return pl.DataFrame()
         df = pl.DataFrame(records)
@@ -885,6 +900,7 @@ class QuoteService:
 
         包含: prev_close, change_pct, change_amount, amplitude, turnover_rate。
         """
+        records = [r for r in records if _is_trade_price_record(r)]
         if not records:
             return pl.DataFrame()
         df = pl.DataFrame(records)

@@ -605,6 +605,11 @@ export interface SignalFrame {
   intraday_low?: number | null
   day_high_distance?: number | null
   day_low_distance?: number | null
+  auction_price?: number | null
+  auction_change_pct?: number | null
+  auction_matched_volume?: number | null
+  auction_unmatched_side?: 'buy' | 'sell' | null
+  auction_unmatched_volume?: number | null
   nearest_support?: number | null
   nearest_resistance?: number | null
   support_distance?: number | null

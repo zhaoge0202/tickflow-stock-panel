@@ -304,13 +304,16 @@ class TDXAPIProvider:
             return None
         k = item.get("K") or {}
         prev_close = _price(k.get("Last"))
-        last_price = _price(k.get("Close"))
+        trade_price = _price(k.get("Close"))
+        auction = _auction_fields(item, prev_close)
+        is_auction_reference = trade_price <= 0 and auction.get("auction_price") is not None
+        last_price = auction["auction_price"] if is_auction_reference else trade_price
         high = _price(k.get("High"))
         low = _price(k.get("Low"))
         change_amount = last_price - prev_close if prev_close else 0.0
         change_pct = change_amount / prev_close if prev_close else 0.0
         amplitude = (high - low) / prev_close if prev_close else 0.0
-        return {
+        row = {
             "symbol": symbol,
             "name": name_map.get(symbol),
             "source": "tdxapi",
@@ -320,13 +323,24 @@ class TDXAPIProvider:
             "high": high,
             "low": low,
             "volume": _volume(item.get("TotalHand")),
-            "amount": _float(item.get("Amount")),
+            # 集合竞价阶段 Amount 常见为极小浮点噪声,不能当成交额使用。
+            "amount": None if is_auction_reference else _float(item.get("Amount")),
             "change_pct": change_pct,
             "change_amount": change_amount,
             "amplitude": amplitude,
             "turnover_rate": None,
             "timestamp": _server_time_ms(item.get("ServerTime")),
         }
+        row.update(_best_level_fields(item))
+        if is_auction_reference:
+            row.update({
+                "price_type": "auction_reference",
+                "market_phase": "preopen_auction",
+                **auction,
+            })
+        else:
+            row["price_type"] = "trade"
+        return row
 
     @staticmethod
     def _trade_tick_row(symbol: str, item: dict, seq_in_day: int) -> dict | None:
@@ -351,6 +365,75 @@ class TDXAPIProvider:
             "raw_status": raw_status,
             "source": "tdxapi",
         }
+
+
+def _best_level_fields(item: dict) -> dict:
+    """从 TDX 五档快照取一档价格/量。
+
+    集合竞价期间 TDX 会把虚拟参考价放在买一/卖一同价位置, 所以这里
+    只做原始字段透传, 业务语义由 _auction_fields 单独识别。
+    """
+    buy1 = _level(item.get("BuyLevel"), 0)
+    sell1 = _level(item.get("SellLevel"), 0)
+    return {
+        "bid1": _price_or_none(buy1.get("Price")),
+        "ask1": _price_or_none(sell1.get("Price")),
+        "bid1_vol": _int_or_none(buy1.get("Number")),
+        "ask1_vol": _int_or_none(sell1.get("Number")),
+    }
+
+
+def _auction_fields(item: dict, prev_close: float | None) -> dict:
+    """识别 TDX 集合竞价参考价。
+
+    实测 9:15-9:25:
+      - K.Close/Open/High/Low 为 0;
+      - BuyLevel[0] 与 SellLevel[0] 同价同量, 对应虚拟参考价/匹配量;
+      - 第二档只有一侧有量, 对应虚拟未匹配量方向。
+    """
+    buy1 = _level(item.get("BuyLevel"), 0)
+    sell1 = _level(item.get("SellLevel"), 0)
+    buy2 = _level(item.get("BuyLevel"), 1)
+    sell2 = _level(item.get("SellLevel"), 1)
+    buy_price = _price_or_none(buy1.get("Price"))
+    sell_price = _price_or_none(sell1.get("Price"))
+    buy_vol = _int_or_none(buy1.get("Number"))
+    sell_vol = _int_or_none(sell1.get("Number"))
+    if (
+        buy_price is None
+        or sell_price is None
+        or buy_price <= 0
+        or sell_price <= 0
+        or abs(buy_price - sell_price) > 1e-9
+        or buy_vol != sell_vol
+    ):
+        return {}
+
+    unmatched_buy = _int_or_none(buy2.get("Number")) or 0
+    unmatched_sell = _int_or_none(sell2.get("Number")) or 0
+    unmatched_side = None
+    unmatched_volume = 0
+    if unmatched_buy > unmatched_sell:
+        unmatched_side = "buy"
+        unmatched_volume = unmatched_buy
+    elif unmatched_sell > unmatched_buy:
+        unmatched_side = "sell"
+        unmatched_volume = unmatched_sell
+
+    change_pct = (buy_price - prev_close) / prev_close if prev_close else None
+    return {
+        "auction_price": buy_price,
+        "auction_matched_volume": buy_vol,
+        "auction_unmatched_side": unmatched_side,
+        "auction_unmatched_volume": unmatched_volume,
+        "auction_change_pct": change_pct,
+    }
+
+
+def _level(levels, index: int) -> dict:
+    if isinstance(levels, list) and len(levels) > index and isinstance(levels[index], dict):
+        return levels[index]
+    return {}
 
 
 def availability() -> tuple[bool, str]:
@@ -499,6 +582,11 @@ def _in_datetime_range(value: datetime, start_time: datetime | None, end_time: d
 
 def _price(value) -> float:
     return _float(value) / 1000.0
+
+
+def _price_or_none(value) -> float | None:
+    price = _price(value)
+    return price if price > 0 else None
 
 
 def _volume(value) -> float:
