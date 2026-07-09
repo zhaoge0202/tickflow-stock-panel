@@ -68,7 +68,7 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'turnover':      return r.turnover_rate
     case 'amount':        return r.rt_amount ?? r.amount
     case 'float_val':     return r.float_shares && (r.rt_price ?? r.close) ? r.float_shares * (r.rt_price ?? r.close) : null
-    case 'vol_ratio':     return r.vol_ratio_5d
+    case 'vol_ratio':     return r.realtime_vol_ratio ?? r.vol_ratio_5d
     case 'annual_vol':    return r.annual_vol_20d
     case 'ma5':           return r.ma5
     case 'ma10':          return r.ma10

@@ -1471,7 +1471,7 @@ export function LimitUpLadder() {
   const extColumnsParam = useMemo(() => buildExtColumnsParam(extFields), [extFields])
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: [QK.limitLadder(asOf || undefined), extColumnsParam, direction],
+    queryKey: [...QK.limitLadder(asOf || undefined), extColumnsParam ?? '', direction],
     queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction),
     staleTime: 5 * 60_000,
   })

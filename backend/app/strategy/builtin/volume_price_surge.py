@@ -9,9 +9,9 @@ META = {
     "params": [
         {"id": "require_ma20_breakout", "label": "要求突破MA20", "type": "bool",
          "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool",
+        {"id": "use_volume_filter", "label": "启用放量倍数过滤", "type": "bool",
          "default": True},
-        {"id": "vol_ratio_min", "label": "最低量比", "type": "float",
+        {"id": "vol_ratio_min", "label": "最低5日放量倍数", "type": "float",
          "default": 2.0, "min": 0.5, "max": 10.0, "step": 0.1},
         {"id": "require_bullish_candle", "label": "要求收阳", "type": "bool",
          "default": True},

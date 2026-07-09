@@ -357,7 +357,7 @@ def set_review_push_channels(channels: list[str]) -> list[str]:
 # 可刷新的页面列表及其默认值
 SSE_REFRESH_PAGES_DEFAULT = {
     "watchlist": True,
-    "limit-ladder": False,
+    "limit-ladder": True,
 }
 
 SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["000001.SH", "399001.SZ", "399006.SZ", "000680.SH"]

@@ -13,7 +13,7 @@ META = {
          "default": 0.02, "min": 0.01, "max": 0.05, "step": 0.005},
         {"id": "use_volume_filter", "label": "启用缩量过滤", "type": "bool",
          "default": True},
-        {"id": "vol_ratio_max", "label": "最大量比", "type": "float",
+        {"id": "vol_ratio_max", "label": "最大5日放量倍数", "type": "float",
          "default": 0.8, "min": 0.2, "max": 1.5, "step": 0.1},
         {"id": "require_above_ma60", "label": "要求收盘价在MA60上方", "type": "bool",
          "default": True},

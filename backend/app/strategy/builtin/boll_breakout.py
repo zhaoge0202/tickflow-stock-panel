@@ -9,9 +9,9 @@ META = {
     "params": [
         {"id": "require_boll_breakout", "label": "要求突破布林上轨", "type": "bool",
          "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool",
+        {"id": "use_volume_filter", "label": "启用放量倍数过滤", "type": "bool",
          "default": True},
-        {"id": "vol_ratio_min", "label": "最低量比", "type": "float",
+        {"id": "vol_ratio_min", "label": "最低5日放量倍数", "type": "float",
          "default": 1.5, "min": 0.5, "max": 5.0, "step": 0.1},
     ],
     "scoring": {"vol_ratio_5d": 0.4, "change_pct": 0.3, "momentum_20d": 0.3},

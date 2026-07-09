@@ -51,7 +51,7 @@ _SIGNAL_CN: dict[str, str] = {
     "kdj_k": "KDJ-K", "kdj_d": "KDJ-D", "kdj_j": "KDJ-J",
     "rsi_6": "RSI6", "rsi_14": "RSI14", "rsi_24": "RSI24",
     # 量能 / 动量 / 波动
-    "vol_ratio_5d": "5日量比", "vol_ratio_20d": "20日量比",
+    "vol_ratio_5d": "5日放量倍数", "vol_ratio_20d": "20日放量倍数",
     "vol_ma5": "5日均量", "vol_ma10": "10日均量",
     "high_60d": "60日最高", "low_60d": "60日最低",
     "momentum_5d": "5日动量", "momentum_20d": "20日动量", "momentum_60d": "60日动量",
@@ -886,7 +886,7 @@ class MonitorRuleEngine:
             return f"策略「{sname}」变更"
 
         # signal / price / market: 条件摘要 + 现价 + 涨跌幅
-        # 条件摘要: 把 conditions (truth/比较) 拼成可读串, 如 "MA20金叉 且 量比>2"
+        # 条件摘要: 把 conditions (truth/比较) 拼成可读串, 如 "MA20金叉 且 5日放量倍数>2"
         cond_text = self._format_conditions_text(rule, conditions)
         price_text = f"现价 {price}" if price is not None else ""
         pct_text = ""
