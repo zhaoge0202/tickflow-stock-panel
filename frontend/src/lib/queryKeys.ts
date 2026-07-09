@@ -87,6 +87,7 @@ export const QK = {
   decisionItem:          (symbol: string, date?: string) => ['decision', 'item', symbol, date ?? 'today'] as const,
   decisionTimeline:      (symbol: string, date?: string) => ['decision', 'timeline', symbol, date ?? 'today'] as const,
   manualPositions:       ['manual-positions'] as const,
+  marketBreadth:         ['market-breadth'] as const,
   quoteTickQuality:      (symbols?: string) => ['quote-tick-quality', symbols ?? 'all'] as const,
   alertOutcomes:         (days?: number) => ['alert-outcomes', days ?? 7] as const,
 

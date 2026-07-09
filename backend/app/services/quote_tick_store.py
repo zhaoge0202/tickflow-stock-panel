@@ -26,6 +26,23 @@ FLUSH_INTERVAL_S = 3.0
 FLUSH_BATCH_SIZE = 5000
 RING_MAX_ROWS = 20000
 STALE_MS = 15_000
+DEPTH_FIELD_NAMES = [
+    *(f"bid{i}_price" for i in range(1, 6)),
+    *(f"bid{i}_vol" for i in range(1, 6)),
+    *(f"ask{i}_price" for i in range(1, 6)),
+    *(f"ask{i}_vol" for i in range(1, 6)),
+]
+MICROSTRUCTURE_FIELD_NAMES = [
+    "spread", "spread_pct", "bid_depth_vol", "ask_depth_vol",
+    "bid_depth_amount", "ask_depth_amount", "depth_imbalance",
+    "best_bid_amount", "best_ask_amount", "limit_seal_amount",
+    "current_volume", "inside_volume", "outside_volume",
+    "outside_inside_ratio", "active_net_volume", "speed_rate",
+    "active1", "active2",
+]
+AUCTION_EXTRA_FIELD_NAMES = [
+    "auction_unmatched_ratio", "auction_pressure_score",
+]
 
 _lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
@@ -239,17 +256,21 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
         return None
     event_ts = _event_ts_ms(record.get("timestamp")) or ingest_ts
     event_dt = datetime.fromtimestamp(event_ts / 1000, tz=CN_TZ)
+    known_fields = {
+        "symbol", "name", "last_price", "close", "prev_close", "open", "high", "low",
+        "volume", "amount", "change_pct", "timestamp", "market_phase", "price_type",
+        "auction_price", "auction_matched_volume", "auction_unmatched_side",
+        "auction_unmatched_volume", "auction_change_pct", "bid1", "ask1", "bid1_vol",
+        "ask1_vol", *DEPTH_FIELD_NAMES, *MICROSTRUCTURE_FIELD_NAMES,
+        *AUCTION_EXTRA_FIELD_NAMES,
+    }
     raw = {
         k: v for k, v in record.items()
-        if k not in {
-            "symbol", "name", "last_price", "close", "prev_close", "open", "high", "low",
-            "volume", "amount", "change_pct", "timestamp", "market_phase", "price_type",
-            "auction_price", "auction_matched_volume", "auction_unmatched_side",
-            "auction_unmatched_volume", "auction_change_pct", "bid1", "ask1", "bid1_vol",
-            "ask1_vol",
-        }
+        if k not in known_fields
     }
-    return {
+    bid1_price = _float_or_none(record.get("bid1_price") if record.get("bid1_price") is not None else record.get("bid1"))
+    ask1_price = _float_or_none(record.get("ask1_price") if record.get("ask1_price") is not None else record.get("ask1"))
+    out = {
         "symbol": symbol,
         "name": record.get("name"),
         "source": source,
@@ -264,8 +285,8 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
         "low": _float_or_none(record.get("low")),
         "volume": _float_or_none(record.get("volume")),
         "amount": _float_or_none(record.get("amount")),
-        "bid1": _float_or_none(record.get("bid1")),
-        "ask1": _float_or_none(record.get("ask1")),
+        "bid1": bid1_price,
+        "ask1": ask1_price,
         "bid1_vol": _float_or_none(record.get("bid1_vol")),
         "ask1_vol": _float_or_none(record.get("ask1_vol")),
         "market_phase": record.get("market_phase"),
@@ -275,8 +296,20 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
         "auction_unmatched_side": record.get("auction_unmatched_side"),
         "auction_unmatched_volume": _float_or_none(record.get("auction_unmatched_volume")),
         "auction_change_pct": _float_or_none(record.get("auction_change_pct")),
+        "auction_unmatched_ratio": _float_or_none(record.get("auction_unmatched_ratio")),
+        "auction_pressure_score": _float_or_none(record.get("auction_pressure_score")),
         "raw": json.dumps(raw, ensure_ascii=False) if raw else None,
     }
+    for field in DEPTH_FIELD_NAMES:
+        fallback = None
+        if field == "bid1_price":
+            fallback = bid1_price
+        elif field == "ask1_price":
+            fallback = ask1_price
+        out[field] = _float_or_none(record.get(field)) if record.get(field) is not None else fallback
+    for field in MICROSTRUCTURE_FIELD_NAMES:
+        out[field] = _float_or_none(record.get(field))
+    return out
 
 
 def _event_ts_ms(value) -> int | None:

@@ -120,22 +120,35 @@ def _load_replay_ticks(
         return loaded
 
     try:
-        trade_ticks = _load_trade_tick_replay_ticks(symbols, target_date)
+        trade_loaded = _load_trade_tick_replay_ticks(
+            symbols,
+            target_date,
+            start_time=start_time,
+            end_time=end_time,
+        )
     except Exception as e:
         loaded["fallback_error"] = str(e)
         return loaded
 
+    trade_ticks = trade_loaded["ticks"]
     trade_window_count = _count_window_ticks(trade_ticks, start_time=start_time, end_time=end_time)
     loaded["trade_tick_count"] = len(trade_ticks)
     loaded["trade_window_tick_count"] = trade_window_count
+    loaded["fallback_error"] = trade_loaded.get("fallback_error")
     if trade_window_count > 0 or (not quote_ticks and trade_ticks):
         loaded["ticks"] = trade_ticks
-        loaded["tick_source"] = "tdxapi_trade_ticks"
+        loaded["tick_source"] = trade_loaded["tick_source"]
         loaded["window_tick_count"] = trade_window_count
     return loaded
 
 
-def _load_trade_tick_replay_ticks(symbols: list[str], target_date: date) -> list[dict]:
+def _load_trade_tick_replay_ticks(
+    symbols: list[str],
+    target_date: date,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> dict:
     from app.plugins.tdxapi.provider import TDXAPIProvider
 
     provider = TDXAPIProvider()
@@ -143,14 +156,50 @@ def _load_trade_tick_replay_ticks(symbols: list[str], target_date: date) -> list
         out: list[dict] = []
         for symbol in symbols:
             rows = provider.get_trade_ticks(symbol, target_date, mode="all", limit=None)
-            out.extend(_trade_ticks_to_quote_rows(symbol, rows, target_date))
+            out.extend(_trade_ticks_to_quote_rows(symbol, rows, target_date, source="tdxapi_trade_ticks"))
         out.sort(key=lambda r: (int(r.get("event_ts") or 0), str(r.get("symbol") or "")))
-        return out
+        if _count_window_ticks(out, start_time=start_time, end_time=end_time) > 0:
+            return {"ticks": out, "tick_source": "tdxapi_trade_ticks", "fallback_error": None}
+
+        fallback_error = None
+        history_out: list[dict] = []
+        try:
+            for symbol in symbols:
+                rows = provider.get_trade_history_full(
+                    symbol,
+                    start_date=target_date,
+                    end_date=target_date,
+                    include_today=target_date == datetime.now(CN_TZ).date(),
+                    limit=None,
+                )
+                history_out.extend(_trade_ticks_to_quote_rows(
+                    symbol,
+                    rows,
+                    target_date,
+                    source="tdxapi_trade_history_minute_precision",
+                ))
+        except Exception as e:
+            fallback_error = str(e)
+
+        if history_out:
+            history_out.sort(key=lambda r: (int(r.get("event_ts") or 0), str(r.get("symbol") or "")))
+            return {
+                "ticks": history_out,
+                "tick_source": "tdxapi_trade_history_minute_precision",
+                "fallback_error": fallback_error,
+            }
+        return {"ticks": out, "tick_source": "tdxapi_trade_ticks", "fallback_error": fallback_error}
     finally:
         provider.close()
 
 
-def _trade_ticks_to_quote_rows(symbol: str, rows: list[dict], target_date: date) -> list[dict]:
+def _trade_ticks_to_quote_rows(
+    symbol: str,
+    rows: list[dict],
+    target_date: date,
+    *,
+    source: str,
+) -> list[dict]:
     parsed = []
     for row in rows or []:
         dt = _trade_tick_datetime(row.get("datetime"))
@@ -198,13 +247,13 @@ def _trade_ticks_to_quote_rows(symbol: str, rows: list[dict], target_date: date)
             "side": row.get("side"),
             "side_label": row.get("side_label"),
             "order_count": row.get("order_count"),
-            "source": row.get("source"),
+            "source": row.get("source") or source,
             "time_precision": "minute",
         }
         out.append({
             "symbol": symbol,
             "name": row.get("name"),
-            "source": "tdxapi_trade_ticks",
+            "source": source,
             "event_ts": event_ts,
             "ingest_ts": ingest_ts,
             "trade_date": target_date.isoformat(),
