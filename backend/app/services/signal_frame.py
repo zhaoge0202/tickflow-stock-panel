@@ -38,7 +38,12 @@ def build_latest_frames(
 
     ticks_by_symbol: dict[str, list[dict]] = {}
     auction_by_symbol: dict[str, dict] = {}
-    for row in quote_tick_store.read_ticks(data_dir, target_date=target_date, symbols=sorted(wanted)):
+    for row in quote_tick_store.read_ticks(
+        data_dir,
+        target_date=target_date,
+        symbols=sorted(wanted),
+        prefer_hot=True,
+    ):
         if _is_auction_tick(row):
             sym = row["symbol"]
             prev = auction_by_symbol.get(sym)

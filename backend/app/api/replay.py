@@ -28,7 +28,7 @@ def run_intraday(req: IntradayReplayReq, request: Request):
     symbols = [s.strip().upper() for s in req.symbols if s.strip()]
     if not symbols:
         raise HTTPException(status_code=400, detail="symbols 不能为空")
-    return intraday_replay.run_replay(
+    return intraday_replay.enqueue_replay(
         _data_dir(request),
         target_date=req.date,
         symbols=symbols,

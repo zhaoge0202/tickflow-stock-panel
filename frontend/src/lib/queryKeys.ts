@@ -90,6 +90,7 @@ export const QK = {
   marketBreadth:         ['market-breadth'] as const,
   quoteTickQuality:      (symbols?: string) => ['quote-tick-quality', symbols ?? 'all'] as const,
   alertOutcomes:         (days?: number) => ['alert-outcomes', days ?? 7] as const,
+  intradayReplayTask:    (taskId: string) => ['replay', 'intraday', taskId] as const,
 
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,

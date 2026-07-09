@@ -188,6 +188,7 @@ function ReplayPanel({ defaultSymbols }: { defaultSymbols: string[] }) {
   const [symbols, setSymbols] = useState(defaultSymbols.slice(0, 8).join(','))
   const [startTime, setStartTime] = useState('09:30')
   const [endTime, setEndTime] = useState('15:00')
+  const [taskId, setTaskId] = useState<string | null>(null)
   const replayMut = useMutation({
     mutationFn: () => api.intradayReplay({
       date: tradeDate,
@@ -195,8 +196,24 @@ function ReplayPanel({ defaultSymbols }: { defaultSymbols: string[] }) {
       start_time: startTime || undefined,
       end_time: endTime || undefined,
     }),
+    onMutate: () => {
+      setTaskId(null)
+    },
+    onSuccess: (task: any) => {
+      setTaskId(task.task_id)
+    },
   })
-  const data = replayMut.data
+  const replayTaskQ = useQuery({
+    queryKey: QK.intradayReplayTask(taskId ?? ''),
+    queryFn: () => api.intradayReplayTask(taskId!),
+    enabled: !!taskId,
+    refetchInterval: (q: any) => {
+      const status = q.state.data?.status
+      return status === 'succeeded' || status === 'failed' ? false : 1_000
+    },
+  })
+  const data = taskId ? (replayTaskQ.data ?? replayMut.data) : undefined
+  const replayRunning = replayMut.isPending || data?.status === 'running' || data?.status === 'pending'
 
   return (
     <section className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface/45">
@@ -215,10 +232,10 @@ function ReplayPanel({ defaultSymbols }: { defaultSymbols: string[] }) {
           </div>
           <button
             onClick={() => replayMut.mutate()}
-            disabled={replayMut.isPending || !tradeDate || !symbols.trim()}
+            disabled={replayRunning || !tradeDate || !symbols.trim()}
             className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium text-white disabled:opacity-50"
           >
-            {replayMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {replayRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
             开始回放
           </button>
           {replayMut.error && <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{String((replayMut.error as Error).message)}</p>}
@@ -262,6 +279,11 @@ function ReplayPanel({ defaultSymbols }: { defaultSymbols: string[] }) {
               {replayEmptyHint(data) && (
                 <div className="rounded-md border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-xs leading-relaxed text-amber-200">
                   {replayEmptyHint(data)}
+                </div>
+              )}
+              {data.status === 'failed' && data.error && (
+                <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs leading-relaxed text-danger">
+                  {data.error}
                 </div>
               )}
               <ReplaySummary title="规则表现" rows={data.rule_summary ?? []} />
@@ -656,6 +678,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function replayEmptyHint(data: any): string {
   if (!data || (data.triggered ?? 0) > 0) return ''
+  if (data.status === 'running' || data.status === 'pending' || data.status === 'failed') return ''
   const tickCount = Number(data.tick_count ?? 0)
   const windowTickCount = Number(data.window_tick_count ?? 0)
   const source = replaySourceLabel(data.tick_source)

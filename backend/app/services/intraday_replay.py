@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -18,7 +21,11 @@ from app.services import quote_tick_store, signal_frame
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
 
+logger = logging.getLogger(__name__)
+
 _TASKS: dict[str, dict] = {}
+_TASKS_LOCK = threading.Lock()
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intraday-replay")
 CN_TZ = ZoneInfo("Asia/Shanghai")
 REPLAY_MIN_EVENT_INTERVAL_MS = 60_000
 DEFAULT_REPLAY_RULES = [
@@ -38,8 +45,9 @@ def run_replay(
     symbols: list[str],
     start_time: str | None = None,
     end_time: str | None = None,
+    task_id: str | None = None,
 ) -> dict:
-    task_id = uuid4().hex
+    task_id = task_id or uuid4().hex
     requested_symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
     normalized_symbols = _normalize_symbols(requested_symbols)
     loaded = _load_replay_ticks(
@@ -81,13 +89,83 @@ def run_replay(
         "events": events,
         "summary": _summary(events, key="signal"),
         "rule_summary": _summary(events, key="rule_id"),
+        "finished_at": int(time.time() * 1000),
     }
-    _TASKS[task_id] = result
+    _set_task(task_id, result)
     return result
 
 
+def enqueue_replay(
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: list[str],
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> dict:
+    task_id = uuid4().hex
+    requested_symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    task = {
+        "task_id": task_id,
+        "status": "running",
+        "date": target_date.isoformat(),
+        "requested_symbols": requested_symbols,
+        "symbols": _normalize_symbols(requested_symbols),
+        "start_time": start_time,
+        "end_time": end_time,
+        "started_at": int(time.time() * 1000),
+    }
+    _set_task(task_id, task)
+    _EXECUTOR.submit(
+        _run_replay_job,
+        task_id,
+        data_dir,
+        target_date=target_date,
+        symbols=symbols,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    return task
+
+
 def get_task(task_id: str) -> dict | None:
-    return _TASKS.get(task_id)
+    with _TASKS_LOCK:
+        task = _TASKS.get(task_id)
+        return dict(task) if task else None
+
+
+def _set_task(task_id: str, task: dict) -> None:
+    with _TASKS_LOCK:
+        _TASKS[task_id] = dict(task)
+
+
+def _run_replay_job(
+    task_id: str,
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: list[str],
+    start_time: str | None,
+    end_time: str | None,
+) -> None:
+    try:
+        run_replay(
+            data_dir,
+            target_date=target_date,
+            symbols=symbols,
+            start_time=start_time,
+            end_time=end_time,
+            task_id=task_id,
+        )
+    except Exception as e:
+        logger.exception("盘中回放任务失败(task_id=%s)", task_id)
+        current = get_task(task_id) or {"task_id": task_id}
+        current.update({
+            "status": "failed",
+            "error": str(e),
+            "finished_at": int(time.time() * 1000),
+        })
+        _set_task(task_id, current)
 
 
 def _load_replay_ticks(
@@ -104,7 +182,12 @@ def _load_replay_ticks(
     留下收盘后的快照。此时回放临时拉取 tdxapi 逐笔成交并转换为累计序列,
     只用于本次模拟, 不写回 quote_ticks。
     """
-    quote_ticks = quote_tick_store.read_ticks(data_dir, target_date=target_date, symbols=symbols)
+    quote_ticks = quote_tick_store.read_ticks(
+        data_dir,
+        target_date=target_date,
+        symbols=symbols,
+        prefer_hot=target_date == datetime.now(CN_TZ).date(),
+    )
     quote_window_count = _count_window_ticks(quote_ticks, start_time=start_time, end_time=end_time)
     loaded = {
         "ticks": quote_ticks,
