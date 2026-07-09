@@ -1,23 +1,30 @@
 """逼近涨停 — 涨幅 > 7% 且距涨停 < 3%, 盘后选股"""
+from datetime import date
+
 import polars as pl
 
+ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE = date(2026, 7, 6)
 
-def _limit_pct() -> pl.Expr:
+
+def _limit_pct(date_col: str | None = None) -> pl.Expr:
     """根据板块和 ST 动态计算涨跌幅限制 (小数)。
     创业板(300/301)/科创板(688): 20% (含其 ST)
     北交所(.BJ): 30%
-    主板 ST: 5%  ← ST 5% 仅主板生效, 创业板/科创板 ST 仍是 20%
+    主板 ST: 2026-07-06 前 5%, 之后 10%
     主板普通: 10%
     """
     is_st = pl.col("name").str.contains("(?i)ST").fill_null(False)
     is_cyb = pl.col("symbol").str.starts_with("300") | pl.col("symbol").str.starts_with("301")
     is_kcb = pl.col("symbol").str.starts_with("688")
     is_bj = pl.col("symbol").str.contains(r"\.BJ$")
+    is_before_st_upgrade = (
+        pl.col(date_col) < ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE
+        if date_col else pl.lit(False)
+    )
     return (
-        # 板块判定优先于 ST: 创业板/科创板 ST 保留 20%, 北交所 30%; ST 5% 只剩主板
         pl.when(is_cyb | is_kcb).then(0.20)
         .when(is_bj).then(0.30)
-        .when(is_st).then(0.05)
+        .when(is_st & is_before_st_upgrade).then(0.05)
         .otherwise(0.10)
     )
 
@@ -53,7 +60,7 @@ ALERTS = []
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     min_chg = params.get("min_change", 7.0) / 100.0
     gap = params.get("limit_gap", 3.0) / 100.0
-    lp = _limit_pct()
+    lp = _limit_pct("date" if "date" in df.columns else None)
     expr = pl.col("symbol").is_not_null() | pl.col("symbol").is_null()
     if params.get("use_change_filter", True):
         expr = expr & (pl.col("change_pct") > min_chg)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -24,6 +25,8 @@ import polars as pl
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE = date(2026, 7, 6)
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -643,11 +646,15 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
         .alias("_board_pct")
     )
 
-    # ST → 5%, 但仅限主板风险警示股; 创业板/科创板/北交所 ST 保留各自板块限幅
-    # (注册制改革后 创业板 300/301、科创板 688/689 的 ST 仍执行 20%, 北交所 30%)。
+    # 主板风险警示股历史上按 5%; 2026-07-06 起沪深主板 ST/*ST 放宽到 10%。
+    # 创业板/科创板/北交所 ST 保留各自板块限幅。
     if "_is_st" in df.columns:
         df = df.with_columns(
-            pl.when(pl.col("_is_st").fill_null(False) & ~(is_chinext | is_star | is_bj))
+            pl.when(
+                pl.col("_is_st").fill_null(False)
+                & ~(is_chinext | is_star | is_bj)
+                & (pl.col("date") < ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE)
+            )
             .then(0.05)
             .otherwise(pl.col("_board_pct"))
             .alias("_limit_pct")
@@ -1181,10 +1188,11 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
     """
     from datetime import date, timedelta
     cutoff = date.today() - timedelta(days=days + 30)  # 多读 30 天余量
+    cast_options = pl.ScanCastOptions(integer_cast="allow-float")
 
     try:
         lf = (
-            pl.scan_parquet(str(enriched_base / "**" / "*.parquet"), cast_options=_cast)
+            pl.scan_parquet(str(enriched_base / "**" / "*.parquet"), cast_options=cast_options)
             .filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= cutoff)
@@ -1557,9 +1565,15 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         .otherwise(0.10)
     )
     if "_is_st" in df.columns:
-        # ST 5% 仅主板生效; 创业板/科创板/北交所 ST 保留板块限幅 (同 compute_limit_signals)
+        if "date" in df.columns:
+            is_before_st_upgrade = pl.col("date") < ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE
+        else:
+            is_before_st_upgrade = pl.lit(False)
+        # 主板 ST 2026-07-06 前按 5%; 新规后回到主板 10%。
+        # 创业板/科创板/北交所 ST 保留板块限幅 (同 compute_limit_signals)。
         limit_pct = pl.when(
             pl.col("_is_st").fill_null(False) & ~(is_chinext | is_star | is_bj)
+            & is_before_st_upgrade
         ).then(0.05).otherwise(limit_pct)
     limit_pct = limit_pct.alias("_limit_pct")
 
