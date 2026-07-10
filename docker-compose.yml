@@ -1,5 +1,4 @@
-# Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
-# 见 ADR-17 / §8.1。
+# 单机部署: FastAPI 托管前端 dist, tdx-api 提供通达信行情, MySQL 持久化逐笔成交。
 services:
   tdx-api:
     build:
@@ -7,7 +6,8 @@ services:
       dockerfile: Dockerfile
     container_name: TickFlow_TDX_API
     ports:
-      - "${TDX_API_PORT:-8080}:8080"
+      # tdx-api 无独立登录态, 默认只暴露给服务器本机调试; app 通过 Docker 内网访问。
+      - "127.0.0.1:${TDX_API_PORT:-8080}:8080"
     env_file:
       - path: ./docs/zhihu/tdx-api/.env
         required: false
@@ -21,6 +21,51 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  mysql:
+    image: mysql:8.0
+    container_name: TickFlow_MySQL
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+      # PyMySQL 直连 MySQL 8 时避免 caching_sha2_password 额外加密依赖。
+      - "--default-authentication-plugin=mysql_native_password"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tickflow_stock_panel}
+      MYSQL_USER: ${MYSQL_USER:-tickflow}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 设置 MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  mysql-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
+    container_name: TickFlow_MySQL_Init
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+      - TRADE_TICKS_MYSQL_URL=mysql+pymysql://${MYSQL_USER:-tickflow}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tickflow_stock_panel}?charset=utf8mb4
+    command: ["uv", "run", "python", "-c", "from app.services.trade_tick_mysql import trade_tick_mysql_store; print(trade_tick_mysql_store.ensure_schema())"]
+    volumes:
+      - ./data:/app/data
+      - ./tiers.yaml:/app/tiers.yaml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
   app:
     build:
       context: .
@@ -29,7 +74,8 @@ services:
         BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
     container_name: TickFlow_Stock_Panel
     ports:
-      - "${PORT:-3018}:3018"
+      # 生产环境交给 Caddy 反代; 应用端口只暴露给服务器本机。
+      - "127.0.0.1:${PORT:-3018}:3018"
     env_file:
       - .env
     environment:
@@ -39,10 +85,15 @@ services:
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
       - TDX_API_BASE_URL=http://tdx-api:8080
+      - TRADE_TICKS_MYSQL_URL=mysql+pymysql://${MYSQL_USER:-tickflow}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tickflow_stock_panel}?charset=utf8mb4
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
     depends_on:
       tdx-api:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
+      mysql-init:
+        condition: service_completed_successfully
     restart: unless-stopped

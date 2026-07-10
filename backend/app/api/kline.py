@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -14,6 +14,7 @@ from app.services.symbols import normalize_symbol
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
+_LIVE_FILL_DATE_TOLERANCE_DAYS = 5
 
 
 def _minute_allowed(capset) -> bool:
@@ -133,6 +134,89 @@ def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
         return {}
 
 
+def _needs_live_daily_fill(df, start: date) -> bool:
+    """本地 K 线覆盖不足时触发单票补拉。
+
+    线上部署可能先通过实时行情落入最近几十天数据。此时 df 非空,但距离
+    用户请求的 365 天窗口明显不够; 不能因为“有 22 天”就跳过补拉。
+    """
+    if df.is_empty() or "date" not in df.columns:
+        return True
+    try:
+        first = df["date"].min()
+        if isinstance(first, datetime):
+            first = first.date()
+        return bool(first and first > start + timedelta(days=_LIVE_FILL_DATE_TOLERANCE_DAYS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _daily_rows_limit(start: date, end: date, days: int, has_start_date: bool) -> int:
+    """计算单票补拉后的最大返回行数。
+
+    前端 K 线缩放会显式传 start_date/end_date。此时不能继续使用默认 days=120,
+    否则即使数据源有 365 天数据, 也会被 tail(120) 截断。
+    """
+    if not has_start_date:
+        return days
+    range_days = max((end - start).days + 1, 1)
+    return min(max(range_days, days), 2000)
+
+
+def _fetch_daily_from_active_provider(symbol: str, start: date, end: date, days: int, asset_type: str):
+    """按当前日 K 数据源单票补拉。
+
+    kline_sync.sync_daily_batch 走 TickFlow SDK; 当用户配置 tdxapi 等插件数据源时,
+    单票 K 线缺口也必须走同一个 active provider,否则会绕回 TickFlow。
+    """
+    from app.services import preferences
+
+    provider_name = preferences.get_daily_data_provider()
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end, datetime.max.time())
+    if provider_name != "tickflow":
+        from app.data_providers import custom as custom_sources
+
+        if custom_sources.provider_has_dataset(provider_name, "daily"):
+            provider = custom_sources.get_provider(provider_name)
+            return provider.get_daily(
+                [symbol],
+                start_time=start_dt,
+                end_time=end_dt,
+                asset_type=asset_type,
+            )
+
+    return kline_sync.sync_daily_batch(
+        [symbol],
+        count=days + 30,
+        start_time=start_dt,
+        end_time=end_dt,
+    )
+
+
+def _compute_live_daily_rows(request: Request, symbol: str, start: date, end: date, days: int, asset_type: str):
+    """从 active provider 拉单票日 K 并即时计算 enriched 行。"""
+    import polars as pl
+
+    raw = _fetch_daily_from_active_provider(symbol, start, end, days, asset_type)
+    if raw.is_empty():
+        return []
+
+    factors = pl.DataFrame()
+    capset = getattr(request.app.state, "capabilities", None)
+    try:
+        from app.tickflow.capabilities import Cap
+        if capset and capset.has(Cap.ADJ_FACTOR):
+            factors = kline_sync.fetch_adj_factor_single(symbol)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)
+
+    enriched = compute_enriched(raw, factors=factors).sort("date")
+    if "date" in enriched.columns:
+        enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+    return enriched.tail(days).to_dicts()
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -149,8 +233,6 @@ def get_daily(
     - ext_columns: 可选，动态 LEFT JOIN 扩展数据表，结果平铺到 stock_info.ext 下
       (key 为 "{config_id}__{field_name}")，供日K信息条等场景展示自定义字段
     """
-    import polars as pl
-
     repo = request.app.state.repo
     symbol = normalize_symbol(symbol, repo)
     end = date.fromisoformat(end_date) if end_date else date.today()
@@ -158,6 +240,7 @@ def get_daily(
         start = date.fromisoformat(start_date)
     else:
         start = end - timedelta(days=days)
+    rows_limit = _daily_rows_limit(start, end, days, bool(start_date))
 
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
@@ -166,28 +249,20 @@ def get_daily(
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
     df = repo.get_daily_asset(asset_type, symbol, start, end)
 
-    if df.is_empty():
+    if _needs_live_daily_fill(df, start):
         try:
-            raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            rows = _compute_live_daily_rows(request, symbol, start, end, rows_limit, asset_type)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
-        if raw.is_empty():
+            if df.is_empty():
+                raise HTTPException(status_code=502, detail=f"daily fetch failed: {e}") from e
+            logger.warning("单票日K补拉失败,返回本地部分数据 %s: %s", symbol, e)
+            rows = []
+        if rows:
+            rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
+            resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
+            return _attach_ext(resp, repo, symbol, ext_columns)
+        if df.is_empty():
             return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
-        # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
-        factors = pl.DataFrame()
-        capset = getattr(request.app.state, "capabilities", None)
-        try:
-            from app.tickflow.capabilities import Cap
-            if capset and capset.has(Cap.ADJ_FACTOR):
-                factors = kline_sync.fetch_adj_factor_single(symbol)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)
-        enriched = compute_enriched(raw, factors=factors)
-        rows = enriched.tail(days).to_dicts()
-        # 即使 live 模式也尝试追加实时蜡烛
-        rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
-        resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
-        return _attach_ext(resp, repo, symbol, ext_columns)
 
     rows = df.to_dicts()
 
@@ -536,7 +611,7 @@ def get_minute(
     if trade_date is None:
         # 本地无任何分钟K，尝试从 TickFlow 拉取当天
         trade_date = today
-        df = kline_sync.fetch_minute_single(symbol, trade_date)
+        df = _fetch_minute_or_502(symbol, trade_date)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
@@ -545,7 +620,7 @@ def get_minute(
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
     if trade_date == today:
-        live_df = kline_sync.fetch_minute_single(symbol, trade_date)
+        live_df = _fetch_minute_or_502(symbol, trade_date)
         if not live_df.is_empty():
             return {
                 "symbol": symbol, "name": stock_name, "stock_info": stock_info,
@@ -569,12 +644,19 @@ def get_minute(
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
-    live_df = kline_sync.fetch_minute_single(symbol, trade_date)
+    live_df = _fetch_minute_or_502(symbol, trade_date)
     return {
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),
         "source": "live" if not live_df.is_empty() else "none",
     }
+
+
+def _fetch_minute_or_502(symbol: str, trade_date: date) -> pl.DataFrame:
+    try:
+        return kline_sync.fetch_minute_single(symbol, trade_date)
+    except kline_sync.MinuteFetchError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.post("/sync")

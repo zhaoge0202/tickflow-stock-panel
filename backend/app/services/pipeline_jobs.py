@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
 
 # 运行超过此秒数视为卡死(reload 后孤儿 task / 网络读无限阻塞等)。
-# 由 reap_stale() 在 /run 和 /jobs/{id} 轮询端点检查 — 保证卡死后能自愈,
-# 无需用户再次点击「同步」。
-STALE_JOB_TIMEOUT_S = 600
+# 全市场一年回填和 enriched 重算会合理地运行超过 10 分钟,因此给重任务
+# 保留 4 小时窗口。由 reap_stale() 在 /run 和 /jobs/{id} 轮询端点检查。
+STALE_JOB_TIMEOUT_S = 4 * 60 * 60
 
 
 def _default_store_dir() -> Path:

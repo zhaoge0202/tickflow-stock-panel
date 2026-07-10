@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date as _date, time as _time, timedelta as _td
 from pathlib import Path
 
 import polars as pl
@@ -21,6 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
+from app.market_time import cn_now, cn_today
 from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
@@ -29,6 +31,7 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[..., None]
+_DAILY_BATCH_READY_TIME = _time(15, 30)
 
 
 class PipelineStageError(RuntimeError):
@@ -52,6 +55,19 @@ def _invalidate(table: str | None = None) -> None:
     """stage 写完调用,让 /api/data/status 只重算被影响的那张表。"""
     from app.api.data import invalidate_data_cache
     invalidate_data_cache(table)
+
+
+def _daily_batch_end_date(today: _date | None = None) -> _date:
+    """批量日K的安全结束日期。
+
+    盘中当天行情由 QuoteService 实时写入。15:30 前使用批量日K接口覆盖今天,
+    容易把数据源的非实时日K快照写成昨收口径,导致看板涨跌幅全 0。
+    """
+    now = cn_now()
+    today = today or cn_today()
+    if now.weekday() < 5 and now.date() == today and now.time() < _DAILY_BATCH_READY_TIME:
+        return today - _td(days=1)
+    return today
 
 
 def _resolve_universe(capset: CapabilitySet) -> list[str]:
@@ -131,13 +147,14 @@ def run_now(
     emit("resolve_universe", 10, f"标的池规模:{len(universe)} 只")
 
     # Step 1: 日 K 同步
-    #   override_start_date 传入 → 强制 batch 拉取 [override_start_date ~ today] (数据修正)
+    #   override_start_date 传入 → 强制 batch 拉取 [override_start_date ~ safe_end] (数据修正)
     #   付费档 + 今天有数据 → 实时行情接口拉一次覆写（1请求全市场）
     #   有历史数据 → batch K-line API 补齐缺口
     #   无任何数据 → batch K-line API 拉首次 1 年
-    from datetime import date as _date, timedelta as _td, datetime as _dt
+    from datetime import datetime as _dt
     latest_daily = repo.latest_daily_date()
-    today = _date.today()
+    today = cn_today()
+    daily_batch_end = _daily_batch_end_date(today)
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
     # 日K范围拉取的起点(分支3补缺口/分支4首次/数据修正); 实时增量/跳过时为 None。
@@ -153,23 +170,27 @@ def run_now(
     elif override_start_date:
         # 数据修正: 强制用传入日期作起点 batch 拉取, 忽略实时行情覆写分支。
         start_date = override_start_date
-        daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] repair/override", start_date, today)
+        if start_date > daily_batch_end:
+            emit("sync_daily", 45, f"已跳过日K同步(盘中保护, 批量接口暂不覆盖 {today})")
+            logger.info("sync_daily: skipped repair/override, start=%s > safe_end=%s", start_date, daily_batch_end)
+        else:
+            daily_range_start = start_date
+            emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+            logger.info("sync_daily: [%s ~ %s] repair/override", start_date, daily_batch_end)
 
-        def _daily_chunk_progress(cur: int, tot: int) -> None:
-            emit("sync_daily", 12 + int(33 * cur / tot),
-                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-        written_daily = kline_sync.sync_and_persist_daily_batch(
-            universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
-            on_chunk_done=_daily_chunk_progress,
-        )
-        gap_days = (today - start_date).days
-        new_daily_days = gap_days
-        emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
-        logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
+            def _daily_chunk_progress(cur: int, tot: int) -> None:
+                emit("sync_daily", 12 + int(33 * cur / tot),
+                     f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+            written_daily = kline_sync.sync_and_persist_daily_batch(
+                universe, repo, capset,
+                start_date=_dt.combine(start_date, _dt.min.time()),
+                end_date=_dt.combine(daily_batch_end, _dt.min.time()),
+                on_chunk_done=_daily_chunk_progress,
+            )
+            gap_days = (daily_batch_end - start_date).days
+            new_daily_days = gap_days
+            emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
+            logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, daily_batch_end, gap_days)
     elif today_exists and capset.has(Cap.QUOTE_POOL) and _prefs.get_daily_data_provider() == "tickflow":
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
@@ -181,33 +202,36 @@ def run_now(
         logger.info("sync_daily: [%s ~ %s] live quotes, %d symbols", today, today, written_daily)
     elif latest_daily:
         # 有历史 → batch 补齐缺口。
-        # 也覆盖"今天已有数据但无实时行情权限(free/none)"的降级场景:
-        #   此时 start_date = latest_daily = today,batch 刷新当天日K。
+        # 盘中 safe_end 会回退到昨天,避免 batch 日K 覆盖 QuoteService 写入的今天实时数据。
         start_date = latest_daily
-        daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] %s", start_date, today,
-                    "refresh today" if today_exists else "gap fill")
+        if start_date > daily_batch_end:
+            emit("sync_daily", 45, f"已跳过日K同步(盘中保护, 批量接口暂不覆盖 {today})")
+            logger.info("sync_daily: skipped, latest=%s > safe_end=%s", start_date, daily_batch_end)
+        else:
+            daily_range_start = start_date
+            emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+            logger.info("sync_daily: [%s ~ %s] %s", start_date, daily_batch_end,
+                        "refresh safe end" if today_exists else "gap fill")
 
-        def _daily_chunk_progress(cur: int, tot: int) -> None:
-            emit("sync_daily", 12 + int(33 * cur / tot),
-                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-        written_daily = kline_sync.sync_and_persist_daily_batch(
-            universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
-            on_chunk_done=_daily_chunk_progress,
-        )
-        gap_days = (today - start_date).days
-        new_daily_days = gap_days
-        emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
-        logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
+            def _daily_chunk_progress(cur: int, tot: int) -> None:
+                emit("sync_daily", 12 + int(33 * cur / tot),
+                     f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+            written_daily = kline_sync.sync_and_persist_daily_batch(
+                universe, repo, capset,
+                start_date=_dt.combine(start_date, _dt.min.time()),
+                end_date=_dt.combine(daily_batch_end, _dt.min.time()),
+                on_chunk_done=_daily_chunk_progress,
+            )
+            gap_days = (daily_batch_end - start_date).days
+            new_daily_days = gap_days
+            emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
+            logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, daily_batch_end, gap_days)
     else:
         # 首次：无任何数据 → batch 拉 1 年
-        start_date = today - _td(days=365)
+        start_date = daily_batch_end - _td(days=365)
         daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, today)
+        emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+        logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, daily_batch_end)
 
         def _daily_chunk_progress(cur: int, tot: int) -> None:
             emit("sync_daily", 12 + int(33 * cur / tot),
@@ -215,12 +239,12 @@ def run_now(
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
             start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            end_date=_dt.combine(daily_batch_end, _dt.min.time()),
             on_chunk_done=_daily_chunk_progress,
         )
         new_daily_days = 365
         emit("sync_daily", 45, "日K 完成")
-        logger.info("sync_daily: [%s ~ %s] done", start_date, today)
+        logger.info("sync_daily: [%s ~ %s] done", start_date, daily_batch_end)
     _invalidate("daily")
 
     # 单标的新鲜度: 全局 max(date) 会被任一有今日数据的标的"拉高", 掩盖停牌/复牌/

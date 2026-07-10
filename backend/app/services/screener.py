@@ -255,7 +255,7 @@ class ScreenerService:
             return pl.DataFrame()
 
         try:
-            df = pl.read_parquet(target_parquet)
+            df = self.repo._ensure_date_column(pl.read_parquet(target_parquet), target_date)
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_for_date failed: %s", e)
             return pl.DataFrame()

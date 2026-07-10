@@ -494,7 +494,7 @@ class KlineRepository:
             step = time.perf_counter()
             logger.info("enriched refresh step start: read latest parquet %s", target_parquet)
             df_latest = self._dedupe_symbol_date(
-                pl.read_parquet(target_parquet),
+                self._ensure_date_column(pl.read_parquet(target_parquet), latest),
                 f"enriched 最新分区 {target_parquet}",
             )
             logger.info("enriched refresh step done: read latest parquet rows=%d (%.2fs)", len(df_latest), time.perf_counter() - step)
@@ -841,7 +841,7 @@ class KlineRepository:
             latest = date.fromisoformat(dates[-1])
             target_parquet = enriched_dir / f"date={dates[-1]}" / "part.parquet"
             df_latest = self._dedupe_symbol_date(
-                pl.read_parquet(target_parquet),
+                self._ensure_date_column(pl.read_parquet(target_parquet), latest),
                 f"ETF enriched 最新分区 {target_parquet}",
             )
             if df_latest.is_empty():
@@ -1716,6 +1716,20 @@ class KlineRepository:
         if removed > 0:
             logger.warning("%s 去重: 移除 %d 行重复 symbol/date", context, removed)
         return deduped
+
+    @staticmethod
+    def _ensure_date_column(df: pl.DataFrame, target_date: date) -> pl.DataFrame:
+        """直接读取 hive 分区文件时补上分区日期列。
+
+        pl.read_parquet(date=YYYY-MM-DD/part.parquet) 不会自动带出 hive
+        分区字段; 后续指标计算依赖 date 排序和 pct_change, 缺 date 会触发
+        缓存预热降级成 14 列窄表。
+        """
+        if df.is_empty():
+            return df
+        if "date" in df.columns:
+            return df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+        return df.with_columns(pl.lit(target_date).cast(pl.Date).alias("date"))
 
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""

@@ -309,7 +309,10 @@ def clear_ai_settings() -> dict:
 # ===== 偏好设置 =====
 
 def _realtime_allowed() -> bool:
-    """当前档位是否允许实时行情(none/free 不允许)。"""
+    """当前配置是否允许实时行情。
+
+    TickFlow 按档位判断; tdxapi 等插件实时源由 QuoteService 放行。
+    """
     from app.services.quote_service import QuoteService
     return QuoteService.is_realtime_allowed()
 

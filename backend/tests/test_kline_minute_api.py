@@ -5,6 +5,8 @@ import datetime as dt
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
+from fastapi import HTTPException
 
 from app.api import kline
 
@@ -96,3 +98,25 @@ def test_get_minute_history_uses_complete_local_without_live_fetch(monkeypatch):
 
     assert resp["source"] == "local"
     assert len(resp["rows"]) == 240
+
+
+def test_get_minute_reports_transient_provider_failure(monkeypatch):
+    monkeypatch.setattr(kline, "date", _FrozenDate)
+    monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
+    monkeypatch.setattr(
+        kline.kline_sync,
+        "fetch_minute_single",
+        lambda symbol, trade_date: (_ for _ in ()).throw(
+            kline.kline_sync.MinuteFetchError("TDX 分钟K请求失败，重试 3 次仍未恢复")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        kline.get_minute(
+            _request(_Repo(pl.DataFrame())),
+            "000725.SZ",
+            dt.date(2026, 7, 8),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert "重试 3 次" in str(exc_info.value.detail)

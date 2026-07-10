@@ -23,6 +23,10 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 
+class MinuteFetchError(RuntimeError):
+    """单票分钟 K 数据源请求失败，与「成功返回空数据」区分。"""
+
+
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
@@ -576,7 +580,7 @@ def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
         )
     except Exception as e:
         logger.warning("fetch_minute_single(%s, %s) failed: %s", symbol, trade_date, e)
-        return pl.DataFrame()
+        raise MinuteFetchError(str(e)) from e
 
 
 def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:

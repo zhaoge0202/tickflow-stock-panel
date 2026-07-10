@@ -50,6 +50,18 @@ def test_repository_dedupe_symbol_date_keeps_last_row():
     assert rows == {"A.SZ": 2.0, "B.SZ": 3.0}
 
 
+def test_repository_ensure_date_column_for_partition_file():
+    df = pl.DataFrame({
+        "symbol": ["A.SZ"],
+        "close": [2.0],
+    })
+
+    out = KlineRepository._ensure_date_column(df, date(2026, 7, 10))
+
+    assert "date" in out.columns
+    assert out["date"][0] == date(2026, 7, 10)
+
+
 def test_quote_service_shutdown_stop_preserves_realtime_preference(monkeypatch):
     saved: list[bool] = []
     monkeypatch.setattr(

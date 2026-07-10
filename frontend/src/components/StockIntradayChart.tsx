@@ -39,6 +39,7 @@ export function StockIntradayChart({
     queryFn: () => api.klineMinute(symbol, date ?? undefined, isToday ? Date.now() : undefined),
     enabled: !!symbol && !!date,
     staleTime: 0,
+    retry: false,
     refetchInterval: isToday ? 15_000 : false,
     refetchIntervalInBackground: true,
   })
@@ -54,6 +55,7 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  const minuteError = minute.error instanceof Error ? minute.error.message : '分钟K请求失败'
   // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
   // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
   const sourceIsNone = minute.data?.source === 'none'
@@ -68,7 +70,18 @@ export function StockIntradayChart({
   return (
     <div className={className} style={{ height, flexShrink: 0 }}>
       {minute.isLoading && <div className="text-xs text-muted py-2">分时加载中…</div>}
-      {!minute.isLoading && minuteRows.length === 0 && (
+      {!minute.isLoading && minute.isError && (
+        <div className="flex h-full flex-col items-center justify-center gap-3">
+          <div className="text-xs text-warning">{minuteError}</div>
+          <button
+            onClick={() => { void minute.refetch() }}
+            className="px-4 py-1.5 rounded-btn bg-elevated text-secondary text-xs font-medium hover:bg-elevated/80 transition-colors duration-150"
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {!minute.isLoading && !minute.isError && minuteRows.length === 0 && (
         <>
           {fetchMinute.isPending ? (
             <div className="flex items-center justify-center h-full gap-2 text-xs text-accent">
