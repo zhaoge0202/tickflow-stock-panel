@@ -18,6 +18,25 @@ def test_normalize_openai_base_url_strips_chat_completions_path():
     assert normalize_openai_base_url("http://ai.zedbox.cn:8080/v1/chat/completions") == "http://ai.zedbox.cn:8080/v1"
 
 
+def test_normalize_openai_base_url_preserves_glm_v4():
+    """智谱 GLM 用 /api/paas/v4, 不能强制补成 /v4/v1 (会 404)。"""
+    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4") == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_normalize_openai_base_url_strips_chat_completions_from_glm_v4():
+    """用户填完整 /v4/chat/completions 时, 去掉后缀归一化为 /v4。"""
+    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/chat/completions") == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_normalize_openai_base_url_preserves_other_version_segments():
+    """其它非 v1 版本号 (/v2 等) 也应保持原样。"""
+    assert normalize_openai_base_url("https://example.com/api/v2") == "https://example.com/api/v2"
+
+
+def test_normalize_openai_base_url_strips_trailing_slash():
+    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/") == "https://open.bigmodel.cn/api/paas/v4"
+
+
 def test_format_openai_error_hides_html_gateway_body():
     response = httpx.Response(
         504,

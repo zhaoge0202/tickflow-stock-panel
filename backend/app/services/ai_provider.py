@@ -64,14 +64,22 @@ def normalize_codex_command(command: str | None, *, strict: bool = True) -> str:
     return CODEX_DEFAULT_COMMAND
 
 
+_VERSION_SEGMENT_RE = re.compile(r"/v\d+(?:\.\d+)?$", re.IGNORECASE)
+
+
 def normalize_openai_base_url(url: str) -> str:
-    """Return the OpenAI-compatible base URL expected by the OpenAI SDK."""
+    """Return the OpenAI-compatible base URL expected by the OpenAI SDK.
+
+    识别 URL 中已有的版本段 (/v1、/v2、/v4 等) 时保持原样 —— 部分 OpenAI 兼容
+    服务用非 v1 的版本号 (如智谱 GLM 用 /api/paas/v4), 旧实现无条件补 /v1 会拼成
+    不存在的 /api/paas/v4/v1/chat/completions 导致 404。仅在无版本段时才补 /v1。
+    """
     base = (url or "").strip().rstrip("/")
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")].rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
-    return base
+    if _VERSION_SEGMENT_RE.search(base):
+        return base
+    return f"{base}/v1"
 
 
 def codex_cli_available() -> bool:
