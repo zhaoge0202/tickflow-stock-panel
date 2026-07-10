@@ -51,6 +51,13 @@ export function Backtest() {
           >
             <Icon className="h-3.5 w-3.5" />
             {MODES[tab].title}
+            {tab === 'optimizer' && (
+              <span className={`rounded border px-1 py-px text-[8px] font-semibold uppercase ${
+                active ? 'border-white/40 bg-white/15 text-white' : 'border-amber-400/30 bg-amber-400/10 text-amber-400'
+              }`}>
+                Beta
+              </span>
+            )}
           </button>
         )
       })}
