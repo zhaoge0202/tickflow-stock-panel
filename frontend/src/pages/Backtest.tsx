@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { FactorBacktest } from './backtest/FactorBacktest'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
-import { BarChart3, FlaskConical } from 'lucide-react'
+import { StrategyOptimizer } from './backtest/StrategyOptimizer'
+import { BarChart3, FlaskConical, SlidersHorizontal } from 'lucide-react'
 
-type Tab = 'factor' | 'strategy'
+type Tab = 'factor' | 'strategy' | 'optimizer'
 
 const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
   factor: {
@@ -17,6 +18,17 @@ const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
     subtitle: '验证完整选股和交易规则',
     hint: '看净值曲线、回撤、胜率和交易明细，适合判断策略是否可执行。',
   },
+  optimizer: {
+    title: '参数优化',
+    subtitle: '网格搜索最优参数组合',
+    hint: '并行回测所有参数组合，按夏普/索提诺等目标排序，找到最优参数。',
+  },
+}
+
+const TAB_ICONS: Record<Tab, typeof BarChart3> = {
+  factor: BarChart3,
+  strategy: FlaskConical,
+  optimizer: SlidersHorizontal,
 }
 
 export function Backtest() {
@@ -24,8 +36,8 @@ export function Backtest() {
 
   const modeSwitch = (
     <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-      {(['factor', 'strategy'] as const).map(tab => {
-        const Icon = tab === 'factor' ? BarChart3 : FlaskConical
+      {(['factor', 'strategy', 'optimizer'] as const).map(tab => {
+        const Icon = TAB_ICONS[tab]
         const active = activeTab === tab
         return (
           <button
@@ -57,6 +69,7 @@ export function Backtest() {
       <main className="flex-1 min-h-0 px-3 pb-3 pt-3 lg:px-4 lg:pb-4">
         {activeTab === 'factor' && <FactorBacktest />}
         {activeTab === 'strategy' && <StrategyBacktest />}
+        {activeTab === 'optimizer' && <StrategyOptimizer />}
       </main>
     </div>
   )

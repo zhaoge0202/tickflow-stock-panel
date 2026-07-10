@@ -511,3 +511,211 @@ async def strategy_cancel(request: Request):
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
 
+
+# ══════════════════════════════════════════════════════════════
+# 参数网格优化器 — 复用 _BacktestJob SSE 框架 (多组参数并行回测 + 排序)
+# ══════════════════════════════════════════════════════════════
+
+# 透传给每组回测的 StrategyBacktestConfig 字段 (作为 backtest_kwargs)。
+_OPT_BT_FIELDS = [
+    "matching", "fees_pct", "commission_pct", "stamp_tax_pct", "slippage_bps",
+    "max_positions", "max_exposure_pct", "initial_capital", "position_sizing",
+    "mode", "holding_days",
+]
+
+
+def _make_opt_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, bt_sig, params=None, overrides=None) -> str:
+    raw = f"OPT|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|{direction}|{bt_sig}|{params}|{overrides}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _opt_backtest_kwargs(
+    matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
+    max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+) -> dict:
+    return {
+        "matching": matching,
+        "fees_pct": fees_pct,
+        "commission_pct": commission_pct,
+        "stamp_tax_pct": stamp_tax_pct,
+        "slippage_bps": slippage_bps,
+        "max_positions": int(max_positions),
+        "max_exposure_pct": float(max_exposure_pct),
+        "initial_capital": float(initial_capital),
+        "position_sizing": position_sizing,
+        "mode": mode,
+        "holding_days": int(holding_days),
+    }
+
+
+@router.get("/optimize/stream")
+async def optimize_stream(
+    request: Request,
+    strategy_id: str,
+    param_grid: str,                 # JSON: {param_id: [values] | {min,max,step}}
+    objective: str = "sortino",
+    direction: str | None = None,
+    max_workers: int = 4,
+    params: str | None = None,       # JSON: 未扫描参数固定为用户当前值 (base_params)
+    overrides: str | None = None,    # JSON: 策略当前的 basic_filter/signals/风控等覆盖
+    symbols: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    matching: str = "open_t+1",
+    fees_pct: float = 0.0002,
+    commission_pct: float | None = None,
+    stamp_tax_pct: float | None = None,
+    slippage_bps: float = 5.0,
+    max_positions: int = 10,
+    max_exposure_pct: float = 1.0,
+    initial_capital: float = 1_000_000.0,
+    position_sizing: str = "equal",
+    mode: str = "position",
+    holding_days: int = 5,
+):
+    """SSE 流式参数优化: 并行跑各参数组回测, 按 objective 排序。
+
+    事件类型:
+      - progress: {type: "optimizer_progress", done, total, best_score}
+      - done: {result} (含 best_params / results 排名)
+      - error: {message}
+    """
+    from app.backtest.optimizer import OptimizeConfig, StrategyOptimizer
+    from app.backtest.strategy import StrategyBacktestService
+
+    engine = _get_engine(request)
+    strategy_engine = request.app.state.strategy_engine
+    svc = StrategyBacktestService(engine, strategy_engine)
+
+    end_date = date.fromisoformat(end) if end else date.today()
+    if start:
+        start_date = date.fromisoformat(start)
+    else:
+        earliest = request.app.state.repo.earliest_daily_date()
+        start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
+
+    guard_violated = False
+    if settings.backtest_range_guard and (end_date - start_date).days + 1 > BACKTEST_MAX_SERVER_DAYS:
+        guard_violated = True
+
+    # 空串归一为 None, 与 cancel 侧 `_get("direction") or None` 口径一致, 避免 job_key 失配。
+    direction = direction or None
+    bt_kwargs = _opt_backtest_kwargs(
+        matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
+        max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+    )
+    bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
+    job_key = _make_opt_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, bt_sig, params, overrides)
+
+    _cleanup_stale_jobs()
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
+        if job is None:
+            job = _BacktestJob(job_key)
+            _running_jobs[job_key] = job
+            is_new = True
+        else:
+            is_new = False
+
+    async def event_generator():
+        # 首个事件回吐 job_key, 前端存下供 cancel 直接引用 (消除两侧重算契约)。
+        yield f"event: job\ndata: {json.dumps({'key': job_key}, ensure_ascii=False)}\n\n"
+
+        if guard_violated:
+            yield f"event: error\ndata: {json.dumps({'message': BACKTEST_SERVER_GUARD_MESSAGE}, ensure_ascii=False)}\n\n"
+            return
+
+        if is_new and not job.done:
+            try:
+                grid = json.loads(param_grid)
+            except (json.JSONDecodeError, TypeError):
+                grid = None
+            # grid 必须是非空 dict; null/[]/"" 等合法 JSON 但结构错误也在此拦下,
+            # 否则会跳过线程启动却不置 done -> event_generator 永久空转、job 挂死。
+            if not isinstance(grid, dict) or not grid:
+                job.error = "param_grid 必须是非空的参数网格对象"
+                job.done = True
+                job.finish_ts = time.time()
+                grid = None
+
+            if grid is not None:
+                # 未扫描参数固定为用户当前值 (base_params); overrides 让策略的 basic_filter/
+                # 信号/风控按用户当前配置参与, 保证优化的就是用户实际回测的策略。
+                try:
+                    base_params = json.loads(params) if params else {}
+                except (json.JSONDecodeError, TypeError):
+                    base_params = {}
+                try:
+                    ov = json.loads(overrides) if overrides else None
+                except (json.JSONDecodeError, TypeError):
+                    ov = None
+                ocfg = OptimizeConfig(
+                    strategy_id=strategy_id,
+                    symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
+                    start=start_date,
+                    end=end_date,
+                    param_grid=grid,
+                    objective=objective,
+                    direction=direction,
+                    max_workers=int(max_workers),
+                    base_params=base_params if isinstance(base_params, dict) else {},
+                    overrides=ov if isinstance(ov, dict) else None,
+                    backtest_kwargs=bt_kwargs,
+                )
+
+                def _run_opt():
+                    try:
+                        opt = StrategyOptimizer(svc, strategy_engine)
+                        job.result = opt.optimize(ocfg, lambda d: job.progress.append(d), job.cancel_event)
+                        job.done = True
+                        job.finish_ts = time.time()
+                    except Exception as e:
+                        job.error = str(e)
+                        job.done = True
+                        job.finish_ts = time.time()
+
+                threading.Thread(target=_run_opt, daemon=True).start()
+
+        cursor = 0
+        tick = 0
+        try:
+            while True:
+                if job.done:
+                    if job.error:
+                        yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                    elif job.cancel_event.is_set():
+                        # 取消时优化器把每组记为 cancelled 并正常返回, 需在此分流为取消提示而非"完成"。
+                        yield f"event: error\ndata: {json.dumps({'message': '优化已取消'}, ensure_ascii=False)}\n\n"
+                    elif job.result is not None:
+                        yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
+                    return
+                tick += 1
+                if tick % 4 == 0 and await request.is_disconnected():
+                    break
+                while cursor < len(job.progress):
+                    msg = job.progress[cursor]
+                    cursor += 1
+                    yield f"event: progress\ndata: {json.dumps(msg, ensure_ascii=False, default=str)}\n\n"
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/optimize/cancel")
+async def optimize_cancel(request: Request):
+    """取消优化任务 — 前端传 stream 首事件回吐的 job_key, 后端直接查表。
+
+    不再让 cancel 侧重算 job_key: 两侧重算必须逐字段一致的脆弱契约(PR3 C1 / direction
+    空串失配都源于此)在此彻底消除。stream 首个 SSE 事件把后端算出的 key 回吐给前端,
+    cancel 原样传回即可。
+    """
+    body = await request.json()
+    job_key = body.get("job_key", "")
+    job = _running_jobs.get(job_key)
+    if job and not job.done:
+        job.cancel_event.set()
+        return {"ok": True}
+    return {"ok": False, "message": "任务不存在或已完成"}
+
