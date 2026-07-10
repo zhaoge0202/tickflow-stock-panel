@@ -20,6 +20,7 @@ import { useUpdateQuoteInterval, useToggleRealtimeQuotes } from '@/lib/useShared
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { tierRank } from '@/lib/capability-labels'
+import { dataSourceSupportsDataset } from '@/lib/data-source-utils'
 import { toast } from '@/components/Toast'
 import { DepthConfigContent } from '@/components/data/DepthConfigCard'
 
@@ -45,11 +46,21 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const { data: caps } = useCapabilities()
   const { data: quoteStatus } = useQuoteStatus()
   const { data: intervalData } = useQuoteInterval()
+  const { data: dataSources } = useQuery({
+    queryKey: QK.dataSources,
+    queryFn: api.dataSources,
+    staleTime: 60_000,
+  })
   const updateInterval = useUpdateQuoteInterval()
   const toggleQuote = useToggleRealtimeQuotes()
   const tier = tierRank(caps?.label ?? '')
-  const isNoneTier = tier < 0
-  const isFreeTier = tier === 0
+  const realtimeProvider = prefs?.realtime_data_provider ?? 'tickflow'
+  const usesProviderRealtime = realtimeProvider !== 'tickflow' && (
+    dataSourceSupportsDataset(dataSources, realtimeProvider, 'realtime')
+    || prefs?.realtime_allowed === true
+  )
+  const isNoneTier = !usesProviderRealtime && tier < 0
+  const isFreeTier = !usesProviderRealtime && tier === 0
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false

@@ -22,6 +22,11 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { tierRank } from '@/lib/capability-labels'
 import {
+  dataSourceDatasets,
+  dataSourceDisplayName,
+  dataSourceSupportsDataset,
+} from '@/lib/data-source-utils'
+import {
   Star,
   ScanSearch,
   History,
@@ -349,23 +354,25 @@ export function Layout() {
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
   const isPaused = quoteStatus?.paused ?? false
   const tier = tierRank(caps?.label ?? '')
-  const isNoneTier = tier < 0
-  const isWatchlistMode = tier === 0
+  const realtimeProvider = prefs?.realtime_data_provider ?? 'tickflow'
+  const usesProviderRealtime = realtimeProvider !== 'tickflow' && (
+    dataSourceSupportsDataset(dataSources, realtimeProvider, 'realtime')
+    || prefs?.realtime_allowed === true
+  )
+  const isNoneTier = !usesProviderRealtime && tier < 0
+  const isWatchlistMode = !usesProviderRealtime && tier === 0
   const realtimeModeLabel = isWatchlistMode ? '自选股' : '全市场'
   // 当前实时行情数据源名称 (custom 时显示源名, tickflow 时不显示)
-  const realtimeProvider = prefs?.realtime_data_provider
-  const realtimeProviderName = realtimeProvider && realtimeProvider !== 'tickflow'
-    ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
+  const realtimeProviderName = realtimeProvider !== 'tickflow'
+    ? dataSourceDisplayName(dataSources, realtimeProvider)
     : null
 
   // 当前主数据源 (用于菜单底部状态条)
   const activeProvider = prefs?.daily_data_provider || 'tickflow'
-  const activeProviderName = activeProvider === 'tickflow'
-    ? 'TickFlow'
-    : (dataSources?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
+  const activeProviderName = dataSourceDisplayName(dataSources, activeProvider)
   const activeProviderDatasets = activeProvider === 'tickflow'
     ? ['daily', 'adj_factor', 'realtime', 'minute']
-    : (dataSources?.custom?.find(s => s.name === activeProvider)?.datasets || [])
+    : dataSourceDatasets(dataSources, activeProvider)
   const isCustomActive = activeProvider !== 'tickflow'
 
   // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒)
@@ -407,15 +414,17 @@ export function Layout() {
   const handleToggle = async (enabled: boolean) => {
     // 开启时重新校验档位
     if (enabled) {
-      const fresh = await qc.fetchQuery({
-        queryKey: QK.capabilities,
-        queryFn: api.capabilities,
-      })
-      const freshTier = tierRank(fresh.label ?? '')
-      if (freshTier < 0) return
-      if (freshTier === 0 && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
-        navigate('/watchlist')
-        return
+      if (!usesProviderRealtime) {
+        const fresh = await qc.fetchQuery({
+          queryKey: QK.capabilities,
+          queryFn: api.capabilities,
+        })
+        const freshTier = tierRank(fresh.label ?? '')
+        if (freshTier < 0) return
+        if (freshTier === 0 && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
+          navigate('/watchlist')
+          return
+        }
       }
     }
     await toggleQuote.mutateAsync(enabled)

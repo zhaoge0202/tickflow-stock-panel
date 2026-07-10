@@ -113,7 +113,10 @@ def get_index_minute(
     repo = request.app.state.repo
     info = _index_info(repo, symbol)
     day = trade_date or date.today()
-    df = kline_sync.fetch_minute_single(symbol, day)
+    try:
+        df = kline_sync.fetch_minute_single(symbol, day)
+    except kline_sync.MinuteFetchError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return {
         "symbol": symbol,
         "name": info.get("name"),

@@ -35,6 +35,16 @@ class FakeProvider:
         }]
 
 
+def test_realtime_mode_tdxapi_bypasses_tickflow_none_tier(monkeypatch):
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(QuoteService, "_current_tier", lambda: "none")
+
+    assert QuoteService.realtime_mode() == "full_market"
+    assert QuoteService.is_realtime_allowed()
+
+
 def test_fetch_full_market_quotes_uses_tdxapi_without_tickflow(monkeypatch):
     provider = FakeProvider()
     captured = {}

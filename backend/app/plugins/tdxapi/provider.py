@@ -24,6 +24,7 @@ _DATASETS = ("daily", "minute", "realtime", "trade_ticks")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
 _KLINE_BATCH = 8
+_MINUTE_FETCH_ATTEMPTS = 3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 _CORE_INDEXES = {
@@ -116,9 +117,11 @@ class TDXAPIProvider:
             for symbol in chunk:
                 app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
                 try:
-                    rows = self._fetch_kline_rows(symbol, kline_type)
+                    rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
                 except Exception as e:
                     logger.warning("tdx-api minute 拉取失败(%s): %s", app_symbol, e)
+                    if len(symbols) == 1:
+                        raise
                     continue
                 mapped = [
                     row for row in (self._minute_row(app_symbol, item) for item in rows)
@@ -129,6 +132,25 @@ class TDXAPIProvider:
             if on_chunk_done:
                 on_chunk_done(i + 1, len(chunks))
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+    def _fetch_minute_rows_with_retry(self, symbol: str, kline_type: str) -> list[dict]:
+        """TDX 节点会偶发返回业务超时，换节点重试可恢复。"""
+        last_error: Exception | None = None
+        for attempt in range(1, _MINUTE_FETCH_ATTEMPTS + 1):
+            try:
+                return self._fetch_kline_rows(symbol, kline_type)
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                logger.warning(
+                    "tdx-api minute 请求失败(%s), 尝试 %d/%d: %s",
+                    symbol,
+                    attempt,
+                    _MINUTE_FETCH_ATTEMPTS,
+                    e,
+                )
+        raise RuntimeError(
+            f"TDX 分钟K请求失败，重试 {_MINUTE_FETCH_ATTEMPTS} 次仍未恢复: {last_error}"
+        ) from last_error
 
     # ---- realtime ----
     def get_realtime(

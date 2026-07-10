@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 
 import polars as pl
+import pytest
 
 from app.plugins.tdxapi import provider as tp
 from app.plugins.tdxapi.provider import TDXAPIProvider
@@ -86,6 +87,53 @@ def test_get_minute_normalizes_tdx_minute_kline(monkeypatch):
     assert df["datetime"][0] == dt.datetime(2026, 1, 5, 9, 31)
     assert df["close"][0] == 12.5
     assert df["volume"][0] == 2
+
+
+def test_get_minute_retries_transient_tdx_failure(monkeypatch):
+    calls = 0
+
+    def fake(self, method, path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("获取K线失败: 超时")
+        return {
+            "list": [{
+                "Time": "2026-07-10T09:31:00+08:00",
+                "Open": 22900,
+                "High": 23000,
+                "Low": 22800,
+                "Close": 22950,
+                "Volume": 12,
+                "Amount": 275400,
+            }],
+        }
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+
+    df = TDXAPIProvider().get_minute(
+        ["002491.SZ"],
+        dt.datetime(2026, 7, 10, 9, 30),
+        dt.datetime(2026, 7, 10, 15, 0),
+    )
+
+    assert calls == 3
+    assert df.height == 1
+    assert df["close"][0] == 22.95
+
+
+def test_get_minute_raises_after_retry_exhausted(monkeypatch):
+    def fake(self, method, path, **kwargs):
+        raise RuntimeError("获取K线失败: 超时")
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+
+    with pytest.raises(RuntimeError, match="重试 3 次"):
+        TDXAPIProvider().get_minute(
+            ["002491.SZ"],
+            dt.datetime(2026, 7, 10, 9, 30),
+            dt.datetime(2026, 7, 10, 15, 0),
+        )
 
 
 def test_get_realtime_batches_and_maps_quote(monkeypatch):

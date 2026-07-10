@@ -1088,6 +1088,7 @@ export interface CustomSourceConfig {
 
 export interface Preferences {
   realtime_quotes_enabled: boolean
+  realtime_allowed?: boolean
   indices_nav_pinned: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
