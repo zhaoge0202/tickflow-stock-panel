@@ -1,3 +1,4 @@
+import time
 import types
 from datetime import date
 
@@ -75,6 +76,78 @@ def test_engine_stock_uses_daily_enriched_dir(monkeypatch, tmp_path):
     eng = BacktestEngine(repo)
     eng._load_panel_inner(["600519"], date(2026, 1, 1), date(2026, 1, 2), None, "stock")
     assert "kline_daily_enriched" in captured["path"]
+
+
+def test_panel_cache_single_flight_computes_once():
+    """N 个线程并发同 key 冷启动: compute_fn 只应被调用一次, 其余复用结果 (无缓存踩踏)。"""
+    import threading
+
+    cache = PanelCache()
+    calls = []
+    barrier = threading.Barrier(8)
+    df = pl.DataFrame({"symbol": ["510300"]})
+
+    def slow_compute(symbols, start, end, columns, asset_type):
+        calls.append(1)
+        time.sleep(0.05)  # 拉长窗口, 逼出并发 miss
+        return df
+
+    args = (["510300"], date(2026, 1, 1), date(2026, 1, 2), None)
+    results = []
+    rlock = threading.Lock()
+
+    def worker():
+        barrier.wait()  # 所有线程同时起跑, 制造冷启动踩踏
+        r = cache.get_or_compute(*args, slow_compute, "stock")
+        with rlock:
+            results.append(r)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(calls) == 1, f"面板被重复加载 {sum(calls)} 次, single-flight 失效"
+    assert len(results) == 8 and all(r is df for r in results)
+
+
+def test_panel_cache_single_flight_error_propagates_and_retries():
+    """leader compute 抛错: 不缓存失败, 异常透传给所有等待者, 后续调用可重试成功。"""
+    import threading
+
+    cache = PanelCache()
+    barrier = threading.Barrier(4)
+    boom = RuntimeError("scan failed")
+
+    def failing_compute(symbols, start, end, columns, asset_type):
+        time.sleep(0.03)
+        raise boom
+
+    args = (["510300"], date(2026, 1, 1), date(2026, 1, 2), None)
+    errors = []
+    elock = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        try:
+            cache.get_or_compute(*args, failing_compute, "stock")
+        except RuntimeError as e:
+            with elock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 4 and all(e is boom for e in errors), "失败未透传给全部跟随者"
+
+    # 失败未被缓存 —— 重试应重新 compute 并成功
+    df = pl.DataFrame({"symbol": ["510300"]})
+    got = cache.get_or_compute(*args, lambda *a: df, "stock")
+    assert got is df
 
 
 def test_job_key_includes_asset_type_and_is_consistent():
