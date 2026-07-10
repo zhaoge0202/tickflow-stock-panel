@@ -6,13 +6,26 @@ import polars as pl
 from app.services.backtest import BacktestConfig
 from app.backtest.engine import BacktestEngine, PanelCache
 from app.backtest.factor import FactorConfig
-from app.backtest.strategy import StrategyBacktestConfig
+from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
 
 
 def test_configs_default_to_stock():
     assert BacktestConfig(symbols=[], start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
     assert FactorConfig(factor_name="x", symbols=None, start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
     assert StrategyBacktestConfig(strategy_id="x", symbols=None, start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
+
+
+def test_strategy_result_config_keeps_asset_type():
+    config = StrategyBacktestConfig(
+        strategy_id="x",
+        symbols=None,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 2),
+        asset_type="etf",
+    )
+
+    assert StrategyBacktestConfig.__dataclass_fields__["asset_type"].default == "stock"
+    assert StrategyBacktestService._config_to_dict(config)["asset_type"] == "etf"
 
 
 def test_panel_cache_key_isolates_asset_type():
@@ -22,6 +35,23 @@ def test_panel_cache_key_isolates_asset_type():
     assert k_stock != k_etf
     assert k_etf.startswith("etf:")
     assert k_stock.startswith("stock:")
+
+
+def test_engine_sanitizes_invalid_and_duplicate_bars():
+    df = pl.DataFrame({
+        "symbol": ["A", "A", "B", "C"],
+        "date": [date(2026, 1, 1)] * 4,
+        "open": [10.0, 11.0, 0.0, 12.0],
+        "high": [10.5, 11.5, 0.0, 12.5],
+        "low": [9.5, 10.5, 0.0, 11.5],
+        "close": [10.0, 11.0, 0.0, None],
+    })
+
+    cleaned = BacktestEngine._sanitize_panel(df)
+
+    assert cleaned.height == 1
+    assert cleaned["symbol"].to_list() == ["A"]
+    assert cleaned["close"].to_list() == [11.0]
 
 
 def test_engine_loads_from_etf_dir(monkeypatch, tmp_path):

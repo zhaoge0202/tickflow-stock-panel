@@ -350,15 +350,15 @@ def test_signal_exit_takes_priority_over_max_hold():
     assert trade.exit_price == 12.0  # 卖点用 day3 开盘 (exit_fill 跟随 matching=open_t+1)
 
 
-def test_stop_loss_triggers_even_when_expired_in_open_mode():
-    """open_t+1 模式下仓位到期且当日破止损 → 应按 stop_loss 平仓 (风控优先于 max_hold)。"""
+def test_open_mode_expiry_executes_before_intraday_stop():
+    """open_t+1 的到期卖单在开盘成交，不能被稍后形成的 high/low 风控覆盖。"""
     panel = _panel(
         ["A"],
         days=4,
         overrides={
             ("A", 1): {"open": 10, "high": 10, "low": 10, "close": 10},
-            # day3 开盘跳空跌破止损 (-10%): open=8.9 < 9.0 止损线, low=8.5
-            ("A", 3): {"open": 8.9, "high": 8.9, "low": 8.5, "close": 8.7},
+            # day3 开盘尚未破止损，盘中才跌破；到期单应已按开盘价 10 成交。
+            ("A", 3): {"open": 10, "high": 10, "low": 8.5, "close": 8.7},
         },
     )
     entries = _mask(panel, {("A", 0)})
@@ -381,9 +381,40 @@ def test_stop_loss_triggers_even_when_expired_in_open_mode():
 
     assert len(result.trades) == 1
     trade = result.trades[0]
-    assert trade.exit_reason == "stop_loss"
-    # 风控盘中触发: 开盘价 8.9 <= 止损线 9.0 → 按开盘价 8.9 成交
-    assert trade.exit_price == 8.9
+    assert trade.exit_reason == "max_hold"
+    assert trade.exit_price == 10.0
+
+
+def test_open_signal_exit_executes_before_intraday_stop():
+    panel = _panel(
+        ["A"],
+        days=4,
+        overrides={
+            ("A", 1): {"open": 10, "high": 10, "low": 10, "close": 10},
+            ("A", 3): {"open": 11, "high": 11, "low": 8, "close": 8.5},
+        },
+    )
+    entries = _mask(panel, {("A", 0)})
+    exits = _mask(panel, {("A", 2)})
+
+    result = _engine().simulate_portfolio(
+        panel,
+        entries,
+        exits,
+        MatcherConfig(
+            entry_fill="open_t+1",
+            exit_fill="open_t+1",
+            fees_pct=0,
+            slippage_bps=0,
+            stop_loss_pct=0.1,
+            max_positions=1,
+            initial_capital=100_000,
+        ),
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "signal"
+    assert result.trades[0].exit_price == 11.0
 
 
 def test_default_fill_is_buy_open_sell_close():
