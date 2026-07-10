@@ -24,6 +24,7 @@ import duckdb
 import polars as pl
 
 from app.config import settings
+from app.parquet import scan_enriched_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +513,7 @@ class KlineRepository:
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
                 lf = (
-                    pl.scan_parquet(self._enriched_glob)
+                    scan_enriched_parquet(self._enriched_glob)
                     .filter(pl.col("date") >= start_full)
                     .sort(["symbol", "date"])
                 )
@@ -718,7 +719,7 @@ class KlineRepository:
         # 昨日连板数: 从 enriched parquet 取 (用于增量计算同向 +1)
         step = time.perf_counter()
         logger.info("live agg step start: consecutive state")
-        lf = pl.scan_parquet(self._enriched_glob).filter(pl.col("date") == latest)
+        lf = scan_enriched_parquet(self._enriched_glob).filter(pl.col("date") == latest)
         consec_cols = [c for c in ["symbol", "consecutive_limit_ups", "consecutive_limit_downs"]
                        if c in lf.collect_schema().names()]
         if len(consec_cols) == 3:
@@ -759,6 +760,8 @@ class KlineRepository:
 
                 pl.col("volume").tail(4).sum().alias("_vol_ma5_partial_sum"),
                 pl.col("volume").tail(9).sum().alias("_vol_ma10_partial_sum"),
+                # 标准量比分母: 前5日成交量之和(不含当天), 用于 vol_ratio_5d
+                pl.col("volume").tail(5).sum().alias("_vol_ma5_prev_sum"),
 
                 pl.col("low").tail(8).min().alias("_kdj_8d_low"),
                 pl.col("high").tail(8).max().alias("_kdj_8d_high"),
@@ -793,7 +796,7 @@ class KlineRepository:
         from app.indicators.pipeline import compute_indicators
 
         lf = (
-            pl.scan_parquet(self._enriched_glob)
+            scan_enriched_parquet(self._enriched_glob)
             .filter(pl.col("date") >= start_60d)
             .filter(pl.col("date") <= latest)
             .sort(["symbol", "date"])
@@ -855,7 +858,7 @@ class KlineRepository:
                          if c in df_latest.columns]
             df_hist = self._dedupe_symbol_date(
                 (
-                    pl.scan_parquet(
+                    scan_enriched_parquet(
                         self._etf_enriched_glob,
                         cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
                     )
@@ -964,12 +967,19 @@ class KlineRepository:
         cache_max = cache["date"].max()
         cache_min = cache["date"].min()
         from datetime import timedelta
-        # 验证缓存覆盖完整范围 (含 warmup)
+        # 验证缓存覆盖完整范围 (含 warmup)。lookback_days 是交易日语义, 用 ×2 日历日
+        # 放宽确保覆盖 (节假日/周末), 与 warmup 60 一起留足余量。
         warmup_start = target_date - timedelta(days=(lookback_days + 60) * 2)
         if cache_min > warmup_start or cache_max < target_date:
             return None
-        # 只返回 lookback 范围 (日历天数 ≈ 2/3 交易日, 足够覆盖)
-        lookback_start = target_date - timedelta(days=lookback_days)
+        # 按交易日计数裁剪: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日。
+        # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口只有 ~N×5/7 个交易日,
+        # 导致 filter_history 策略的滚动窗口/行号差(_gap)漏算, 与回测结果不一致。
+        trading_dates = cache["date"].unique().sort()
+        if len(trading_dates) > lookback_days:
+            lookback_start = trading_dates[-(lookback_days + 1)]
+        else:
+            lookback_start = trading_dates[0]
         return cache.filter((pl.col("date") >= lookback_start) & (pl.col("date") <= target_date))
 
     def get_enriched_range(
@@ -1337,7 +1347,7 @@ class KlineRepository:
 
     def _scan_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            lf = pl.scan_parquet(self._enriched_glob,
+            lf = scan_enriched_parquet(self._enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
@@ -1354,7 +1364,7 @@ class KlineRepository:
 
     def _scan_daily_batch(self, symbols: list[str], start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            lf = pl.scan_parquet(self._enriched_glob,
+            lf = scan_enriched_parquet(self._enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= start)
@@ -1371,7 +1381,7 @@ class KlineRepository:
 
     def _scan_index_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            lf = pl.scan_parquet(self._index_enriched_glob,
+            lf = scan_enriched_parquet(self._index_enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
@@ -1388,7 +1398,7 @@ class KlineRepository:
 
     def _scan_etf_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            lf = pl.scan_parquet(self._etf_enriched_glob,
+            lf = scan_enriched_parquet(self._etf_enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)

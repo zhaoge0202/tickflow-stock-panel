@@ -35,6 +35,7 @@ from typing import ClassVar
 import polars as pl
 
 from app.market_time import cn_now, cn_today
+from app.parquet import scan_daily_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -925,7 +926,7 @@ class QuoteService:
 
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
-        """将 API records 转为日K格式 DataFrame (只有 OHLCV, 写 kline_daily 用)。"""
+        """将 API records 转为日K格式 DataFrame (OHLCV + quote_ts, 写 kline_daily 用)。"""
         records = [r for r in records if _is_trade_price_record(r)]
         if not records:
             return pl.DataFrame()
@@ -938,11 +939,13 @@ class QuoteService:
             "low": "low",
             "volume": "volume",
             "amount": "amount",
+            "timestamp": "quote_ts",
         }
         select_exprs = []
         for src, dst in cols_map.items():
             if src in df.columns:
-                select_exprs.append(pl.col(src).alias(dst))
+                select_exprs.append(pl.col(src).cast(pl.Int64, strict=False).alias(dst)
+                                     if dst == "quote_ts" else pl.col(src).alias(dst))
         if not select_exprs:
             return pl.DataFrame()
         result = df.select(select_exprs).with_columns(
@@ -976,7 +979,12 @@ class QuoteService:
         ] if c in df.columns]
         if not keep or "symbol" not in keep:
             return pl.DataFrame()
-        return df.select(keep).unique(subset=["symbol"], keep="last").sort("symbol")
+        out = df.select(keep)
+        # 实时 API 的 turnover_rate 入口契约为小数制(0.05 = 5%).
+        # enriched 内部统一存百分数值(5 = 5%), 后续页面/筛选直接展示和比较。
+        if "turnover_rate" in out.columns:
+            out = out.with_columns((pl.col("turnover_rate").cast(pl.Float64, strict=False) * 100).alias("turnover_rate"))
+        return out.unique(subset=["symbol"], keep="last").sort("symbol")
 
     @staticmethod
     def _build_index_quotes(records: list[dict]) -> pl.DataFrame:
@@ -1349,16 +1357,26 @@ class QuoteService:
 
             if use_incremental:
                 from app.indicators.pipeline import compute_enriched_today
+                from app.market_time import trading_minutes_elapsed_from_ts, trading_minutes_elapsed
                 instruments = self._repo.get_instruments()
                 # 将 API 直接提供的补充字段 JOIN 到 daily_df
                 today_ohlcv = daily_df
                 if quote_extra is not None and not quote_extra.is_empty():
                     today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
+                # 量比时间折算: 优先用行情 quote_ts (真实成交时间), 缺失则兜底服务端时间
+                elapsed_minutes: float | None = None
+                if "quote_ts" in daily_df.columns and not daily_df.is_empty():
+                    valid_ts = daily_df["quote_ts"].drop_nulls()
+                    if not valid_ts.is_empty():
+                        elapsed_minutes = trading_minutes_elapsed_from_ts(valid_ts.median())
+                if elapsed_minutes is None:
+                    elapsed_minutes = trading_minutes_elapsed()
                 enriched_today = compute_enriched_today(
                     live_agg=live_agg,
                     prev_enriched=prev_enriched,
                     today_ohlcv=today_ohlcv,
                     instruments=instruments,
+                    elapsed_minutes=elapsed_minutes,
                 )
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")
@@ -1380,9 +1398,9 @@ class QuoteService:
                 cutoff = today - timedelta(days=90)
                 table = "kline_etf_daily" if asset_type == "etf" else "kline_daily"
                 daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
-                ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+                ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
                 hist_df = (
-                    pl.scan_parquet(daily_glob)
+                    scan_daily_parquet(daily_glob)
                     .filter(pl.col("date") >= cutoff)
                     .sort(["symbol", "date"])
                     .collect()
