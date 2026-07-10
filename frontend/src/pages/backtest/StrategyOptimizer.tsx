@@ -163,9 +163,9 @@ export function StrategyOptimizer() {
   const progress = task?.progress
 
   return (
-    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_minmax(0,1fr)] h-full min-h-0 overflow-hidden">
       {/* ── 配置面板 ── */}
-      <div className="space-y-3 rounded-card border border-border bg-surface p-4">
+      <div className="space-y-3 rounded-card border border-border bg-surface p-4 overflow-y-auto min-h-0">
         <div>
           <label className="mb-1.5 block text-xs font-medium text-secondary">策略</label>
           <select value={strategyId} onChange={e => onSelectStrategy(e.target.value)} className={INPUT_CLS}>
@@ -257,7 +257,7 @@ export function StrategyOptimizer() {
       </div>
 
       {/* ── 结果面板 ── */}
-      <div className="min-h-[300px] rounded-card border border-border bg-surface p-4">
+      <div className="min-h-0 rounded-card border border-border bg-surface p-4 overflow-y-auto">
         {task?.error && (
           <div className="mb-3 rounded-input border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">{task.error}</div>
         )}
