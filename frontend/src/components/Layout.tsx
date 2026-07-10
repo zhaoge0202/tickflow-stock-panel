@@ -338,7 +338,7 @@ export function Layout() {
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)
-  // 实时 SSE 连接状态 — 断开时顶部显示徽标, 提示可能漏策略告警
+  // 实时 SSE 连接状态 — 断开时底部显示提示, 提示可能漏策略告警
   const streamStatus = useQuoteStreamStatus()
 
   const toggleQuote = useToggleRealtimeQuotes()
@@ -671,10 +671,10 @@ export function Layout() {
           <div
             role="status"
             aria-live="polite"
-            className="fixed top-3 right-4 z-[9998] flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
+            className="fixed bottom-4 left-1/2 z-[9998] flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
           >
             <WifiOff className="h-3 w-3 shrink-0 animate-pulse" />
-            实时连接断开 · 重连中
+            与服务连接已断开 · 正在重连
           </div>
         )}
         <Suspense
