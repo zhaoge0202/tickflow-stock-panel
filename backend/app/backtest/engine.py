@@ -199,6 +199,29 @@ class BacktestEngine:
         """加载 enriched 数据面板，带缓存。asset_type='etf' 时读 ETF enriched。"""
         return self._cache.get_or_compute(symbols, start, end, columns, self._load_panel_inner, asset_type=asset_type)
 
+    @staticmethod
+    def _sanitize_panel(df: pl.DataFrame) -> pl.DataFrame:
+        """清理会扭曲指标和撮合的坏行，并保证每个标的每日只有一根 K 线。"""
+        if df.is_empty():
+            return df
+
+        before = df.height
+        ohlc = [col for col in ("open", "high", "low", "close") if col in df.columns]
+        if len(ohlc) == 4:
+            valid_bar = pl.all_horizontal(
+                *[pl.col(col).is_not_null() & pl.col(col).is_finite() & (pl.col(col) > 0) for col in ohlc]
+            )
+            df = df.filter(valid_bar)
+
+        if {"symbol", "date"}.issubset(df.columns):
+            df = df.unique(subset=["symbol", "date"], keep="last", maintain_order=False)
+            df = df.sort(["symbol", "date"])
+
+        dropped = before - df.height
+        if dropped:
+            logger.warning("backtest panel sanitized: dropped %d invalid/duplicate rows", dropped)
+        return df
+
     def _load_panel_inner(
         self,
         symbols: list[str] | None,
@@ -214,6 +237,7 @@ class BacktestEngine:
             if asset_type == "stock" and self.repo is not None and hasattr(self.repo, "get_enriched_range"):
                 cached = self.repo.get_enriched_range(start, end, symbols=symbols, columns=columns)
                 if cached is not None and not cached.is_empty():
+                    cached = self._sanitize_panel(cached)
                     elapsed = (time.perf_counter() - t0) * 1000
                     logger.info("load_panel(cache): %.0fms, %d rows, %d columns", elapsed, len(cached), len(cached.columns))
                     return cached
@@ -235,6 +259,18 @@ class BacktestEngine:
                 if "date" not in selected and "date" in available:
                     selected.insert(1, "date")
                 lf = lf.select(selected)
+            available = set(lf.collect_schema().names())
+            if {"open", "high", "low", "close"}.issubset(available):
+                lf = lf.filter(pl.all_horizontal(
+                    *[
+                        pl.col(col).is_not_null()
+                        & pl.col(col).is_finite()
+                        & (pl.col(col) > 0)
+                        for col in ("open", "high", "low", "close")
+                    ]
+                ))
+            if {"symbol", "date"}.issubset(available):
+                lf = lf.unique(subset=["symbol", "date"], keep="last", maintain_order=False)
             df = (
                 lf.filter(
                     (pl.col("date") >= start)
@@ -249,6 +285,8 @@ class BacktestEngine:
 
         if df.is_empty():
             return df
+
+        df = self._sanitize_panel(df)
 
         if columns is not None:
             elapsed = (time.perf_counter() - t0) * 1000
@@ -1208,11 +1246,14 @@ class BacktestEngine:
             for pos in positions.values():
                 pos["hold_days"] += 1
 
-            # 统一执行顺序 (不分口径): 风控(止损/移动止损/止盈) → 计划出场(signal/max_hold/end) → 建仓。
-            # 风控是保护性离场, 必须最先; 计划出场次之; 建仓最后 (卖出释放的现金/仓位先用于满足新买)。
-            # 当天新建仓不会被风控误杀 (_process_risk_exits 跳过 entry_date == d_str 的仓位)。
-            _process_risk_exits(d_str, row_by_symbol, sold_today)
-            _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
+            # 次日开盘卖单在当日 high/low 形成前已经成交，必须先于盘中风控处理；
+            # 收盘卖单则要等到收盘确认，盘中风控仍应优先。建仓始终最后执行。
+            if config.exit_fill == "open_t+1":
+                _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
+                _process_risk_exits(d_str, row_by_symbol, sold_today)
+            else:
+                _process_risk_exits(d_str, row_by_symbol, sold_today)
+                _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
             if d_idx < len(all_dates) - 1:
                 _process_entries(d_str, idxs, sold_today)
 

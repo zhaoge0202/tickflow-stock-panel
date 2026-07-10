@@ -667,6 +667,7 @@ class StrategyBacktestService:
             "position_sizing": c.position_sizing,
             "mode": c.mode,
             "holding_days": c.holding_days,
+            "asset_type": c.asset_type,
         }
 
     @staticmethod
