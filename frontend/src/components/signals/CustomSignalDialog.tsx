@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Plus, Save, X } from 'lucide-react'
-import { api, type CustomSignal, type CustomSignalCondition } from '@/lib/api'
+import { ArrowRight, Plus, Save, Search, X } from 'lucide-react'
+import { api, type CustomSignal, type CustomSignalCondition, type CustomSignalFieldGroup } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 interface Props {
@@ -15,7 +16,7 @@ interface Props {
 
 const emptySignal = (kind: CustomSignal['kind'] = 'exit'): CustomSignal => ({
   id: '', name: '', kind, enabled: true,
-  conditions: [{ left: 'close', op: '>', right: 'field:ma20' }],
+  conditions: [{ left: 'close', op: '>', right: 'field:ma20', leftDays: 0, rightDays: 0 }],
 })
 
 export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose, onSaved }: Props) {
@@ -26,6 +27,8 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   const [error, setError] = useState('')
 
   const fields = options.data?.fields ?? []
+  const groups = options.data?.groups
+  const maxDays = options.data?.maxDays ?? 60
   const operators = options.data?.operators ?? ['>', '>=', '<', '<=', '==', '!=']
   const editing = !!signal
 
@@ -55,10 +58,9 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
     onError: err => setError(String((err as any)?.message ?? err)),
   })
 
-  const updateCond = (idx: number, patch: Partial<CustomSignalCondition>) => {
+  const updateCond = (idx: number, patch: Partial<CustomSignalCondition>) =>
     setDraft(d => ({ ...d, conditions: d.conditions.map((c, i) => i === idx ? { ...c, ...patch } : c) }))
-  }
-  const addCond = () => setDraft(d => ({ ...d, conditions: [...d.conditions, { left: 'close', op: '>', right: '0' }] }))
+  const addCond = () => setDraft(d => ({ ...d, conditions: [...d.conditions, { left: 'close', op: '>', right: '0', leftDays: 0, rightDays: 0 }] }))
   const removeCond = (idx: number) => setDraft(d => ({ ...d, conditions: d.conditions.filter((_, i) => i !== idx) }))
 
   return (
@@ -127,14 +129,22 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                 <div className="space-y-2 rounded-card border border-border/70 bg-base/50 p-3">
                   {draft.conditions.map((c, i) => (
                     <div key={i} className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-muted/60 w-6 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
-                      <select value={c.left} onChange={e => updateCond(i, { left: e.target.value })} className="w-32 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
-                        {fields.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
-                      </select>
-                      <select value={c.op} onChange={e => updateCond(i, { op: e.target.value })} className="w-12 h-7 px-1 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50">
+                      <span className="text-[10px] text-muted/60 w-5 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
+
+                      {/* 左操作数: 前N日 + 字段(弹出选择) */}
+                      <DaysInput value={c.leftDays ?? 0} max={maxDays} onChange={v => updateCond(i, { leftDays: v })} />
+                      <FieldPicker value={c.left} fields={fields} groups={groups} onChange={v => updateCond(i, { left: v })} />
+
+                      {/* 运算符 */}
+                      <select value={c.op} onChange={e => updateCond(i, { op: e.target.value })} className="w-11 h-7 px-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50">
                         {operators.map(op => <option key={op} value={op}>{op}</option>)}
                       </select>
-                      <RightValueInput cond={c} fields={fields} onChange={v => updateCond(i, { right: v })} />
+
+                      {/* 右操作数: 前N日(仅字段) + 字段/常量(弹出选择) */}
+                      <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays}
+                        onChangeRight={v => updateCond(i, { right: v })}
+                        onChangeDays={v => updateCond(i, { rightDays: v })} />
+
                       {draft.conditions.length > 1 && (
                         <button onClick={() => removeCond(i)} className="p-1 rounded text-muted hover:text-danger hover:bg-danger/10 cursor-pointer">
                           <X className="h-3 w-3" />
@@ -143,6 +153,9 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                     </div>
                   ))}
                 </div>
+                <p className="text-[10px] text-muted/60 px-1">
+                  每个操作数左侧的 <span className="text-foreground/70">最新</span> 按钮可点击切换为「前N日」(取 N 个交易日前的值)。例:收盘价(最新) &gt; 收盘价(前1日) = 上涨。带偏移的条件仅盘后/回测生效, 盘中实时跳过。
+                </p>
               </div>
 
               {error && <div className="rounded-btn border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">{error}</div>}
@@ -161,26 +174,227 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   )
 }
 
-function RightValueInput({ cond, fields, onChange }: { cond: CustomSignalCondition; fields: { key: string; label: string }[]; onChange: (v: string) => void }) {
+// ── 字段选择器: 搜索 + 分组弹出 (Portal 到 body, 避免被弹窗 overflow 裁切) ──
+
+const FIELD_POP_WIDTH = 240
+const FIELD_POP_MAX_HEIGHT = 360
+const FIELD_POP_GAP = 4
+
+function FieldPicker({ value, fields, groups, onChange }: {
+  value: string
+  fields: { key: string; label: string }[]
+  groups?: CustomSignalFieldGroup[]
+  onChange: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [pos, setPos] = useState<{ top: number; left: number; dropUp: boolean } | null>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const selectedLabel = fields.find(f => f.key === value)?.label ?? value
+
+  const filteredGroups = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q || !groups) return groups
+    return groups
+      .map(g => ({ ...g, fields: g.fields.filter(f => f.label.toLowerCase().includes(q) || f.key.toLowerCase().includes(q)) }))
+      .filter(g => g.fields.length > 0)
+  }, [groups, query])
+
+  const filteredFields = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q || filteredGroups) return fields
+    return fields.filter(f => f.label.toLowerCase().includes(q) || f.key.toLowerCase().includes(q))
+  }, [fields, query, filteredGroups])
+
+  // 打开: 计算按钮视口坐标 + 智能方向翻转 + 水平裁剪
+  const handleOpen = () => {
+    if (!btnRef.current) { setOpen(true); return }
+    const r = btnRef.current.getBoundingClientRect()
+    const spaceBelow = window.innerHeight - r.bottom
+    const dropUp = spaceBelow < FIELD_POP_MAX_HEIGHT + FIELD_POP_GAP && r.top > FIELD_POP_MAX_HEIGHT + FIELD_POP_GAP
+    const top = dropUp ? Math.max(8, r.top - FIELD_POP_MAX_HEIGHT - FIELD_POP_GAP) : r.bottom + FIELD_POP_GAP
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - FIELD_POP_WIDTH - 8))
+    setPos({ top, left, dropUp })
+    setQuery('')
+    setOpen(true)
+  }
+
+  // 点击外部 / 滚动关闭
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (btnRef.current?.contains(t)) return
+      if (popRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    const close = () => setOpen(false)
+    document.addEventListener('mousedown', handler)
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', handler)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [open])
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={handleOpen}
+        className="w-28 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground text-left hover:border-accent/40 transition-colors shrink-0 cursor-pointer truncate"
+      >
+        {selectedLabel}
+      </button>
+      {createPortal(
+        <AnimatePresence>
+          {open && pos && (
+            <motion.div
+              ref={popRef}
+              initial={{ opacity: 0, y: pos.dropUp ? 4 : -4, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: pos.dropUp ? 4 : -4, scale: 0.97 }}
+              transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
+              style={{ position: 'fixed', top: pos.top, left: pos.left }}
+              className="z-[9999] bg-surface border border-border/60 rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.4)] flex flex-col overflow-hidden"
+            >
+              {/* 搜索框 */}
+              <div className="p-2 border-b border-border/50">
+                <div className="flex items-center gap-2 px-2 h-7 rounded-btn bg-base border border-border">
+                  <Search className="h-3 w-3 text-muted shrink-0" />
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    placeholder="搜索字段…"
+                    className="flex-1 bg-transparent text-[11px] text-foreground focus:outline-none"
+                  />
+                  {query && <button onClick={() => setQuery('')} className="text-muted hover:text-foreground"><X className="h-3 w-3" /></button>}
+                </div>
+              </div>
+              {/* 分组列表 */}
+              <div className="overflow-y-auto p-1.5" style={{ maxHeight: FIELD_POP_MAX_HEIGHT - 44 }}>
+                {filteredGroups ? (
+                  filteredGroups.length > 0 ? filteredGroups.map(g => (
+                    <div key={g.key} className="mb-0.5">
+                      <div className="px-2 py-0.5 text-[10px] text-muted/60 font-medium">{g.label}</div>
+                      {g.fields.map(f => (
+                        <button
+                          key={f.key}
+                          onClick={() => { onChange(f.key); setOpen(false) }}
+                          className={`w-full text-left px-2 py-1 rounded text-[11px] transition-colors ${
+                            f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  )) : (
+                    <div className="px-3 py-5 text-center text-[11px] text-muted">无匹配字段</div>
+                  )
+                ) : (
+                  filteredFields.map(f => (
+                    <button
+                      key={f.key}
+                      onClick={() => { onChange(f.key); setOpen(false) }}
+                      className={`w-full text-left px-2 py-1 rounded text-[11px] transition-colors ${
+                        f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+// ── 日期偏移控件: "最新" / "前N日" ───────────────────────
+
+function DaysInput({ value, max, onChange }: { value: number; max: number; onChange: (v: number) => void }) {
+  if (!value) {
+    return (
+      <button
+        type="button"
+        onClick={() => onChange(1)}
+        title="点击切换为「前N日」(取 N 个交易日前的值)"
+        className="h-7 px-2 rounded bg-base border border-border text-[11px] text-muted hover:text-accent hover:border-accent/50 transition-colors shrink-0 cursor-pointer"
+      >
+        最新
+      </button>
+    )
+  }
+  return (
+    <div className="flex items-center h-7 rounded bg-base border border-border focus-within:border-accent/50 transition-colors shrink-0">
+      <span className="pl-1.5 text-[11px] text-muted select-none">前</span>
+      <input
+        type="number"
+        min={1}
+        max={max}
+        value={value}
+        onChange={e => {
+          const raw = e.target.value
+          if (raw === '') { onChange(0); return }
+          const n = Math.max(1, Math.min(max, parseInt(raw) || 1))
+          onChange(n)
+        }}
+        title={`前 ${value} 个交易日的值`}
+        className="w-7 h-full px-0 text-[11px] font-mono text-foreground text-center bg-transparent focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
+      />
+      <button
+        type="button"
+        onClick={() => onChange(0)}
+        title="切回「最新」"
+        className="pr-1.5 pl-0.5 text-[11px] text-muted hover:text-accent transition-colors cursor-pointer"
+      >
+        日
+      </button>
+    </div>
+  )
+}
+
+// ── 右操作数: 字段(弹出) / 常量 切换 ─────────────────────
+
+function RightValueInput({ cond, fields, groups, maxDays, onChangeRight, onChangeDays }: {
+  cond: CustomSignalCondition
+  fields: { key: string; label: string }[]
+  groups?: CustomSignalFieldGroup[]
+  maxDays: number
+  onChangeRight: (v: string) => void
+  onChangeDays: (v: number) => void
+}) {
   const isField = cond.right.startsWith('field:')
   const fieldValue = isField ? cond.right.slice(6) : ''
   const numValue = isField ? '' : cond.right
 
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1 flex-1 min-w-0">
       {isField ? (
         <>
-          <select value={fieldValue} onChange={e => onChange(`field:${e.target.value}`)} className="w-32 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
-            {fields.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
-          </select>
-          <button onClick={() => onChange('0')} title="切换为数字" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer">
+          <DaysInput value={cond.rightDays ?? 0} max={maxDays} onChange={onChangeDays} />
+          <FieldPicker value={fieldValue} fields={fields} groups={groups} onChange={v => onChangeRight(`field:${v}`)} />
+          <button onClick={() => onChangeRight('0')} title="切换为数字" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer shrink-0">
             <ArrowRight className="h-3 w-3 rotate-90" />
           </button>
         </>
       ) : (
         <>
-          <input type="number" value={numValue} onChange={e => onChange(e.target.value)} step="any" className="w-24 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
-          <button onClick={() => onChange('field:close')} title="切换为字段" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer">
+          {/* 常量无前N日概念, 占位保持与字段模式对齐 */}
+          <div className="shrink-0" style={{ width: 44 }} />
+          <input type="number" value={numValue} onChange={e => onChangeRight(e.target.value)} step="any"
+            className="flex-1 min-w-0 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+          <button onClick={() => onChangeRight('field:close')} title="切换为字段" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer shrink-0">
             <ArrowRight className="h-3 w-3 -rotate-90" />
           </button>
         </>

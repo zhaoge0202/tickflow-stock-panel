@@ -1530,9 +1530,15 @@ def compute_enriched_today(
     ]
     df = df.drop([c for c in drop_cols if c in df.columns])
 
-    # 自定义信号（日级实时路径同样注入）
+    # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
     from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs())
+    try:
+        sigs = custom_signals.load_all(settings.data_dir)
+        today_exprs = custom_signals.build_expressions(sigs, allow_shift=False)
+    except Exception as e:
+        logger.warning("custom signals load failed (today): %s", e)
+        today_exprs = {}
+    df = custom_signals.inject(df, today_exprs)
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
