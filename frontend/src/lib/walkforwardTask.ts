@@ -59,6 +59,8 @@ export interface StartWalkForwardParams {
   train_days: number
   test_days: number
   step_days: number
+  params?: Record<string, any> | null       // 未扫描参数固定为用户当前值
+  overrides?: Record<string, any> | null     // 策略当前的 basic_filter/信号/风控覆盖
   symbols?: string[] | null
   start?: string | null
   end?: string | null
@@ -70,6 +72,9 @@ const listeners = new Set<() => void>()
 let taskSeq = 0
 let eventSource: EventSource | null = null
 let currentJobKey: string | null = null
+let cancelRequested = false
+let reconnectAttempts = 0
+const MAX_RECONNECT = 5
 
 const RECONNECT_KEY = 'walkforward_reconnect'
 const JOB_KEY_KEY = 'walkforward_job_key'
@@ -103,17 +108,28 @@ function connectSSE(url: string): void {
   eventSource = es
 
   es.addEventListener('job', (e: MessageEvent) => {
+    reconnectAttempts = 0
     try {
       const key = JSON.parse(e.data)?.key
       if (key) {
         currentJobKey = key
         localStorage.setItem(JOB_KEY_KEY, key)
+        // 竞态: stop 在拿到 key 前被点过 -> 补发 cancel 真正停后端任务, 再收尾关闭。
+        if (cancelRequested) {
+          postCancel(key)
+          es.close()
+          eventSource = null
+          currentJobKey = null
+          localStorage.removeItem(RECONNECT_KEY)
+          localStorage.removeItem(JOB_KEY_KEY)
+        }
       }
     } catch { /* ignore */ }
   })
 
   es.addEventListener('progress', (e: MessageEvent) => {
     if (current?.id !== id) return
+    reconnectAttempts = 0
     try {
       const prog = JSON.parse(e.data) as WFProgress
       current = { ...current, progress: prog }
@@ -154,8 +170,28 @@ function connectSSE(url: string): void {
       currentJobKey = null
       localStorage.removeItem(RECONNECT_KEY)
       localStorage.removeItem(JOB_KEY_KEY)
+      return
+    }
+    // 无 data: 连接异常断开。EventSource 自动重连, 设上限避免网络长断时无限 pending。
+    if (current?.id === id) {
+      reconnectAttempts += 1
+      if (reconnectAttempts > MAX_RECONNECT) {
+        es.close()
+        eventSource = null
+        current = { ...current, isPending: false, error: '连接中断, 重连多次失败' }
+        emit()
+      }
     }
   })
+}
+
+/** 调后端 cancel (按回吐的 job_key)。 */
+function postCancel(jobKey: string): void {
+  fetch('/api/backtest/walkforward/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_key: jobKey }),
+  }).catch(() => {})
 }
 
 export function startWalkForward(params: StartWalkForwardParams): void {
@@ -164,6 +200,9 @@ export function startWalkForward(params: StartWalkForwardParams): void {
     eventSource = null
   }
 
+  cancelRequested = false
+  currentJobKey = null
+  reconnectAttempts = 0
   const id = ++taskSeq
   current = { id, isPending: true, result: null, progress: null, error: null }
   emit()
@@ -175,6 +214,8 @@ export function startWalkForward(params: StartWalkForwardParams): void {
     train_days: params.train_days,
     test_days: params.test_days,
     step_days: params.step_days,
+    params: params.params ? JSON.stringify(params.params) : undefined,
+    overrides: params.overrides ? JSON.stringify(params.overrides) : undefined,
     symbols: params.symbols?.join(','),
     start: params.start ?? undefined,
     end: params.end ?? undefined,
@@ -185,26 +226,24 @@ export function startWalkForward(params: StartWalkForwardParams): void {
   connectSSE(`/api/backtest/walkforward/stream?${qs}`)
 }
 
-export async function stopWalkForward(): Promise<void> {
+export function stopWalkForward(): void {
+  // 竞态: job_key 未到手时保持 SSE 打开, 等 job 事件补发 cancel (关 SSE 不停后端 daemon 线程)。
+  cancelRequested = true
   const jobKey = currentJobKey ?? localStorage.getItem(JOB_KEY_KEY)
   if (jobKey) {
-    await fetch('/api/backtest/walkforward/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_key: jobKey }),
-    }).catch(() => {})
-  }
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
+    postCancel(jobKey)
+    if (eventSource) { eventSource.close(); eventSource = null }
+    currentJobKey = null
+    localStorage.removeItem(RECONNECT_KEY)
+    localStorage.removeItem(JOB_KEY_KEY)
+  } else if (eventSource) {
+    const es = eventSource
+    setTimeout(() => { if (es === eventSource) { es.close(); eventSource = null } }, 5000)
   }
   if (current?.isPending) {
     current = { ...current, isPending: false, error: '已取消' }
     emit()
   }
-  currentJobKey = null
-  localStorage.removeItem(RECONNECT_KEY)
-  localStorage.removeItem(JOB_KEY_KEY)
 }
 
 export function clearWalkForward(): void {

@@ -12,6 +12,7 @@ import {
   tryReconnectWalkForward,
   useWalkForwardTask,
 } from '@/lib/walkforwardTask'
+import { buildDefaultOverrides } from '@/lib/strategyOverrides'
 import {
   INPUT_CLS,
   OBJECTIVES,
@@ -93,6 +94,10 @@ export function StrategyWalkForward() {
       train_days: Number(trainDays),
       test_days: Number(testDays),
       step_days: Number(stepDays),
+      // 未扫描参数固定为策略当前默认值; overrides 让 basic_filter/信号/风控按当前策略参与,
+      // 否则 walk-forward 优化的策略与用户实际回测的不一致 (同 PR #82 优化器修复)。
+      params: sweep.selected?.params_defaults,
+      overrides: sweep.selected ? buildDefaultOverrides(sweep.selected) : undefined,
       start,
       end,
       mode,
@@ -189,13 +194,13 @@ export function StrategyWalkForward() {
         {!result && !task?.isPending && (
           <EmptyState
             title="Walk-forward 优化"
-            description="每折在训练区间网格优化选最优参数，再在紧邻的测试区间做样本外(OOS)验证。样本内漂亮、样本外崩溃即过拟合。"
+            hint="每折在训练区间网格优化选最优参数，再在紧邻的测试区间做样本外(OOS)验证。样本内漂亮、样本外崩溃即过拟合。"
           />
         )}
 
         {result && result.n_folds === 0 && (
           <EmptyState title="未产生有效折"
-            description={`计划 ${result.n_planned_folds} 折, 但 ${result.n_skipped} 折因训练区间未优化出参数或 OOS 回测失败被跳过。请检查数据范围或放宽参数网格。`} />
+            hint={`计划 ${result.n_planned_folds} 折, 但 ${result.n_skipped} 折因训练区间未优化出参数或 OOS 回测失败被跳过。请检查数据范围或放宽参数网格。`} />
         )}
 
         {result && summary && result.n_folds > 0 && (

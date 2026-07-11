@@ -240,6 +240,22 @@ def test_wf_job_key_distinguishes_windows():
     assert base != _make_wf_job_key("s", None, None, None, '{"p":[1]}', "sortino", None, "120/30/30", "sig")
 
 
+def test_wf_job_key_distinguishes_params_and_overrides():
+    """params/overrides 不同必须产出不同 job_key —— 否则 stream 与 cancel 会错配到别的任务。"""
+    from app.api.backtest import _make_wf_job_key
+    base = _make_wf_job_key("s", None, None, None, '{"p":[1]}', "sortino", None, "252/63/63", "sig")
+    # params 不同 (未扫描参数固定值不同 -> 优化的策略不同)
+    assert base != _make_wf_job_key(
+        "s", None, None, None, '{"p":[1]}', "sortino", None, "252/63/63", "sig", params='{"x":1}')
+    # overrides 不同 (basic_filter/信号/风控 不同)
+    assert base != _make_wf_job_key(
+        "s", None, None, None, '{"p":[1]}', "sortino", None, "252/63/63", "sig", overrides='{"score_min":5}')
+    # 相同 params/overrides 必须稳定一致 (stream 端与 cancel 端对齐前提)
+    k = _make_wf_job_key("s", None, None, None, '{"p":[1]}', "sortino", None, "252/63/63", "sig", params='{"x":1}')
+    assert k == _make_wf_job_key(
+        "s", None, None, None, '{"p":[1]}', "sortino", None, "252/63/63", "sig", params='{"x":1}')
+
+
 def test_wf_cancel_by_echoed_key():
     import asyncio
 

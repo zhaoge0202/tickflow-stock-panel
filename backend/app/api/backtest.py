@@ -738,8 +738,8 @@ async def optimize_cancel(request: Request):
 # Walk-forward 优化 — 每折训练区间优化 + 测试区间 OOS 验证 (复用优化器 + job_key 回吐)
 # ══════════════════════════════════════════════════════════════
 
-def _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig) -> str:
-    raw = f"WF|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|{direction}|{windows}|{bt_sig}"
+def _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig, params=None, overrides=None) -> str:
+    raw = f"WF|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|{direction}|{windows}|{bt_sig}|{params}|{overrides}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -754,6 +754,8 @@ async def walkforward_stream(
     test_days: int = 63,
     step_days: int = 63,
     max_workers: int = 4,
+    params: str | None = None,       # JSON: 未扫描参数固定为用户当前值 (base_params)
+    overrides: str | None = None,    # JSON: 策略当前的 basic_filter/signals/风控等覆盖
     symbols: str | None = None,
     start: str | None = None,
     end: str | None = None,
@@ -796,7 +798,7 @@ async def walkforward_stream(
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     windows = f"{train_days}/{test_days}/{step_days}"
-    job_key = _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig)
+    job_key = _make_wf_job_key(strategy_id, symbols, start, end, param_grid, objective, direction, windows, bt_sig, params, overrides)
 
     # guard 作用于单折窗口 (每折训练/测试各是一次回测), 而非总区间 —— WF 总区间可长达数年,
     # 按总区间拦会误杀; 真正的 OOM 风险在单折窗口过大。
@@ -835,6 +837,14 @@ async def walkforward_stream(
                 grid = None
 
             if grid is not None:
+                try:
+                    base_params = json.loads(params) if params else {}
+                except (json.JSONDecodeError, TypeError):
+                    base_params = {}
+                try:
+                    ov = json.loads(overrides) if overrides else None
+                except (json.JSONDecodeError, TypeError):
+                    ov = None
                 wf_cfg = WalkForwardConfig(
                     strategy_id=strategy_id,
                     symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
@@ -847,6 +857,8 @@ async def walkforward_stream(
                     test_days=int(test_days),
                     step_days=int(step_days),
                     max_workers=int(max_workers),
+                    base_params=base_params if isinstance(base_params, dict) else {},
+                    overrides=ov if isinstance(ov, dict) else None,
                     backtest_kwargs=bt_kwargs,
                 )
 
