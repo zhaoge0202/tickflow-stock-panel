@@ -53,7 +53,12 @@ def get_settings() -> dict:
     """返回当前配置概况(Key 脱敏)。"""
     from app.config import settings
     from app.services import preferences
-    from app.services.ai_provider import ai_configured, current_ai_model, current_codex_command
+    from app.services.ai_provider import (
+        ai_configured,
+        current_ai_model,
+        current_codex_command,
+        current_codex_reasoning_effort,
+    )
 
     key = secrets_store.get_tickflow_key()
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
@@ -76,6 +81,7 @@ def get_settings() -> dict:
         "ai_configured": ai_configured(ai_provider),
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
+        "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
     }
 
@@ -234,6 +240,7 @@ class AiSettingsIn(BaseModel):
     api_key: str | None = None
     model: str = ""
     codex_command: str = ""
+    codex_reasoning_effort: str = ""
     user_agent: str = ""
 
 
@@ -241,7 +248,15 @@ class AiSettingsIn(BaseModel):
 def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 配置（全部持久化到 secrets.json）"""
     from app.config import settings
-    from app.services.ai_provider import ai_configured, current_ai_model, current_ai_provider, current_codex_command, normalize_codex_command
+    from app.services.ai_provider import (
+        ai_configured,
+        current_ai_model,
+        current_ai_provider,
+        current_codex_command,
+        current_codex_reasoning_effort,
+        normalize_codex_command,
+        normalize_codex_reasoning_effort,
+    )
 
     updates: dict = {}
     if req.provider:
@@ -268,8 +283,11 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
             codex_command = normalize_codex_command(req.codex_command)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        codex_reasoning_effort = normalize_codex_reasoning_effort(req.codex_reasoning_effort)
         updates["ai_codex_command"] = codex_command
+        updates["ai_codex_reasoning_effort"] = codex_reasoning_effort
         settings.ai_codex_command = codex_command
+        settings.ai_codex_reasoning_effort = codex_reasoning_effort
     # user_agent 允许清空(回到默认浏览器 UA),故无条件持久化
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
@@ -283,6 +301,7 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ai_provider": provider,
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
+        "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_configured": ai_configured(provider),
     }
 
@@ -295,13 +314,14 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command")
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
     settings.ai_api_key = ""
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
+    settings.ai_codex_reasoning_effort = ""
 
     return {"ok": True}
 

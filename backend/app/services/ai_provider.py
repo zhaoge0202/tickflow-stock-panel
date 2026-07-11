@@ -5,11 +5,15 @@ import asyncio
 import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
+import time
 import tomllib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
+from types import TracebackType
 
 from app import secrets_store
 from app.config import settings
@@ -17,8 +21,47 @@ from app.config import settings
 OPENAI_COMPAT_PROVIDER = "openai_compat"
 CODEX_CLI_PROVIDER = "codex_cli"
 CODEX_DEFAULT_COMMAND = "codex"
-CODEX_SERVICE_TIER_FALLBACK = "fast"
-CODEX_SUPPORTED_SERVICE_TIERS = {"fast", "flex"}
+CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+_CODEX_ENV_ALLOWLIST = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+)
 
 Message = dict[str, str]
 
@@ -42,6 +85,15 @@ def current_codex_command() -> str:
     )
 
 
+def current_codex_reasoning_effort() -> str:
+    return normalize_codex_reasoning_effort(
+        secrets_store.get_ai_config(
+            "ai_codex_reasoning_effort",
+            settings.ai_codex_reasoning_effort,
+        )
+    )
+
+
 def is_codex_cli_provider(provider: str | None = None) -> bool:
     return (provider or current_ai_provider()) == CODEX_CLI_PROVIDER
 
@@ -49,10 +101,18 @@ def is_codex_cli_provider(provider: str | None = None) -> bool:
 def normalize_codex_model(model: str) -> str:
     value = model.strip()
     aliases = {
-        "gpt5": "gpt-5",
         "gpt5.5": "gpt-5.5",
+        "gpt5.6": "gpt-5.6-sol",
+        "gpt5.6-sol": "gpt-5.6-sol",
+        "gpt5.6-terra": "gpt-5.6-terra",
+        "gpt5.6-luna": "gpt-5.6-luna",
     }
     return aliases.get(value.lower(), value)
+
+
+def normalize_codex_reasoning_effort(effort: str | None) -> str:
+    value = (effort or "").strip().lower()
+    return value if value in CODEX_SUPPORTED_REASONING_EFFORTS else ""
 
 
 def normalize_codex_command(command: str | None, *, strict: bool = True) -> str:
@@ -363,8 +423,8 @@ async def _run_codex_cli(
     timeout: float,
 ) -> str:
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
-    with tempfile.TemporaryDirectory(prefix="tickflow-codex-run-") as run_dir:
-        run_path = Path(run_dir)
+    run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-"))
+    try:
         codex_home_path = run_path / "codex-home"
         workspace_path = run_path / "workspace"
         codex_home_path.mkdir()
@@ -389,37 +449,107 @@ async def _run_codex_cli(
             args.extend(["--model", model])
         args.extend(["--cd", str(workspace_path), "-"])
 
-        env = os.environ.copy()
-        env.setdefault("NO_COLOR", "1")
-        env["CODEX_HOME"] = str(codex_home_path)
+        env = _codex_process_env(codex_home_path)
 
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        returncode, stdout, stderr = await asyncio.to_thread(
+            _run_codex_process,
+            args,
+            prompt,
+            env,
+            timeout,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode("utf-8")),
-                timeout=timeout,
-            )
-        except TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeError("Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态") from exc
 
         out = _clean_process_text(stdout)
         err = _clean_process_text(stderr)
         final_message = _read_output_file(output_path)
-        if proc.returncode != 0:
-            detail = err or out or f"exit code {proc.returncode}"
+        if returncode != 0:
+            detail = err or out or f"exit code {returncode}"
             raise RuntimeError(f"Codex CLI 调用失败: {detail[-1200:]}")
         result = final_message or out
         if not result:
             raise RuntimeError("Codex CLI 未返回内容")
         return result
+    finally:
+        await asyncio.to_thread(_remove_tree_best_effort, run_path)
+
+
+def _run_codex_process(
+    args: Sequence[str],
+    prompt: str,
+    env: dict[str, str],
+    timeout: float,
+) -> tuple[int, bytes, bytes]:
+    try:
+        proc = subprocess.run(
+            list(args),
+            input=prompt.encode("utf-8"),
+            capture_output=True,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态") from exc
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _codex_process_env(codex_home_path: Path) -> dict[str, str]:
+    """Pass only OS, locale, certificate, and proxy settings to Codex."""
+    env: dict[str, str] = {}
+    seen: set[str] = set()
+    for name in _CODEX_ENV_ALLOWLIST:
+        normalized = name.casefold() if os.name == "nt" else name
+        if normalized in seen:
+            continue
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+            seen.add(normalized)
+    env["NO_COLOR"] = "1"
+    env["CODEX_HOME"] = str(codex_home_path)
+    return env
+
+
+def _remove_tree_best_effort(path: Path) -> None:
+    _remove_auth_files(path)
+    for attempt in range(4):
+        try:
+            shutil.rmtree(path, onerror=_make_writable_and_retry)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == 3:
+                break
+            time.sleep(0.2 * (attempt + 1))
+    _remove_auth_files(path)
+    shutil.rmtree(path, ignore_errors=True)
+    _remove_auth_files(path)
+
+
+def _remove_auth_files(path: Path) -> None:
+    try:
+        auth_files = list(path.rglob("auth.json"))
+    except OSError:
+        return
+    for auth_file in auth_files:
+        try:
+            os.chmod(auth_file, stat.S_IWRITE)
+            auth_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _make_writable_and_retry(
+    func: Callable[[str], object],
+    path: str,
+    exc_info: tuple[type[BaseException], BaseException, TracebackType],
+) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        raise exc_info[1] from None
 
 
 def _codex_prompt(messages: Sequence[Message], *, max_tokens: int) -> str:
@@ -539,10 +669,16 @@ def _write_compatible_codex_config(path: Path) -> None:
     config = _read_codex_config()
     lines: list[str] = []
 
-    tier = str(config.get("service_tier") or "").strip()
-    if tier not in CODEX_SUPPORTED_SERVICE_TIERS:
-        tier = CODEX_SERVICE_TIER_FALLBACK
-    lines.append(_toml_string("service_tier", tier))
+    model = current_ai_model() or normalize_codex_model(str(config.get("model") or ""))
+    if model:
+        lines.append(_toml_string("model", model))
+
+    effort = current_codex_reasoning_effort() or normalize_codex_reasoning_effort(
+        str(config.get("model_reasoning_effort") or "")
+    )
+    if effort:
+        lines.append(_toml_string("model_reasoning_effort", effort))
+
     lines.append(_toml_string("approval_policy", "never"))
     lines.append(_toml_string("sandbox_mode", "read-only"))
 
