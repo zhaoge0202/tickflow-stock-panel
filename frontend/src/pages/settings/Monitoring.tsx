@@ -390,8 +390,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         {/* 自选列表分时图实时刷新 (默认关闭, 开启后盘中 15s 轮询刷新分时数据) */}
         <Card icon={Activity} title="分时图刷新">
           <ToggleRow
-            label="自选分时图实时刷新"
-            desc="开启后自选列表的分时图盘中每 15 秒自动刷新（需 Pro+ 权限）。关闭时仅打开页面时拉取一次。"
+            label="自选/策略分时图实时刷新"
+            desc="开启后自选与策略列表的分时图盘中每 15 秒自动刷新（需 Pro+ 权限 + 实时行情运行）。关闭时仅打开页面时拉取一次, 可点表头刷新按钮手动更新。"
             checked={prefs?.minute_intraday_refresh ?? false}
             onChange={(v) => save({ minute_intraday_refresh: v })}
           />
