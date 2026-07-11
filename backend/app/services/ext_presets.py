@@ -155,17 +155,43 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
 # 拉取执行 (复用 httpx, 不依赖 fetch_and_ingest 的 PullConfig 路径)
 # ---------------------------------------------------------------------------
 
+# 部分网络环境 (CDN/WAF/网关) 会把数组包成 {data: [...]}/{list: [...]}/{rows: [...]} 信封。
+# 这里做一次兼容解包, 避免误判为「接口返回不是数组」。
+_ENVELOPE_KEYS = ("data", "list", "rows", "result", "results")
+
+
 async def _fetch_json(url: str) -> list[dict]:
-    """请求 JSON 接口, 返回行数组。超时 30s, 失败抛异常由调用方兜底。"""
+    """请求 JSON 接口, 返回行数组。超时 30s, 失败抛异常由调用方兜底。
+
+    兼容两种上游返回形态:
+      - 直接是数组: [{...}, ...]          → 原样返回
+      - 信封包裹: {data: [{...}]} 等       → 自动解包
+    """
     import httpx
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         data = resp.json()
-    if not isinstance(data, list):
-        raise ValueError(f"接口返回不是数组: {type(data)}")
-    return data
+
+    if isinstance(data, list):
+        return data
+
+    # 信封解包: 在常见键里找第一个值为数组的
+    if isinstance(data, dict):
+        for key in _ENVELOPE_KEYS:
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return inner
+        # 兜底: 遍历所有值, 取第一个数组
+        for v in data.values():
+            if isinstance(v, list):
+                return v
+
+    raise ValueError(
+        f"接口返回不是数组 (type={type(data).__name__}), "
+        f"响应预览: {str(data)[:200]}"
+    )
 
 
 async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:
