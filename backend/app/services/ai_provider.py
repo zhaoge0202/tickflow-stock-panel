@@ -100,7 +100,7 @@ def ai_configured(provider: str | None = None) -> bool:
 async def generate_ai_text(
     messages: Sequence[Message],
     *,
-    temperature: float = 0.3,
+    temperature: float | None = 0.3,
     max_tokens: int = 3000,
     timeout: float = 180.0,
 ) -> str:
@@ -118,7 +118,7 @@ async def generate_ai_text(
 async def stream_ai_text(
     messages: Sequence[Message],
     *,
-    temperature: float = 0.5,
+    temperature: float | None = 0.5,
     max_tokens: int = 4000,
     timeout: float = 180.0,
 ) -> AsyncIterator[str]:
@@ -143,7 +143,7 @@ async def stream_ai_text(
 async def _run_openai_once(
     messages: Sequence[Message],
     *,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     timeout: float,
 ) -> str:
@@ -152,17 +152,28 @@ async def _run_openai_once(
         raise RuntimeError("AI API Key 未配置, 请在设置页配置")
 
     client = _openai_client(ai_key, timeout)
+    model = current_ai_model()
+    req_messages = list(messages)
     try:
         resp = await client.chat.completions.create(
-            model=current_ai_model(),
-            messages=list(messages),
-            temperature=temperature,
-            max_tokens=max_tokens,
+            model=model,
+            messages=req_messages,
+            **_openai_kwargs(temperature=temperature, max_tokens=max_tokens),
         )
     except Exception as exc:
-        if _is_openai_transport_error(exc):
-            raise RuntimeError(_format_openai_error(exc)) from exc
-        raise
+        # Reasoning 类模型 (如 kimi-k2.7-code, deepseek-r1, o 系列) 拒绝非约定
+        # temperature (Moonshot 报 "only 1 is allowed for this model")。不再靠
+        # 模型名猜测, 而是捕获该错误后去掉 temperature 重试一次 —— 对所有此类模型都稳。
+        if temperature is not None and _is_temperature_rejected(exc):
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=req_messages,
+                **_openai_kwargs(temperature=None, max_tokens=max_tokens),
+            )
+        else:
+            if _is_openai_transport_error(exc):
+                raise RuntimeError(_format_openai_error(exc)) from exc
+            raise
     if not resp.choices:
         return ""
     return (resp.choices[0].message.content or "").strip()
@@ -171,7 +182,7 @@ async def _run_openai_once(
 async def _stream_openai(
     messages: Sequence[Message],
     *,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     timeout: float,
 ) -> AsyncIterator[str]:
@@ -180,19 +191,39 @@ async def _stream_openai(
         raise RuntimeError("AI API Key 未配置, 请在设置页配置")
 
     client = _openai_client(ai_key, timeout)
-    try:
-        stream = await client.chat.completions.create(
-            model=current_ai_model(),
-            messages=list(messages),
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-        )
+    model = current_ai_model()
+    req_messages = list(messages)
 
+    async def _iter(stream):
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content
+
+    try:
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=req_messages,
+            **_openai_kwargs(temperature=temperature, max_tokens=max_tokens),
+            stream=True,
+        )
+    except Exception as exc:
+        # 流尚未开始 yield, 可安全重建: 去掉 temperature 后重开 stream。
+        if temperature is not None and _is_temperature_rejected(exc):
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=req_messages,
+                **_openai_kwargs(temperature=None, max_tokens=max_tokens),
+                stream=True,
+            )
+        else:
+            if _is_openai_transport_error(exc):
+                raise RuntimeError(_format_openai_error(exc)) from exc
+            raise
+
+    try:
+        async for piece in _iter(stream):
+            yield piece
     except Exception as exc:
         if _is_openai_transport_error(exc):
             raise RuntimeError(_format_openai_error(exc)) from exc
@@ -210,6 +241,29 @@ def _openai_client(api_key: str, timeout: float):
         max_retries=0,
         default_headers={"User-Agent": user_agent},
     )
+
+
+# Reasoning / thinking 类模型 (kimi-k2.7-code, deepseek-r1, OpenAI o 系列等) 不接受
+# 任意 temperature, 上游会以 400 拒绝 (如 Moonshot: "only 1 is allowed for this model")。
+# 这里不靠模型名猜测, 而是在真正命中该错误后自动去掉 temperature 重试 (见
+# _run_openai_once / _stream_openai), 对任意 reasoning 模型都稳健。
+_TEMP_REJECT_HINTS = ("temperature", "only 1 is allowed", "unsupported parameter")
+
+
+def _is_temperature_rejected(exc: Exception) -> bool:
+    """True if the upstream 400 is specifically about the temperature param."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = _openai_error_detail(exc) or str(exc)
+    return any(h in text.lower() for h in _TEMP_REJECT_HINTS)
+
+
+def _openai_kwargs(*, temperature: float | None, max_tokens: int) -> dict:
+    """Build OpenAI create() kwargs; temperature omitted when None."""
+    kwargs: dict = {"max_tokens": max_tokens}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return kwargs
 
 
 def _is_openai_transport_error(exc: Exception) -> bool:
@@ -254,7 +308,9 @@ def _format_openai_error(exc: Exception) -> str:
         503: "AI 服务暂时不可用, 请稍后重试",
         504: "AI 上游服务超时, 请稍后重试或检查 AI Base URL / 网络",
     }
-    message = status_messages.get(status) or detail or "请稍后重试或检查 AI 服务配置"
+    # 优先透出上游真实错误 (如 Moonshot 的 "model not found"), 仅在没有
+    # 可读 detail 时才回落到按状态码的通用文案, 避免吞掉排障关键信息。
+    message = detail or status_messages.get(status) or "请稍后重试或检查 AI 服务配置"
     if status:
         return f"AI 服务请求失败({status}): {message}"
     return f"AI 服务请求失败: {message}"
