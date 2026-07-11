@@ -121,6 +121,17 @@ class _CacheEntry:
         self.ts = ts
 
 
+class _InFlight:
+    """同 key 正在计算的占位: leader 算完通过 done 唤醒所有跟随者复用结果。"""
+
+    __slots__ = ("done", "df", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.df: pl.DataFrame | None = None
+        self.error: BaseException | None = None
+
+
 class PanelCache:
     """LRU + TTL 数据面板缓存。"""
 
@@ -132,6 +143,9 @@ class PanelCache:
         # 无锁的 move_to_end/del/popitem check-then-act 会抛 "OrderedDict mutated"。
         # 用实例锁守护所有 OrderedDict 变更; compute_fn (重扫盘) 放锁外避免串行化。
         self._lock = threading.Lock()
+        # single-flight: 同 key 只让一个线程 compute, 其余等其结果复用。
+        # 否则优化器等场景下 max_workers 个线程冷启动同时 miss, 会并行加载 N 份同一面板。
+        self._inflight: dict[str, _InFlight] = {}
 
     def get_or_compute(
         self,
@@ -146,19 +160,43 @@ class PanelCache:
         now = time.monotonic()
 
         with self._lock:
-            if key in self._cache:
-                entry = self._cache[key]
+            entry = self._cache.get(key)
+            if entry is not None:
                 if now - entry.ts < self._ttl:
                     self._cache.move_to_end(key)
                     return entry.df
-                del self._cache[key]
+                del self._cache[key]  # 过期, 丢弃后重算
+            # single-flight: 同 key 若已有线程在算, 登记为跟随者; 否则本线程当 leader。
+            flight = self._inflight.get(key)
+            leader = flight is None
+            if leader:
+                flight = _InFlight()
+                self._inflight[key] = flight
 
-        # 计算在锁外 (可能重扫 parquet, 耗时); 并发相同 key 至多重复算一次, 不会崩
-        df = compute_fn(symbols, start, end, columns, asset_type)
+        if not leader:
+            # 跟随者: 等 leader 算完直接复用, 不重复 compute (消除缓存踩踏)。
+            flight.done.wait()
+            if flight.error is not None:
+                raise flight.error
+            return flight.df
+
+        # leader: compute 放锁外 (不同 key 仍可并发, 保留原设计优点)。
+        try:
+            df = compute_fn(symbols, start, end, columns, asset_type)
+        except BaseException as e:
+            # 失败不缓存: 摘除 inflight 让后续线程重试, 并把异常透传给已在等的跟随者。
+            with self._lock:
+                self._inflight.pop(key, None)
+            flight.error = e
+            flight.done.set()
+            raise
         with self._lock:
             self._cache[key] = _CacheEntry(df=df, ts=now)
             if len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
+            self._inflight.pop(key, None)
+        flight.df = df
+        flight.done.set()
         return df
 
     def invalidate(self) -> None:
