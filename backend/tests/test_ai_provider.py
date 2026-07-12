@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import openai
 
+from app.services import ai_provider
 from app.services.ai_provider import (
     _format_openai_error,
     _is_temperature_rejected,
@@ -140,3 +141,23 @@ def test_is_temperature_rejected_false_for_non_400():
     )
     exc = openai.AuthenticationError("unauthorized", response=response, body=None)
     assert _is_temperature_rejected(exc) is False
+
+
+def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", "test-path")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("TICKFLOW_API_KEY", "tickflow-secret")
+    monkeypatch.setenv("AI_API_KEY", "ai-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("AUTH_PASSWORD", "password-secret")
+
+    env = ai_provider._codex_process_env(tmp_path / "codex-home")
+
+    assert env["PATH"] == "test-path"
+    assert env["HTTPS_PROXY"] == "http://proxy.example"
+    assert env["NO_COLOR"] == "1"
+    assert env["CODEX_HOME"] == str(tmp_path / "codex-home")
+    assert "TICKFLOW_API_KEY" not in env
+    assert "AI_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "AUTH_PASSWORD" not in env
