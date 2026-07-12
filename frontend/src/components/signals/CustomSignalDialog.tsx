@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -128,7 +128,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                 </div>
                 <div className="space-y-2 rounded-card border border-border/70 bg-base/50 p-3">
                   {draft.conditions.map((c, i) => (
-                    <div key={i} className="flex items-center gap-1.5">
+                    <div key={i} className="flex flex-wrap items-center gap-1.5">
                       <span className="text-[10px] text-muted/60 w-5 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
 
                       {/* 左操作数: 前N日 + 字段(弹出选择) */}
@@ -174,11 +174,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   )
 }
 
-// ── 字段选择器: 搜索 + 分组弹出 (Portal 到 body, 避免被弹窗 overflow 裁切) ──
-
-const FIELD_POP_WIDTH = 240
-const FIELD_POP_MAX_HEIGHT = 360
-const FIELD_POP_GAP = 4
+// ── 字段选择器: 搜索 + 分组居中对话框 ───────────────────
 
 function FieldPicker({ value, fields, groups, onChange }: {
   value: string
@@ -188,9 +184,6 @@ function FieldPicker({ value, fields, groups, onChange }: {
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [pos, setPos] = useState<{ top: number; left: number; dropUp: boolean } | null>(null)
-  const btnRef = useRef<HTMLButtonElement>(null)
-  const popRef = useRef<HTMLDivElement>(null)
   const selectedLabel = fields.find(f => f.key === value)?.label ?? value
 
   const filteredGroups = useMemo(() => {
@@ -207,110 +200,89 @@ function FieldPicker({ value, fields, groups, onChange }: {
     return fields.filter(f => f.label.toLowerCase().includes(q) || f.key.toLowerCase().includes(q))
   }, [fields, query, filteredGroups])
 
-  // 打开: 计算按钮视口坐标 + 智能方向翻转 + 水平裁剪
-  const handleOpen = () => {
-    if (!btnRef.current) { setOpen(true); return }
-    const r = btnRef.current.getBoundingClientRect()
-    const spaceBelow = window.innerHeight - r.bottom
-    const dropUp = spaceBelow < FIELD_POP_MAX_HEIGHT + FIELD_POP_GAP && r.top > FIELD_POP_MAX_HEIGHT + FIELD_POP_GAP
-    const top = dropUp ? Math.max(8, r.top - FIELD_POP_MAX_HEIGHT - FIELD_POP_GAP) : r.bottom + FIELD_POP_GAP
-    const left = Math.max(8, Math.min(r.left, window.innerWidth - FIELD_POP_WIDTH - 8))
-    setPos({ top, left, dropUp })
-    setQuery('')
-    setOpen(true)
-  }
-
-  // 点击外部 / 滚动关闭
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => {
-      const t = e.target as Node
-      if (btnRef.current?.contains(t)) return
-      if (popRef.current?.contains(t)) return
-      setOpen(false)
-    }
-    const close = () => setOpen(false)
-    document.addEventListener('mousedown', handler)
-    window.addEventListener('scroll', close, true)
-    window.addEventListener('resize', close)
-    return () => {
-      document.removeEventListener('mousedown', handler)
-      window.removeEventListener('scroll', close, true)
-      window.removeEventListener('resize', close)
-    }
-  }, [open])
-
   return (
     <>
       <button
-        ref={btnRef}
         type="button"
-        onClick={handleOpen}
-        className="w-28 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground text-left hover:border-accent/40 transition-colors shrink-0 cursor-pointer truncate"
+        onClick={() => { setQuery(''); setOpen(true) }}
+        className="min-w-[80px] max-w-[180px] h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground text-left hover:border-accent/40 transition-colors cursor-pointer truncate"
       >
         {selectedLabel}
       </button>
       {createPortal(
         <AnimatePresence>
-          {open && pos && (
+          {open && (
             <motion.div
-              ref={popRef}
-              initial={{ opacity: 0, y: pos.dropUp ? 4 : -4, scale: 0.97 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: pos.dropUp ? 4 : -4, scale: 0.97 }}
-              transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
-              style={{ position: 'fixed', top: pos.top, left: pos.left }}
-              className="z-[9999] bg-surface border border-border/60 rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.4)] flex flex-col overflow-hidden"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+              onClick={() => setOpen(false)}
             >
-              {/* 搜索框 */}
-              <div className="p-2 border-b border-border/50">
-                <div className="flex items-center gap-2 px-2 h-7 rounded-btn bg-base border border-border">
-                  <Search className="h-3 w-3 text-muted shrink-0" />
-                  <input
-                    autoFocus
-                    value={query}
-                    onChange={e => setQuery(e.target.value)}
-                    placeholder="搜索字段…"
-                    className="flex-1 bg-transparent text-[11px] text-foreground focus:outline-none"
-                  />
-                  {query && <button onClick={() => setQuery('')} className="text-muted hover:text-foreground"><X className="h-3 w-3" /></button>}
-                </div>
-              </div>
-              {/* 分组列表 */}
-              <div className="overflow-y-auto p-1.5" style={{ maxHeight: FIELD_POP_MAX_HEIGHT - 44 }}>
-                {filteredGroups ? (
-                  filteredGroups.length > 0 ? filteredGroups.map(g => (
-                    <div key={g.key} className="mb-0.5">
-                      <div className="px-2 py-0.5 text-[10px] text-muted/60 font-medium">{g.label}</div>
-                      {g.fields.map(f => (
-                        <button
-                          key={f.key}
-                          onClick={() => { onChange(f.key); setOpen(false) }}
-                          className={`w-full text-left px-2 py-1 rounded text-[11px] transition-colors ${
-                            f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
-                          }`}
-                        >
-                          {f.label}
-                        </button>
-                      ))}
-                    </div>
-                  )) : (
-                    <div className="px-3 py-5 text-center text-[11px] text-muted">无匹配字段</div>
-                  )
-                ) : (
-                  filteredFields.map(f => (
-                    <button
-                      key={f.key}
-                      onClick={() => { onChange(f.key); setOpen(false) }}
-                      className={`w-full text-left px-2 py-1 rounded text-[11px] transition-colors ${
-                        f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
-                      }`}
-                    >
-                      {f.label}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+                className="w-full max-w-sm bg-surface border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[70vh]"
+                onClick={e => e.stopPropagation()}
+              >
+                {/* 标题 + 搜索 */}
+                <div className="p-3 border-b border-border/50 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-foreground">选择字段</span>
+                    <button onClick={() => setOpen(false)} className="rounded p-1 text-muted hover:bg-elevated hover:text-foreground transition-colors">
+                      <X className="h-3.5 w-3.5" />
                     </button>
-                  ))
-                )}
-              </div>
+                  </div>
+                  <div className="flex items-center gap-2 px-2.5 h-8 rounded-btn bg-base border border-border">
+                    <Search className="h-3.5 w-3.5 text-muted shrink-0" />
+                    <input
+                      autoFocus
+                      value={query}
+                      onChange={e => setQuery(e.target.value)}
+                      placeholder="搜索字段…"
+                      className="flex-1 bg-transparent text-xs text-foreground focus:outline-none"
+                    />
+                    {query && <button onClick={() => setQuery('')} className="text-muted hover:text-foreground"><X className="h-3 w-3" /></button>}
+                  </div>
+                </div>
+                {/* 分组列表 */}
+                <div className="flex-1 overflow-y-auto p-2">
+                  {filteredGroups ? (
+                    filteredGroups.length > 0 ? filteredGroups.map(g => (
+                      <div key={g.key} className="mb-1">
+                        <div className="px-2 py-1 text-[10px] text-muted/60 font-medium">{g.label}</div>
+                        {g.fields.map(f => (
+                          <button
+                            key={f.key}
+                            onClick={() => { onChange(f.key); setOpen(false) }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
+                              f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
+                            }`}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+                    )) : (
+                      <div className="px-3 py-8 text-center text-xs text-muted">无匹配字段</div>
+                    )
+                  ) : (
+                    filteredFields.map(f => (
+                      <button
+                        key={f.key}
+                        onClick={() => { onChange(f.key); setOpen(false) }}
+                        className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
+                          f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>,

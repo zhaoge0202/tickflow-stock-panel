@@ -24,7 +24,8 @@ const CODEX_MODEL_OPTIONS = [
   { label: 'gpt-5', value: 'gpt-5', hint: '通用模型' },
 ]
 
-const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; partner?: boolean; promo?: string }[] = [
+const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; partner?: boolean; promo?: string; custom?: boolean }[] = [
+  { label: '自定义', url: '', model: '', website: '', websiteLabel: '', description: '不自动填充任何配置，完全手动填写 API 地址、模型和密钥。', custom: true },
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-v4-pro', website: 'https://www.deepseek.com/', websiteLabel: 'deepseek.com', description: 'DeepSeek 官方 OpenAI 兼容接口。' },
   { label: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-3.6plus', website: 'https://tongyi.aliyun.com/', websiteLabel: 'tongyi.aliyun.com', description: '阿里云 DashScope 兼容模式接口。' },
   { label: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2', website: 'https://open.bigmodel.cn/', websiteLabel: 'open.bigmodel.cn', description: '智谱 AI 官方 OpenAI 兼容接口。' },
@@ -55,16 +56,20 @@ export function SettingsAIPanel() {
   const isCodexProvider = provider === CODEX_PROVIDER
   const savedCodexProvider = s?.ai_provider === CODEX_PROVIDER
   const configured = s?.ai_configured ?? (savedCodexProvider ? !!(s?.ai_codex_command ?? CODEX_COMMAND) : s?.has_ai_key)
-  const selectedPreset = PRESETS.find(p => (p.provider ?? OPENAI_PROVIDER) === provider && (isCodexProvider ? p.codexCommand === codexCommand : p.url === baseUrl))
+  // 选中的预设: 精确匹配 provider+url/codexCommand; 匹配不上时默认"自定义"
+  const matchedPreset = PRESETS.find(p => (p.provider ?? OPENAI_PROVIDER) === provider && (isCodexProvider ? p.codexCommand === codexCommand : p.url === baseUrl))
+  const selectedPreset = matchedPreset ?? PRESETS.find(p => p.custom)
   const codexModelSelectValue = codexCustomModel ? CUSTOM_CODEX_MODEL : model
   const canSave = isCodexProvider ? true : !!baseUrl.trim() && !!model.trim()
 
   useEffect(() => {
     if (!s) return
+    // 未配置过 AI (无 api_key): 字段留空, 默认选中"自定义"预设, 不预填充后端默认值
+    const unconfigured = !s.has_ai_key && !s.ai_configured
     setProvider(s.ai_provider ?? OPENAI_PROVIDER)
-    setBaseUrl(s.ai_base_url ?? '')
-    setModel(s.ai_model ?? '')
-    setCodexCustomModel(!!s.ai_model && !CODEX_MODEL_OPTIONS.some(o => o.value === s.ai_model))
+    setBaseUrl(unconfigured ? '' : (s.ai_base_url ?? ''))
+    setModel(unconfigured ? '' : (s.ai_model ?? ''))
+    setCodexCustomModel(!unconfigured && !!s.ai_model && !CODEX_MODEL_OPTIONS.some(o => o.value === s.ai_model))
     setCodexCommand(s.ai_codex_command ?? CODEX_COMMAND)
     const ua = s.ai_user_agent ?? ''
     setCustomUa(!!ua)
@@ -139,6 +144,14 @@ export function SettingsAIPanel() {
   }
 
   const handlePreset = (p: typeof PRESETS[number]) => {
+    if (p.custom) {
+      // 自定义: 清空所有自动填充字段, 由用户完全手动填写
+      setProvider(OPENAI_PROVIDER)
+      setBaseUrl('')
+      setModel('')
+      setCodexCustomModel(false)
+      return
+    }
     setProvider(p.provider ?? OPENAI_PROVIDER)
     setBaseUrl(p.url)
     setModel(p.model)
@@ -213,11 +226,13 @@ export function SettingsAIPanel() {
               <span className="text-secondary">{selectedPreset.description}</span>
               {selectedPreset.promo && <span className="text-amber-400">{selectedPreset.promo}</span>}
             </div>
-            <a href={selectedPreset.website} target="_blank" rel="noreferrer"
-              className="mt-1 inline-flex items-center gap-1 text-muted hover:text-accent transition-colors">
-              {selectedPreset.websiteLabel}
-              <ExternalLink className="h-3 w-3" />
-            </a>
+            {selectedPreset.website && (
+              <a href={selectedPreset.website} target="_blank" rel="noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-muted hover:text-accent transition-colors">
+                {selectedPreset.websiteLabel}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
           </div>
         )}
       </Card>
