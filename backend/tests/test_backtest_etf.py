@@ -187,8 +187,11 @@ def test_panel_cache_stats_counts_scans_hits_reuses():
         t.join()
 
     s = cache.stats()
+    # 核心不变量: 5 线程并发同 key 只扫盘 1 次 (args1 首次 + args2 一次 = 2)。
     assert s["compute_count"] == 2, "并发同 key 应只扫盘 1 次"
-    assert s["reuse_count"] == 4, "其余 4 个跟随者应计为复用"
+    # 其余 4 线程要么 single-flight 复用, 要么(慢调度下 leader 已写缓存)命中 ——
+    # 二者之和恒为 4。不锁定 reuse/hit 具体分配, 避免时序 flaky。
+    assert s["reuse_count"] + (s["hit_count"] - 1) == 4, "4 个非 leader 线程应复用或命中"
 
 
 def test_job_key_includes_asset_type_and_is_consistent():

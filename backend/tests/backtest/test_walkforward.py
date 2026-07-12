@@ -136,11 +136,14 @@ class _FakeOptimizer:
         return {"best_params": {"p": cfg.start.month}, "best_score": 2.0, "results": [], "n_completed": 1}
 
 
-_ZERO_CACHE_STATS = {"compute_seconds": 0.0, "compute_count": 0, "hit_count": 0, "reuse_count": 0}
+# 从真实 PanelCache 取字段模板 —— 字段被重命名时本桩自动跟随, 避免 test 绿而生产 KeyError。
+from app.backtest.engine import PanelCache
+
+_ZERO_CACHE_STATS = {k: type(v)() for k, v in PanelCache().stats().items()}
 
 
 class _FakeEngine:
-    """最小引擎桩: 仅提供 WF 遥测所需的 cache_stats。"""
+    """最小引擎桩: 仅提供 WF 遥测所需的 cache_stats (字段同源自 PanelCache.stats)。"""
     def cache_stats(self):
         return dict(_ZERO_CACHE_STATS)
 
@@ -180,6 +183,33 @@ def test_walkforward_optimizes_train_applies_oos():
     assert svc.calls[0]["params"] == first_fold["best_params"]
     # 训练区间与测试区间不重叠 (测试在训练之后)
     assert svc.calls[0]["start"] >= opt.train_ranges[0][1]
+
+
+class _CountingEngine:
+    """首尾两次 cache_stats 返回不同值, 用于验证 WF 遥测差值/顺序计算 (非全零掩盖)。"""
+    def __init__(self):
+        self._n = 0
+
+    def cache_stats(self):
+        self._n += 1
+        if self._n == 1:  # run 开头快照 (before)
+            return {"compute_seconds": 1.0, "compute_count": 2, "hit_count": 0, "reuse_count": 0}
+        return {"compute_seconds": 3.5, "compute_count": 7, "hit_count": 4, "reuse_count": 3}  # after
+
+
+def test_walkforward_cache_telemetry_computes_deltas():
+    """cache_telemetry 用首尾快照差值: scans/hits/reuses/秒数 = after - before, 且方向正确。"""
+    opt, svc = _FakeOptimizer(), _FakeService()
+    svc.engine = _CountingEngine()
+    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    out = wf.run(_wf_cfg())
+
+    tel = out["cache_telemetry"]
+    assert tel["scans"] == 5          # 7 - 2, 顺序写反会得 -5
+    assert tel["hits"] == 4           # 4 - 0
+    assert tel["single_flight_reuses"] == 3  # 3 - 0
+    assert abs(tel["load_panel_seconds"] - 2.5) < 1e-9  # 3.5 - 1.0
+    assert tel["load_panel_pct"] >= 0.0  # 扫盘耗时 / WF总耗时, 非负
 
 
 def test_walkforward_reports_degradation():
