@@ -99,6 +99,16 @@ def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
 
 
+def get_minute_sync_segment_days() -> int:
+    """分钟 K 拉取的单段大小(交易日)。默认 20,范围 [5, 30]。
+
+    每段拉完后立即落盘(流式),避免全量攒内存导致 OOM。
+    段越小内存峰值越低但总耗时越长(限速 sleep 随段数线性增加);
+    物理上限 ~41 交易日(TickFlow 单次 10000 根 / 一天 241 根 ≈ 41 天),max=30 留出余量。
+    """
+    return max(5, min(30, load().get("minute_sync_segment_days", 20)))
+
+
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
 _ALLOWED_DATA_PROVIDERS = {"tickflow"}

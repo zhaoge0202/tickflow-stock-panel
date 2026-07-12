@@ -527,7 +527,7 @@ class BacktestEngine:
                 )
                 for _key, _mdf in _loaded.items():
                     if not _mdf.is_empty():
-                        minute_cache[_key] = _mdf.to_numpy()
+                        minute_cache[_key] = _mdf
 
         def _refill_price(idx: int, side: str, daily_price: float) -> float:
             if not config.minute_fill or not minute_cache:
@@ -839,29 +839,33 @@ class BacktestEngine:
 
     @staticmethod
     def _resolve_minute_fill(
-        minute_rows: np.ndarray,
+        minute_df: pl.DataFrame,
         ref_price: float | None,
         side: str,
     ) -> float | None:
         """用当日分钟K确定精确成交价。
 
         Args:
-            minute_rows: structured numpy array, 字段含 open/high/low/close/volume/amount
+            minute_df: 当日分钟K polars DataFrame, 列含 open/high/low/close/volume/amount
             ref_price: 信号参考线价格 (如 MA5 值); None 表示无参考线
             side: "buy" 或 "sell", 决定穿越方向
 
         Returns:
             精确成交价, 或 None (降级到日K口径)
+
+        注: 原实现用 df.to_numpy() 转 structured array 再按字段名索引, 但当列类型不
+        一致时 (如 datetime 列 + float 列) to_numpy() 退化为 object 二维数组, 字段名
+        索引 arr["open"] 会抛 IndexError。改为直接按列取 Series, 稳定且更快。
         """
-        if minute_rows is None or len(minute_rows) == 0:
+        if minute_df is None or minute_df.is_empty():
             return None
 
-        opens = minute_rows["open"].astype(float)
-        highs = minute_rows["high"].astype(float)
-        lows = minute_rows["low"].astype(float)
-        closes = minute_rows["close"].astype(float)
-        volumes = minute_rows["volume"].astype(float) if "volume" in minute_rows.dtype.names else None
-        amounts = minute_rows["amount"].astype(float) if "amount" in minute_rows.dtype.names else None
+        opens = minute_df["open"].to_numpy().astype(float)
+        highs = minute_df["high"].to_numpy().astype(float)
+        lows = minute_df["low"].to_numpy().astype(float)
+        closes = minute_df["close"].to_numpy().astype(float)
+        volumes = minute_df["volume"].to_numpy().astype(float) if "volume" in minute_df.columns else None
+        amounts = minute_df["amount"].to_numpy().astype(float) if "amount" in minute_df.columns else None
 
         # 有参考线 → 穿越价成交 (逻辑同止损: 找价格穿越参考线的时刻)
         if ref_price is not None and ref_price > 0 and np.isfinite(ref_price):
@@ -914,22 +918,19 @@ class BacktestEngine:
         if df.is_empty():
             return {}
 
+        # 按 (symbol, 日期) 向量化分组, 替代原 iter_rows 逐行 Python 循环。
+        # 原实现对每行做 dict 转换再重建 DataFrame, 回测区间内触发股数多时极慢。
+        df = df.with_columns(
+            pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
+        )
         cache: dict = {}
-        for row in df.iter_rows(named=True):
-            dt = row.get("datetime")
-            if dt is None:
+        for sub in df.partition_by(["symbol", "_d_str"], as_dict=False):
+            if sub.is_empty():
                 continue
-            d_str = str(dt)[:10]
-            sym = row["symbol"]
-            key = (sym, d_str)
-            if key not in cache:
-                cache[key] = []
-            cache[key].append(row)
-        # 转 DataFrame per key
-        result: dict = {}
-        for key, rows in cache.items():
-            result[key] = pl.DataFrame(rows)
-        return result
+            sym = sub["symbol"][0]
+            d_str = sub["_d_str"][0]
+            cache[(sym, d_str)] = sub.drop("_d_str")
+        return cache
 
     def simulate_portfolio(
         self,
@@ -1052,7 +1053,7 @@ class BacktestEngine:
                 )
                 for key, mdf in loaded.items():
                     if not mdf.is_empty():
-                        minute_cache[key] = mdf.to_numpy()
+                        minute_cache[key] = mdf
 
         def _refill_price(idx: int, side: str, daily_price: float) -> float:
             """分钟K精确成交价; 无数据则降级为 daily_price。"""

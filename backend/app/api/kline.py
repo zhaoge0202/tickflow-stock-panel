@@ -585,7 +585,7 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot, LONG_JOB_TIMEOUT_S
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
@@ -607,7 +607,8 @@ async def sync_minute(request: Request):
     override_days = body.get("days")
     extend_flag = body.get("extend")
 
-    job_id, is_new = job_store.create()
+    # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
+    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
     if not is_new:
         return {"status": "reused", "job_id": job_id}
 

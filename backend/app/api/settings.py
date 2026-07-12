@@ -337,6 +337,8 @@ def _realtime_allowed() -> bool:
 class MinuteSyncPrefs(BaseModel):
     minute_sync_enabled: bool
     minute_sync_days: int = 5
+    # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
+    minute_sync_segment_days: int | None = None
 
 
 class DataProvidersIn(BaseModel):
@@ -395,6 +397,7 @@ def get_preferences() -> dict:
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
+        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
@@ -643,16 +646,24 @@ def update_screener_result_columns(req: dict) -> dict:
 
 @router.put("/preferences/minute-sync")
 def update_minute_sync(req: MinuteSyncPrefs) -> dict:
-    """保存分钟 K 同步偏好。"""
+    """保存分钟 K 同步偏好。
+
+    minute_sync_segment_days 为可选:未传(None)时不覆盖现有值,便于开关/天数
+    与段大小各自独立更新。
+    """
     from app.services import preferences
     days = max(1, min(30, req.minute_sync_days))
-    preferences.save({
+    updates: dict = {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
-    })
+    }
+    if req.minute_sync_segment_days is not None:
+        updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
+    preferences.save(updates)
     return {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
+        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
     }
 
 
