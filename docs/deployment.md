@@ -27,6 +27,8 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ```bash
 # 后端
 cd backend && uv sync --extra backtest   # 含回测依赖
+# 老 CPU: uv sync --extra legacy-cpu
+# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
 uv run uvicorn app.main:app --reload --port 3018
 
 # 前端
@@ -69,12 +71,15 @@ Fork 本仓库后,手动触发 [Release 打包工作流](https://github.com/shy3
 如果运行时报 `avx2`/`fma` 缺失,或进程 `exit 132`,说明 CPU 不支持 AVX2 指令集(常见于老 VPS)。解决:
 
 - **桌面客户端**:安装包已内置兼容内核,新老 CPU 通吃
-- **Docker / 源码**:在 `.env` 打开 `BACKEND_EXTRAS=legacy-cpu` 后重建,会给 Polars 切到 `rtcompat` 运行时
+- **Dev 源码启动**:在根目录 `.env` 设置后运行 `./dev.sh` 或 Windows 的 `.\dev.ps1`;即使已有 `.venv`,启动器也会同步兼容内核
+- **Docker**:在根目录 `.env` 设置后执行 `docker compose up --build`
 
 ```ini
 BACKEND_EXTRAS=legacy-cpu          # 兼容老 CPU
 BACKEND_EXTRAS=legacy-cpu backtest # 兼容老 CPU + 回测依赖
 ```
+
+手动启动源码时，也可以在 `backend/` 目录直接执行 `uv sync --extra legacy-cpu`。不要设置 `POLARS_SKIP_CPU_CHECK`，它只会隐藏警告，实际执行不支持的指令时仍可能崩溃。
 
 ### 回测依赖说明
 
