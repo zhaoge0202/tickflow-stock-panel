@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
 from dataclasses import asdict
@@ -20,6 +21,8 @@ from app.services.backtest import (
     VectorbtUnavailable,
     is_available,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -840,10 +843,13 @@ async def walkforward_stream(
                 try:
                     base_params = json.loads(params) if params else {}
                 except (json.JSONDecodeError, TypeError):
+                    # 静默降级会让"用户配置丢失"变成无声 bug: 至少 warn 供诊断 (前端应传合法 JSON)。
+                    logger.warning("walkforward: params JSON 解析失败, 降级为空 params: %r", params)
                     base_params = {}
                 try:
                     ov = json.loads(overrides) if overrides else None
                 except (json.JSONDecodeError, TypeError):
+                    logger.warning("walkforward: overrides JSON 解析失败, 降级为 None: %r", overrides)
                     ov = None
                 wf_cfg = WalkForwardConfig(
                     strategy_id=strategy_id,

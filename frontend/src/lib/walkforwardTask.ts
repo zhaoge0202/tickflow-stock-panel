@@ -178,6 +178,9 @@ function connectSSE(url: string): void {
       if (reconnectAttempts > MAX_RECONNECT) {
         es.close()
         eventSource = null
+        // 清 localStorage: 否则刷新页面 tryReconnect 会重连到这个已放弃的任务。
+        localStorage.removeItem(RECONNECT_KEY)
+        localStorage.removeItem(JOB_KEY_KEY)
         current = { ...current, isPending: false, error: '连接中断, 重连多次失败' }
         emit()
       }
@@ -238,7 +241,15 @@ export function stopWalkForward(): void {
     localStorage.removeItem(JOB_KEY_KEY)
   } else if (eventSource) {
     const es = eventSource
-    setTimeout(() => { if (es === eventSource) { es.close(); eventSource = null } }, 5000)
+    // job_key 始终没到手(job 事件未达): 5 秒后放弃并清 localStorage, 避免刷新重连到未取消任务。
+    // (若期间 job 到达, job handler 已 postCancel+清storage 并置 eventSource=null, 下面条件不成立跳过)
+    setTimeout(() => {
+      if (es === eventSource) {
+        es.close(); eventSource = null
+        localStorage.removeItem(RECONNECT_KEY)
+        localStorage.removeItem(JOB_KEY_KEY)
+      }
+    }, 5000)
   }
   if (current?.isPending) {
     current = { ...current, isPending: false, error: '已取消' }
