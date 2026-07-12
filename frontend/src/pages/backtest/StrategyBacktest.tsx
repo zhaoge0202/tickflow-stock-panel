@@ -14,6 +14,7 @@ import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/lib/board'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
+import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
@@ -245,7 +246,17 @@ const statValueColor = (v: number | null | undefined) => {
   return v > 0 ? '#f87171' : '#34d399'
 }
 
-function ExitReasonBadge({ reason }: { reason: string }) {
+/** 信号 ID → 可读名称映射 (内置 + 自定义), 供交易记录显示具体触发信号。 */
+function useSignalNames(): Record<string, string> {
+  const customQ = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
+  return useMemo(() => {
+    const names: Record<string, string> = {}
+    for (const cs of customQ.data?.signals ?? []) names[`csg_${cs.id}`] = cs.name
+    return names
+  }, [customQ.data])
+}
+
+function ExitReasonBadge({ reason, signalId, signalNames }: { reason: string; signalId?: string | null; signalNames?: Record<string, string> }) {
   const config: Record<string, { label: string; cls: string }> = {
     signal: { label: '信号', cls: 'bg-accent/10 text-accent border-accent/30' },
     stop_loss: { label: '止损', cls: 'bg-red-500/10 text-red-400 border-red-500/30' },
@@ -257,8 +268,12 @@ function ExitReasonBadge({ reason }: { reason: string }) {
     end: { label: '期末', cls: 'bg-secondary/10 text-secondary border-border' },
   }
   const c = config[reason] ?? { label: reason, cls: 'bg-elevated text-muted border-border' }
+  // 信号类退出且能解析出具体信号名时, 显示具体信号而非笼统的"信号"
+  const specific = reason === 'signal' && signalId ? cnSignal(signalId, signalNames) : null
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${c.cls}`}>{c.label}</span>
+    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${c.cls} ${specific ? 'max-w-[7rem] truncate' : ''}`} title={specific ?? c.label}>
+      {specific ?? c.label}
+    </span>
   )
 }
 
@@ -282,7 +297,7 @@ function fmtScore(v: number | null | undefined): string {
   return Number(v).toFixed(1)
 }
 
-function DailyTradeChip({ trade, side, strategyName, onClick }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; strategyName?: string; onClick?: () => void }) {
+function DailyTradeChip({ trade, side, strategyName, onClick, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; strategyName?: string; onClick?: () => void; signalNames?: Record<string, string> }) {
   const isBuy = side === 'buy'
   const tag = boardTag(trade.symbol)
   const price = isBuy ? trade.entry_price : trade.exit_price
@@ -317,7 +332,7 @@ function DailyTradeChip({ trade, side, strategyName, onClick }: { trade: Strateg
         ) : (
           <span className="flex shrink-0 items-center gap-1.5">
             <span className="num text-secondary">{fmtPrice(price)}</span>
-            <ExitReasonBadge reason={trade.exit_reason} />
+            <ExitReasonBadge reason={trade.exit_reason} signalId={trade.exit_signal_id} signalNames={signalNames} />
           </span>
         )}
       </span>
@@ -354,12 +369,14 @@ function DailyTradeChip({ trade, side, strategyName, onClick }: { trade: Strateg
   )
 }
 
-function TradeLegCell({ trade, side }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell' }) {
+function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; signalNames?: Record<string, string> }) {
   const isBuy = side === 'buy'
   const date = String(isBuy ? trade.entry_date : trade.exit_date).slice(0, 10)
   const signalDate = String(isBuy ? trade.entry_signal_date ?? '' : trade.exit_signal_date ?? '').slice(0, 10)
   const price = isBuy ? trade.entry_price : trade.exit_price
   const amount = isBuy ? trade.entry_value : trade.exit_value
+  const signalId = isBuy ? trade.entry_signal_id : trade.exit_signal_id
+  const signalLabel = signalId ? cnSignal(signalId, signalNames) : null
 
   return (
     <div className="min-w-[8.25rem] rounded-btn border border-border/60 bg-base/35 px-2 py-1 text-xs leading-4">
@@ -375,7 +392,10 @@ function TradeLegCell({ trade, side }: { trade: StrategyBacktestTrade; side: 'bu
         <span className="num text-foreground">{fmtPrice(price)}</span>
         <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
       </div>
-      {signalDate && signalDate !== date && (
+      {signalLabel && (
+        <div className="mt-0.5 text-[10px] text-accent/80 truncate" title={signalLabel}>{signalLabel}</div>
+      )}
+      {!signalLabel && signalDate && signalDate !== date && (
         <div className="mt-0.5 text-[10px] text-muted">信号 {signalDate}</div>
       )}
     </div>
@@ -706,6 +726,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
 }
 
 export function StrategyBacktest() {
+  const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
@@ -1751,7 +1772,7 @@ export function StrategyBacktest() {
                               ) : (
                                 <div className="flex flex-wrap gap-1.5">
                                   {row.buys.map((t, i) => (
-                                    <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setSelectedTrade(t)} />
+                                    <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
@@ -1762,7 +1783,7 @@ export function StrategyBacktest() {
                               ) : (
                                 <div className="flex flex-wrap gap-1.5">
                                   {row.sells.map((t, i) => (
-                                    <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setSelectedTrade(t)} />
+                                    <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
@@ -1833,10 +1854,10 @@ export function StrategyBacktest() {
                               <div className="mt-0.5 font-mono text-[11px] text-muted">{t.symbol}</div>
                             </td>
                             <td className="px-4 py-2.5">
-                              <TradeLegCell trade={t} side="buy" />
+                              <TradeLegCell trade={t} side="buy" signalNames={signalNames} />
                             </td>
                             <td className="px-4 py-2.5">
-                              <TradeLegCell trade={t} side="sell" />
+                              <TradeLegCell trade={t} side="sell" signalNames={signalNames} />
                             </td>
                             <td className="px-4 py-2.5 text-right">
                               <div className="num text-foreground">{fmtPct(t.position_pct, 2)}</div>
@@ -1853,7 +1874,7 @@ export function StrategyBacktest() {
                               <div>{t.duration} 天</div>
                               {!!t.blocked_exit_days && <div className="mt-0.5 text-[11px] text-amber-400">阻塞 {t.blocked_exit_days} 天</div>}
                             </td>
-                            <td className="px-4 py-2.5"><ExitReasonBadge reason={t.exit_reason} /></td>
+                            <td className="px-4 py-2.5"><ExitReasonBadge reason={t.exit_reason} signalId={t.exit_signal_id} signalNames={signalNames} /></td>
                           </tr>
                         ))}
                       </tbody>

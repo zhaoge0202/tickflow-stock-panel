@@ -623,6 +623,8 @@ export interface StrategyBacktestTrade {
   entry_signal_date?: string | null
   exit_signal_date?: string | null
   blocked_exit_days?: number
+  entry_signal_id?: string | null
+  exit_signal_id?: string | null
 }
 
 export interface StrategyBacktestResult {

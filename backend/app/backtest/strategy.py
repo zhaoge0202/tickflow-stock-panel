@@ -229,9 +229,15 @@ class StrategyBacktestService:
                 matcher_config,
                 progress_cb,
                 cancel_event,
+                entry_signal_ids=entry_signals,
+                exit_signal_ids=exit_signals,
             )
         else:
-            result = self.engine.simulate_portfolio(sim_panel, sim_entry_mask, sim_exit_mask, matcher_config, progress_cb, cancel_event)
+            result = self.engine.simulate_portfolio(
+                sim_panel, sim_entry_mask, sim_exit_mask, matcher_config,
+                progress_cb, cancel_event,
+                entry_signal_ids=entry_signals, exit_signal_ids=exit_signals,
+            )
         timing_ms["simulate"] = round((time.perf_counter() - t_sim) * 1000, 1)
 
         # 检查是否被取消
@@ -640,6 +646,8 @@ class StrategyBacktestService:
             "entry_signal_date": str(t.entry_signal_date) if getattr(t, "entry_signal_date", None) is not None else None,
             "exit_signal_date": str(t.exit_signal_date) if getattr(t, "exit_signal_date", None) is not None else None,
             "blocked_exit_days": getattr(t, "blocked_exit_days", 0),
+            "entry_signal_id": getattr(t, "entry_signal_id", None),
+            "exit_signal_id": getattr(t, "exit_signal_id", None),
         }
 
     @staticmethod

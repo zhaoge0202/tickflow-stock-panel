@@ -101,6 +101,10 @@ class TradeRecord:
     entry_signal_date: date | str | None = None
     exit_signal_date: date | str | None = None
     blocked_exit_days: int = 0
+    # 触发买入/卖出的具体信号列名 (如 signal_ma_golden_5_20 / csg_xxx);
+    # 仅当该腿由信号触发时填充, 止损/止盈/到期等非信号退出时 exit_signal_id 为 None。
+    entry_signal_id: str | None = None
+    exit_signal_id: str | None = None
 
 
 @dataclass
@@ -110,6 +114,26 @@ class SimResult:
     trades: list[TradeRecord]
     per_symbol_stats: list[dict]
     stats: dict
+
+
+def _resolve_signal_id(panel: pl.DataFrame, idx: int, signal_ids: list[str] | None) -> str | None:
+    """在触发行 idx 上, 从候选信号里找出 panel 列为 True 的那个, 返回其列名。
+
+    多个信号同时为 True 时返回第一个匹配的 (信号 OR 关系, 回测只记录其一即可)。
+    signal_ids 元素可能带 signal_/csg_ 前缀, 也可能是裸名 (如 "ma_golden_5_20")。
+    """
+    if not signal_ids:
+        return None
+    for sid in signal_ids:
+        col = sid if (sid.startswith("signal_") or sid.startswith("csg_")) else f"signal_{sid}"
+        if col not in panel.columns:
+            continue
+        try:
+            if bool(panel[col][idx]):
+                return col
+        except (IndexError, TypeError):
+            continue
+    return None
 
 
 # ================================================================
@@ -322,6 +346,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
+        entry_signal_ids: list[str] | None = None,
+        exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
         """纯 NumPy 撮合模拟 — 逐 symbol 状态机。"""
         if panel.is_empty():
@@ -459,6 +485,8 @@ class BacktestEngine:
         config: MatcherConfig,
         progress_cb: "Callable[[dict], None] | None" = None,
         cancel_event: "threading.Event | None" = None,
+        entry_signal_ids: list[str] | None = None,
+        exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
         """全量候选独立执行：每个买入信号都是独立样本, 不受资金/仓位限制。"""
         if panel.is_empty():
@@ -736,6 +764,8 @@ class BacktestEngine:
                 entry_signal_date=pos.get("entry_signal_date"),
                 exit_signal_date=signal_date,
                 blocked_exit_days=int(pos.get("blocked_exit_days", 0)),
+                entry_signal_id=pos.get("entry_signal_id"),
+                exit_signal_id=_resolve_signal_id(panel, idx, exit_signal_ids) if reason == "signal" else None,
             ))
             return True
 
@@ -781,6 +811,7 @@ class BacktestEngine:
                 "entry_idx": entry_idx,
                 "entry_date": self._date_str(panel_dates[entry_idx]),
                 "entry_signal_date": entry_signal_dates[entry_idx] or self._date_str(panel_dates[entry_idx]),
+                "entry_signal_id": _resolve_signal_id(panel, entry_idx, entry_signal_ids),
                 "entry_price": entry_price,
                 "entry_score": score,
                 "hold_days": 0,
@@ -955,6 +986,8 @@ class BacktestEngine:
         config: MatcherConfig,
         progress_cb: "Callable[[dict], None] | None" = None,
         cancel_event: "threading.Event | None" = None,
+        entry_signal_ids: list[str] | None = None,
+        exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
         """账户级组合回测：日线信号 → 成交约束 → 仓位/现金撮合。"""
         if panel.is_empty():
@@ -1223,6 +1256,8 @@ class BacktestEngine:
                 entry_signal_date=pos.get("entry_signal_date"),
                 exit_signal_date=signal_date,
                 blocked_exit_days=int(pos.get("blocked_exit_days", 0)),
+                entry_signal_id=pos.get("entry_signal_id"),
+                exit_signal_id=_resolve_signal_id(panel, idx, exit_signal_ids) if reason == "signal" else None,
             ))
 
         def _try_sell(
@@ -1416,6 +1451,7 @@ class BacktestEngine:
                     "name": str(names[idx] or ""),
                     "entry_date": self._date_str(panel_dates[idx]),
                     "entry_signal_date": entry_signal_dates[idx] or self._date_str(panel_dates[idx]),
+                    "entry_signal_id": _resolve_signal_id(panel, idx, entry_signal_ids),
                     "entry_price": entry_price,
                     "entry_value": entry_value,
                     "shares": shares,
