@@ -47,7 +47,18 @@ docker compose up --build
 
 Docker 采用两阶段构建,前端 dist 拷进后端镜像,**单容器**运行,数据完全在自己手里。
 
-> 💡 镜像已内置 Node.js 运行时并预装 **stock-sdk** 插件依赖,Docker 部署下开箱即用,无需手动 `npm install`。
+> ⚠️ **stock-sdk 插件默认不打包(合规考虑)**
+>
+> stock-sdk 数据源本质是抓取第三方财经网站(如东方财富)的行情接口,未经对方授权,可能违反其服务条款并涉及交易所行情版权问题。**出于合规考虑,Docker 默认构建不再内置 stock-sdk 插件依赖**。
+>
+> - **默认行为**:`docker compose up --build` 构建出的镜像**不含** stock-sdk,插件不可用。
+> - **如确需启用**(自行承担合规责任):
+>   ```bash
+>   docker compose build --build-arg INCLUDE_STOCKSDK=1
+>   docker compose up -d
+>   ```
+> - 启用后镜像会额外内置 Node.js 运行时并预装 stock-sdk 依赖,插件开箱即用。
+> - **建议优先使用 TickFlow 等正规授权数据源。**
 
 更新到新版本:
 
@@ -58,19 +69,10 @@ docker compose up --build -d
 
 ---
 
-## 方式 C:GitHub Actions 自行构建
-
-Fork 本仓库后,手动触发 [Release 打包工作流](https://github.com/shy3130/tickflow-stock-panel/actions/workflows/release.yml) 自行构建桌面客户端安装包。
-
-> ⚠️ 目前官方 Release 的安装包存在已知问题(修复中),如需桌面客户端请优先用此方式自行构建,或用上面的 Dev / Docker 方式运行。
-
----
-
 ## 老 CPU 兼容(avx2/fma 缺失)
 
 如果运行时报 `avx2`/`fma` 缺失,或进程 `exit 132`,说明 CPU 不支持 AVX2 指令集(常见于老 VPS)。解决:
 
-- **桌面客户端**:安装包已内置兼容内核,新老 CPU 通吃
 - **Dev 源码启动**:在根目录 `.env` 设置后运行 `./dev.sh` 或 Windows 的 `.\dev.ps1`;即使已有 `.venv`,启动器也会同步兼容内核
 - **Docker**:在根目录 `.env` 设置后执行 `docker compose up --build`
 
