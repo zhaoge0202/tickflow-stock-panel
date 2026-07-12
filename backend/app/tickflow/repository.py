@@ -1275,6 +1275,38 @@ class KlineRepository:
             logger.warning("批量分钟K查询失败: %s", e)
             return pl.DataFrame()
 
+    def get_minute_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """多 symbol × 日期范围的分钟K查询 (分钟K精确回测用)。
+
+        一次 scan_parquet + predicate pushdown 读多只股票在 [start, end] 内的所有分钟K。
+        返回列: symbol, datetime, open, high, low, close, volume, amount。
+        """
+        if not symbols:
+            return pl.DataFrame()
+        try:
+            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            available = set(lf.collect_schema().names())
+            select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
+            return (
+                lf.select(select_cols)
+                .filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("datetime").dt.date() >= start)
+                    & (pl.col("datetime").dt.date() <= end)
+                )
+                .sort(["symbol", "datetime"])
+                .collect(streaming=True)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("分钟K范围查询失败: %s", e)
+            return pl.DataFrame()
+
     # ================================================================
     # Polars 查询内部方法
     # ================================================================

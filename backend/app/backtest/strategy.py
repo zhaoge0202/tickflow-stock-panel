@@ -45,6 +45,8 @@ class StrategyBacktestConfig:
     mode: Literal["position", "full"] = "position"
     asset_type: str = "stock"
     holding_days: int = 5
+    # 分钟K精确成交: 开启后用当日分钟K确定穿越价/VWAP (需 Pro+ 分钟K能力)
+    minute_fill: bool = False
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
@@ -216,6 +218,7 @@ class StrategyBacktestService:
             score_max=score_max,
             initial_capital=config.initial_capital,
             position_sizing=config.position_sizing,
+            minute_fill=config.minute_fill,
         )
         # 撮合 — full 为全候选独立执行；position 为账户级仓位模拟。
         if config.mode == "full":

@@ -10,7 +10,6 @@ import {
   type StrategyParamDef,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { tierRank } from '@/lib/capability-labels'
 import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/lib/board'
@@ -728,10 +727,10 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 高颗粒回测（分钟K精确回测）— 开发中，Starter+ 功能
+  // 分钟K精确回测: 用当日分钟K确定精确成交价 (穿越价/VWAP), 需 Pro+ 分钟K能力
   const [highGranularity, setHighGranularity] = useState(false)
   const { data: caps } = useCapabilities()
-  const isFreeTier = tierRank(caps?.label ?? '') < 1
+  const hasMinuteBatch = !!caps?.capabilities?.['kline.minute.batch']
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
   const [settingsTab, setSettingsTab] = useState<AdvancedSettingsTab>('params')
@@ -864,6 +863,7 @@ export function StrategyBacktest() {
       overrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
+      minute_fill: highGranularity,
     })
   }
 
@@ -1093,22 +1093,18 @@ export function StrategyBacktest() {
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
-            {/* 高颗粒回测（分钟K）— 开发中占位 */}
+            {/* 分钟K精确回测 */}
             <div className="flex items-center gap-1">
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
-                onClick={() => {
-                  if (isFreeTier) return
-                  // 功能开发中，暂不实际启用
-                  setHighGranularity(v => !v)
-                }}
-                disabled={isFreeTier}
-                title={isFreeTier
-                  ? '高颗粒回测（分钟K精确回测）：需 Starter+ 档位'
-                  : '高颗粒回测（分钟K精确回测）：切换后结合每日分钟K更精确回测。⚠️ 开发中，且会显著影响性能、回测很慢。'
+                onClick={() => { if (!hasMinuteBatch) return; setHighGranularity(v => !v) }}
+                disabled={!hasMinuteBatch}
+                title={!hasMinuteBatch
+                  ? '分钟K精确回测：需 Pro+ 权限 (分钟K批量)'
+                  : '分钟K精确回测：用当日分钟K确定精确成交价（穿越价/VWAP），比收盘价更真实。⚠️ 回测速度会变慢。'
                 }
                 className={`group relative inline-flex h-3.5 w-6 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                  isFreeTier ? 'bg-elevated opacity-50 cursor-not-allowed'
+                  !hasMinuteBatch ? 'bg-elevated opacity-50 cursor-not-allowed'
                   : highGranularity ? 'bg-amber-500 cursor-pointer'
                   : 'bg-elevated cursor-pointer'
                 }`}
@@ -1118,19 +1114,18 @@ export function StrategyBacktest() {
                 }`} />
               </button>
               <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟K</span>
-              {isFreeTier && (
-                <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Starter+</span>
+              {!hasMinuteBatch && (
+                <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
               )}
             </div>
           </div>
-          {/* 高颗粒开启时的警告条 */}
-          {highGranularity && !isFreeTier && (
+          {/* 分钟K开启时的提示条 */}
+          {highGranularity && hasMinuteBatch && (
             <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
               <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
               <div className="text-[10px] leading-snug text-amber-400/90">
-                <span className="font-medium">高颗粒回测（开发中）</span>
-                ：将结合每日分钟K进行更精确的回测。
-                <span className="text-amber-400/70"> ⚠️ 此功能尚未完成，且开启后会显著拖慢回测速度、占用大量资源。</span>
+                <span className="font-medium">分钟K精确回测</span>
+                ：信号触发日用当日分钟K确定成交价（均线类信号按穿越价, 其他按 VWAP 均价）。需本地有足够的分钟K历史, 回测速度会变慢。
               </div>
             </div>
           )}
