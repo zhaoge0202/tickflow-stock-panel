@@ -129,9 +129,11 @@ class _FakeOptimizer:
     """optimize 返回受控 best_params/best_score, 记录被优化的训练区间。"""
     def __init__(self):
         self.train_ranges = []
+        self.opt_kwargs = []  # 记录每折 IS 优化收到的 backtest_kwargs (验证 mode 强制)
 
     def optimize(self, cfg, progress_cb=None, cancel_event=None):
         self.train_ranges.append((cfg.start, cfg.end))
+        self.opt_kwargs.append(dict(cfg.backtest_kwargs))
         # best_params 随训练起点变化, best_score 固定
         return {"best_params": {"p": cfg.start.month}, "best_score": 2.0, "results": [], "n_completed": 1}
 
@@ -155,7 +157,8 @@ class _FakeService:
         self.engine = _FakeEngine()
 
     def run(self, config, progress_cb=None, cancel_event=None):
-        self.calls.append({"start": config.start, "end": config.end, "params": dict(config.params or {})})
+        self.calls.append({"start": config.start, "end": config.end,
+                           "params": dict(config.params or {}), "mode": config.mode})
         return _FakeResult(stats={"total_return": 0.05, "sortino": 1.0})
 
 
@@ -210,6 +213,20 @@ def test_walkforward_cache_telemetry_computes_deltas():
     assert tel["single_flight_reuses"] == 3  # 3 - 0
     assert abs(tel["load_panel_seconds"] - 2.5) < 1e-9  # 3.5 - 1.0
     assert tel["load_panel_pct"] >= 0.0  # 扫盘耗时 / WF总耗时, 非负
+
+
+def test_walkforward_forces_position_mode_for_is_optimization():
+    """训练折(IS)强制 position 防前视泄漏(full 会用 OOS 区间 K 线平仓污染 IS);
+    OOS 回测保留用户所选 mode。"""
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf.run(_wf_cfg(backtest_kwargs={"mode": "full"}))
+
+    assert len(opt.opt_kwargs) > 0 and len(svc.calls) > 0
+    # 用户选了 full, 但每折 IS 优化都被强制 position
+    assert all(kw["mode"] == "position" for kw in opt.opt_kwargs), "IS 优化未强制 position"
+    # OOS 回测保留用户的 full
+    assert all(c["mode"] == "full" for c in svc.calls), "OOS 未保留用户 mode"
 
 
 def test_walkforward_reports_degradation():

@@ -166,6 +166,12 @@ class WalkForwardService:
         valid_records: list[dict] = []   # IS 与 OOS 都成功, 计入聚合
         skipped: list[dict] = []          # 无优化结果 或 OOS 失败, 不计入聚合 (避免伪装成有效折)
         done = 0
+
+        # IS 训练区间强制 position 模式: full 模式会让训练折未平仓持仓用 train_end 之后
+        # (即 OOS 区间) 的真实 K 线平仓, IS 分数被未来数据污染 -> 优化选参乐观偏移, 使过拟合
+        # 被掩盖。OOS 回测保留用户所选 mode。参数扫描优化只看正式区间内的表现即可。
+        is_backtest_kwargs = {**cfg.backtest_kwargs, "mode": "position"}
+
         for f in folds:
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -182,7 +188,7 @@ class WalkForwardService:
                 max_workers=cfg.max_workers,
                 base_params=cfg.base_params,
                 overrides=cfg.overrides,
-                backtest_kwargs=cfg.backtest_kwargs,
+                backtest_kwargs=is_backtest_kwargs,  # IS 强制 position, 堵前视泄漏
             )
             opt_res = self.optimizer.optimize(opt_cfg, cancel_event=cancel_event)
             best_params = opt_res.get("best_params")
