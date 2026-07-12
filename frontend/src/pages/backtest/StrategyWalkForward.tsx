@@ -67,7 +67,11 @@ export function StrategyWalkForward() {
   const { data: stratData } = useQuery({ queryKey: ['strategies'], queryFn: api.strategyList })
   const strategies: StrategyDetail[] = stratData?.strategies ?? []
 
-  const sweep = useParamSweep(strategies, clearWalkForward)
+  // 切策略: 有任务在跑时先真正取消 (关 SSE + 后端 cancel + 清 localStorage), 不能静默丢
+  const sweep = useParamSweep(strategies, () => {
+    if (task?.isPending) stopWalkForward()
+    else clearWalkForward()
+  })
   const [objective, setObjective] = useState('sortino')
   const [start, setStart] = useState(THREE_YEARS_AGO)
   const [end, setEnd] = useState(TODAY)
@@ -82,6 +86,7 @@ export function StrategyWalkForward() {
   }, [])
 
   const canRun = sweep.strategyId && sweep.combos > 0 && sweep.combos <= GRID_MAX_COMBINATIONS
+    && !sweep.gridError
     && Number(trainDays) > 0 && Number(testDays) > 0 && Number(stepDays) > 0 && !task?.isPending
 
   const onRun = () => {
@@ -160,7 +165,7 @@ export function StrategyWalkForward() {
         </div>
 
         <SweepParamList params={sweep.params} sweeps={sweep.sweeps} updateSweep={sweep.updateSweep} />
-        <CombosHint show={!!sweep.strategyId} combos={sweep.combos} />
+        <CombosHint show={!!sweep.strategyId} combos={sweep.combos} gridError={sweep.gridError} />
         <div className="text-[11px] text-secondary">每折跑 {sweep.combos || 0} 组优化 × N 折，耗时较长</div>
 
         {task?.isPending ? (
