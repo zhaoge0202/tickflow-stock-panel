@@ -525,9 +525,9 @@ class BacktestEngine:
                 _loaded = self._load_minute_for_fills(
                     self.repo, list(_trigger_symbols), _trigger_dates, "stock",
                 )
-                for _key, _mdf in _loaded.items():
-                    if not _mdf.is_empty():
-                        minute_cache[_key] = _mdf
+                for _key, _marr in _loaded.items():
+                    if _marr is not None and len(_marr) > 0:
+                        minute_cache[_key] = _marr
 
         def _refill_price(idx: int, side: str, daily_price: float) -> float:
             if not config.minute_fill or not minute_cache:
@@ -839,33 +839,32 @@ class BacktestEngine:
 
     @staticmethod
     def _resolve_minute_fill(
-        minute_df: pl.DataFrame,
+        minute_arr: np.ndarray,
         ref_price: float | None,
         side: str,
     ) -> float | None:
         """用当日分钟K确定精确成交价。
 
         Args:
-            minute_df: 当日分钟K polars DataFrame, 列含 open/high/low/close/volume/amount
+            minute_arr: float64 2D 数组, 列顺序 = _MINUTE_NUMERIC_COLS
+                        [open(0), high(1), low(2), close(3), volume(4), amount(5)]
+                        (缺失的尾部列直接不存在, 用 shape 判断)
             ref_price: 信号参考线价格 (如 MA5 值); None 表示无参考线
             side: "buy" 或 "sell", 决定穿越方向
 
         Returns:
             精确成交价, 或 None (降级到日K口径)
-
-        注: 原实现用 df.to_numpy() 转 structured array 再按字段名索引, 但当列类型不
-        一致时 (如 datetime 列 + float 列) to_numpy() 退化为 object 二维数组, 字段名
-        索引 arr["open"] 会抛 IndexError。改为直接按列取 Series, 稳定且更快。
         """
-        if minute_df is None or minute_df.is_empty():
+        if minute_arr is None or len(minute_arr) == 0:
             return None
 
-        opens = minute_df["open"].to_numpy().astype(float)
-        highs = minute_df["high"].to_numpy().astype(float)
-        lows = minute_df["low"].to_numpy().astype(float)
-        closes = minute_df["close"].to_numpy().astype(float)
-        volumes = minute_df["volume"].to_numpy().astype(float) if "volume" in minute_df.columns else None
-        amounts = minute_df["amount"].to_numpy().astype(float) if "amount" in minute_df.columns else None
+        ncols = minute_arr.shape[1] if minute_arr.ndim == 2 else 1
+        opens = minute_arr[:, 0]
+        highs = minute_arr[:, 1] if ncols > 1 else opens
+        lows = minute_arr[:, 2] if ncols > 2 else opens
+        closes = minute_arr[:, 3] if ncols > 3 else opens
+        volumes = minute_arr[:, 4] if ncols > 4 else None
+        amounts = minute_arr[:, 5] if ncols > 5 else None
 
         # 有参考线 → 穿越价成交 (逻辑同止损: 找价格穿越参考线的时刻)
         if ref_price is not None and ref_price > 0 and np.isfinite(ref_price):
@@ -893,6 +892,9 @@ class BacktestEngine:
 
         return float(closes[-1]) if np.isfinite(closes[-1]) else None
 
+    # 分钟K cache 存储的数值列及固定顺序 (_resolve_minute_fill 按此顺序整数索引)。
+    _MINUTE_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]
+
     @staticmethod
     def _load_minute_for_fills(
         repo,
@@ -900,36 +902,49 @@ class BacktestEngine:
         dates_needed: set,
         asset_type: str,
     ) -> dict:
-        """批量加载回测区间内触发日的分钟K, 返回 {(symbol, date_str): minute_df}。
+        """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
         dates_needed: 需要分钟数据的日期集合 (set of date strings "YYYY-MM-DD")
+
+        按触发日分批读取对应分区文件 (get_minute_by_dates), 而非扫描整个区间
+        (get_minute_range)。内存与回测区间长度解耦, 只随触发日数量增长 ——
+        触发日稀疏时避免读取区间内大量无关日期导致爆内存。
+
+        cache 值为 float64 紧凑 2D 数组 (列顺序见 _MINUTE_NUMERIC_COLS), 而非
+        完整 DataFrame, 避免每条记录携带 polars 元数据开销导致内存膨胀。
         """
         if not symbols or not dates_needed:
             return {}
         from datetime import date as _date
-        sorted_dates = sorted(dates_needed)
-        start = _date.fromisoformat(sorted_dates[0])
-        end = _date.fromisoformat(sorted_dates[-1])
-        try:
-            df = repo.get_minute_range(symbols, start, end, asset_type=asset_type)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("minute fill data load failed: %s", e)
-            return {}
-        if df.is_empty():
-            return {}
+        sorted_date_strs = sorted(dates_needed)
+        date_objs = [_date.fromisoformat(s) for s in sorted_date_strs]
 
-        # 按 (symbol, 日期) 向量化分组, 替代原 iter_rows 逐行 Python 循环。
-        # 原实现对每行做 dict 转换再重建 DataFrame, 回测区间内触发股数多时极慢。
-        df = df.with_columns(
-            pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
-        )
         cache: dict = {}
-        for sub in df.partition_by(["symbol", "_d_str"], as_dict=False):
-            if sub.is_empty():
+        # 分批读取: 每批 50 个交易日, 处理完拼进 cache, 避免单批过大。
+        BATCH = 50
+        numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
+        for i in range(0, len(date_objs), BATCH):
+            batch = date_objs[i:i + BATCH]
+            try:
+                df = repo.get_minute_by_dates(symbols, batch, asset_type=asset_type)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("minute fill data load failed (batch %d-%d): %s", i, i + len(batch), e)
                 continue
-            sym = sub["symbol"][0]
-            d_str = sub["_d_str"][0]
-            cache[(sym, d_str)] = sub.drop("_d_str")
+            if df.is_empty():
+                continue
+            # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
+            df = df.with_columns(
+                pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
+            )
+            for sub in df.partition_by(["symbol", "_d_str"], as_dict=False):
+                if sub.is_empty():
+                    continue
+                sym = sub["symbol"][0]
+                d_str = sub["_d_str"][0]
+                cols = [c for c in numeric_cols if c in sub.columns]
+                cache[(sym, d_str)] = sub.select(
+                    [pl.col(c).cast(pl.Float64) for c in cols]
+                ).to_numpy()
         return cache
 
     def simulate_portfolio(
@@ -1051,9 +1066,9 @@ class BacktestEngine:
                 loaded = self._load_minute_for_fills(
                     self.repo, list(trigger_symbols), trigger_dates, asset_type,
                 )
-                for key, mdf in loaded.items():
-                    if not mdf.is_empty():
-                        minute_cache[key] = mdf
+                for key, marr in loaded.items():
+                    if marr is not None and len(marr) > 0:
+                        minute_cache[key] = marr
 
         def _refill_price(idx: int, side: str, daily_price: float) -> float:
             """分钟K精确成交价; 无数据则降级为 daily_price。"""
