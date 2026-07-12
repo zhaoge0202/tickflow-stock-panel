@@ -1236,8 +1236,21 @@ export const api = {
       `/api/kline/sync?symbol=${encodeURIComponent(symbol)}&days=${days}`,
       { method: 'POST' },
     ),
-  syncMinute: () =>
-    request<{ status: string; job_id: string }>('/api/kline/sync_minute', { method: 'POST' }),
+  syncMinute: (days?: number, extend?: boolean) =>
+    request<{ status: string; job_id: string }>('/api/kline/sync_minute', {
+      method: 'POST',
+      body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
+    }),
+  syncMinuteSingle: (symbol: string) =>
+    request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
+      method: 'POST',
+      body: JSON.stringify({ symbol }),
+    }),
+  clearMinute: () =>
+    request<{ status: string; removed: number }>('/api/kline/clear_minute', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
   extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
       method: 'POST',
@@ -1247,11 +1260,6 @@ export const api = {
     request<{ status: string; job_id: string }>('/api/kline/repair_daily', {
       method: 'POST',
       body: JSON.stringify({ start_date: startDate }),
-    }),
-  extendMinuteHistory: (value: number, unit: 'day' | 'month') =>
-    request<{ status: string; job_id: string }>('/api/kline/extend_minute_history', {
-      method: 'POST',
-      body: JSON.stringify({ value, unit }),
     }),
   rebuildEnriched: () =>
     request<{ status: string; job_id: string }>('/api/kline/rebuild_enriched', {

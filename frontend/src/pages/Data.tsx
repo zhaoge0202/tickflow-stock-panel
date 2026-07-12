@@ -1085,7 +1085,7 @@ export function Data() {
       <AnimatePresence>
         {openSettings === 'minute' && (
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
-            <MinuteSyncConfig caps={caps.data} isRunning={!!activeJobId} onStart={() => setOpenSettings(null)} />
+            <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
           </SettingsModal>
         )}
       </AnimatePresence>

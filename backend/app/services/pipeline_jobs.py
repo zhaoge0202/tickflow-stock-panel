@@ -253,6 +253,12 @@ class JobStore:
             logger.warning("reap_stale: 强制取消卡死 job %s (已运行 %.0fs)",
                            jid, elapsed)
             self.fail(jid, f"超时自动取消 (运行 {int(elapsed)}s, 疑似卡死)")
+            # 强制释放重任务锁: 卡死的线程无法被中断, 锁永远不会自然释放。
+            # job 已标记 failed, 即使僵尸线程后续写入 parquet, 下次拉取会覆盖, 安全。
+            try:
+                _heavy_run_lock.release()
+            except RuntimeError:
+                pass
 
     def clear(self) -> None:
         """清空所有任务（内存 + 磁盘文件）。"""

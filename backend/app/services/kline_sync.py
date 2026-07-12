@@ -506,13 +506,16 @@ def sync_minute_batch(
     count: int | None = None,
     batch_size: int | None = None,
     rpm: int | None = None,
-    on_chunk_done: Callable[[int, int], None] | None = None,
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
 ) -> pl.DataFrame:
     """批量拉取多股分钟 K。
 
     优先使用 start_time / end_time 区间, 确保所有标的覆盖同一时间段。
     count 仅作为 fallback 保留。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
+
+    TickFlow count 上限 10000 根/股, 1 天 240 根 → 单次最多约 41 天。
+    当区间超过 35 天时自动按月 (30 天) 分段拉取, 拼接结果。
     """
     # 自定义数据源分流: minute provider
     provider_name = preferences.get_minute_data_provider()
@@ -526,37 +529,63 @@ def sync_minute_batch(
         # 未配置 minute → 回退 TickFlow
 
     tf = get_client()
+
+    # TickFlow count 上限 10000 根/股, 1 天 240 根 → 单次最多约 41 个交易日。
+    # 按 41 交易日 (≈57 自然日) 分段: ≤41 交易日的区间只产生 1 段 (单次拉满)。
+    SEG_CHUNK = timedelta(days=57)  # 41 交易日 × 7/5 ≈ 57 自然日
+    time_segments: list[tuple[datetime, datetime]] = []
+    if start_time and end_time:
+        seg_start = start_time
+        while seg_start < end_time:
+            seg_end = min(seg_start + SEG_CHUNK, end_time)
+            time_segments.append((seg_start, seg_end))
+            seg_start = seg_end
+    else:
+        time_segments = [(None, None)]  # fallback: 用 count 模式
+
+    total_steps = len(time_segments) * len(chunked(symbols, batch_size))
+    step = 0
     out: list[pl.DataFrame] = []
-    chunks = chunked(symbols, batch_size)
 
-    for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, rpm)
-        try:
-            if start_time and end_time:
-                raw = tf.klines.batch(
-                    chunk, period="1m",
-                    start_time=_datetime_to_ms(start_time),
-                    end_time=_datetime_to_ms(end_time),
-                    count=10000,
-                    as_dataframe=True, show_progress=False,
-                )
-            else:
-                raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
-                                      as_dataframe=True, show_progress=False)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
-            continue
+    for seg_idx, (seg_start, seg_end) in enumerate(time_segments):
+        # 当前的日期段描述 (供进度展示)
+        if seg_start and seg_end:
+            seg_label = f"{seg_start.strftime('%m-%d')}~{seg_end.strftime('%m-%d')}"
+        else:
+            seg_label = "最新"
+        seg_total = len(time_segments)
+        chunks = chunked(symbols, batch_size)
+        for i, chunk in enumerate(chunks):
+            sleep_between_batches(step, rpm)
+            step += 1
+            try:
+                if seg_start and seg_end:
+                    raw = tf.klines.batch(
+                        chunk, period="1m",
+                        start_time=_datetime_to_ms(seg_start),
+                        end_time=_datetime_to_ms(seg_end),
+                        count=10000,
+                        adjust="forward",
+                        as_dataframe=True, show_progress=False,
+                    )
+                else:
+                    raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
+                                          adjust="forward",
+                                          as_dataframe=True, show_progress=False)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
+                continue
 
-        if isinstance(raw, dict):
-            for sym, sub in raw.items():
-                if sub is None or len(sub) == 0:
-                    continue
-                out.append(_normalize_minute(sub, default_symbol=sym))
-        elif raw is not None and len(raw) > 0:
-            out.append(_normalize_minute(raw))
+            if isinstance(raw, dict):
+                for sym, sub in raw.items():
+                    if sub is None or len(sub) == 0:
+                        continue
+                    out.append(_normalize_minute(sub, default_symbol=sym))
+            elif raw is not None and len(raw) > 0:
+                out.append(_normalize_minute(raw))
 
-        if on_chunk_done:
-            on_chunk_done(i + 1, len(chunks))
+            if on_chunk_done:
+                on_chunk_done(step, total_steps, seg_label)
 
     if not out:
         return pl.DataFrame()
@@ -575,6 +604,7 @@ def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
             start_time=_datetime_to_ms(start_time),
             end_time=_datetime_to_ms(end_time),
             count=10000,
+            adjust="forward",
             as_dataframe=True, show_progress=False,
         )
     except Exception as e:
@@ -608,6 +638,20 @@ def _latest_minute_datetime(repo: KlineRepository) -> datetime | None:
     """本地分钟 K 数据的最新时间。"""
     try:
         res = repo.execute_one("SELECT max(datetime) FROM kline_minute")
+        if res and res[0]:
+            d = res[0]
+            if isinstance(d, datetime):
+                return d
+            return datetime.fromisoformat(str(d))
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _earliest_minute_datetime(repo: KlineRepository) -> datetime | None:
+    """本地分钟 K 数据的最早时间 (用于向前扩展的起点)。"""
+    try:
+        res = repo.execute_one("SELECT min(datetime) FROM kline_minute")
         if res and res[0]:
             d = res[0]
             if isinstance(d, datetime):
@@ -703,9 +747,10 @@ def sync_and_persist_minute(
     repo: KlineRepository,
     capset: CapabilitySet,
     days: int = 5,
-    on_chunk_done: Callable[[int, int], None] | None = None,
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
+    extend_backward: bool = False,
 ) -> int:
-    """同步分钟 K 并存到 Parquet(仅 raw,不前复权)。返回写入行数。
+    """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
     使用 start_time / end_time 区间拉取, 确保所有标的覆盖同一时间段。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
@@ -729,13 +774,28 @@ def sync_and_persist_minute(
 
     now = datetime.now()
 
-    # 计算时间区间: 首次拉取回溯 N 天, 增量从最后数据时间开始
-    last_dt = _latest_minute_datetime(repo)
-    if last_dt:
-        start_time = last_dt
+    if extend_backward:
+        # 向前扩展模式: 从本地最早数据往前补, 叠加已有数据避免缺口。
+        earliest_dt = _earliest_minute_datetime(repo)
+        # 按交易日换算自然日 (7/5 系数)
+        # ≤41 交易日: 不加余量, 确保落在单段 (57 自然日) 内 → 单次拉满
+        # >41 交易日: +10 天余量覆盖节假日
+        calendar_days = int(days * 7 / 5) + (10 if days > 41 else 0)
+        if earliest_dt:
+            end_time = earliest_dt
+            start_time = end_time - timedelta(days=calendar_days)
+        else:
+            # 本地无数据 → 从今天往前拉
+            start_time = now - timedelta(days=calendar_days)
+            end_time = now
     else:
-        start_time = now - timedelta(days=days)
-    end_time = now
+        # 默认增量模式: 首次拉取回溯 N 天, 已有数据则从最新时间增量补到今天
+        last_dt = _latest_minute_datetime(repo)
+        if last_dt:
+            start_time = last_dt
+        else:
+            start_time = now - timedelta(days=days)
+        end_time = now
 
     limit = resolve_limit(
         capset,
