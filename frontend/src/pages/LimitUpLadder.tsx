@@ -208,7 +208,7 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
  */
 function useSealedDegrade(asOf: string, latestDate: string | undefined, sealedReady: boolean | undefined, sealedCounts?: { real: number; fake: number; pending: number }) {
   const { data: caps } = useCapabilities()
-  const hasDepth = !!caps?.capabilities?.['depth5.batch']
+  const hasDepth = !!caps?.business_capabilities?.sealed_depth?.available || !!caps?.capabilities?.['depth5.batch']
   // 历史判定: 用户主动选了早于最新交易日的日期
   const isHistorical = !!asOf && !!latestDate && asOf < latestDate
   // 降级: 无能力 / 历史日期 / 最新日但 sealed 未就绪
@@ -566,7 +566,7 @@ function MonitorMenu({ stock, direction, sealMode, monitorRule, anchorRect, hasD
           {!hasDepth && (
             <div className="flex items-start gap-1.5 rounded border border-amber-400/30 bg-amber-400/5 px-2 py-1.5 text-[10px] leading-relaxed text-amber-400/90">
               <AlertCircle className="h-3 w-3 shrink-0 mt-px" />
-              <span>当前 Key 权限无法获取五档行情,后续会适配免费数据源</span>
+              <span>当前数据源暂无可用五档盘口,请启用 tdxapi 实时源或配置 TickFlow Pro+</span>
             </div>
           )}
         </div>
@@ -583,10 +583,10 @@ function MonitorMenu({ stock, direction, sealMode, monitorRule, anchorRect, hasD
           <button
             onClick={handleSave}
             disabled={saving || !threshold || !hasDepth}
-            title={!hasDepth ? '需 Pro+ 套餐 (批量五档能力)' : ''}
+            title={!hasDepth ? '需可用五档盘口来源' : ''}
             className="flex-1 h-7 rounded text-[11px] font-medium transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-accent text-white hover:bg-accent/90 active:scale-[0.98] disabled:active:scale-100"
           >
-            {saving ? '保存中…' : !hasDepth ? '需 Pro+ 套餐' : existing ? '更新监控' : '开启监控'}
+            {saving ? '保存中…' : !hasDepth ? '需五档来源' : existing ? '更新监控' : '开启监控'}
           </button>
         </div>
       </div>

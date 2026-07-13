@@ -1304,14 +1304,12 @@ def update_limit_ladder_monitor(req: LimitLadderMonitorIn, request: Request) -> 
 
 @router.post("/preferences/limit-ladder-monitor/run")
 def run_limit_ladder_fix(request: Request) -> dict:
-    """立即手动修正一次真假板(拉取五档盘口 + 更新缓存)。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    capset = request.app.state.capabilities
-    capset.require(Cap.DEPTH5_BATCH)  # 无能力抛 CapabilityDenied(403)
-
+    """立即手动修正一次真假板(拉取五档盘口 + 更新缓存)。"""
     depth_svc = getattr(request.app.state, "depth_service", None)
     if not depth_svc:
         raise HTTPException(status_code=503, detail="depth 服务未初始化")
+    if not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
     return depth_svc.run_once()
 
 
@@ -1321,9 +1319,10 @@ class DepthPollingIntervalIn(BaseModel):
 
 @router.put("/preferences/depth-polling-interval")
 def update_depth_polling_interval(req: DepthPollingIntervalIn, request: Request) -> dict:
-    """保存五档盘口盘中轮询间隔(秒)。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
+    """保存五档盘口盘中轮询间隔(秒)。"""
+    depth_svc = getattr(request.app.state, "depth_service", None)
+    if not depth_svc or not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
 
     from app.services import preferences
     interval = preferences.set_depth_polling_interval(req.interval)
@@ -1337,9 +1336,10 @@ class DepthFinalizeTimeIn(BaseModel):
 
 @router.put("/preferences/depth-finalize-time")
 def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> dict:
-    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
+    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。"""
+    depth_svc = getattr(request.app.state, "depth_service", None)
+    if not depth_svc or not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
 
     from app.services import preferences
     sched = preferences.set_depth_finalize_time(req.hour, req.minute)

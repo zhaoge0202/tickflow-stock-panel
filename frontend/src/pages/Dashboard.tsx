@@ -546,7 +546,7 @@ export function Dashboard() {
   const data = overview.data
   const caps = useCapabilities()
   const settings = useSettings()
-  const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
+  const hasDepth = !!caps.data?.business_capabilities?.sealed_depth?.available || !!caps.data?.capabilities?.['depth5.batch']
   const sealedReady = !!data?.limit?.sealed_ready
   const isSealedDegrade = !hasDepth || !sealedReady
   // none 档(无 key / 无效 key): 不再阻断功能, 仅实时行情等扩展能力受限

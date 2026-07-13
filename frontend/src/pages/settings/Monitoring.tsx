@@ -64,7 +64,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false
-  const hasDepth = !!caps?.capabilities?.['depth5.batch']
+  const hasDepth = !!caps?.business_capabilities?.sealed_depth?.available || !!caps?.capabilities?.['depth5.batch']
+  const depthSource = caps?.business_capabilities?.sealed_depth?.source
   // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
   const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
   const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? SIDEBAR_INDEX_OPTIONS.map(i => i.symbol)
@@ -446,7 +447,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         <Card
           icon={Flame}
           title="连板梯队降级修正"
-          badge={!hasDepth ? '需 Pro+' : undefined}
+          badge={!hasDepth ? '需五档来源' : depthSource === 'tdxapi' ? 'TDX' : undefined}
           right={hasDepth ? (
             <button
               onClick={() => runFix.mutate()}
