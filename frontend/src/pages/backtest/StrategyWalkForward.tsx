@@ -36,11 +36,17 @@ function Stat({ label, value, hint, color }: { label: string; value: string; hin
   )
 }
 
+/** 把 NaN/Infinity 归一为 null (走 ?! '—' 的既有降级路径), 防止 toFixed 渲染出 "NaN"。 */
+function fin(v: number | null | undefined): number | null {
+  return v != null && Number.isFinite(v) ? v : null
+}
+
 /** OOS 拼接净值曲线 (逐折复利) — walk-forward 核心产出的极简 SVG 折线。 */
 function OosEquityChart({ curve }: { curve: { fold: number; date: string; value: number }[] }) {
-  if (!curve.length) return null
+  // 过滤非有限值: 零成交折等边界可能产出 NaN/Infinity, 混入会让坐标全 NaN → SVG 空白。
+  const vals = curve.map(p => p.value).filter(v => Number.isFinite(v))
+  if (!vals.length) return null
   const W = 600, H = 120, pad = 8
-  const vals = curve.map(p => p.value)
   const lo = Math.min(1, ...vals), hi = Math.max(1, ...vals)
   const span = hi - lo || 1
   // 起点补一个 value=1 基准, 让曲线从 1.0 起步
@@ -112,6 +118,12 @@ export function StrategyWalkForward() {
   const result = task?.result
   const progress = task?.progress
   const summary = result?.summary
+  // 汇总里的可空数值先归一: 零成交折等边界可能产出 NaN/Infinity,
+  // 直接 toFixed 会渲染出 "NaN"; 这里把非有限值转 null, 下游统一走 '—' 降级。
+  const compounded = fin(summary?.compounded_oos_return)
+  const degradation = fin(summary?.degradation)
+  const avgIs = fin(summary?.avg_is_objective)
+  const avgOos = fin(summary?.avg_oos_objective)
 
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
@@ -210,20 +222,20 @@ export function StrategyWalkForward() {
 
         {result && summary && result.n_folds > 0 && (
           <div className="space-y-4">
-            {/* 汇总卡 */}
+            {/* 汇总卡 — 可空数值已在上游用 fin() 归一, NaN/Infinity 走 '—' 而非渲染 "NaN" */}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <Stat label="OOS 复利收益" value={fmtPct(summary.compounded_oos_return)}
-                color={summary.compounded_oos_return >= 0 ? '#34d399' : '#f87171'} />
+              <Stat label="OOS 复利收益" value={fmtPct(compounded)}
+                color={compounded != null && compounded >= 0 ? '#34d399' : '#f87171'} />
               <Stat label="IS→OOS 退化"
-                value={summary.degradation != null ? summary.degradation.toFixed(3) : '—'}
-                hint={summary.degradation != null && summary.degradation > 0 ? '样本外退化=过拟合' : '样本外未退化'}
-                color={summary.degradation != null && summary.degradation > 0 ? '#f87171' : '#34d399'} />
+                value={degradation != null ? degradation.toFixed(3) : '—'}
+                hint={degradation != null && degradation > 0 ? '样本外退化=过拟合' : '样本外未退化'}
+                color={degradation != null && degradation > 0 ? '#f87171' : '#34d399'} />
               <Stat label="一致性" value={fmtPct(summary.consistency)} hint="OOS 盈利折占比" />
               <Stat label="有效折" value={result.n_skipped > 0 ? `${result.n_folds} (跳过${result.n_skipped})` : String(result.n_folds)} />
             </div>
 
             <div className="text-xs text-secondary">
-              IS 目标均值 {summary.avg_is_objective ?? '—'} · OOS 目标均值 {summary.avg_oos_objective ?? '—'} · 耗时 {(result.elapsed_ms / 1000).toFixed(1)}s
+              IS 目标均值 {avgIs != null ? avgIs.toFixed(3) : '—'} · OOS 目标均值 {avgOos != null ? avgOos.toFixed(3) : '—'} · 耗时 {(result.elapsed_ms / 1000).toFixed(1)}s
             </div>
 
             {/* OOS 拼接净值曲线 (walk-forward 核心产出) */}
@@ -269,10 +281,10 @@ export function StrategyWalkForward() {
               </table>
             </div>
 
-            {summary.degradation != null && summary.degradation > 0 && (
+            {degradation != null && degradation > 0 && (
               <div className="flex items-center gap-1.5 rounded-input border border-red-500/30 bg-red-500/5 px-3 py-2 text-[11px] text-red-400">
                 <TrendingDown className="h-3.5 w-3.5" />
-                样本外目标较样本内退化 {summary.degradation.toFixed(3)}，提示参数可能过拟合训练区间。
+                样本外目标较样本内退化 {degradation.toFixed(3)}，提示参数可能过拟合训练区间。
               </div>
             )}
           </div>
