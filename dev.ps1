@@ -108,11 +108,37 @@ function Free-Port($name, $port) {
 Free-Port 'backend'  $BackendPort
 Free-Port 'frontend' $FrontendPort
 
-# ===== 3. First-time dependency install =====
-if (-not (Test-Path (Join-Path $BackendDir '.venv'))) {
-    Log-Info 'first run - installing Python deps (1-2 min)...'
+# ===== 3. Dependency install =====
+# Match Docker's whitespace-separated BACKEND_EXTRAS behavior so old CPUs can
+# select Polars' rtcompat runtime before the backend starts.
+$BackendExtras = $env:BACKEND_EXTRAS
+if (-not (Test-Path Env:BACKEND_EXTRAS)) {
+    $envFile = Join-Path $Root '.env'
+    if (Test-Path $envFile) {
+        foreach ($line in Get-Content $envFile) {
+            if ($line -match '^\s*BACKEND_EXTRAS\s*=\s*(.*?)\s*$') {
+                $BackendExtras = $Matches[1]
+                break
+            }
+        }
+    }
+}
+
+$BackendExtraArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($BackendExtras)) {
+    foreach ($extra in ($BackendExtras -split '\s+' | Where-Object { $_ })) {
+        $BackendExtraArgs += '--extra', $extra
+    }
+}
+
+if (-not (Test-Path (Join-Path $BackendDir '.venv')) -or $BackendExtraArgs.Count) {
+    if ($BackendExtraArgs.Count) {
+        Log-Info "syncing Python deps with extras: $BackendExtras"
+    } else {
+        Log-Info 'first run - installing Python deps (1-2 min)...'
+    }
     Push-Location $BackendDir
-    try { & uv sync } finally { Pop-Location }
+    try { & uv sync @BackendExtraArgs } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Log-Err 'uv sync failed'; exit 1 }
     Log-Ok 'backend deps installed'
 }

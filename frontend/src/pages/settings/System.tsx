@@ -3,7 +3,7 @@
  *
  * 独立于实时监控, 放置影响整体应用行为的开关项。
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info } from 'lucide-react'
 import { usePreferences, useVersion } from '@/lib/useSharedQueries'
@@ -12,6 +12,9 @@ import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { refreshAlertToastConfig } from '@/components/AlertToast'
 import { SOUND_OPTIONS, previewSound } from '@/lib/notificationSound'
+import {
+  listZhVoices, previewVoice, activateVoice, getCurrentVoiceURI,
+} from '@/lib/voiceBroadcast'
 
 export function SettingsSystemPanel() {
   const qc = useQueryClient()
@@ -36,6 +39,41 @@ export function SettingsSystemPanel() {
   const [soundType, setSoundType] = useState(() => {
     try { return localStorage.getItem('alert_sound') || 'ding' } catch { return 'ding' }
   })
+  const [voiceEnabled, setVoiceEnabled] = useState(() => {
+    try { return localStorage.getItem('voice_broadcast_enabled') === '1' } catch { return false }
+  })
+  const [voices, setVoices] = useState(listZhVoices())
+  // 用户手选值 (空=走默认偏好 Google 中国大陆)
+  const [voiceConfigured, setVoiceConfigured] = useState(() => {
+    try { return localStorage.getItem('voice_broadcast_voice') || '' } catch { return '' }
+  })
+  // 下拉回显值: 用户手选优先, 否则显示当前解析到的语音
+  const [voiceURI, setVoiceURI] = useState(() => {
+    try { return localStorage.getItem('voice_broadcast_voice') || getCurrentVoiceURI() } catch { return getCurrentVoiceURI() }
+  })
+  const [voiceRate, setVoiceRate] = useState(() => {
+    try {
+      const v = parseFloat(localStorage.getItem('voice_broadcast_rate') || '')
+      return v >= 0.5 && v <= 2 ? v : 1
+    } catch { return 1 }
+  })
+
+  // 语音包异步加载 (Google 云语音为 Chrome 联网注入, 比本地晚到), 监听刷新
+  useEffect(() => {
+    const h = () => {
+      setVoices(listZhVoices())
+      // 用户未手选时, 跟随默认偏好 (Google CN 到货后自动同步回显)
+      if (!voiceConfigured) setVoiceURI(getCurrentVoiceURI())
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.addEventListener('voiceschanged', h)
+      // 部分浏览器首次需主动触发一次
+      h()
+    }
+    return () => {
+      if ('speechSynthesis' in window) window.speechSynthesis.removeEventListener('voiceschanged', h)
+    }
+  }, [voiceConfigured])
 
   const save = useCallback(async (cfg: Record<string, unknown>) => {
     setSaving(true)
@@ -159,6 +197,93 @@ export function SettingsSystemPanel() {
             >
               试听
             </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-card border border-border bg-surface p-5 mt-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Volume2 className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-medium text-foreground">语音播报</h3>
+        </div>
+
+        <ToggleRow
+          label="监控告警语音播报"
+          desc="收到告警时用中文语音播报内容 (需浏览器支持, 默认关闭)"
+          checked={voiceEnabled}
+          disabled={!toastEnabled}
+          onChange={(v) => {
+            localStorage.setItem('voice_broadcast_enabled', v ? '1' : '0')
+            setVoiceEnabled(v)
+            if (v) { activateVoice(); previewVoice() }   // 开启即激活 + 试听一句
+          }}
+        />
+
+        <div className="flex items-center justify-between gap-4 py-2">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <Volume2 className="h-3.5 w-3.5 text-muted" />
+            <div>
+              <div className="text-sm text-foreground">语音音色</div>
+              <div className="text-[11px] text-muted truncate">
+                {voices.length === 0
+                  ? '未检测到中文语音, 将用系统默认'
+                  : '默认优先 Google 中国大陆 (音质最佳)'}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={voiceURI}
+              disabled={!toastEnabled || !voiceEnabled}
+              onChange={(e) => {
+                const v = e.target.value
+                if (v) {
+                  // 手选某一语音包
+                  localStorage.setItem('voice_broadcast_voice', v)
+                  setVoiceConfigured(v)
+                  setVoiceURI(v)
+                } else {
+                  // 选"默认偏好": 清空手选, 走 Google 中国大陆偏好
+                  localStorage.removeItem('voice_broadcast_voice')
+                  setVoiceConfigured('')
+                  setVoiceURI(getCurrentVoiceURI())
+                }
+              }}
+              className="w-32 h-8 px-1.5 rounded-btn border border-border bg-base text-xs text-foreground disabled:opacity-50"
+            >
+              <option value={getCurrentVoiceURI()}>默认偏好</option>
+              {voices
+                .filter(v => v.voiceURI !== getCurrentVoiceURI())
+                .map(v => <option key={v.voiceURI} value={v.voiceURI}>{v.name}</option>)
+              }
+            </select>
+            <button
+              onClick={() => previewVoice()}
+              disabled={!toastEnabled || !voiceEnabled}
+              className="px-2 h-8 rounded-btn border border-border bg-base text-xs text-secondary hover:text-foreground hover:border-accent/30 disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              试听
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 py-2">
+          <div className="min-w-0">
+            <div className="text-sm text-foreground">语速</div>
+            <div className="text-[11px] text-muted truncate">0.5 慢 — 2.0 快</div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <input
+              type="range" min={0.5} max={2} step={0.1} value={voiceRate}
+              disabled={!toastEnabled || !voiceEnabled}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                localStorage.setItem('voice_broadcast_rate', String(v))
+                setVoiceRate(v)
+              }}
+              className="w-32 disabled:opacity-50"
+            />
+            <span className="text-xs text-muted w-8 text-right">{voiceRate.toFixed(1)}</span>
           </div>
         </div>
       </section>

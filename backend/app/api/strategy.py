@@ -564,7 +564,11 @@ async def ai_test(request: Request):
         )
         return {"ok": True, "model": current_ai_model() or current_ai_provider(), "response": text[:80]}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {
+            "ok": False,
+            "error": str(e) or repr(e),
+            "error_type": type(e).__name__,
+        }
 
 
 def _build_prompt(req: BuildRequest) -> str:

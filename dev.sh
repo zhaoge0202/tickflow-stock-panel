@@ -16,6 +16,20 @@ FRONTEND_DIR="$ROOT/frontend"
 BACKEND_PORT="${BACKEND_PORT:-3018}"
 FRONTEND_PORT="${FRONTEND_PORT:-3011}"
 
+# Match Docker's BACKEND_EXTRAS behavior so old CPUs can select Polars'
+# rtcompat runtime before the backend starts. An exported value wins over .env.
+if [[ -z "${BACKEND_EXTRAS+x}" && -f "$ROOT/.env" ]]; then
+  BACKEND_EXTRAS="$(awk '/^[[:space:]]*BACKEND_EXTRAS[[:space:]]*=/ {sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}' "$ROOT/.env")"
+fi
+BACKEND_EXTRAS="${BACKEND_EXTRAS:-}"
+BACKEND_EXTRA_ARGS=()
+if [[ -n "$BACKEND_EXTRAS" ]]; then
+  read -r -a backend_extras <<< "$BACKEND_EXTRAS"
+  for extra in "${backend_extras[@]}"; do
+    BACKEND_EXTRA_ARGS+=(--extra "$extra")
+  done
+fi
+
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -71,10 +85,14 @@ free_port() {
 free_port backend  "$BACKEND_PORT"
 free_port frontend "$FRONTEND_PORT"
 
-# ===== 3. 首次依赖安装 =====
-if [ ! -d "$BACKEND_DIR/.venv" ]; then
-  info "后端首次启动 — 安装 Python 依赖(约 1-2 分钟)..."
-  ( cd "$BACKEND_DIR" && uv sync )
+# ===== 3. 依赖安装 =====
+if [ ! -d "$BACKEND_DIR/.venv" ] || [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
+  if [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
+    info "同步后端 Python 依赖，extras: $BACKEND_EXTRAS"
+  else
+    info "后端首次启动 — 安装 Python 依赖(约 1-2 分钟)..."
+  fi
+  ( cd "$BACKEND_DIR" && uv sync "${BACKEND_EXTRA_ARGS[@]}" )
   ok "后端依赖装好了"
 fi
 

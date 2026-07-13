@@ -139,13 +139,13 @@ AUTH_PASSWORD=你的密码    # 至少 6 位;仅首次生效,已设过则不覆�
 
 ---
 
-## Docker 构建 Extras(可选)
+## 后端依赖 Extras(可选)
 
 ```ini
 BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 ```
 
-老 VPS 无 AVX2/FMA 支持时设为 `legacy-cpu`,会给 Polars 切到 `rtcompat` 运行时;需回测则 `legacy-cpu backtest`。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
+老 CPU 无 AVX2/FMA 支持时设为 `legacy-cpu`,会给 Polars 切到 `rtcompat` 运行时;需回测则 `legacy-cpu backtest`。Docker 构建和 `./dev.sh` / `.\dev.ps1` 都会读取此值并同步依赖。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
 
 ---
 
