@@ -428,6 +428,7 @@ def get_preferences() -> dict:
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
+        "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
         "screener_auto_run": preferences.get_screener_auto_run(),
@@ -752,6 +753,7 @@ class RealtimeMonitorConfigIn(BaseModel):
     strategy_monitor_ids: list[str] | None = None
     sidebar_index_symbols: list[str] | None = None
     screener_auto_run: bool | None = None
+    minute_intraday_refresh: bool | None = None
 
 
 @router.put("/preferences/realtime-monitor")

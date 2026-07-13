@@ -91,8 +91,20 @@ def get_minute_sync_enabled() -> bool:
 
 
 def get_minute_intraday_refresh() -> bool:
-    """自选列表分时图是否跟随实时行情刷新 (默认关闭, 开启后盘中按 SSE 频率刷新)。"""
-    return load().get("minute_intraday_refresh", False)
+    """自选列表分时图是否跟随实时行情刷新。
+
+    默认值随权限: 有实时行情权限 (Pro+) 的用户默认开启, 否则关闭。
+    用户主动设置过的 (key 存在) 以用户选择为准, 即使是 False 也尊重。
+    """
+    data = load()
+    if "minute_intraday_refresh" in data:
+        return bool(data["minute_intraday_refresh"])
+    # 未设置过: 有权限默认开, 无权限默认关。
+    try:
+        from app.services.quote_service import QuoteService
+        return QuoteService.is_realtime_allowed()
+    except Exception:
+        return False
 
 
 def get_minute_sync_days() -> int:
