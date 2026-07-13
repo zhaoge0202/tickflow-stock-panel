@@ -137,15 +137,14 @@ def list_rules(request: Request):
 @router.post("")
 def save_rule(req: RuleModel, request: Request):
     rule = monitor_rules.normalize(req.model_dump())
-    # 连板梯队封单监控 (type=ladder) 依赖五档盘口数据, 需 Pro+ (DEPTH5_BATCH 能力)。
+    # 连板梯队封单监控 (type=ladder) 依赖五档盘口数据。
     # 无能力时拒绝创建, 避免规则存了却永远无法触发。
     if rule.get("type") == "ladder":
-        from app.tickflow.capabilities import Cap
-        capset = getattr(request.app.state, "capabilities", None)
-        if capset is None or not capset.has(Cap.DEPTH5_BATCH):
+        depth_svc = getattr(request.app.state, "depth_service", None)
+        if depth_svc is None or not depth_svc.is_available():
             raise HTTPException(
                 status_code=403,
-                detail="封单监控需要 Pro+ 套餐 (批量五档能力),请升级后在「设置」页配置",
+                detail="封单监控需要可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+",
             )
     # 编辑现有规则时, 保留原 created_at (避免按时间排序时位置跳动)
     existing = monitor_rules.load_one(_data_dir(request), rule["id"])

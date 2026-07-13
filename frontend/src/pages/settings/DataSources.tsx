@@ -27,6 +27,7 @@ export function SettingsDataSourcesPanel() {
     mutationFn: api.reloadDataSources,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
       toast('配置已重新加载', 'success')
     },
   })
@@ -36,6 +37,7 @@ export function SettingsDataSourcesPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
       setSelected('tickflow')
       setConfirmDelete(null)
       toast('数据源已删除', 'success')
@@ -71,6 +73,7 @@ export function SettingsDataSourcesPanel() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
       toast('数据源已切换', 'success')
     },
   })
@@ -84,6 +87,7 @@ export function SettingsDataSourcesPanel() {
     mutationFn: (name: string) => api.installPlugin(name),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
       if (data.install_ok) {
         toast('插件依赖安装成功', 'success')
       } else {
@@ -98,6 +102,7 @@ export function SettingsDataSourcesPanel() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
       if (data.uninstall_ok) {
         toast(data.uninstall_message || '已卸载', 'success')
       } else {

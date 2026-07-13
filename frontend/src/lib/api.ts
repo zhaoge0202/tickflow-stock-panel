@@ -46,6 +46,13 @@ export interface CapabilityLimits {
 export interface CapabilitiesResponse {
   label: string
   capabilities: Record<string, CapabilityLimits>
+  business_capabilities?: {
+    sealed_depth?: {
+      available: boolean
+      source: string | null
+      requires: string | null
+    }
+  }
 }
 
 // ===== Financials =====
