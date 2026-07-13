@@ -625,8 +625,8 @@ export function Watchlist() {
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
   // 批量分时数据 (Pro+ 用户, 列可见时才拉)
-  // 刷新策略: 实时行情运行中自动按 15s 轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流);
-  // 用户也可在实时监控设置里单独开启 minute_intraday_refresh 强制刷新 (即使未开实时行情)
+  // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
+  // 按 15s 轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流); 与 Screener / 设置卡片描述一致。
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const minuteBatch = useQuery({
@@ -634,7 +634,7 @@ export function Watchlist() {
     queryFn: () => api.klineMinuteBatch(symbols),
     enabled: intradayVisible && symbols.length > 0,
     staleTime: 10_000,
-    refetchInterval: (realtimeRunning || intradayRefreshEnabled) ? 15_000 : false,
+    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? 15_000 : false,
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
