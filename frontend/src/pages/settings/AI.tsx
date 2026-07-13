@@ -15,22 +15,41 @@ const INPUT_CLS =
 
 const CODEX_PROVIDER = 'codex_cli'
 const OPENAI_PROVIDER = 'openai_compat'
-const CUSTOM_CODEX_MODEL = '__custom__'
 const CODEX_COMMAND = 'codex'
+const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
+const DEFAULT_CODEX_REASONING_EFFORT = 'xhigh'
+const SAVED_CODEX_OPTION_VALUE = '__saved_codex_config__'
+const CODEX_REASONING_LABELS: Record<string, string> = {
+  high: '高',
+  xhigh: '极高',
+}
 
-const CODEX_MODEL_OPTIONS = [
-  { label: 'Codex 默认（推荐）', value: '', hint: '使用当前 Codex CLI 支持的默认模型' },
-  { label: 'gpt-5.5', value: 'gpt-5.5', hint: '高能力模型' },
-  { label: 'gpt-5', value: 'gpt-5', hint: '通用模型' },
+type CodexModelOption = { label: string; value: string; model: string; effort: string; hint: string }
+
+const CODEX_MODEL_OPTIONS: CodexModelOption[] = [
+  { label: 'GPT-5.6 Sol · 极高（推荐）', value: 'gpt-5.6-sol:xhigh', model: 'gpt-5.6-sol', effort: 'xhigh', hint: '旗舰档，适合复杂金融分析与专业任务' },
+  { label: 'GPT-5.6 Terra · 极高', value: 'gpt-5.6-terra:xhigh', model: 'gpt-5.6-terra', effort: 'xhigh', hint: '平衡智能、速度与使用成本' },
+  { label: 'GPT-5.6 Luna · 极高', value: 'gpt-5.6-luna:xhigh', model: 'gpt-5.6-luna', effort: 'xhigh', hint: '适合成本敏感与高频分析任务' },
+  { label: 'gpt-5.5 · 高', value: 'gpt-5.5:high', model: 'gpt-5.5', effort: 'high', hint: '使用 gpt-5.5 + high 推理档' },
+  { label: 'gpt-5.5 · 极高', value: 'gpt-5.5:xhigh', model: 'gpt-5.5', effort: 'xhigh', hint: '使用 gpt-5.5 + xhigh 推理档' },
+  { label: '跟随本机 Codex 默认', value: '', model: '', effort: '', hint: '使用本机 Codex CLI 配置的默认模型与推理强度' },
 ]
 
-const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; partner?: boolean; promo?: string }[] = [
+const codexModelLabel = (model?: string, effort?: string) => {
+  if (!model && !effort) return '默认模型'
+  const modelLabel = model || '默认模型'
+  const effortLabel = effort ? CODEX_REASONING_LABELS[effort] ?? effort : ''
+  return effortLabel ? `${modelLabel} · ${effortLabel}` : modelLabel
+}
+
+const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; custom?: boolean }[] = [
+  { label: '自定义', url: '', model: '', website: '', websiteLabel: '', description: '不自动填充任何配置，完全手动填写 API 地址、模型和密钥。', custom: true },
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-v4-pro', website: 'https://www.deepseek.com/', websiteLabel: 'deepseek.com', description: 'DeepSeek 官方 OpenAI 兼容接口。' },
   { label: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-3.6plus', website: 'https://tongyi.aliyun.com/', websiteLabel: 'tongyi.aliyun.com', description: '阿里云 DashScope 兼容模式接口。' },
   { label: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2', website: 'https://open.bigmodel.cn/', websiteLabel: 'open.bigmodel.cn', description: '智谱 AI 官方 OpenAI 兼容接口。' },
-  { label: 'Kimi', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2.6', website: 'https://platform.moonshot.cn/', websiteLabel: 'platform.moonshot.cn', description: '月之暗面 Moonshot 官方 OpenAI 兼容接口，支持超长上下文。' },
-  { label: 'Codex CLI', provider: CODEX_PROVIDER, url: '', model: '', codexCommand: CODEX_COMMAND, website: 'https://developers.openai.com/codex/noninteractive', websiteLabel: 'codex exec', description: '调用本机 Codex CLI 的 codex exec, 适合已登录 ChatGPT/Codex 的本地环境。' },
-  { label: '炸鸡中转站', url: 'https://api.zhaji.dev/v1', model: 'gpt-5.5', website: 'https://api.zhaji.dev', websiteLabel: 'api.zhaji.dev', description: 'OpenAI 兼容中转服务，适合直接使用国际模型。', partner: true, promo: '通过链接邀请注册赠送免费额度 · 国际模型最低0.02倍率' },
+  { label: 'Kimi', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2.7-code', website: 'https://platform.moonshot.cn/', websiteLabel: 'platform.moonshot.cn', description: '月之暗面 Moonshot 官方 OpenAI 兼容接口，支持超长上下文。' },
+  { label: 'Codex CLI', provider: CODEX_PROVIDER, url: '', model: DEFAULT_CODEX_MODEL, codexCommand: CODEX_COMMAND, website: 'https://developers.openai.com/codex/noninteractive', websiteLabel: 'codex exec', description: '调用本机 Codex CLI 的 codex exec, 适合已登录 ChatGPT/Codex 的本地环境。' },
+  { label: '炸鸡中转站', url: 'https://api.zhaji.dev/v1', model: 'gpt-5.5', website: 'https://api.zhaji.dev', websiteLabel: 'api.zhaji.dev', description: 'OpenAI 兼容中转服务，适合直接使用国际模型。' },
 ]
 
 export function SettingsAIPanel() {
@@ -42,7 +61,7 @@ export function SettingsAIPanel() {
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
-  const [codexCustomModel, setCodexCustomModel] = useState(false)
+  const [codexReasoningEffort, setCodexReasoningEffort] = useState('')
   const [codexCommand, setCodexCommand] = useState(CODEX_COMMAND)
   const [customUa, setCustomUa] = useState(false)
   const [userAgent, setUserAgent] = useState('')
@@ -55,16 +74,42 @@ export function SettingsAIPanel() {
   const isCodexProvider = provider === CODEX_PROVIDER
   const savedCodexProvider = s?.ai_provider === CODEX_PROVIDER
   const configured = s?.ai_configured ?? (savedCodexProvider ? !!(s?.ai_codex_command ?? CODEX_COMMAND) : s?.has_ai_key)
-  const selectedPreset = PRESETS.find(p => (p.provider ?? OPENAI_PROVIDER) === provider && (isCodexProvider ? p.codexCommand === codexCommand : p.url === baseUrl))
-  const codexModelSelectValue = codexCustomModel ? CUSTOM_CODEX_MODEL : model
+  // 选中的预设: 精确匹配 provider+url/codexCommand; 匹配不上时默认"自定义"
+  const matchedPreset = PRESETS.find(p => (p.provider ?? OPENAI_PROVIDER) === provider && (isCodexProvider ? p.codexCommand === codexCommand : p.url === baseUrl))
+  const selectedPreset = matchedPreset ?? PRESETS.find(p => p.custom)
+  const savedCodexModel = savedCodexProvider ? (s?.ai_model ?? '') : ''
+  const savedCodexEffort = savedCodexProvider ? (s?.ai_codex_reasoning_effort ?? '') : ''
+  const savedCodexOptionKnown = CODEX_MODEL_OPTIONS.some(option =>
+    option.model === savedCodexModel && option.effort === savedCodexEffort,
+  )
+  const savedCodexOption: CodexModelOption | null =
+    (savedCodexModel || savedCodexEffort) && !savedCodexOptionKnown
+      ? {
+          label: `${codexModelLabel(savedCodexModel, savedCodexEffort)}（当前配置）`,
+          value: SAVED_CODEX_OPTION_VALUE,
+          model: savedCodexModel,
+          effort: savedCodexEffort,
+          hint: '保留项目中已保存的模型与推理档；此兼容项不可编辑',
+        }
+      : null
+  const codexModelOptions = savedCodexOption
+    ? [savedCodexOption, ...CODEX_MODEL_OPTIONS]
+    : CODEX_MODEL_OPTIONS
+  const selectedCodexModelOption = codexModelOptions.find(option =>
+    option.model === model && option.effort === codexReasoningEffort,
+  ) ?? CODEX_MODEL_OPTIONS[0]
+  const codexModelSelectValue = selectedCodexModelOption.value
   const canSave = isCodexProvider ? true : !!baseUrl.trim() && !!model.trim()
 
   useEffect(() => {
     if (!s) return
-    setProvider(s.ai_provider ?? OPENAI_PROVIDER)
-    setBaseUrl(s.ai_base_url ?? '')
-    setModel(s.ai_model ?? '')
-    setCodexCustomModel(!!s.ai_model && !CODEX_MODEL_OPTIONS.some(o => o.value === s.ai_model))
+    // 未配置过 AI (无 api_key): 字段留空, 默认选中"自定义"预设, 不预填充后端默认值
+    const unconfigured = !s.has_ai_key && !s.ai_configured
+    const savedProvider = s.ai_provider ?? OPENAI_PROVIDER
+    setProvider(savedProvider)
+    setBaseUrl(unconfigured ? '' : (s.ai_base_url ?? ''))
+    setModel(unconfigured ? '' : (s.ai_model ?? ''))
+    setCodexReasoningEffort(unconfigured ? '' : (s.ai_codex_reasoning_effort ?? ''))
     setCodexCommand(s.ai_codex_command ?? CODEX_COMMAND)
     const ua = s.ai_user_agent ?? ''
     setCustomUa(!!ua)
@@ -77,6 +122,7 @@ export function SettingsAIPanel() {
     api_key: apiKey || undefined,
     model,
     codex_command: isCodexProvider ? CODEX_COMMAND : codexCommand,
+    codex_reasoning_effort: isCodexProvider ? codexReasoningEffort : '',
     user_agent: customUa ? userAgent : '',
   })
 
@@ -91,6 +137,7 @@ export function SettingsAIPanel() {
         ai_base_url: baseUrl,
         ai_model: result.ai_model ?? model,
         ai_codex_command: result.ai_codex_command ?? (isCodexProvider ? CODEX_COMMAND : codexCommand),
+        ai_codex_reasoning_effort: result.ai_codex_reasoning_effort ?? (isCodexProvider ? codexReasoningEffort : ''),
         ai_configured: result.ai_configured ?? (isCodexProvider ? true : (apiKey ? true : prev.ai_configured)),
         ...(apiKey ? {
           has_ai_key: true,
@@ -110,7 +157,7 @@ export function SettingsAIPanel() {
       setBaseUrl('')
       setApiKey('')
       setModel('')
-      setCodexCustomModel(false)
+      setCodexReasoningEffort('')
       setCodexCommand(CODEX_COMMAND)
       setTestResult(null)
       qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
@@ -119,6 +166,7 @@ export function SettingsAIPanel() {
         ai_base_url: '',
         ai_model: '',
         ai_codex_command: CODEX_COMMAND,
+        ai_codex_reasoning_effort: '',
         has_ai_key: false,
         ai_configured: false,
         ai_api_key_masked: '',
@@ -139,10 +187,18 @@ export function SettingsAIPanel() {
   }
 
   const handlePreset = (p: typeof PRESETS[number]) => {
+    if (p.custom) {
+      // 自定义: 清空所有自动填充字段, 由用户完全手动填写
+      setProvider(OPENAI_PROVIDER)
+      setBaseUrl('')
+      setModel('')
+      setCodexReasoningEffort('')
+      return
+    }
     setProvider(p.provider ?? OPENAI_PROVIDER)
     setBaseUrl(p.url)
     setModel(p.model)
-    setCodexCustomModel(false)
+    setCodexReasoningEffort(p.provider === CODEX_PROVIDER ? DEFAULT_CODEX_REASONING_EFFORT : '')
     if (p.codexCommand) setCodexCommand(CODEX_COMMAND)
   }
 
@@ -180,7 +236,7 @@ export function SettingsAIPanel() {
             <div className="text-xs text-muted mt-0.5 truncate">
               {configured
                 ? (savedCodexProvider
-                  ? `${s?.ai_codex_command ?? CODEX_COMMAND} · ${s?.ai_model || '默认模型'}`
+                  ? `${s?.ai_codex_command ?? CODEX_COMMAND} · ${codexModelLabel(s?.ai_model, s?.ai_codex_reasoning_effort)}`
                   : `${s?.ai_model} · ${s?.ai_api_key_masked}`)
                 : (isCodexProvider ? '使用本机 codex exec, 此处无需填写 API Key。' : '配置 API Key 后即可使用 AI 功能。')}
             </div>
@@ -202,7 +258,6 @@ export function SettingsAIPanel() {
               <div className="flex items-center gap-1.5 text-xs font-medium">
                 <span>{p.label}</span>
                 {p.provider === CODEX_PROVIDER && <Terminal className="h-3 w-3" />}
-                {p.partner && <span className="rounded-full border border-orange-400/30 bg-orange-400/10 px-1.5 py-px text-[9px] text-orange-400">赞助</span>}
               </div>
             </button>
           ))}
@@ -211,13 +266,14 @@ export function SettingsAIPanel() {
           <div className="mt-3 rounded-btn border border-border/30 bg-base/30 px-3 py-2 text-[11px] leading-relaxed">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="text-secondary">{selectedPreset.description}</span>
-              {selectedPreset.promo && <span className="text-amber-400">{selectedPreset.promo}</span>}
             </div>
-            <a href={selectedPreset.website} target="_blank" rel="noreferrer"
-              className="mt-1 inline-flex items-center gap-1 text-muted hover:text-accent transition-colors">
-              {selectedPreset.websiteLabel}
-              <ExternalLink className="h-3 w-3" />
-            </a>
+            {selectedPreset.website && (
+              <a href={selectedPreset.website} target="_blank" rel="noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-muted hover:text-accent transition-colors">
+                {selectedPreset.websiteLabel}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
           </div>
         )}
       </Card>
@@ -241,39 +297,23 @@ export function SettingsAIPanel() {
                 </div>
               </Field>
               <Field
-                label="模型（可选）"
-                hint={codexCustomModel
-                  ? '留空则使用 Codex 默认模型'
-                  : CODEX_MODEL_OPTIONS.find(o => o.value === model)?.hint}
+                label="模型 / 推理档"
+                hint={selectedCodexModelOption.hint}
               >
                 <select
                   value={codexModelSelectValue}
                   onChange={e => {
                     const value = e.target.value
-                    if (value === CUSTOM_CODEX_MODEL) {
-                      setCodexCustomModel(true)
-                      if (CODEX_MODEL_OPTIONS.some(o => o.value === model)) setModel('')
-                    } else {
-                      setCodexCustomModel(false)
-                      setModel(value)
-                    }
+                    const option = codexModelOptions.find(item => item.value === value) ?? CODEX_MODEL_OPTIONS[0]
+                    setModel(option.model)
+                    setCodexReasoningEffort(option.effort)
                   }}
                   className={INPUT_CLS}
                 >
-                  {CODEX_MODEL_OPTIONS.map(option => (
-                    <option key={option.label} value={option.value}>{option.label}</option>
+                  {codexModelOptions.map(option => (
+                    <option key={option.value || 'codex-local-default'} value={option.value}>{option.label}</option>
                   ))}
-                  <option value={CUSTOM_CODEX_MODEL}>自定义模型</option>
                 </select>
-                {codexCustomModel && (
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={e => setModel(e.target.value)}
-                    placeholder="例如 gpt-5.5"
-                    className={`${INPUT_CLS} mt-2`}
-                  />
-                )}
               </Field>
             </div>
           ) : (
@@ -283,7 +323,7 @@ export function SettingsAIPanel() {
                   <input type="text" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.zhaji.dev/v1" className={INPUT_CLS} />
                 </Field>
                 <Field label="模型">
-                  <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-5.5" className={INPUT_CLS} />
+                  <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-5.6-sol" className={INPUT_CLS} />
                 </Field>
               </div>
 

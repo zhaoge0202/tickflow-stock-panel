@@ -294,8 +294,9 @@ def _make_job_key(
     mode: str = "position", holding_days: int = 5,
     commission_pct: float | None = None, stamp_tax_pct: float | None = None,
     asset_type: str = "stock",
+    minute_fill: bool = False,
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -322,6 +323,7 @@ async def strategy_stream(
     mode: str = "position",
     holding_days: int = 5,
     asset_type: str = "stock",
+    minute_fill: bool = False,
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -363,6 +365,7 @@ async def strategy_stream(
         mode, holding_days,
         commission_pct, stamp_tax_pct,
         asset_type=asset_type,
+        minute_fill=minute_fill,
     )
 
     _cleanup_stale_jobs()
@@ -382,6 +385,22 @@ async def strategy_stream(
         if guard_violated:
             yield f"event: error\ndata: {json.dumps({'message': BACKTEST_SERVER_GUARD_MESSAGE}, ensure_ascii=False)}\n\n"
             return
+
+        # 分钟K精确回测: Pro+ 门控 + 数据范围检查
+        if minute_fill:
+            capset = request.app.state.capabilities
+            from app.tickflow.capabilities import Cap
+            if not capset.has(Cap.KLINE_MINUTE_BATCH):
+                yield f"event: error\ndata: {json.dumps({'message': '分钟K精确回测需要 Pro+ 权限 (kline.minute.batch)'}, ensure_ascii=False)}\n\n"
+                return
+            # 检查本地分钟K历史是否覆盖回测区间
+            repo = request.app.state.repo
+            earliest_minute = repo.earliest_minute_date() if hasattr(repo, "earliest_minute_date") else None
+            if earliest_minute is not None and start_date < earliest_minute:
+                msg = (f"本地分钟K历史最早到 {earliest_minute}, 无法覆盖回测起始日 {start_date}。"
+                       f"请先用「扩展分钟K历史」功能拉取更多数据, 或缩小回测区间。")
+                yield f"event: error\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
+                return
 
         # 如果是新任务, 启动回测线程
         if is_new and not job.done:
@@ -406,6 +425,7 @@ async def strategy_stream(
                 mode=mode,
                 holding_days=int(holding_days),
                 asset_type=asset_type,
+                minute_fill=minute_fill,
             )
 
             def _run_backtest():
