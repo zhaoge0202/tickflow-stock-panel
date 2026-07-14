@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
       args:
         BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.144.3}
     container_name: TickFlow_Stock_Panel
     ports:
       - "${PORT:-3018}:3018"
@@ -21,4 +22,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
+      # 复用主机 Codex 登录态；后端只读后复制到单次请求的临时 CODEX_HOME。
+      - ${HOME}/.codex:/root/.codex:ro
     restart: unless-stopped
