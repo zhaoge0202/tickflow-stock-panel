@@ -167,6 +167,12 @@ Docker 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}
 CODEX_CLI_VERSION=0.144.3 docker compose up --build
 ```
 
+> **Windows 用户注意**：纯 PowerShell / CMD 下 `HOME` 环境变量通常未设置，会导致挂载路径解析失败、容器读不到 Codex 登录态。请在 `.env` 中显式指定主机 Codex 目录：
+> ```bash
+> # PowerShell 示例(实际路径以本机为准)
+> echo "CODEX_HOME_HOST=C:\Users\你的用户名\.codex" >> .env
+> ```
+
 > Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
 
 镜像已内置 **stock-sdk** 数据源插件(Node 运行时 + 依赖),开箱即用。
