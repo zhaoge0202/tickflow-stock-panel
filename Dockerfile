@@ -52,7 +52,8 @@ RUN if [ "$INCLUDE_STOCKSDK" = "1" ]; then \
 FROM node:20-bookworm-slim AS codex-builder
 ARG USE_CN_MIRROR=1
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG CODEX_CLI_VERSION=0.144.3
+# 版本由顶层 ARG CODEX_CLI_VERSION 提供, 这里仅声明以继承, 不再重复默认值。
+ARG CODEX_CLI_VERSION
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry "$NPM_REGISTRY"; fi \
     && npm install --global --prefix /opt/codex "@openai/codex@${CODEX_CLI_VERSION}" \
     && CODEX_NATIVE="$(find /opt/codex -type f -path '*/vendor/*/bin/codex' -print -quit)" \
