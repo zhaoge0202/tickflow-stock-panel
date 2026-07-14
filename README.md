@@ -161,7 +161,7 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
-Docker 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器，因此主机需先完成 Codex 登录。需要覆盖镜像内版本时可设置构建参数：
+Docker 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器，因此主机需先完成 Codex 登录。若主机 Codex 使用 loopback local-access provider，容器会保留实际端口并自动将主机名映射为 `host.docker.internal`。需要覆盖镜像内版本时可设置构建参数：
 
 ```bash
 CODEX_CLI_VERSION=0.144.3 docker compose up --build

@@ -19,6 +19,8 @@ services:
       # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
+      # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
+      - CODEX_DOCKER_HOST=host.docker.internal
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro

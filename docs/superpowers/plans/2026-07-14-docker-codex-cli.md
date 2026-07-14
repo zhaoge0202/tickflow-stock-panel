@@ -37,6 +37,7 @@
 
 - [x] Pass `CODEX_CLI_VERSION` through Compose.
 - [x] Mount `${HOME}/.codex:/root/.codex:ro`.
+- [x] Set `CODEX_DOCKER_HOST=host.docker.internal` for loopback local-access providers.
 - [x] Run `docker compose config` and confirm the version and read-only mount.
 
 ### Task 4: Document behavior
@@ -55,9 +56,10 @@
 
 - [x] Build the Codex builder stage and verify `codex-cli 0.144.3`.
 - [x] Copy the extracted binary into the current TickFlow runtime image and verify it executes without Node.js.
-- [ ] Recreate the app with the Codex-enabled image and existing data.
-- [ ] Verify `/api/settings` reports Codex configured.
-- [ ] POST `/api/strategies/ai/test` and expect `{"ok":true}` with `OK`.
+- [x] Add red/green tests for opt-in local-access provider mapping and default token isolation.
+- [x] Recreate the app with the Codex-enabled image and existing data.
+- [x] Verify `/api/settings` reports Codex configured.
+- [x] POST `/api/strategies/ai/test` and receive `{"ok":true}` with `OK`.
 - [ ] Re-run provider tests and inspect final Git/GitNexus scope.
 - [ ] Push `codex/docker-codex-cli` and open a Draft PR against `main`.
 
