@@ -11,6 +11,8 @@ services:
     container_name: TickFlow_Stock_Panel
     ports:
       - "${PORT:-3018}:3018"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
