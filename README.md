@@ -161,6 +161,14 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
+Docker 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器，因此主机需先完成 Codex 登录。需要覆盖镜像内版本时可设置构建参数：
+
+```bash
+CODEX_CLI_VERSION=0.144.3 docker compose up --build
+```
+
+> Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
+
 镜像已内置 **stock-sdk** 数据源插件(Node 运行时 + 依赖),开箱即用。
 
 > 📖 Docker 进阶、GitHub Actions 自构建、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
