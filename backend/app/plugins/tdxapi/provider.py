@@ -20,13 +20,60 @@ from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
 
-_DATASETS = ("daily", "minute", "realtime", "trade_ticks")
+_DATASETS = ("daily", "minute", "realtime", "trade_ticks", "financial")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
 _KLINE_BATCH = 8
 _MINUTE_FETCH_ATTEMPTS = 3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+_FINANCIAL_TABLE_FIELDS: dict[str, dict[str, str]] = {
+    "metrics": {
+        "market": "Market",
+        "code": "Code",
+        "float_shares": "LiuTongGuBen",
+        "total_shares": "ZongGuBen",
+        "province_code": "Province",
+        "industry_code": "Industry",
+        "shareholder_count": "GuDongRenShu",
+        "total_assets": "ZongZiChan",
+        "net_assets": "JingZiChan",
+        "main_revenue": "ZhuYingShouRu",
+        "operating_profit": "YingYeLiRun",
+        "total_profit": "LiRunZongHe",
+        "net_profit": "JingLiRun",
+        "operating_cash_flow": "JingYingXianJinLiu",
+        "total_cash_flow": "ZongXianJinLiu",
+    },
+    "income": {
+        "main_revenue": "ZhuYingShouRu",
+        "main_profit": "ZhuYingLiRun",
+        "operating_profit": "YingYeLiRun",
+        "investment_income": "TouZiShouYi",
+        "total_profit": "LiRunZongHe",
+        "profit_after_tax": "ShuiHouLiRun",
+        "net_profit": "JingLiRun",
+        "retained_profit": "WeiFenLiRun",
+    },
+    "balance_sheet": {
+        "float_shares": "LiuTongGuBen",
+        "total_shares": "ZongGuBen",
+        "total_assets": "ZongZiChan",
+        "current_assets": "LiuDongZiChan",
+        "fixed_assets": "GuDingZiChan",
+        "intangible_assets": "WuXingZiChan",
+        "accounts_receivable": "YingShouZhangKuan",
+        "inventory": "CunHuo",
+        "current_liabilities": "LiuDongFuZhai",
+        "long_term_liabilities": "ChangQiFuZhai",
+        "capital_reserve": "ZiBenGongJiJin",
+        "net_assets": "JingZiChan",
+    },
+    "cash_flow": {
+        "operating_cash_flow": "JingYingXianJinLiu",
+        "total_cash_flow": "ZongXianJinLiu",
+    },
+}
 _CORE_INDEXES = {
     "000001.SH": "上证指数",
     "399001.SZ": "深证成指",
@@ -263,6 +310,43 @@ class TDXAPIProvider:
             return rows[-limit:]
         return rows
 
+    # ---- financial ----
+    def get_financials(
+        self,
+        table: str,
+        symbols: list[str],
+        latest_only: bool = True,  # noqa: ARG002
+    ) -> pl.DataFrame:
+        """拉取通达信财务/基本面快照。
+
+        TDX 该接口是单票当前快照，不是完整历史财报。这里按项目的四张
+        financial 表拆分字段，便于绕过 TickFlow Expert 门槛做基础分析。
+        """
+        table = str(table or "").strip().lower()
+        if table not in _FINANCIAL_TABLE_FIELDS:
+            raise ValueError(f"tdx-api 不支持财务表: {table}")
+        if not symbols:
+            return pl.DataFrame()
+
+        rows: list[dict] = []
+        for symbol in symbols:
+            app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+            try:
+                data = self._request(
+                    "GET",
+                    "/api/finance",
+                    params={"code": _to_tdx_code(symbol)},
+                    timeout=max(self.timeout, 60.0),
+                )
+            except Exception as e:
+                logger.warning("tdx-api financial 拉取失败(%s/%s): %s", table, app_symbol, e)
+                continue
+            row = _financial_row(table, app_symbol, data or {})
+            if row:
+                rows.append(row)
+
+        return pl.DataFrame(rows) if rows else pl.DataFrame()
+
     # ---- instruments ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
         asset_type = str(asset_type or "stock").lower()
@@ -449,6 +533,9 @@ class TDXAPIProvider:
                 "columns": list(rows[0].keys()) if rows else [],
                 "preview": rows[:5],
             }
+        if dataset == "financial":
+            df = self.get_financials("metrics", symbols[:1], latest_only=True)
+            return _preview(self.name, "financial", df)
         raise ValueError(f"tdx-api 不支持数据集: {dataset}")
 
     def _fetch_kline_rows(self, symbol: str, kline_type: str) -> list[dict]:
@@ -775,6 +862,28 @@ def availability() -> tuple[bool, str]:
     return True, f"ok ({base_url})"
 
 
+def _financial_row(table: str, symbol: str, item: dict) -> dict | None:
+    if not isinstance(item, dict) or not item:
+        return None
+    row: dict = {
+        "symbol": symbol,
+        "source": "tdxapi",
+        "table": table,
+        "report_date": _yyyymmdd_date(item.get("UpdatedDate")),
+        "updated_date": _yyyymmdd_date(item.get("UpdatedDate")),
+        "ipo_date": _yyyymmdd_date(item.get("IPODate")),
+    }
+    for out_name, raw_name in _FINANCIAL_TABLE_FIELDS[table].items():
+        value = item.get(raw_name)
+        if out_name in {"market", "province_code", "industry_code"}:
+            row[out_name] = _int_or_none(value)
+        elif out_name == "code":
+            row[out_name] = str(value or "").strip()
+        else:
+            row[out_name] = _float_or_none(value)
+    return row
+
+
 def _base_url() -> str:
     return (os.getenv("TDX_API_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
@@ -946,6 +1055,19 @@ def _parse_tdx_time(value) -> datetime | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(_CN_TZ).replace(tzinfo=None)
     return dt
+
+
+def _yyyymmdd_date(value) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("-", "")
+    if len(normalized) != 8 or not normalized.isdigit():
+        return None
+    try:
+        return date.fromisoformat(f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}")
+    except ValueError:
+        return None
 
 
 def _in_date_range(value, start_time: datetime | None, end_time: datetime | None) -> bool:

@@ -568,6 +568,68 @@ def test_get_instruments_from_codes(monkeypatch):
     assert TDXAPIProvider().get_instruments("etf") == []
 
 
+@pytest.mark.parametrize(
+    ("table", "expected_field", "expected_value"),
+    [
+        ("metrics", "net_profit", 65000000000.0),
+        ("income", "main_revenue", 120000000000.0),
+        ("balance_sheet", "inventory", 40000000000.0),
+        ("cash_flow", "operating_cash_flow", 70000000000.0),
+    ],
+)
+def test_get_financials_maps_tdx_finance_snapshot(monkeypatch, table, expected_field, expected_value):
+    calls = []
+
+    def fake(self, method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {
+            "Market": 1,
+            "Code": "600519",
+            "LiuTongGuBen": 1256197800.0,
+            "Province": 24,
+            "Industry": 36,
+            "UpdatedDate": 20260331,
+            "IPODate": 20010827,
+            "ZongGuBen": 1256197800.0,
+            "ZongZiChan": 300000000000.0,
+            "LiuDongZiChan": 200000000000.0,
+            "GuDingZiChan": 10000000000.0,
+            "WuXingZiChan": 1000000000.0,
+            "GuDongRenShu": 180000.0,
+            "LiuDongFuZhai": 50000000000.0,
+            "ChangQiFuZhai": 10000000000.0,
+            "ZiBenGongJiJin": 1000000000.0,
+            "JingZiChan": 200000000000.0,
+            "ZhuYingShouRu": 120000000000.0,
+            "ZhuYingLiRun": 90000000000.0,
+            "YingShouZhangKuan": 1000000000.0,
+            "YingYeLiRun": 80000000000.0,
+            "TouZiShouYi": 100000000.0,
+            "JingYingXianJinLiu": 70000000000.0,
+            "ZongXianJinLiu": 60000000000.0,
+            "CunHuo": 40000000000.0,
+            "LiRunZongHe": 85000000000.0,
+            "ShuiHouLiRun": 65000000000.0,
+            "JingLiRun": 65000000000.0,
+            "WeiFenLiRun": 100000000000.0,
+        }
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+
+    df = TDXAPIProvider().get_financials(table, ["600519.SH"])
+
+    assert calls[0][0] == "GET"
+    assert calls[0][1] == "/api/finance"
+    assert calls[0][2]["params"] == {"code": "sh600519"}
+    assert df.height == 1
+    assert df["symbol"][0] == "600519.SH"
+    assert df["source"][0] == "tdxapi"
+    assert df["table"][0] == table
+    assert df["report_date"][0] == dt.date(2026, 3, 31)
+    assert df["ipo_date"][0] == dt.date(2001, 8, 27)
+    assert df[expected_field][0] == expected_value
+
+
 def test_symbol_helpers():
     assert tp._to_tdx_code("002491.SZ") == "sz002491"
     assert tp._to_tdx_code("000001.SH") == "sh000001"
@@ -643,6 +705,7 @@ def test_plugin_discovered_in_loader():
     assert "minute" in plugins["tdxapi"]["datasets"]
     assert "realtime" in plugins["tdxapi"]["datasets"]
     assert "trade_ticks" in plugins["tdxapi"]["datasets"]
+    assert "financial" in plugins["tdxapi"]["datasets"]
     assert cs.is_builtin("tdxapi")
 
 
@@ -660,7 +723,7 @@ def test_plugin_registered_when_available(monkeypatch):
     assert cs.provider_has_dataset("tdxapi", "minute")
     assert cs.provider_has_dataset("tdxapi", "realtime")
     assert cs.provider_has_dataset("tdxapi", "trade_ticks")
-    assert not cs.provider_has_dataset("tdxapi", "financial")
+    assert cs.provider_has_dataset("tdxapi", "financial")
 
 
 def _load_tdxapi_entry(entry_ref: str):
