@@ -431,6 +431,9 @@ def get_preferences() -> dict:
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
+        "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
+        "minute_intraday_refresh_interval": preferences.get_minute_intraday_refresh_interval(),
+        "monitor_ext_fields": preferences.get_monitor_ext_fields(),
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
         "screener_auto_run": preferences.get_screener_auto_run(),
@@ -755,6 +758,9 @@ class RealtimeMonitorConfigIn(BaseModel):
     strategy_monitor_ids: list[str] | None = None
     sidebar_index_symbols: list[str] | None = None
     screener_auto_run: bool | None = None
+    minute_intraday_refresh: bool | None = None
+    minute_intraday_refresh_interval: int | None = None
+    monitor_ext_fields: dict | None = None
 
 
 @router.put("/preferences/realtime-monitor")
@@ -1310,7 +1316,12 @@ def run_limit_ladder_fix(request: Request) -> dict:
         raise HTTPException(status_code=503, detail="depth 服务未初始化")
     if not depth_svc.is_available():
         raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
-    return depth_svc.run_once()
+    result = depth_svc.run_once()
+    # sealed 数据变了, 清看板总览缓存, 否则看板在 TTL 窗口内仍返回旧的 limit_up/fake 等
+    if result.get("ok"):
+        from app.api.overview import invalidate_overview_cache
+        invalidate_overview_cache()
+    return result
 
 
 class DepthPollingIntervalIn(BaseModel):

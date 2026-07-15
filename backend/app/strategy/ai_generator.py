@@ -116,18 +116,35 @@ class AIStrategyGenerator:
             return content.split("```", 1)[1].split("```", 1)[0].strip()
         return content.strip()
 
-    # import 白名单: 策略文件只允许 polars (见 strategy-guide.md「只 import polars」)。
+    # import 白名单: 策略文件只允许 polars + datetime (纯日期运算, 无文件/网络/进程能力)。
     # 白名单而非黑名单 — 黑名单挡不住 ctypes/importlib/builtins/pickle 等未列出的危险模块。
-    _ALLOWED_IMPORT_MODULES = frozenset({"polars", "__future__"})
+    _ALLOWED_IMPORT_MODULES = frozenset({"polars", "__future__", "datetime"})
 
     @classmethod
     def _validate_safety(cls, code: str) -> None:
-        """AST 级安全检查: import 白名单 + 危险内建调用拦截。"""
+        """AST 级安全检查: import 白名单 + 危险内建调用拦截 + dunder 遍历拦截。
+
+        注意: AST 名单不是真正的沙箱, 只能拦截常见攻击模式。真正的隔离需要
+        在受限子进程里执行策略 (后续 P0)。此处拦截已知的逃逸技巧:
+        - __globals__ / __builtins__ / __class__ / __subclasses__ / __mro__ 等属性访问
+        - ["__import__"] / ["__builtins__"] 等字符串下标访问
+        """
         tree = ast.parse(code)
 
         forbidden_calls = {"open", "exec", "eval", "compile", "__import__",
                            "globals", "locals", "vars", "dir", "getattr",
-                           "setattr", "delattr", "type", "input"}
+                           "setattr", "delattr", "type", "input", "breakpoint"}
+
+        # dunder 属性名: 访问这些属性可逃逸出策略沙箱拿到 os/subprocess 等
+        forbidden_dunder_attrs = {
+            "__globals__", "__builtins__", "__class__", "__subclasses__",
+            "__mro__", "__bases__", "__base__", "__dict__", "__code__",
+            "__import__", "__loader__", "__spec__", "__wrapped__",
+        }
+        # 字符串下标访问的危险名: x["__builtins__"] / x["__import__"]
+        forbidden_subscript_strs = {
+            "__builtins__", "__import__", "__globals__",
+        }
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -141,17 +158,37 @@ class AIStrategyGenerator:
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
                     raise ValueError(f"禁止调用 {node.func.id}()")
+            # 拦截 dunder 属性访问: x.__globals__ / ().__class__ 等
+            if isinstance(node, ast.Attribute) and node.attr in forbidden_dunder_attrs:
+                raise ValueError(f"禁止访问属性 {node.attr} (策略不允许 dunder 遍历逃逸)")
+            # 拦截字符串下标访问危险名: x["__builtins__"]
+            if isinstance(node, ast.Subscript):
+                sl = node.slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str) \
+                        and sl.value in forbidden_subscript_strs:
+                    raise ValueError(f"禁止下标访问 {sl.value} (策略不允许 dunder 遍历逃逸)")
 
     @staticmethod
     def _extract_meta(code: str) -> dict:
-        """从代码字符串中提取 META 字典（不执行代码, 仅接受字面量）"""
+        """从代码字符串中提取 META 字典（不执行代码, 仅接受字面量）
+
+        兼容两种声明: META = {...} (Assign) 和 META: dict = {...} (AnnAssign)。
+        与 api.strategy._find_meta_dict 保持同一套匹配逻辑。
+        """
         tree = ast.parse(code)
         for node in ast.walk(tree):
+            value = None
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id == "META":
-                        try:
-                            return ast.literal_eval(node.value)
-                        except (ValueError, SyntaxError) as e:
-                            raise ValueError(f"META 必须是纯字面量字典: {e}") from e
+                        value = node.value
+                        break
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                    and node.target.id == "META":
+                value = node.value
+            if value is not None:
+                try:
+                    return ast.literal_eval(value)
+                except (ValueError, SyntaxError) as e:
+                    raise ValueError(f"META 必须是纯字面量字典: {e}") from e
         return {}
