@@ -499,7 +499,7 @@ export function Screener() {
       inList ? api.watchlistRemove(symbol) : api.watchlistAdd(symbol),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
     },
   })
 
