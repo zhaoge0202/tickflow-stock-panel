@@ -181,12 +181,12 @@ class TDXAPIProvider:
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     def _fetch_minute_rows_with_retry(self, symbol: str, kline_type: str) -> list[dict]:
-        """TDX 节点会偶发返回业务超时，换节点重试可恢复。"""
+        """TDX 节点会偶发返回业务超时, 换节点重试可恢复。"""
         last_error: Exception | None = None
         for attempt in range(1, _MINUTE_FETCH_ATTEMPTS + 1):
             try:
                 return self._fetch_kline_rows(symbol, kline_type)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 last_error = e
                 logger.warning(
                     "tdx-api minute 请求失败(%s), 尝试 %d/%d: %s",
@@ -196,7 +196,7 @@ class TDXAPIProvider:
                     e,
                 )
         raise RuntimeError(
-            f"TDX 分钟K请求失败，重试 {_MINUTE_FETCH_ATTEMPTS} 次仍未恢复: {last_error}"
+            f"TDX 分钟K请求失败, 重试 {_MINUTE_FETCH_ATTEMPTS} 次仍未恢复: {last_error}"
         ) from last_error
 
     # ---- realtime ----
@@ -315,12 +315,12 @@ class TDXAPIProvider:
         self,
         table: str,
         symbols: list[str],
-        latest_only: bool = True,  # noqa: ARG002
+        latest_only: bool = True,
     ) -> pl.DataFrame:
         """拉取通达信财务/基本面快照。
 
-        TDX 该接口是单票当前快照，不是完整历史财报。这里按项目的四张
-        financial 表拆分字段，便于绕过 TickFlow Expert 门槛做基础分析。
+        TDX 该接口是单票当前快照, 不是完整历史财报。这里按项目的四张
+        financial 表拆分字段, 便于绕过 TickFlow Expert 门槛做基础分析。
         """
         table = str(table or "").strip().lower()
         if table not in _FINANCIAL_TABLE_FIELDS:
