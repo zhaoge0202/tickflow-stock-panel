@@ -738,10 +738,21 @@ def fetch_intraday_monitor_batch(
 
 
 def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
-    """从 TickFlow 实时拉取单股单日分钟 K（不写入本地）。"""
+    """实时拉取单股单日分钟 K(不写入本地)。优先自定义分钟源, 回退 TickFlow。"""
     from datetime import datetime
     start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
     end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+
+    # 自定义数据源分流: 与 sync_minute_batch 一致, 配了自定义分钟源时走 custom provider,
+    # 避免无 TickFlow Pro+ 权限的用户分时图首次打开(本地无数据)时补拉失败返回空。
+    provider_name = preferences.get_minute_data_provider()
+    if provider_name != "tickflow":
+        from app.data_providers import custom as custom_sources
+        if custom_sources.provider_has_dataset(provider_name, "minute"):
+            provider = custom_sources.get_provider(provider_name)
+            return provider.get_minute([symbol], start_time=start_time, end_time=end_time)
+        # 未配置 minute dataset → 回退 TickFlow
+
     tf = get_client()
     try:
         raw = tf.klines.batch(
