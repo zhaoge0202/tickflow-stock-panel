@@ -8,9 +8,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services.financial_sync import get_financial_df
-from app.services.financial_analyzer import analyze_financials_stream
 from app.services import ai_reports
+from app.services.financial_analyzer import analyze_financials_stream
+from app.services.financial_sync import _effective_custom_financial_provider, get_financial_df
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
@@ -35,10 +35,10 @@ def _require_financial(capset) -> None:
 
 @router.get("/status")
 def financial_status(request: Request):
-    """返回各财务表的同步状态。无需 FINANCIAL 权限（前端根据 available 决定是否展示）。"""
+    """返回各财务表的同步状态。无需 FINANCIAL 权限(前端根据 available 决定是否展示)。"""
     capset = request.app.state.capabilities
     if not _financial_allowed(capset):
-        return {"available": False, "tables": {}}
+        return {"available": False, "source": None, "tables": {}, "last_sync": {}, "syncing": False}
 
     data_dir = request.app.state.repo.store.data_dir
     tables = {}
@@ -62,6 +62,7 @@ def financial_status(request: Request):
 
     return {
         "available": True,
+        "source": _effective_custom_financial_provider() or "tickflow",
         "tables": tables,
         "last_sync": last_sync,
         # 服务端是否正在同步(手动触发)——前端据此显示"同步中"并防重复点击,

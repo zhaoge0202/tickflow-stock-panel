@@ -58,6 +58,7 @@ export interface CapabilitiesResponse {
 // ===== Financials =====
 export interface FinancialStatus {
   available: boolean
+  source?: string | null
   tables: Record<string, { rows: number; symbols: number }>
   last_sync: Record<string, string>
   /** 服务端是否正在同步(手动触发)——驱动"同步中"UI 并防重复点击 */

@@ -8,9 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
@@ -42,14 +41,36 @@ def _get_symbols(data_dir: Path) -> list[str]:
         return []
 
 
+def _effective_custom_financial_provider() -> str | None:
+    """返回当前可用的 custom 财务源。
+
+    老用户可能在 tdxapi 支持 financial 之前已经切过行情源, 此时
+    financial_data_provider 仍停在 tickflow。若当前主行情源已支持
+    financial, 自动用它作为财务源, 避免页面继续误判为 Expert 门槛。
+    """
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    candidates = [
+        preferences.get_financial_provider(),
+        preferences.get_daily_data_provider(),
+        preferences.get_realtime_data_provider(),
+        preferences.get_minute_data_provider(),
+    ]
+    seen: set[str] = set()
+    for provider in candidates:
+        provider = str(provider or "").lower()
+        if not provider or provider == "tickflow" or provider in seen:
+            continue
+        seen.add(provider)
+        if custom_sources.provider_has_dataset(provider, "financial"):
+            return provider
+    return None
+
+
 def _financial_is_custom() -> bool:
     """当前财务数据源是否走 custom (用于绕过 TickFlow Expert 套餐门槛)。"""
-    from app.services import preferences
-    provider = preferences.get_financial_provider()
-    if provider == "tickflow":
-        return False
-    from app.data_providers import custom as custom_sources
-    return custom_sources.provider_has_dataset(provider, "financial")
+    return _effective_custom_financial_provider() is not None
 
 
 def _sync_table(
@@ -60,7 +81,8 @@ def _sync_table(
     latest_only: bool = True,
 ) -> int:
     """同步单张财务表。返回写入的行数。"""
-    is_custom = _financial_is_custom()
+    custom_provider_name = _effective_custom_financial_provider()
+    is_custom = custom_provider_name is not None
     if not is_custom and not capset.has(Cap.FINANCIAL):
         logger.info("sync_%s skipped: no FINANCIAL capability", table)
         return 0
@@ -70,9 +92,8 @@ def _sync_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
-        provider = custom_sources.get_provider(preferences.get_financial_provider())
+        provider = custom_sources.get_provider(custom_provider_name)
         df = provider.get_financials(table, symbols, latest_only=latest_only)
         if df.is_empty() or "symbol" not in df.columns:
             return 0
@@ -160,7 +181,7 @@ def sync_cash_flow(data_dir: Path, capset: CapabilitySet) -> int:
 
 def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     """同步所有财务表。返回 {table: rows}。"""
-    if not capset.has(Cap.FINANCIAL):
+    if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
         logger.info("sync_all financials skipped: no FINANCIAL capability")
         return {}
 
@@ -188,7 +209,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_balance_sheet": f"{d}/financials/balance_sheet/*.parquet",
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
     }
-    for name, path in views.items():
+    for name, _path in views.items():
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
         if not out.exists():
             continue
@@ -226,7 +247,7 @@ class FinancialScheduler:
         self._is_syncing = False
 
     def start(self, data_dir: Path, capset: CapabilitySet, *, auto_schedule: bool = False) -> None:
-        """初始化调度器，并按需启动周期同步后台任务。
+        """初始化调度器, 并按需启动周期同步后台任务。
 
         auto_schedule=False (默认): 仅初始化 (设置数据目录/能力 + 恢复 last_sync),
             供 /api/financials/sync/* 手动同步使用, 不启动自动调度。
@@ -238,7 +259,7 @@ class FinancialScheduler:
         # 即便 app.state.capabilities 已更新, 调度器仍报 "no FINANCIAL capability"。
         self._data_dir = data_dir
         self._capset = capset
-        if not capset.has(Cap.FINANCIAL):
+        if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
             logger.info("FinancialScheduler skipped: no FINANCIAL capability")
             return
         # 从持久化恢复上次同步时间: 重启后前端仍能显示真实最后同步时间,而非"尚未同步"
@@ -252,14 +273,14 @@ class FinancialScheduler:
                     continue
                 parquet = data_dir / "financials" / table / "part.parquet"
                 if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
                     restored[table] = mtime
                     preferences.set_financial_sync_time(table, mtime)
                     logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
             self._last_sync = restored
             if self._last_sync:
                 logger.info("FinancialScheduler restored last_sync: %s", list(self._last_sync.keys()))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("restore financial_sync_times failed: %s", e)
 
         if not auto_schedule:
@@ -277,12 +298,12 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         self._last_sync[table] = ts
         try:
             from app.services import preferences
             preferences.set_financial_sync_time(table, ts)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("persist financial_sync_time(%s) failed: %s", e)
 
     def update_capabilities(self, capset: CapabilitySet) -> None:
@@ -409,7 +430,7 @@ class FinancialScheduler:
         def _bg() -> None:
             try:
                 self._run_body(table)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception("background financial sync failed: %s", e)
             finally:
                 with self._lock:

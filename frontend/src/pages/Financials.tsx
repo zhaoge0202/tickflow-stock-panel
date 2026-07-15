@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { RefreshCw, Lock, Loader2, X, Search, FileText, Database, Clock, CheckCircle2, Hourglass, Lightbulb, ExternalLink } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { useCapabilities } from '@/lib/useSharedQueries'
 import { useFinancialStatus, useFinancialSync } from '@/lib/useFinancials'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockFinancialDetail } from '@/components/financials/StockFinancialDetail'
@@ -27,9 +26,9 @@ const TABLE_ICON: Record<string, typeof FileText> = {
 }
 
 export function Financials() {
-  const { data: caps } = useCapabilities()
-  const hasFinancial = caps?.capabilities?.['financial'] != null
   const { data: status, isLoading } = useFinancialStatus()
+  const hasFinancial = status?.available === true
+  const sourceLabel = status?.source === 'tdxapi' ? 'tdx-api（通达信代理池）' : (status?.source ?? 'TickFlow')
   const syncMut = useFinancialSync()
   // 同步进行中 = 服务端真值(status.syncing)或本地乐观态(请求已发出待确认)。
   // 乐观窗口:点击后到 invalidate 触发的 refetch 返回之间,status.syncing 暂为 false,
@@ -57,6 +56,20 @@ export function Financials() {
     rememberStock(symbol, name)
   }
 
+  if (isLoading && !status) {
+    return (
+      <>
+        <PageHeader title="财务分析" subtitle="利润表 / 资负表 / 现金流 / 关键指标 / AI分析" />
+        <div className="px-8 py-10">
+          <div className="mx-auto flex max-w-md items-center justify-center gap-2 rounded-card border border-border bg-surface p-8 text-sm text-secondary">
+            <Loader2 className="h-4 w-4 animate-spin text-accent" />
+            检测财务数据源…
+          </div>
+        </div>
+      </>
+    )
+  }
+
   if (!hasFinancial) {
     return (
       <>
@@ -68,16 +81,15 @@ export function Financials() {
             </div>
             <h3 className="mt-4 text-base font-semibold text-foreground">需要 Expert 套餐</h3>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
-              财务数据接口仅 Expert 套餐可用。升级后此页自动显示财务数据面板。
+              当前财务源不可用。TickFlow 财务接口需要 Expert 套餐,也可以切换到支持财务的数据源。
             </p>
-            {/* 当前财务数据源(TickFlow)需付费,后续将接入免费数据源;期间欢迎在 issues 推荐免费源 */}
             <div className="mt-5 rounded-btn border border-accent/25 bg-accent/[0.05] px-3.5 py-3 text-left">
               <div className="flex items-center gap-1.5 text-xs font-medium text-accent">
                 <Lightbulb className="h-3.5 w-3.5 shrink-0" />
                 关于数据源
               </div>
               <p className="mt-1.5 text-[11px] leading-relaxed text-secondary">
-                当前财务数据源需付费,后续会接入免费数据源。如你常用某个免费财务数据源,欢迎在 Issues 中多多推荐哈 ~
+                设置页选择的数据源只会启用它声明支持的数据集。若已启用 tdx-api,请重新切换一次或重新加载数据源。
               </p>
               <a
                 href="https://github.com/shy3130/tickflow-stock-panel/issues"
@@ -157,7 +169,7 @@ export function Financials() {
     <>
       <PageHeader
         title="财务分析"
-        subtitle="利润表 / 资负表 / 现金流 / 关键指标 / AI分析 · Expert"
+        subtitle={`利润表 / 资负表 / 现金流 / 关键指标 / AI分析 · ${sourceLabel}`}
         right={
           <div className="flex items-center gap-2">
             <LastStockChip stock={lastStock} onSelect={pick} />
@@ -190,7 +202,7 @@ export function Financials() {
         {syncing && (
           <div className="flex items-center gap-2 rounded-card border border-accent/30 bg-accent/[0.06] px-3 py-2 text-xs text-accent">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-            正在从 TickFlow 拉取财务数据，请稍候…
+            正在从 {sourceLabel} 拉取财务数据，请稍候…
           </div>
         )}
 
