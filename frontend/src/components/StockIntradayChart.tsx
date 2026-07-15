@@ -43,8 +43,10 @@ export function StockIntradayChart({
     enabled: !!symbol && !!date,
     staleTime: 0,
     retry: false,
-    // 外部可覆盖轮询间隔; 未传时今天默认 15s 刷新, 历史日不轮询。
-    refetchInterval: refetchIntervalMs ?? (isToday ? 15_000 : false),
+    // 仅今天且外部显式传入正数间隔时轮询；undefined/0 表示关闭刷新。
+    refetchInterval: isToday && refetchIntervalMs && refetchIntervalMs > 0
+      ? refetchIntervalMs
+      : false,
     refetchIntervalInBackground: true,
   })
 
