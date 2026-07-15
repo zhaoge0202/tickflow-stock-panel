@@ -3,9 +3,10 @@ import { PageHeader } from '@/components/PageHeader'
 import { FactorBacktest } from './backtest/FactorBacktest'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
 import { StrategyOptimizer } from './backtest/StrategyOptimizer'
-import { BarChart3, FlaskConical, SlidersHorizontal } from 'lucide-react'
+import { StrategyWalkForward } from './backtest/StrategyWalkForward'
+import { BarChart3, FlaskConical, SlidersHorizontal, Waypoints } from 'lucide-react'
 
-type Tab = 'factor' | 'strategy' | 'optimizer'
+type Tab = 'factor' | 'strategy' | 'optimizer' | 'walkforward'
 
 const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
   factor: {
@@ -23,12 +24,18 @@ const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
     subtitle: '网格搜索最优参数组合',
     hint: '并行回测所有参数组合，按夏普/索提诺等目标排序，找到最优参数。',
   },
+  walkforward: {
+    title: 'Walk-forward',
+    subtitle: '滚动窗口样本外验证',
+    hint: '每折训练区间优化、测试区间验证，看样本外是否退化以识别过拟合。',
+  },
 }
 
 const TAB_ICONS: Record<Tab, typeof BarChart3> = {
   factor: BarChart3,
   strategy: FlaskConical,
   optimizer: SlidersHorizontal,
+  walkforward: Waypoints,
 }
 
 export function Backtest() {
@@ -36,7 +43,7 @@ export function Backtest() {
 
   const modeSwitch = (
     <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-      {(['factor', 'strategy', 'optimizer'] as const).map(tab => {
+      {(['factor', 'strategy', 'optimizer', 'walkforward'] as const).map(tab => {
         const Icon = TAB_ICONS[tab]
         const active = activeTab === tab
         return (
@@ -77,6 +84,7 @@ export function Backtest() {
         {activeTab === 'factor' && <FactorBacktest />}
         {activeTab === 'strategy' && <StrategyBacktest />}
         {activeTab === 'optimizer' && <StrategyOptimizer />}
+        {activeTab === 'walkforward' && <StrategyWalkForward />}
       </main>
     </div>
   )

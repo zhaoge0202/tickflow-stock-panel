@@ -12,6 +12,8 @@ interface Props {
   prevClose?: number
   className?: string
   onPriceHover?: (price: number | null) => void
+  /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
+  refetchIntervalMs?: number
 }
 
 function todayLocalISO() {
@@ -29,6 +31,7 @@ export function StockIntradayChart({
   prevClose,
   className,
   onPriceHover,
+  refetchIntervalMs,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -40,7 +43,8 @@ export function StockIntradayChart({
     enabled: !!symbol && !!date,
     staleTime: 0,
     retry: false,
-    refetchInterval: isToday ? 15_000 : false,
+    // 外部可覆盖轮询间隔; 未传时今天默认 15s 刷新, 历史日不轮询。
+    refetchInterval: refetchIntervalMs ?? (isToday ? 15_000 : false),
     refetchIntervalInBackground: true,
   })
 

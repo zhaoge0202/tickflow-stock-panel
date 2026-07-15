@@ -136,7 +136,6 @@ class StrategyCodeValidateRequest(BaseModel):
     strategy_id: str = ""
     name: str = ""
     description: str = ""
-    strict: bool = True
 
 
 class StrategyCodeSaveRequest(BaseModel):
@@ -146,7 +145,6 @@ class StrategyCodeSaveRequest(BaseModel):
     mode: Literal["create", "update"] = "create"
     name: str = ""
     description: str = ""
-    strict: bool = True
 
 
 class MonitorStartRequest(BaseModel):
@@ -313,14 +311,24 @@ def _py_string(value: str) -> str:
 
 
 def _find_meta_dict(code: str) -> ast.Dict:
+    # 兼容两种 LLM 常见写法:
+    #   META = {...}        → ast.Assign
+    #   META: dict = {...}  → ast.AnnAssign (类型注解, 合法但旧逻辑漏匹配)
     tree = ast.parse(code)
     for node in ast.walk(tree):
+        value = None
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "META":
-                    if not isinstance(node.value, ast.Dict):
-                        raise ValueError("META 必须是字面量字典")
-                    return node.value
+                    value = node.value
+                    break
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == "META":
+            value = node.value
+        if value is not None:
+            if not isinstance(value, ast.Dict):
+                raise ValueError("META 必须是字面量字典")
+            return value
     raise ValueError("找不到 META 字典")
 
 
@@ -432,8 +440,8 @@ def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRe
                 req.name.strip() or None,
                 req.description.strip() or None,
             )
-    if req.strict:
-        AIStrategyGenerator._validate_safety(code)
+    # 安全校验始终执行 (此前 strict 字段可被客户端设 false 绕过, 已移除)
+    AIStrategyGenerator._validate_safety(code)
     meta = AIStrategyGenerator._extract_meta(code)
     return {"code": code, "meta": meta}
 
