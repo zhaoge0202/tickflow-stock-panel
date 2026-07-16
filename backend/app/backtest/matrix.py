@@ -25,7 +25,20 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
-from numba import njit, prange
+
+try:
+    from numba import njit, prange
+except ImportError:
+    def njit(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    prange = range
 
 _MATRIX_CACHE_VERSION = 1
 _DIRECT_MATRIX_LOADER_VERSION = 3

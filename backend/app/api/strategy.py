@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.strategy import config as strategy_config
-from app.strategy.ai_generator import AIStrategyGenerator
+from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
@@ -372,25 +372,10 @@ def _py_string(value: str) -> str:
 
 
 def _find_meta_dict(code: str) -> ast.Dict:
-    # 兼容两种 LLM 常见写法:
-    #   META = {...}        → ast.Assign
-    #   META: dict = {...}  → ast.AnnAssign (类型注解, 合法但旧逻辑漏匹配)
-    tree = ast.parse(code)
-    for node in ast.walk(tree):
-        value = None
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "META":
-                    value = node.value
-                    break
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
-                and node.target.id == "META":
-            value = node.value
-        if value is not None:
-            if not isinstance(value, ast.Dict):
-                raise ValueError("META 必须是字面量字典")
-            return value
-    raise ValueError("找不到 META 字典")
+    found = find_meta_assignment(code)
+    if found is None:
+        raise ValueError("找不到 META 字典")
+    return found[1]
 
 
 def _set_meta_string_field(block: str, field: str, value: str) -> str:
@@ -437,7 +422,22 @@ def _normalize_strategy_meta(code: str, strategy_id: str,
                              name: str | None = None,
                              description: str | None = None) -> str:
     """Force persisted strategy identity to match the caller-owned identity."""
-    meta_node = _find_meta_dict(code)
+    found = find_meta_assignment(code)
+    if found is None:
+        raise ValueError("找不到 META 字典")
+    target, meta_node = found
+    if target.id != "META":
+        lines = code.splitlines(keepends=True)
+        index = target.lineno - 1
+        raw_line = lines[index].encode("utf-8")
+        lines[index] = (
+            raw_line[:target.col_offset]
+            + b"META"
+            + raw_line[target.end_col_offset:]
+        ).decode("utf-8")
+        code = "".join(lines)
+        meta_node = _find_meta_dict(code)
+
     lines = code.splitlines(keepends=True)
     start = meta_node.lineno - 1
     end = meta_node.end_lineno or meta_node.lineno
@@ -695,6 +695,8 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
                 chunks.append(chunk)
                 yield json.dumps({"type": "delta", "content": chunk}, ensure_ascii=False) + "\n"
             result = gen.validate_code("".join(chunks))
+            if gen.needs_structural_repair(result):
+                result = await gen.repair_code(result["code"], result["error"])
             if req.step == 1:
                 result = _normalize_build_result(result, req.strategy_id, req.name, req.description)
             elif req.strategy_id:
