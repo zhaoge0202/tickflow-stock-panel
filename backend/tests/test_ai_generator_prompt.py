@@ -27,3 +27,20 @@ def test_build_step1_keeps_user_prompt_compact():
     assert "模式 A 框架" not in prompt
     assert "策略ID（必须使用此ID）：ai_test" in prompt
     assert len(prompt) < 1000
+
+
+def test_matrix_backend_prompt_and_imports_are_supported():
+    prompt = build_step1(
+        "矩阵策略",
+        "矩阵原生示例",
+        "long",
+        "收盘价站上 MA20",
+        "ai_matrix",
+        "matrix_native",
+    )
+    assert "执行后端：matrix_native" in prompt
+
+    AIStrategyGenerator._validate_safety(
+        "import numpy as np\n"
+        "from app.backtest.matrix import MarketDataMatrix, SignalMatrix, make_signal_matrix\n"
+    )
