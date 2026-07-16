@@ -193,23 +193,35 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const [checkedAi, setCheckedAi] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
+  const resetDraftState = useCallback(() => {
+    setStep(1); setTab('ai'); setName(''); setDescription(''); setDirection('long')
+    setExecutionBackend('polars_expr'); setRules(''); setCode(''); setInstruction('')
+    setPreviewTab('params'); setStrategyId(''); setSource('ai'); setValidated(false); setError('')
+  }, [])
+
   // 打开时恢复草稿
   useEffect(() => {
     if (!open) { setLoaded(false); return }
     const d = draftStore.get(null)
     if (d) {
+      const restoredSource = d.source ?? (d.strategyId?.startsWith('custom_') ? 'custom' : 'ai')
+      const restoredId = mode === 'create' && d.strategyId
+        ? slugId(restoredSource)
+        : (d.strategyId ?? '')
       setStep(d.step ?? 1); setName(d.name ?? ''); setDescription(d.description ?? '')
       setDirection(d.direction ?? 'long')
       setExecutionBackend(
         (d as any).executionBackend
         ?? (String(d.code ?? '').includes('matrix_native') ? 'matrix_native' : 'polars_expr'),
       )
-      setRules(d.rules ?? ''); setCode(d.code ?? ''); setStrategyId(d.strategyId ?? '')
-      setSource((d as any).source ?? (d.strategyId?.startsWith('custom_') ? 'custom' : 'ai'))
-      if (mode === 'modify') setTab('custom')
+      setRules(d.rules ?? ''); setCode(d.code ?? ''); setStrategyId(restoredId)
+      setSource(restoredSource)
+      setTab(mode === 'modify' || restoredSource === 'custom' ? 'custom' : 'ai')
+    } else {
+      resetDraftState()
     }
     setLoaded(true)
-  }, [open])
+  }, [open, mode, draftStore, resetDraftState])
 
   // 打开时检查 AI 状态
   useEffect(() => {
@@ -229,9 +241,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
 
   const clearDraft = () => {
     draftStore.set(null)
-    setName(''); setDescription(''); setDirection('long'); setExecutionBackend('polars_expr')
-    setRules(''); setCode(''); setStep(1); setError(''); setInstruction('')
-    setStrategyId(''); setSource('ai'); setValidated(false)
+    resetDraftState()
   }
 
   const handleClose = () => { if (name || rules || code) persist(); onClose() }
