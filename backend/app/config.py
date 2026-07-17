@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     trade_ticks_persist_interval_seconds: int = 30
     trade_ticks_persist_timeout_seconds: int = 120
 
+    # Latest quote snapshot — 复用逐笔成交 MySQL URL, 每个 symbol 只保留最新一行。
+    quote_snapshot_mysql_enabled: bool = True
+
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 

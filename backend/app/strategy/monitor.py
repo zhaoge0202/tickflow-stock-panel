@@ -359,7 +359,7 @@ class MonitorRuleEngine:
         """注入历史窗口加载器, 用于声明 filter_history 的策略跑实时监控。
 
         loader 签名: (target_date, lookback_days) → 多日 enriched DataFrame。
-        复用 ScreenerService._load_enriched_history (三级缓存, 命中 ~0ms)。
+        复用 ScreenerService._load_enriched_history 的按需读取和单份短 TTL 缓存。
         为 None 时 filter_history 策略退回到跳过逻辑 (不破坏无历史场景)。
         """
         self._history_loader = fn

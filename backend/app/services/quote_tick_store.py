@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from app.market_time import cn_today
+from app.parquet import scan_parquet_compat
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ FLUSH_INTERVAL_S = 3.0
 FLUSH_BATCH_SIZE = 5000
 RING_MAX_ROWS = 20000
 STALE_MS = 15_000
+# 无 symbol 条件的磁盘读取只允许读取最近文件，避免误把整天全市场快照物化。
+UNSCOPED_READ_MAX_FILES = 16
 DEPTH_FIELD_NAMES = [
     *(f"bid{i}_price" for i in range(1, 6)),
     *(f"bid{i}_vol" for i in range(1, 6)),
@@ -45,7 +48,7 @@ AUCTION_EXTRA_FIELD_NAMES = [
 ]
 TEXT_FIELD_NAMES = {
     "symbol", "name", "source", "trade_date", "hour", "market_phase",
-    "price_type", "auction_unmatched_side", "raw",
+    "price_type", "auction_unmatched_side", "event_time_quality", "raw",
 }
 INT_FIELD_NAMES = {"event_ts", "ingest_ts"}
 FLOAT_FIELD_NAMES = {
@@ -61,12 +64,10 @@ QUOTE_TICK_SCHEMA_OVERRIDES = {
 }
 
 _lock = threading.Lock()
-_partition_cache_lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
 _rings: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=RING_MAX_ROWS))
 _last_flush: dict[str, float] = defaultdict(float)
 _quality: dict[str, dict] = {}
-_partition_cache: dict[tuple[str, str], dict[str, object]] = {}
 
 
 def append_many(
@@ -147,15 +148,29 @@ def latest(
         ]
         if _symbols_covered(hot_rows, wanted):
             return _latest_by_symbol(hot_rows)
-        recent_rows = [
-            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
-            if str(r.get("symbol", "")).upper() in wanted
-        ]
+        mysql_rows = _mysql_latest(target_date=target_date, symbols=sorted(wanted))
+        merged_rows = _dedupe_rows(mysql_rows + hot_rows)
+        if _symbols_covered(merged_rows, wanted):
+            return _latest_by_symbol(merged_rows)
+        recent_rows = _read_recent_partition(
+            data_dir,
+            target_date.isoformat(),
+            max_files=1200,
+            symbols=wanted,
+        )
         if _symbols_covered(recent_rows, wanted):
             return _latest_by_symbol(recent_rows)
-    rows = _recent_rows(data_dir, target_date=target_date)
-    if wanted:
-        rows = [r for r in rows if str(r.get("symbol", "")).upper() in wanted]
+    else:
+        # 进程重启后内存环为空时，从 MySQL 热表恢复最新行情；
+        # 这张表只有每个 symbol 一行，不会扫描 quote_ticks 历史。
+        mysql_rows = _mysql_latest(target_date=target_date)
+        if mysql_rows:
+            return _latest_by_symbol(mysql_rows)
+    rows = _recent_rows(
+        data_dir,
+        target_date=target_date,
+        symbols=wanted or None,
+    )
     return _latest_by_symbol(rows)
 
 
@@ -173,15 +188,18 @@ def bars(
         if str(r.get("symbol", "")).upper() == symbol.upper()
     ]
     if not rows:
-        rows = [
-            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
-            if str(r.get("symbol", "")).upper() == symbol.upper()
-        ]
+        rows = _read_recent_partition(
+            data_dir,
+            target_date.isoformat(),
+            max_files=1200,
+            symbols={symbol.upper()},
+        )
     if not rows:
-        rows = [
-            r for r in _recent_rows(data_dir, target_date=target_date)
-            if str(r.get("symbol", "")).upper() == symbol.upper()
-        ]
+        rows = _recent_rows(
+            data_dir,
+            target_date=target_date,
+            symbols={symbol.upper()},
+        )
     if not rows:
         return []
     return _bars_from_rows(rows, symbol, freq)
@@ -272,23 +290,50 @@ def read_ticks(
         if _symbols_covered(hot_rows, wanted):
             hot_rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
             return hot_rows
-        recent_rows = [
-            r for r in _read_recent_partition(data_dir, target_date.isoformat(), max_files=1200)
-            if str(r.get("symbol", "")).upper() in wanted
-        ]
+        recent_rows = _read_recent_partition(
+            data_dir,
+            target_date.isoformat(),
+            max_files=1200,
+            symbols=wanted,
+        )
         if _symbols_covered(recent_rows, wanted):
             recent_rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
             return recent_rows
-    rows = _recent_rows(data_dir, target_date=target_date)
-    if wanted:
-        rows = [r for r in rows if str(r.get("symbol", "")).upper() in wanted]
+    rows = _recent_rows(
+        data_dir,
+        target_date=target_date,
+        symbols=wanted or None,
+    )
     rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
     return rows
 
 
-def _recent_rows(data_dir: Path, *, target_date: date) -> list[dict]:
+def _recent_rows(
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: set[str] | None = None,
+) -> list[dict]:
     hot_rows = _hot_rows(data_dir, target_date=target_date)
-    disk_rows = _read_partition(data_dir, target_date.isoformat())
+    if symbols:
+        hot_rows = [
+            row for row in hot_rows
+            if str(row.get("symbol", "")).upper() in symbols
+        ]
+    if symbols:
+        disk_rows = _read_partition(
+            data_dir,
+            target_date.isoformat(),
+            symbols=symbols,
+        )
+    else:
+        # 无条件的全市场读取仅作为无 MySQL 配置时的有限降级，
+        # 不允许回到“整天所有文件 + Python dict”模式。
+        disk_rows = _read_recent_partition(
+            data_dir,
+            target_date.isoformat(),
+            max_files=UNSCOPED_READ_MAX_FILES,
+        )
     return _dedupe_rows(disk_rows + hot_rows)
 
 
@@ -308,14 +353,18 @@ def _symbols_covered(rows: list[dict], wanted: set[str]) -> bool:
     return wanted.issubset(got)
 
 
-def _read_recent_partition(data_dir: Path, ds: str, *, max_files: int) -> list[dict]:
+def _read_recent_partition(
+    data_dir: Path,
+    ds: str,
+    *,
+    max_files: int,
+    symbols: set[str] | None = None,
+) -> list[dict]:
     base = data_dir / "quote_ticks" / f"date={ds}"
     if not base.exists():
         return []
     paths = _recent_partition_paths(base, max_files=max_files)
-    meta = _partition_meta(paths)
-    rows, _ = _read_parquet_paths(paths, base, meta)
-    return rows
+    return _read_parquet_paths(paths, base, symbols=symbols)
 
 
 def _recent_partition_paths(base: Path, *, max_files: int) -> list[Path]:
@@ -330,95 +379,61 @@ def _recent_partition_paths(base: Path, *, max_files: int) -> list[Path]:
     return [path for _, path in paths[:max_files]]
 
 
-def _read_partition(data_dir: Path, ds: str) -> list[dict]:
+def _read_partition(
+    data_dir: Path,
+    ds: str,
+    *,
+    symbols: set[str] | None = None,
+) -> list[dict]:
     base = data_dir / "quote_ticks" / f"date={ds}"
     if not base.exists():
         return []
     paths = sorted(base.rglob("*.parquet"))
     if not paths:
         return []
-    meta = _partition_meta(paths)
-    cache_key = (str(data_dir), ds)
-    with _partition_cache_lock:
-        cached = _partition_cache.get(cache_key)
-        cached_meta = cached.get("meta") if cached else None
-        cached_rows = cached.get("rows") if cached else None
-        if cached_meta == meta and isinstance(cached_rows, list):
-            return [dict(row) for row in cached_rows]
-        if (
-            isinstance(cached_meta, dict)
-            and isinstance(cached_rows, list)
-            and _meta_is_append_only(cached_meta, meta)
-        ):
-            known_paths = set(cached_meta)
-            rows = [dict(row) for row in cached_rows]
-            read_paths = [Path(p) for p in meta if p not in known_paths]
-        else:
-            rows = []
-            read_paths = [Path(p) for p in meta]
-
-    new_rows, read_meta = _read_parquet_paths(read_paths, base, meta)
-    rows.extend(new_rows)
-    cached_meta_for_write = (
-        cached_meta if isinstance(cached_meta, dict) and _meta_is_append_only(cached_meta, meta) else {}
-    )
-    cached_meta_for_write = {**cached_meta_for_write, **read_meta}
-    with _partition_cache_lock:
-        _partition_cache[cache_key] = {
-            "meta": cached_meta_for_write,
-            "rows": [dict(row) for row in rows],
-        }
-    return [dict(row) for row in rows]
-
-
-def _partition_meta(paths: list[Path]) -> dict[str, tuple[int, int]]:
-    meta: dict[str, tuple[int, int]] = {}
-    for path in paths:
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        meta[str(path)] = (stat.st_mtime_ns, stat.st_size)
-    return meta
-
-
-def _meta_is_append_only(
-    cached_meta: dict[str, tuple[int, int]],
-    current_meta: dict[str, tuple[int, int]],
-) -> bool:
-    if len(current_meta) < len(cached_meta):
-        return False
-    for path, cached_sig in cached_meta.items():
-        if current_meta.get(path) != cached_sig:
-            return False
-    return True
+    return _read_parquet_paths(paths, base, symbols=symbols)
 
 
 def _read_parquet_paths(
     paths: list[Path],
     base: Path,
-    meta: dict[str, tuple[int, int]],
-) -> tuple[list[dict], dict[str, tuple[int, int]]]:
+    *,
+    symbols: set[str] | None = None,
+) -> list[dict]:
     if not paths:
-        return [], {}
-    frames = []
-    read_meta: dict[str, tuple[int, int]] = {}
-    for path in paths:
-        try:
-            frames.append(pl.read_parquet(str(path)))
-            key = str(path)
-            if key in meta:
-                read_meta[key] = meta[key]
-        except Exception as e:
-            logger.warning("quote_ticks 读取失败(%s): %s", path, e)
-    if not frames:
-        return [], read_meta
+        return []
+    wanted = sorted(symbols or set())
     try:
-        df = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
-        return [_json_safe(row) for row in df.iter_rows(named=True)], read_meta
+        frame = scan_parquet_compat(
+            [str(path) for path in paths],
+            schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+            hive_partitioning=False,
+            cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+        )
+        if wanted:
+            frame = frame.filter(pl.col("symbol").is_in(wanted))
+        df = frame.collect(engine="streaming")
+        return [_json_safe(row) for row in df.iter_rows(named=True)]
     except Exception as e:
         logger.warning("quote_ticks 合并失败(%s): %s", base, e)
-        return [], {}
+        return []
+
+
+def _mysql_latest(
+    *,
+    target_date: date,
+    symbols: list[str] | None = None,
+) -> list[dict]:
+    """读取 MySQL 最新快照；不可用时返回空并让调用方走本地降级。"""
+    try:
+        from app.services.quote_snapshot_mysql import quote_snapshot_mysql_store
+
+        if target_date != cn_today() or not quote_snapshot_mysql_store.enabled():
+            return []
+        return quote_snapshot_mysql_store.list(symbols=symbols, trade_date=target_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quote_latest MySQL 读取失败, 使用本地 tick: %s", exc)
+        return []
 
 
 def _quote_tick_frame(rows: list[dict]) -> pl.DataFrame:

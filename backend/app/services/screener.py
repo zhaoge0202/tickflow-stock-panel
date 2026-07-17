@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from functools import wraps
 
 import polars as pl
 
@@ -19,9 +21,21 @@ from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
-# ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
+# ── 进程级有界历史数据缓存 (避免 run_all 短时间内重复计算) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
+_HISTORY_CACHE_MAX_ENTRIES = 1
+_HISTORY_SYMBOL_BATCH_SIZE = 256
+_history_compute_lock = threading.Lock()
+
+
+def _singleflight_history_load(fn):
+    """历史指标计算同一时刻只允许一个，防止并发请求叠加大 DataFrame。"""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _history_compute_lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 # 内置预设策略 — Polars 表达式方式
@@ -311,8 +325,6 @@ class ScreenerService:
 
         读取历史数据作为指标计算的 warmup, 计算完成后只返回目标日期的行。
         """
-        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
-
         # 加载 warmup 历史 (目标日期前 ~120 天)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
@@ -326,44 +338,75 @@ class ScreenerService:
                     (pl.col("date") >= start)
                     & (pl.col("date") <= target_date)
                 )
-                .sort(["symbol", "date"])
             )
-            available = [c for c in read_cols if c in lf.schema]
-            df_hist = lf.select(available).collect()
+            available = [c for c in read_cols if c in lf.collect_schema().names()]
+            history_lf = lf.select(available)
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
-            df_hist = df_target
+            history_lf = df_target.lazy()
 
-        if df_hist.is_empty():
-            df_hist = df_target
+        symbols = df_target["symbol"].unique().sort().to_list()
+        return self._compute_enriched_batches(
+            history_lf,
+            symbols,
+            result_start=target_date,
+            result_end=target_date,
+        )
 
-        # 计算指标
-        df_full = compute_indicators(df_hist)
-        df_full = compute_signals(df_full)
+    def _compute_enriched_batches(
+        self,
+        history_lf: pl.LazyFrame,
+        symbols: list[str],
+        *,
+        result_start: date,
+        result_end: date,
+    ) -> pl.DataFrame:
+        """按 symbol 分批计算指标，只保留调用方需要的日期范围。"""
+        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
 
-        # 计算涨跌停信号 (需要 instruments; 涨停为股票专有, ETF 跳过)
+        if not symbols:
+            return pl.DataFrame()
         instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
-            df_full = compute_limit_signals(df_full, instruments)
+        parts: list[pl.DataFrame] = []
+        for offset in range(0, len(symbols), _HISTORY_SYMBOL_BATCH_SIZE):
+            batch = symbols[offset:offset + _HISTORY_SYMBOL_BATCH_SIZE]
+            df_hist = self.repo._collect_unique_symbol_date(  # noqa: SLF001
+                history_lf.filter(pl.col("symbol").is_in(batch))
+            )
+            if df_hist.is_empty():
+                continue
+            df_full = compute_signals(compute_indicators(df_hist))
+            if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+                df_full = compute_limit_signals(df_full, instruments)
+            df_result = df_full.filter(
+                (pl.col("date") >= result_start) & (pl.col("date") <= result_end)
+            )
+            if not df_result.is_empty():
+                parts.append(df_result)
 
-        # 只保留目标日期
-        df_result = df_full.filter(pl.col("date") == target_date)
+        if not parts:
+            return pl.DataFrame()
+        result = pl.concat(parts, how="diagonal_relaxed").sort(["symbol", "date"])
+        if instruments is not None and not instruments.is_empty() and "name" not in result.columns:
+            inst_cols = [
+                c for c in ["symbol", "name", "total_shares", "float_shares"]
+                if c in instruments.columns
+            ]
+            result = result.join(
+                instruments.select(inst_cols).unique(subset=["symbol"]),
+                on="symbol",
+                how="left",
+            )
+        return result.sort(["symbol", "date"])
 
-        # JOIN instruments (name, total_shares, float_shares)
-        if not instruments.is_empty():
-            inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
-            if "name" not in df_result.columns:
-                df_result = df_result.join(instruments.select(inst_cols), on="symbol", how="left")
-
-        return df_result
-
+    @_singleflight_history_load
     def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
         """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
 
-        优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
-        缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
+        repository 不常驻完整历史；这里按需 scan_parquet + compute_indicators，
+        并仅保留最近一次结果的短 TTL 缓存。
         """
-        # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
+        # 兼容 repository 接口；当前实现主动返回 None，不再命中常驻历史缓存。
         t0 = time.perf_counter()
         if self.asset_type == "stock":
             cached = self.repo.get_enriched_history(target_date, lookback_days)
@@ -393,8 +436,6 @@ class ScreenerService:
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
                        target_date, lookback_days)
-        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
-
         warmup = 60
         start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
 
@@ -406,51 +447,56 @@ class ScreenerService:
             lf = (
                 scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
                 .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-                .sort(["symbol", "date"])
             )
             available = [c for c in read_cols if c in lf.collect_schema().names()]
-            df_hist = lf.select(available).collect()
+            history_lf = lf.select(available)
+            trading_dates = (
+                history_lf.select("date")
+                .unique()
+                .sort("date")
+                .collect(engine="streaming")["date"]
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)
             return pl.DataFrame()
 
-        if df_hist.is_empty():
+        if trading_dates.is_empty():
             return pl.DataFrame()
-
-        df_full = compute_indicators(df_hist)
-        df_full = compute_signals(df_full)
-
         instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
-            df_full = compute_limit_signals(df_full, instruments)
-
-        if instruments is not None and not instruments.is_empty():
-            inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
-            if "name" not in df_full.columns:
-                df_full = df_full.join(instruments.select(inst_cols), on="symbol", how="left")
-
-        # 裁剪掉 warmup 部分, 只保留 lookback 范围 (减少 group_by 开销)。
-        # 按交易日计数: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日,
-        # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口偏少, 与回测不一致。
-        if "date" in df_full.columns:
-            trading_dates = df_full["date"].unique().sort()
-            if len(trading_dates) > lookback_days:
-                lookback_start = trading_dates[-(lookback_days + 1)]
-            else:
-                lookback_start = trading_dates[0]
-            df_full = df_full.filter(pl.col("date") >= lookback_start)
-
-        df_full = df_full.sort(["symbol", "date"])
+        if instruments is not None and not instruments.is_empty() and "symbol" in instruments.columns:
+            symbols = instruments["symbol"].unique().sort().to_list()
+        else:
+            symbols = (
+                history_lf.select("symbol")
+                .unique()
+                .collect(engine="streaming")["symbol"]
+                .sort()
+                .to_list()
+            )
+        lookback_start = (
+            trading_dates[-(lookback_days + 1)]
+            if len(trading_dates) > lookback_days
+            else trading_dates[0]
+        )
+        df_full = self._compute_enriched_batches(
+            history_lf,
+            symbols,
+            result_start=lookback_start,
+            result_end=target_date,
+        )
 
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
                     target_date, lookback_days, elapsed, len(df_full))
 
+        # 完整指标历史体积较大，只保留最近一次 run_all 的结果。repository 不再
+        # 常驻 300 天历史，这里也不能累积多个大 DataFrame 抵消内存优化。
+        expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
+        for k in expired:
+            del _history_cache[k]
+        if cache_key not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
+            _history_cache.clear()
         _history_cache[cache_key] = (now, df_full)
-        if len(_history_cache) > 10:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-            for k in expired:
-                del _history_cache[k]
 
         return df_full
 
