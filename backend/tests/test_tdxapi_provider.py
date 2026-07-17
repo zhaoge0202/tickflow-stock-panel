@@ -258,6 +258,50 @@ def test_get_realtime_with_symbols_survives_codes_failure(monkeypatch):
     assert rows[0]["name"] is None
 
 
+def test_get_realtime_retries_batch_without_missing_code(monkeypatch):
+    quote_calls = []
+
+    def fake(self, method, path, **kwargs):
+        if path == "/api/codes":
+            return {"codes": []}
+        codes = kwargs["json"]["codes"]
+        quote_calls.append(codes)
+        if "sh510143" in codes:
+            raise RuntimeError("获取行情失败: 未查询到代码[sh510143]相关信息")
+        return [
+            {
+                "Exchange": 0 if code.startswith("sz") else 1,
+                "Code": code[2:],
+                "K": {"Last": 1000, "Open": 1000, "High": 1010, "Low": 990, "Close": 1005},
+                "TotalHand": 10,
+                "Amount": 100000,
+                "ServerTime": "1730617200",
+            }
+            for code in codes
+        ]
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+
+    rows = TDXAPIProvider().get_realtime(
+        symbols=["159881.SZ", "510143.SH", "510660.SH"],
+    )
+
+    assert quote_calls == [
+        ["sz159881", "sh510143", "sh510660"],
+        ["sz159881", "sh510660"],
+    ]
+    assert [row["symbol"] for row in rows] == ["159881.SZ", "510660.SH"]
+
+
+def test_server_time_parses_tdx_hhmmss_milliseconds():
+    timestamp = tp._server_time_ms("143523199")
+    assert timestamp is not None
+
+    decoded = dt.datetime.fromtimestamp(timestamp / 1000, tz=dt.timezone(dt.timedelta(hours=8)))
+    assert (decoded.hour, decoded.minute, decoded.second) == (14, 35, 23)
+    assert decoded.microsecond == 199_000
+
+
 def test_get_realtime_maps_preopen_auction_reference(monkeypatch):
     def fake_codes(kwargs):
         return {"codes": [{"code": "002491", "name": "通鼎互联", "exchange": "sz"}]}
