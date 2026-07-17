@@ -181,7 +181,12 @@ export function Screener() {
   // 进入页面自动跑策略池中的策略，获取命中数
   const runAll = useMutation({
     mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
-      api.screenerRunAll(date, strategyIds ?? visiblePool, extColumnsParam || undefined),
+      api.screenerRunAll(
+        date,
+        strategyIds ?? visiblePool,
+        extColumnsParam || undefined,
+        assetType,
+      ),
     onSuccess: (data) => {
       if (data.as_of) setAsOf(data.as_of)
     },
@@ -499,7 +504,7 @@ export function Screener() {
       inList ? api.watchlistRemove(symbol) : api.watchlistAdd(symbol),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
     },
   })
 
@@ -977,7 +982,7 @@ export function Screener() {
         onClose={() => setShowBuilder(false)}
         mode={builderMode}
         onSavedId={async id => {
-          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('stock'), queryFn: () => api.screenerStrategies('stock') })
+          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('stock'), queryFn: () => api.screenerStrategies('stock'), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
