@@ -9,8 +9,12 @@ class _Store:
 
 
 class _Repo:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, etf_symbols=()):
         self.store = _Store(data_dir)
+        self._etf_symbols = set(etf_symbols)
+
+    def get_etf_symbol_set(self):
+        return set(self._etf_symbols)
 
 
 class FakeProvider:
@@ -133,6 +137,77 @@ def test_fetch_full_market_quotes_supplements_manual_positions_for_tdxapi(monkey
 
     assert provider_calls == [None, ["589020.SH"]]
     assert [row["symbol"] for row in captured["records"]] == ["002491.SZ", "589020.SH"]
+
+
+def test_fetch_full_market_quotes_supplements_enabled_etfs_for_tdxapi(monkeypatch, tmp_path):
+    provider_calls = []
+
+    class ProviderWithSymbols:
+        def get_realtime(self, symbols=None):
+            provider_calls.append(symbols)
+            if symbols is None:
+                return [{"symbol": "002491.SZ", "source": "tdxapi"}]
+            return [{"symbol": symbol, "source": "tdxapi"} for symbol in symbols]
+
+    provider = ProviderWithSymbols()
+    captured = {}
+
+    import app.tickflow.client as tickflow_client
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(preferences, "get_realtime_pull_etf", lambda: True)
+    monkeypatch.setattr(
+        custom_sources,
+        "provider_has_dataset",
+        lambda name, dataset: name == "tdxapi" and dataset == "realtime",
+    )
+    monkeypatch.setattr(custom_sources, "get_provider", lambda name: provider)
+    monkeypatch.setattr(QuoteService, "_custom_realtime_index_symbols", lambda self: [])
+    monkeypatch.setattr(QuoteService, "_custom_realtime_manual_position_symbols", lambda self: [])
+    monkeypatch.setattr(
+        tickflow_client,
+        "get_paid_realtime_client",
+        lambda: (_ for _ in ()).throw(AssertionError("不应调用 TickFlow")),
+    )
+
+    def fake_process(self, records, *, t0, now_ts):
+        captured["records"] = records
+
+    monkeypatch.setattr(QuoteService, "_process_full_market_records", fake_process)
+
+    qs = QuoteService()
+    qs.set_repo(_Repo(tmp_path, etf_symbols={"159881.SZ", "510660.SH"}))
+    qs._fetch_full_market_quotes()
+
+    assert provider_calls == [None, ["159881.SZ", "510660.SH"]]
+    assert [row["symbol"] for row in captured["records"]] == [
+        "002491.SZ",
+        "159881.SZ",
+        "510660.SH",
+    ]
+
+
+def test_custom_realtime_etf_symbols_syncs_missing_metadata(monkeypatch, tmp_path):
+    from app.services import index_sync, preferences
+
+    repo = _Repo(tmp_path)
+    sync_calls = []
+
+    def fake_sync(target_repo):
+        sync_calls.append(target_repo)
+        target_repo._etf_symbols.update({"159881.SZ", "510660.SH"})
+        return 2
+
+    monkeypatch.setattr(preferences, "get_realtime_pull_etf", lambda: True)
+    monkeypatch.setattr(index_sync, "sync_etf_instruments", fake_sync)
+
+    qs = QuoteService()
+    qs.set_repo(repo)
+
+    assert qs._custom_realtime_etf_symbols() == ["159881.SZ", "510660.SH"]
+    assert sync_calls == [repo]
 
 
 def test_build_daily_skips_tdx_preopen_auction_reference():

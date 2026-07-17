@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -222,16 +223,53 @@ class TDXAPIProvider:
             name_map = {}
         rows: list[dict] = []
         for chunk in chunked(target_symbols, _QUOTE_BATCH):
-            codes = [_to_tdx_code(symbol) for symbol in chunk]
-            try:
-                data = self._request("POST", "/api/batch-quote", json={"codes": codes})
-            except Exception as e:
-                logger.warning("tdx-api realtime batch 拉取失败(%d symbols): %s", len(chunk), e)
-                continue
-            for item in data or []:
-                row = self._quote_row(item, name_map)
-                if row:
-                    rows.append(row)
+            rows.extend(self._fetch_realtime_chunk(chunk, name_map))
+        return rows
+
+    def _fetch_realtime_chunk(
+        self,
+        symbols: list[str],
+        name_map: dict[str, str | None],
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        codes = [_to_tdx_code(symbol) for symbol in symbols]
+        try:
+            data = self._request("POST", "/api/batch-quote", json={"codes": codes})
+        except Exception as e:
+            missing_code = _missing_quote_code(e)
+            if missing_code:
+                remaining = [
+                    symbol
+                    for symbol, code in zip(symbols, codes, strict=True)
+                    if code.lower() != missing_code.lower()
+                ]
+                if len(remaining) < len(symbols):
+                    logger.warning(
+                        "tdx-api 跳过失效实时行情代码 %s, 重试剩余 %d 只",
+                        missing_code,
+                        len(remaining),
+                    )
+                    return self._fetch_realtime_chunk(remaining, name_map)
+            if len(symbols) > 1:
+                middle = len(symbols) // 2
+                logger.warning(
+                    "tdx-api realtime batch 拉取失败(%d symbols), 拆分重试: %s",
+                    len(symbols),
+                    e,
+                )
+                return [
+                    *self._fetch_realtime_chunk(symbols[:middle], name_map),
+                    *self._fetch_realtime_chunk(symbols[middle:], name_map),
+                ]
+            logger.warning("tdx-api realtime 拉取失败(%s): %s", codes[0], e)
+            return []
+
+        rows: list[dict] = []
+        for item in data or []:
+            row = self._quote_row(item, name_map)
+            if row:
+                rows.append(row)
         return rows
 
     # ---- trade ticks ----
@@ -895,6 +933,11 @@ def _symbols_from_env() -> list[str]:
     return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
 
 
+def _missing_quote_code(error: Exception) -> str | None:
+    match = re.search(r"未查询到代码\[([^\]]+)\]", str(error))
+    return match.group(1).strip() if match else None
+
+
 def _to_tdx_code(symbol: str | None) -> str:
     text = str(symbol or "").strip()
     if "." in text:
@@ -1151,6 +1194,19 @@ def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
     text = str(value).strip()
     if not text:
         return None
+
+    # TDX ServerTime 常用 HHMMSSmmm, 例如 143523199 表示 14:35:23.199。
+    if len(text) in {8, 9, 10} and text[:6].isdigit():
+        hour = int(text[:2])
+        minute = int(text[2:4])
+        whole_second = int(text[4:6])
+        fraction = text[6:]
+        if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= whole_second < 60:
+            seconds = whole_second + int(fraction) / (10 ** len(fraction)) if fraction else whole_second
+            midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+            decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=seconds)
+            return int(decoded.timestamp() * 1000)
+
     head = text[:-6]
     try:
         hour = int(head) if head else 0

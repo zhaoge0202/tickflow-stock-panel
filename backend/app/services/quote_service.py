@@ -947,9 +947,28 @@ class QuoteService:
         """自定义实时源需要精确补拉的 symbol 集合。"""
         symbols = {
             *self._custom_realtime_index_symbols(),
+            *self._custom_realtime_etf_symbols(),
             *self._custom_realtime_manual_position_symbols(),
         }
         return sorted(symbols)
+
+    def _custom_realtime_etf_symbols(self) -> list[str]:
+        """自定义实时源按开关补拉全量 ETF。"""
+        from app.services import preferences
+
+        if not preferences.get_realtime_pull_etf() or not self._repo:
+            return []
+        try:
+            symbols = self._repo.get_etf_symbol_set()
+            if not symbols:
+                from app.services.index_sync import sync_etf_instruments
+
+                sync_etf_instruments(self._repo)
+                symbols = self._repo.get_etf_symbol_set()
+            return sorted(symbols)
+        except Exception as e:
+            logger.warning("ETF 实时补拉列表读取失败: %s", e)
+            return []
 
     @staticmethod
     def _provider_accepts_realtime_symbols(provider) -> bool:
