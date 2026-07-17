@@ -156,3 +156,42 @@ def test_build_daily_skips_tdx_preopen_auction_reference():
     ])
 
     assert df.is_empty()
+
+
+def test_prime_quotes_waits_for_enriched_warmup(monkeypatch, tmp_path):
+    repo = _Repo(tmp_path)
+    repo.enriched_warming = True
+    qs = QuoteService()
+    qs.set_repo(repo)
+    monkeypatch.setattr(
+        qs,
+        "_fetch_quotes",
+        lambda: (_ for _ in ()).throw(AssertionError("预热期间不应拉取全市场行情")),
+    )
+
+    qs._prime_quotes_once()
+
+
+def test_tdxapi_records_are_submitted_to_mysql_snapshot_writer(monkeypatch, tmp_path):
+    from app.services import preferences, quote_snapshot_ingest, quote_tick_store
+
+    records = [{"symbol": "002491.SZ", "timestamp": 1_783_485_000_000, "last_price": 10.2}]
+    captured = {}
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(quote_tick_store, "append_many", lambda *args, **kwargs: {})
+
+    def capture_submit(rows):
+        captured["rows"] = rows
+        return True
+
+    monkeypatch.setattr(
+        quote_snapshot_ingest.quote_snapshot_ingestor,
+        "submit",
+        capture_submit,
+    )
+
+    qs = QuoteService()
+    qs.set_repo(_Repo(tmp_path))
+    qs._append_quote_ticks_if_tdxapi(records)
+
+    assert captured["rows"] is records

@@ -4,8 +4,8 @@
 「概念分析 → 涨幅RPS轮动」对话框渲染。
 
 数据来源全部复用现有资产, 不引入新数据源:
-  - 个股历史涨跌幅: repo.get_enriched_range(..., columns=["symbol","date","change_pct"])
-    命中启动时构建的 _enriched_history_cache (0ms, 含 change_pct 小数列)
+  - 个股历史涨跌幅: repo.get_enriched_range(..., columns=["symbol","date","close"])
+    按日期和列下推读取后即时计算, 不依赖全量历史内存缓存
   - 概念成分股映射: 复用 market_overview_builder 的 _dimension_field / _read_ext_rows /
     _symbol_keys / _dimension_values, 与看板/复盘的概念聚合口径完全一致
 
@@ -44,11 +44,18 @@ def invalidate_cache() -> None:
 
 
 def _latest_enriched_date(repo) -> date | None:
-    """取 enriched 缓存里的最新交易日(矩阵的右端=最新日期)。"""
-    cache = repo._enriched_history_cache  # noqa: SLF001 —— 缓存字段无公开 getter
-    if cache is None or cache.is_empty() or "date" not in cache.columns:
-        return None
-    return cache["date"].max()
+    """取最新 enriched 交易日(矩阵的右端=最新日期)。"""
+    latest = repo.enriched_latest_date()
+    if latest is not None:
+        return latest
+    try:
+        row = repo.execute_one("SELECT max(date) FROM kline_enriched")
+        if row and row[0]:
+            value = row[0]
+            return value if isinstance(value, date) else date.fromisoformat(str(value))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("rps_rotation latest date lookup failed: %s", exc)
+    return None
 
 
 def _load_concept_map_df(repo) -> tuple[pl.DataFrame, int]:
@@ -118,7 +125,7 @@ def build_rps_rotation(repo, days: int = 12) -> dict:
     """构建概念涨幅轮动矩阵。
 
     Args:
-        repo: KlineRepository(含 _enriched_history_cache 内存历史)。
+        repo: KlineRepository。
         days: 取最近 N 个交易日, 范围 [7, 30], 默认 12。
 
     Returns:
@@ -149,13 +156,18 @@ def build_rps_rotation(repo, days: int = 12) -> dict:
         logger.info("rps_rotation: no concept data (ext_gn_ths not fetched yet)")
         return {"dates": [], "columns": {}, "concept_count": 0}
 
-    # 2. 取最近 N 交易日的个股 change_pct(命中内存缓存)
+    # 2. 窄读最近一段时间的 close，在 Polars 中按 symbol 计算日涨跌幅。
     start = latest - timedelta(days=days * 2 + 10)  # 日历天 ≈ 2/3 交易日, 多取余量
     df = repo.get_enriched_range(
-        start, latest, columns=["symbol", "date", "change_pct"]
+        start, latest, columns=["symbol", "date", "close"]
     )
     if df is None or df.is_empty():
         return {"dates": [], "columns": {}, "concept_count": 0}
+    df = (
+        df.sort(["symbol", "date"])
+        .with_columns(pl.col("close").pct_change().over("symbol").alias("change_pct"))
+        .select("symbol", "date", "change_pct")
+    )
 
     # 3. 把个股 symbol 映射到概念, 一只股票拆成多行(每个概念一行)
     #    symbol 大写匹配(map_df 的 _sym_up 已大写)

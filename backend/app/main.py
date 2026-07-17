@@ -47,11 +47,11 @@ async def lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
-    # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
+    # 指标异步预热标志: 最新日指标和递推状态在后台分批构建, 完成后置 True
     app.state.indicators_ready = False
     repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
 
-    # Polars 缓存预热 — enriched 的重计算 (107万行 compute_indicators) 推后台,
+    # Polars 缓存预热 — 最新日指标和盘中递推状态推后台计算，历史不常驻内存；
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
     repo.refresh_cache(background=True)
 
@@ -72,6 +72,9 @@ async def lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
+    quote_snapshot_ingestor.start()
+    app.state.quote_snapshot_ingestor = quote_snapshot_ingestor
     qs.boot_check()
 
     # QuoteService 需要访问 strategy_monitor 等单例
@@ -173,7 +176,7 @@ async def lifespan(app: FastAPI):
     monitor_engine = MonitorRuleEngine()
     monitor_engine.set_strategy_engine(strategy_engine)
     monitor_engine.set_data_dir(store.data_dir)
-    # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
+    # 复用 ScreenerService 的按需历史加载和单份短 TTL 缓存，
     # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑选股 → 盘中触发通知。
     monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
     # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (读 kline_etf_enriched)。
@@ -218,6 +221,9 @@ async def lifespan(app: FastAPI):
     if qs:
         # 进程退出/热重载只是清理后台线程, 不能把用户的实时行情开关写成关闭。
         qs.stop(persist_enabled=False)
+    qsi = getattr(app.state, "quote_snapshot_ingestor", None)
+    if qsi:
+        qsi.stop()
     dsvc = getattr(app.state, "depth_service", None)
     if dsvc:
         dsvc.stop_polling()

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request
 
 from app.services import quote_tick_store
+from app.services.quote_snapshot_mysql import quote_snapshot_mysql_store
 
 router = APIRouter(prefix="/api/quote-ticks", tags=["quote-ticks"])
 
@@ -42,3 +43,9 @@ def bars(
 @router.get("/quality")
 def quality(request: Request, symbols: str | None = None):
     return quote_tick_store.quality(_data_dir(request), _symbols(symbols))
+
+
+@router.get("/mysql/status")
+def mysql_status():
+    """返回最新行情 MySQL 热缓存的配置和表状态。"""
+    return quote_snapshot_mysql_store.health()

@@ -917,7 +917,10 @@ def compute_enriched(
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
     """写入 parquet 前裁剪到存储列 (14 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
-    return df.select(cols)
+    selected = df.select(cols)
+    if {"symbol", "date"}.issubset(selected.columns):
+        selected = selected.unique(subset=["symbol", "date"], keep="last")
+    return selected
 
 
 def run_pipeline(data_dir: Path | None = None,
@@ -990,7 +993,11 @@ def run_pipeline(data_dir: Path | None = None,
             raw_new = scan_daily_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
             for nd in new_date_dirs[1:]:
                 raw_new = pl.concat([raw_new, scan_daily_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
-            raw_new = raw_new.sort(["symbol", "date"]).collect(streaming=True)
+            raw_new = (
+                raw_new.unique(subset=["symbol", "date"], keep="last")
+                .sort(["symbol", "date"])
+                .collect(engine="streaming")
+            )
 
             # 增量模式: 只算新日期, 但指标需要历史窗口
             # 读已有 enriched 最近 60 天作为历史前缀
@@ -1039,7 +1046,10 @@ def run_pipeline(data_dir: Path | None = None,
             sym_set = set(symbols)
             raw_sym = scan_daily_parquet(daily_glob, cast_options=_cast).sort(["symbol", "date"])
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
-            raw_sym = raw_sym.collect(streaming=True)
+            raw_sym = (
+                raw_sym.unique(subset=["symbol", "date"], keep="last")
+                .collect(engine="streaming")
+            )
             if not raw_sym.is_empty():
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
@@ -1054,7 +1064,7 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = pl.read_parquet(out)
                         existing = existing.filter(~pl.col("symbol").is_in(list(sym_set)))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
-                    date_df_storage = date_df_storage.sort(["symbol"])
+                    date_df_storage = _select_storage_cols(date_df_storage).sort(["symbol"])
                     date_df_storage.write_parquet(out)
                     written += date_df.height
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
@@ -1084,7 +1094,7 @@ def run_pipeline(data_dir: Path | None = None,
 
     all_symbols = (
         lf_all.select("symbol").unique().sort("symbol")
-        .collect(streaming=True)["symbol"].to_list()
+        .collect(engine="streaming")["symbol"].to_list()
     )
     if not all_symbols:
         logger.info("无日K数据, 跳过管道")
@@ -1116,7 +1126,11 @@ def run_pipeline(data_dir: Path | None = None,
         # 只读取本批 symbol 的数据
         lf_batch = scan_daily_parquet(daily_glob, cast_options=_cast)
         lf_batch = lf_batch.filter(pl.col("symbol").is_in(batch_syms))
-        raw = lf_batch.sort(["symbol", "date"]).collect(streaming=True)
+        raw = (
+            lf_batch.unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
+            .collect(engine="streaming")
+        )
 
         if raw.is_empty():
             continue
@@ -1147,7 +1161,7 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = pl.read_parquet(out)
                         existing = existing.filter(~pl.col("symbol").is_in(batch_syms))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
-                    date_df_storage = date_df_storage.sort(["symbol"])
+                    date_df_storage = _select_storage_cols(date_df_storage).sort(["symbol"])
                     date_df_storage.write_parquet(out)
                     written += date_df_storage.height
             else:
@@ -1180,7 +1194,9 @@ def run_pipeline(data_dir: Path | None = None,
         for ds, dfs in date_buffers.items():
             out = base / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
-            merged = pl.concat(dfs, how="diagonal_relaxed").sort(["symbol"])
+            merged = _select_storage_cols(
+                pl.concat(dfs, how="diagonal_relaxed")
+            ).sort(["symbol"])
             merged.write_parquet(out)
 
         date_buffers.clear()
@@ -1225,7 +1241,12 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
         hist_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                  "volume", "amount", "raw_close", "raw_high", "raw_low"]
                     if c in lf.schema]
-        return lf.select(hist_cols).collect()
+        return (
+            lf.select(hist_cols)
+            .unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
+            .collect(engine="streaming")
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("历史数据加载失败: %s", e)
         return pl.DataFrame()

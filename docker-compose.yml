@@ -1,4 +1,4 @@
-# 单机部署: FastAPI 托管前端 dist, tdx-api 提供通达信行情, MySQL 持久化逐笔成交。
+# 单机部署: FastAPI 托管前端 dist, tdx-api 提供通达信行情, MySQL 保存逐笔成交和最新快照。
 services:
   tdx-api:
     build:
@@ -57,7 +57,7 @@ services:
     environment:
       - DATA_DIR=/app/data
       - TRADE_TICKS_MYSQL_URL=mysql+pymysql://${MYSQL_USER:-tickflow}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tickflow_stock_panel}?charset=utf8mb4
-    command: ["uv", "run", "python", "-c", "from app.services.trade_tick_mysql import trade_tick_mysql_store; print(trade_tick_mysql_store.ensure_schema())"]
+    command: ["uv", "run", "python", "-c", "from app.services.trade_tick_mysql import trade_tick_mysql_store; from app.services.quote_snapshot_mysql import quote_snapshot_mysql_store; print({'trade_ticks': trade_tick_mysql_store.ensure_schema(), 'quote_latest': quote_snapshot_mysql_store.ensure_schema()})"]
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro

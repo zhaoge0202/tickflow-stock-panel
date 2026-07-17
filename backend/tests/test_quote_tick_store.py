@@ -21,6 +21,13 @@ def _ms_on(day: int, hour: int, minute: int, second: int = 0) -> int:
     return int(datetime(2026, 7, day, hour, minute, second, tzinfo=CN).timestamp() * 1000)
 
 
+def _clear_hot_rows(data_dir) -> None:
+    key = str(data_dir)
+    with quote_tick_store._lock:
+        quote_tick_store._rings.pop(key, None)
+        quote_tick_store._buffers.pop(key, None)
+
+
 def test_quote_tick_store_appends_latest_bars_and_quality(tmp_path):
     rows = [
         {
@@ -103,6 +110,29 @@ def test_latest_can_read_historical_date_without_duplicate_rows(tmp_path):
     assert [row["last_price"] for row in ticks_8] == [10.1]
 
 
+def test_latest_uses_mysql_hot_cache_when_memory_ring_is_empty(tmp_path, monkeypatch):
+    _clear_hot_rows(tmp_path)
+    monkeypatch.setattr(
+        quote_tick_store,
+        "_mysql_latest",
+        lambda target_date, symbols=None: [{
+            "symbol": "002491.SZ",
+            "trade_date": target_date.isoformat(),
+            "event_ts": _ms(9, 30),
+            "last_price": 10.3,
+            "source": "tdxapi",
+        }],
+    )
+
+    rows = quote_tick_store.latest(
+        tmp_path,
+        ["002491.SZ"],
+        target_date=TRADE_DATE,
+    )
+
+    assert rows[0]["last_price"] == 10.3
+
+
 def test_quote_tick_store_writes_when_late_numeric_columns_appear(tmp_path):
     rows = [
         {
@@ -127,6 +157,88 @@ def test_quote_tick_store_writes_when_late_numeric_columns_appear(tmp_path):
     latest = quote_tick_store.latest(tmp_path, ["300750.SZ"], target_date=TRADE_DATE)
     assert latest[0]["amount"] == 319_108_120.0
     assert latest[0]["bid_depth_amount"] == 319_108_120.0
+
+
+def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, monkeypatch):
+    quote_tick_store.append_many(tmp_path, [
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.0,
+            "volume": 100,
+            "amount": 100_000,
+            "timestamp": _ms(9, 30, 0),
+        },
+        {
+            "symbol": "300750.SZ",
+            "last_price": 319.1,
+            "volume": 1_000,
+            "amount": 319_100,
+            "timestamp": _ms(9, 30, 1),
+        },
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.2,
+            "volume": 130,
+            "amount": 132_000,
+            "timestamp": _ms(9, 30, 5),
+        },
+    ], source="tdxapi", force_flush=True)
+    legacy_dir = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    pl.DataFrame({
+        "symbol": ["002491.SZ"],
+        "event_ts": [_ms(9, 30, 10)],
+        "ingest_ts": [_ms(9, 30, 11)],
+        "trade_date": [TRADE_DATE.isoformat()],
+        "hour": ["09"],
+        "last_price": [10.3],
+    }).write_parquet(legacy_dir / "legacy-schema.parquet")
+    _clear_hot_rows(tmp_path)
+
+    scan_paths = []
+    seen_symbols = []
+    original_scan_parquet = quote_tick_store.pl.scan_parquet
+    original_json_safe = quote_tick_store._json_safe
+
+    def tracking_scan_parquet(path, *args, **kwargs):
+        scan_paths.append(str(path))
+        return original_scan_parquet(path, *args, **kwargs)
+
+    def reject_eager_read(*args, **kwargs):
+        raise AssertionError("指定 symbol 查询不应使用 eager read_parquet")
+
+    def tracking_json_safe(row):
+        if row.get("symbol"):
+            seen_symbols.append(row["symbol"])
+        return original_json_safe(row)
+
+    monkeypatch.setattr(quote_tick_store.pl, "scan_parquet", tracking_scan_parquet)
+    monkeypatch.setattr(quote_tick_store.pl, "read_parquet", reject_eager_read)
+    monkeypatch.setattr(quote_tick_store, "_json_safe", tracking_json_safe)
+
+    ticks = quote_tick_store.read_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        symbols=["002491.SZ"],
+    )
+    latest = quote_tick_store.latest(
+        tmp_path,
+        ["002491.SZ"],
+        target_date=TRADE_DATE,
+    )
+    bars = quote_tick_store.bars(
+        tmp_path,
+        "002491.SZ",
+        freq="5s",
+        target_date=TRADE_DATE,
+    )
+
+    assert scan_paths
+    assert [row["last_price"] for row in ticks] == [10.0, 10.2, 10.3]
+    assert {row["symbol"] for row in ticks} == {"002491.SZ"}
+    assert latest[0]["symbol"] == "002491.SZ"
+    assert latest[0]["last_price"] == 10.3
+    assert bars[-1]["close"] == 10.3
+    assert set(seen_symbols) == {"002491.SZ"}
 
 
 def test_quote_service_realtime_frames_write_late_numeric_columns():

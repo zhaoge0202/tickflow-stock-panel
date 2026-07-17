@@ -548,6 +548,9 @@ class QuoteService:
 
     def _prime_quotes_once(self) -> None:
         """启动/启用时主动抓取一次最新行情, 避免盘后启动只回退到昨日缓存。"""
+        if self._repo is not None and getattr(self._repo, "enriched_warming", False):
+            logger.info("enriched 后台预热中, 延后启动行情抓取")
+            return
         try:
             self._fetch_quotes()
         except Exception as e:
@@ -571,6 +574,10 @@ class QuoteService:
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 if self._paused:
+                    time.sleep(0.5)
+                    continue
+
+                if self._repo is not None and getattr(self._repo, "enriched_warming", False):
                     time.sleep(0.5)
                     continue
 
@@ -892,6 +899,10 @@ class QuoteService:
                 records,
                 source="tdxapi",
             )
+            # MySQL 只保存每个 symbol 的最新状态，作为重启后的热缓存；
+            # 写入由有界后台线程完成，数据库异常不能阻塞行情轮询。
+            from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
+            quote_snapshot_ingestor.submit(records)
         except Exception as e:
             logger.warning("quote_ticks 追加失败: %s", e)
 
