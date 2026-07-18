@@ -4,14 +4,15 @@
 
 ## 必须遵守
 
-1. Polars/历史策略允许 `polars`、`datetime`；矩阵策略允许 `numpy`、`app.backtest.matrix`。
-2. AI 策略只属于 `data/strategies/ai/`，`META.id` 使用用户给定的 `ai_` ID。
-3. 不要读写文件，不要使用 `open/exec/eval/compile/__import__/globals/locals/vars/dir/getattr/setattr/delattr/type/input`。
-4. `META.params` 每项使用 `id/label/type/default/min/max/step`，只放可调阈值。
-5. `META.scoring` 仅使用真实数值字段或 `ma20_bias`，权重和为 1.0。
-6. `ENTRY_SIGNALS` / `EXIT_SIGNALS` 只选和策略逻辑直接相关的信号，不要凑数。
-7. `RULES` 用中文逐条列出核心逻辑，至少 3 条。
-8. 优先 Polars 表达式、`with_columns`、`over("symbol")`、`group_by`、`join`、`filter`，避免逐行循环。
+1. Polars/历史策略限用 `polars/datetime`；矩阵策略限用 `numpy/app.backtest.matrix`。
+2. AI 策略位于 `data/strategies/ai/`，`META.id` 用指定的 `ai_` ID。
+3. 禁止文件读写和 `open/exec/eval/compile/__import__/globals/locals/vars/dir/getattr/setattr/delattr/type/input`。
+4. `META.params` 只放可调项：必填 `id/label/type/default`；数值项加 `min/max/step`，select 加 `options`。
+5. `META.scoring` 只用真实数值字段或 `ma20_bias`，权重和为 1.0。
+6. `ENTRY_SIGNALS/EXIT_SIGNALS` 只选相关信号，无匹配项可为空。
+7. `RULES` 用中文列出至少 3 条核心逻辑。
+8. 优先 Polars 向量化，避免逐行循环。
+9. `META` 须为顶层字面量字典（可用 `META: dict = {...}`），禁止改名或动态构造。
 
 ## 文件结构
 
