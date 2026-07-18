@@ -33,6 +33,9 @@ export const storage = {
   /** 个股日K信息条指标配置 */
   stockInfoBarFields:   kv<unknown[]>('stock_info_bar_fields'),
 
+  /** 个股日K成交量对比设置 */
+  stockVolumeCompare:   kv<{ enabled: boolean; days: number }>('stock_volume_compare'),
+
   /** 策略结果列表列配置 */
   screenerResultColumns: kv<unknown[]>('screener_result_columns'),
 
