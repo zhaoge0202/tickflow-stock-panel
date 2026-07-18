@@ -66,6 +66,19 @@ def test_common_matrix_features_match_polars_indicator_pipeline():
         actual = matrix_feature(market, name)[:, 0]
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5, equal_nan=True)
 
+    expected_bias = (
+        enriched.sort(["date", "symbol"])["close"].to_numpy()
+        / enriched.sort(["date", "symbol"])["ma20"].to_numpy()
+        - 1.0
+    )
+    np.testing.assert_allclose(
+        matrix_feature(market, "ma20_bias")[:, 0],
+        expected_bias,
+        rtol=2e-5,
+        atol=2e-5,
+        equal_nan=True,
+    )
+
 
 def _panel_with_missing_asset_bar() -> pl.DataFrame:
     rows = []

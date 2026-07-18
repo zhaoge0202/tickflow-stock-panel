@@ -401,6 +401,7 @@ export interface StrategyDetail {
   scoring: Record<string, number>
   entry_signals: string[]
   exit_signals: string[]
+  minute_exit_trigger_supported_signals: string[]
   stop_loss: number | null
   take_profit: number | null
   trailing_stop: number | null
@@ -1455,7 +1456,7 @@ export const api = {
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
     entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | null
+    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
     fees_pct?: number
     commission_pct?: number
     stamp_tax_pct?: number
@@ -1464,6 +1465,7 @@ export const api = {
     initial_capital?: number
     position_sizing?: 'equal' | 'score_weight'
     asset_type?: 'stock' | 'etf'
+    minute_fill?: boolean
   }) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',

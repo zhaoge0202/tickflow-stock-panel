@@ -96,7 +96,7 @@ export const storage = {
     end: string
     matching: 'close_t' | 'open_t+1'
     entryFill: 'close_t' | 'open_t+1'
-    exitFill: 'close_t' | 'open_t+1'
+    exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'
     fees: string
     stampTax?: string
     slippage: string
@@ -106,6 +106,7 @@ export const storage = {
     positionSizing: 'equal' | 'score_weight'
     mode: 'position' | 'full'
     holdingDays: string
+    minuteFill?: boolean
     params?: Record<string, any>
     overrides?: Record<string, any>
     result: any

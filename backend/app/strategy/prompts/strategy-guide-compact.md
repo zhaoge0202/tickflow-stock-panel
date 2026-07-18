@@ -7,8 +7,8 @@
 1. Polars/历史策略允许 `polars`、`datetime`；矩阵策略允许 `numpy`、`app.backtest.matrix`。
 2. AI 策略只属于 `data/strategies/ai/`，`META.id` 使用用户给定的 `ai_` ID。
 3. 不要读写文件，不要使用 `open/exec/eval/compile/__import__/globals/locals/vars/dir/getattr/setattr/delattr/type/input`。
-4. `META.params` 只放用户可能调整的阈值；公式常数和固定窗口边界不必参数化。
-5. `META.scoring` 权重总和必须为 1.0。
+4. `META.params` 每项使用 `id/label/type/default/min/max/step`，只放可调阈值。
+5. `META.scoring` 仅使用真实数值字段或 `ma20_bias`，权重和为 1.0。
 6. `ENTRY_SIGNALS` / `EXIT_SIGNALS` 只选和策略逻辑直接相关的信号，不要凑数。
 7. `RULES` 用中文逐条列出核心逻辑，至少 3 条。
 8. 优先 Polars 表达式、`with_columns`、`over("symbol")`、`group_by`、`join`、`filter`，避免逐行循环。
@@ -153,6 +153,8 @@ anchor_date = _date.fromisoformat(anchor_raw) if isinstance(anchor_raw, str) els
 量能：`volume`, `vol_ma5`, `vol_ma10`, `vol_ratio_5d`, `turnover_rate`
 
 动量与波动：`momentum_5d`, `momentum_10d`, `momentum_20d`, `momentum_30d`, `momentum_60d`, `annual_vol_20d`, `high_60d`, `low_60d`
+
+虚拟评分：`ma20_bias = close / ma20 - 1`（仅内存计算）。
 
 涨跌停：`consecutive_limit_ups`, `consecutive_limit_downs`
 

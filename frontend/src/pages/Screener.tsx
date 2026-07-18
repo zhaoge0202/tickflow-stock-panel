@@ -900,7 +900,7 @@ export function Screener() {
                 <ScanSearch className="h-7 w-7 text-accent/40" />
               </div>
               <div className="flex flex-col items-center gap-1.5">
-                <span className="text-sm text-secondary">可先在右上角切换日期，再点击策略卡片查看选股结果</span>
+                <span className="text-sm text-secondary">点击策略卡片查看选股结果</span>
                 <span className="text-[11px] text-muted">若提示 enriched 表无数据，请先运行盘后管道</span>
               </div>
             </div>
@@ -981,6 +981,7 @@ export function Screener() {
         open={showBuilder}
         onClose={() => setShowBuilder(false)}
         mode={builderMode}
+        existingStrategyIds={availableStrategyIds}
         onSavedId={async id => {
           const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('stock'), queryFn: () => api.screenerStrategies('stock'), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {

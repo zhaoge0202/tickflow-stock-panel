@@ -26,6 +26,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
 
+from app.backtest.minute_trigger import build_minute_exit_reference
+
 try:
     from numba import njit, prange
 except ImportError:
@@ -2233,6 +2235,7 @@ def build_market_matrix_from_signals(
     entry_delay_bars: int = 0,
     exit_delay_bars: int = 0,
     reference_price: np.ndarray | None = None,
+    minute_exit_trigger: bool = False,
 ) -> MarketMatrix:
     """Combine base data and strategy signals into the matcher input matrix."""
     if entry_delay_bars not in (0, 1) or exit_delay_bars not in (0, 1):
@@ -2265,6 +2268,16 @@ def build_market_matrix_from_signals(
                 continue
             use = ~np.isfinite(resolved_reference_price) & np.isfinite(values) & (values > 0)
             resolved_reference_price[use] = values[use]
+
+    if minute_exit_trigger:
+        trigger_reference = build_minute_exit_reference(
+            market.close,
+            market.fields,
+            signals.exit_signal_code,
+            signals.exit_signal_ids,
+        )
+        trigger_mask = signals.exit != 0
+        resolved_reference_price[trigger_mask] = trigger_reference[trigger_mask]
 
     _make_read_only(
         entry,
@@ -2312,6 +2325,7 @@ def build_market_matrix(
     exit_delay_bars: int = 0,
     entry_signal_ids: list[str] | None = None,
     exit_signal_ids: list[str] | None = None,
+    minute_exit_trigger: bool = False,
 ) -> MarketMatrix:
     """Backward-compatible long-panel boundary used by legacy/Polars strategies."""
     if panel.is_empty():
@@ -2355,6 +2369,7 @@ def build_market_matrix(
         signals,
         entry_delay_bars=entry_delay_bars,
         exit_delay_bars=exit_delay_bars,
+        minute_exit_trigger=minute_exit_trigger,
     )
 
 
@@ -3458,6 +3473,8 @@ def _estimate_pipeline_cache_bytes(
             continue
         if name == "vol_ratio_5d":
             estimated += 2 * float_bytes
+        elif name == "ma20_bias":
+            estimated += 2 * float_bytes
         elif name == "change_pct" or (
             name.startswith("momentum_") and name.endswith("d")
         ):
@@ -3631,6 +3648,7 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             "high_60d",
             "low_60d",
             "annual_vol_20d",
+            "ma20_bias",
         }
         or (name.startswith("ma") and name[2:].isdigit())
         or (name.startswith("rsi_") and name[4:].isdigit())
@@ -3695,6 +3713,17 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             out=out,
             where=volume_valid & np.isfinite(previous_mean) & (previous_mean != 0),
         )
+        return out
+    if name == "ma20_bias":
+        ma20 = valid_rolling_mean(market.close, close_valid, 20)
+        out = np.full(market.shape, np.nan, dtype=np.float32)
+        np.divide(
+            market.close,
+            ma20,
+            out=out,
+            where=close_valid & np.isfinite(ma20) & (ma20 != 0),
+        )
+        out -= np.float32(1.0)
         return out
     if name.startswith("ma") and name[2:].isdigit():
         return valid_rolling_mean(market.close, close_valid, int(name[2:]))
