@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
+from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import cn_now
 from app.services import preferences
@@ -528,6 +529,56 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     return written
 
 
+def _try_custom_minute(
+    symbols: list[str],
+    start_time: datetime | None,
+    end_time: datetime | None,
+    asset_type: AssetType,
+    freq: str = "1m",
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
+) -> tuple[pl.DataFrame | None, bool]:
+    """尝试从自定义分钟源拉取。返回 (df, should_fallback_to_tickflow)。
+
+    返回契约:
+      (None, True)   → 未配自定义源 / 未配 minute dataset / 自定义源异常 → 走 TickFlow
+      (df, False)    → 自定义源成功(含空 df) → 直接用, 不回退
+
+    降级策略 (C): 自定义源异常时无条件 fall through 到 TickFlow,
+    由 TickFlow 路径自身 try/except 兜底。Pro+ 用户 TickFlow 成功返回数据,
+    None 档用户 TickFlow 失败返回空。不显式判断 tier, 避免 #126 augmented
+    capability 逻辑干扰。
+
+    on_chunk_done 适配: 上层回调是 3 参 (cur, total, seg_label), provider
+    实现内部以 2 参 (cur, total) 调用。这里包装一层, provider 调 2 参时补
+    默认 seg_label="custom" 转发给上层, 保证进度展示不降级。
+    """
+    provider_name = preferences.get_minute_data_provider()
+    if provider_name == "tickflow":
+        return (None, True)
+    from app.data_providers import custom as custom_sources
+    if not custom_sources.provider_has_dataset(provider_name, "minute"):
+        return (None, True)
+    provider = custom_sources.get_provider(provider_name)
+
+    # 包装 on_chunk_done: provider 调 2 参 → 补 seg_label="custom" → 转发上层 3 参
+    wrapped_cb: Callable[[int, int], None] | None = None
+    if on_chunk_done is not None:
+        def _wrapped_cb(cur: int, total: int) -> None:
+            on_chunk_done(cur, total, "custom")
+        wrapped_cb = _wrapped_cb
+
+    try:
+        df = provider.get_minute(
+            symbols, start_time=start_time, end_time=end_time,
+            asset_type=asset_type, freq=freq, on_chunk_done=wrapped_cb,
+        )
+        return (df, False)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom minute provider %s failed, falling back to TickFlow: %s",
+                       provider_name, e)
+        return (None, True)
+
+
 def sync_minute_batch(
     symbols: list[str],
     start_time: datetime | None = None,
@@ -538,6 +589,7 @@ def sync_minute_batch(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     segment_trading_days: int = 20,
     on_segment: Callable[[pl.DataFrame], None] | None = None,
+    asset_type: AssetType = "stock",
 ) -> pl.DataFrame:
     """批量拉取多股分钟 K。
 
@@ -555,16 +607,15 @@ def sync_minute_batch(
         不进入全局 out → 内存峰值从「全量」降到「单段」。适用于 sync_and_persist_minute。
         不传时 (如 get_minute_batch 的实时补拉) 保持原契约: 累积进 out 末尾一次性返回。
     """
-    # 自定义数据源分流: minute provider
-    provider_name = preferences.get_minute_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "minute"):
-            provider = custom_sources.get_provider(provider_name)
-            return provider.get_minute(
-                symbols, start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done,
-            )
-        # 未配置 minute → 回退 TickFlow
+    df, fallback = _try_custom_minute(
+        symbols, start_time=start_time, end_time=end_time,
+        asset_type=asset_type, freq="1m", on_chunk_done=on_chunk_done,
+    )
+    if not fallback:
+        # _try_custom_minute 成功时返回 (df, False), df 非 None;
+        # fallback=True 时才返回 (None, True)。故此处 df 必非 None。
+        # (旧版 `df or pl.DataFrame()` 触发 polars DataFrame __bool__ TypeError, 已修。)
+        return df if df is not None else pl.DataFrame()
 
     tf = get_client()
 
@@ -572,7 +623,7 @@ def sync_minute_batch(
     # 按 segment_trading_days 交易日分段 (交易日→自然日 ×7/5 换算, 含节假日余量)。
     seg_calendar_days = max(1, int(segment_trading_days * 7 / 5))
     SEG_CHUNK = timedelta(days=seg_calendar_days)
-    time_segments: list[tuple[datetime, datetime]] = []
+    time_segments: list[tuple[datetime | None, datetime | None]] = []
     if start_time and end_time:
         seg_start = start_time
         while seg_start < end_time:
@@ -589,10 +640,10 @@ def sync_minute_batch(
     # 段内累积: 每段拉完即 flush, 避免全量攒内存 (OOM 根因)
     seg_out: list[pl.DataFrame] = []
 
-    for seg_idx, (seg_start, seg_end) in enumerate(time_segments):
+    for seg_idx, (cur_start, cur_end) in enumerate(time_segments):
         # 当前的日期段描述 (供进度展示)
-        if seg_start and seg_end:
-            seg_label = f"{seg_start.strftime('%m-%d')}~{seg_end.strftime('%m-%d')}"
+        if cur_start and cur_end:
+            seg_label = f"{cur_start.strftime('%m-%d')}~{cur_end.strftime('%m-%d')}"
         else:
             seg_label = "最新"
         seg_total = len(time_segments)
@@ -601,11 +652,11 @@ def sync_minute_batch(
             sleep_between_batches(step, rpm)
             step += 1
             try:
-                if seg_start and seg_end:
+                if cur_start and cur_end:
                     raw = tf.klines.batch(
                         chunk, period="1m",
-                        start_time=_datetime_to_ms(seg_start),
-                        end_time=_datetime_to_ms(seg_end),
+                        start_time=_datetime_to_ms(cur_start),
+                        end_time=_datetime_to_ms(cur_end),
                         count=10000,
                         adjust="forward",
                         as_dataframe=True, show_progress=False,
@@ -737,7 +788,11 @@ def fetch_intraday_monitor_batch(
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
-def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
+def fetch_minute_single(
+    symbol: str,
+    trade_date: date,
+    asset_type: AssetType = "stock",
+) -> pl.DataFrame:
     """实时拉取单股单日分钟 K(不写入本地)。优先自定义分钟源, 回退 TickFlow。"""
     from datetime import datetime
     start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
@@ -745,13 +800,13 @@ def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
 
     # 自定义数据源分流: 与 sync_minute_batch 一致, 配了自定义分钟源时走 custom provider,
     # 避免无 TickFlow Pro+ 权限的用户分时图首次打开(本地无数据)时补拉失败返回空。
-    provider_name = preferences.get_minute_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "minute"):
-            provider = custom_sources.get_provider(provider_name)
-            return provider.get_minute([symbol], start_time=start_time, end_time=end_time)
-        # 未配置 minute dataset → 回退 TickFlow
+    df, fallback = _try_custom_minute(
+        [symbol], start_time=start_time, end_time=end_time,
+        asset_type=asset_type, freq="1m",
+    )
+    if not fallback:
+        # 见 sync_minute_batch 同分支注释: df 在此必非 None。
+        return df if df is not None else pl.DataFrame()
 
     tf = get_client()
     try:
@@ -975,6 +1030,7 @@ def sync_and_persist_minute(
         on_chunk_done=on_chunk_done,
         segment_trading_days=segment_days,
         on_segment=_persist,
+        asset_type="stock",
     )
 
     if written_box[0] == 0:
