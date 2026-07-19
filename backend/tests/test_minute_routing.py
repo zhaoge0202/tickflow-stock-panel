@@ -207,7 +207,10 @@ def test_custom_success_skips_tickflow(monkeypatch):
 # ---------- 测试 7: sync_minute_batch 自定义源成功直接返回 ----------
 
 def test_sync_minute_batch_custom_success_returns_directly(monkeypatch):
-    """§4 测试 7: sync_minute_batch 自定义源成功 → 直接 return, 不走 segment 逻辑。"""
+    """§4 测试 7: sync_minute_batch 自定义源成功 + 未传 on_segment → 原样返回 df (实时补拉契约)。
+
+    传了 on_segment 时走流式落盘分支 (见测试 10), 此处验证未传时的实时补拉契约。
+    """
     expected_df = _mock_minute_df()
     mock_provider = MagicMock()
     mock_provider.get_minute.return_value = expected_df
@@ -310,3 +313,329 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     # 两个 symbol 都在结果里 (concat 后按 symbol filter 命中)
     assert "600519.SH" in result["data"]
     assert "510300.SH" in result["data"]
+
+
+# ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------
+
+def test_sync_minute_batch_custom_calls_on_segment(monkeypatch):
+    """Issue 1: sync_minute_batch 自定义源成功 + 传了 on_segment →
+    调 on_segment(df), 返回空 df (数据已落盘)。
+    """
+    expected_df = _mock_minute_df()
+    mock_provider = MagicMock()
+    mock_provider.get_minute.return_value = expected_df
+    _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
+
+    get_client_spy = MagicMock(name="get_client_spy")
+    monkeypatch.setattr(kline_sync, "get_client", get_client_spy)
+
+    on_segment_spy = MagicMock(name="on_segment_spy")
+    df = kline_sync.sync_minute_batch(
+        ["600519.SH"],
+        start_time=datetime(2026, 1, 15, 9, 25, 0),
+        end_time=datetime(2026, 1, 15, 15, 5, 0),
+        on_segment=on_segment_spy,
+        asset_type="stock",
+    )
+
+    on_segment_spy.assert_called_once_with(expected_df)
+    assert isinstance(df, pl.DataFrame)
+    assert df.is_empty()
+    get_client_spy.assert_not_called()
+
+
+# ---------- 测试 11: 自定义源返回空 df 时不调 on_segment (Issue 1 边界) ----------
+
+def test_sync_minute_batch_custom_empty_df_skips_on_segment(monkeypatch):
+    """Issue 1 边界: 自定义源返回空 df → 不调 on_segment (与 TickFlow `if seg_out:` 对称)。
+    """
+    mock_provider = MagicMock()
+    mock_provider.get_minute.return_value = pl.DataFrame()
+    _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
+
+    on_segment_spy = MagicMock(name="on_segment_spy")
+    df = kline_sync.sync_minute_batch(
+        ["600519.SH"],
+        start_time=datetime(2026, 1, 15, 9, 25, 0),
+        end_time=datetime(2026, 1, 15, 15, 5, 0),
+        on_segment=on_segment_spy,
+        asset_type="stock",
+    )
+
+    on_segment_spy.assert_not_called()
+    assert isinstance(df, pl.DataFrame)
+    assert df.is_empty()
+
+
+# ---------- 测试 12: sync_and_persist_minute + custom provider 端到端落盘 (Issue 1) ----------
+
+def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
+    """Issue 1 端到端: sync_and_persist_minute + 自定义源 →
+    _write_minute_partition 被调, written > 0。
+    """
+    expected_df = _mock_minute_df()
+    mock_provider = MagicMock()
+    mock_provider.get_minute.return_value = expected_df
+    _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
+
+    # mock sync_and_persist_minute 内部依赖 (通过 monkeypatch kline_sync 模块属性)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
+
+    # _write_minute_partition spy: 记录调用, 返回行数
+    write_spy = MagicMock(return_value=expected_df.height)
+    monkeypatch.setattr(kline_sync, "_write_minute_partition", write_spy)
+
+    # get_client spy: 自定义源成功时不应走 TickFlow
+    get_client_spy = MagicMock(name="get_client_spy")
+    monkeypatch.setattr(kline_sync, "get_client", get_client_spy)
+
+    # mock repo
+    mock_repo = MagicMock()
+    mock_repo.store.data_dir = tmp_path
+    mock_repo.db.execute = MagicMock()
+
+    # mock capset (minute_is_custom=True 绕过 has() 检查, resolve_limit 已 mock)
+    mock_capset = MagicMock()
+
+    written = kline_sync.sync_and_persist_minute(
+        ["600519.SH"], mock_repo, mock_capset,
+    )
+
+    assert write_spy.called
+    assert written == expected_df.height
+    assert written > 0
+    get_client_spy.assert_not_called()
+
+
+# ---------- 测试 13: get_provider 异常时 fall through TickFlow (Issue 2) ----------
+
+def test_get_provider_exception_falls_back_to_tickflow(monkeypatch):
+    """Issue 2: get_provider raise ValueError →
+    _try_custom_minute 返回 (None, True), 无异常穿透。
+    """
+    monkeypatch.setattr(
+        kline_sync.preferences,
+        "get_minute_data_provider",
+        lambda: "mock_src",
+    )
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        lambda name, ds: True,  # provider 存在, 但 get_provider 会抛
+    )
+
+    def _raising_get_provider(name):
+        raise ValueError("not found")
+    monkeypatch.setattr(
+        "app.data_providers.custom.get_provider",
+        _raising_get_provider,
+    )
+
+    df, fallback = kline_sync._try_custom_minute(
+        ["600519.SH"], None, None, asset_type="stock",
+    )
+
+    assert fallback is True
+    assert df is None
+
+
+# ---------- 测试 14: provider_has_dataset 异常时 fall through (Issue 2) ----------
+
+def test_provider_has_dataset_exception_falls_back(monkeypatch):
+    """Issue 2: provider_has_dataset raise →
+    _try_custom_minute 返回 (None, True), 无异常穿透。
+    """
+    monkeypatch.setattr(
+        kline_sync.preferences,
+        "get_minute_data_provider",
+        lambda: "mock_src",
+    )
+
+    def _raising_has_dataset(name, ds):
+        raise RuntimeError("registry corrupted")
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        _raising_has_dataset,
+    )
+
+    df, fallback = kline_sync._try_custom_minute(
+        ["600519.SH"], None, None, asset_type="stock",
+    )
+
+    assert fallback is True
+    assert df is None
+
+
+# ---------- 测试 15-17: GenericHTTPProvider opt-in 参数传递 (Issue 3) ----------
+
+from app.data_providers.custom.config import CustomSourceConfig, DatasetConfig
+from app.data_providers.custom.provider import GenericHTTPProvider
+
+
+def _make_minute_config(**extra) -> CustomSourceConfig:
+    """构造带 minute dataset 的最小 CustomSourceConfig, extra 传给 DatasetConfig。"""
+    field_map = {f: f for f in (
+        "symbol", "datetime", "open", "high", "low", "close", "volume", "amount"
+    )}
+    return CustomSourceConfig(
+        name="test_src",
+        display_name="Test Source",
+        datasets={"minute": DatasetConfig(
+            url="http://example.com/minute", field_map=field_map, **extra,
+        )},
+    )
+
+
+def _capture_request_rows(provider):
+    """替换 _request_rows 为捕获 spy, 返回 captured dict。"""
+    captured: dict = {}
+
+    def fake_request_rows(cfg, *, symbols=None, start_time=None, end_time=None,
+                          override_params=None, override_body=None):
+        captured["override_params"] = override_params
+        captured["override_body"] = override_body
+        return []  # 空行 → 空 df
+
+    provider._request_rows = fake_request_rows
+    return captured
+
+
+def test_generic_http_get_minute_passes_asset_type_when_configured():
+    """Issue 3: 配了 asset_type_param="asset" → override 含 {"asset": "etf"}。"""
+    config = _make_minute_config(asset_type_param="asset")
+    provider = GenericHTTPProvider(config)
+    captured = _capture_request_rows(provider)
+
+    provider.get_minute(["600519.SH"], None, None, asset_type="etf", freq="1m")
+
+    assert captured["override_params"] == {"asset": "etf"}
+    assert captured["override_body"] == {"asset": "etf"}
+
+
+def test_generic_http_get_minute_passes_freq_when_configured():
+    """Issue 3: 配了 freq_param="period" → override 含 {"period": "1m"}。"""
+    config = _make_minute_config(freq_param="period")
+    provider = GenericHTTPProvider(config)
+    captured = _capture_request_rows(provider)
+
+    provider.get_minute(["600519.SH"], None, None, asset_type="stock", freq="1m")
+
+    assert captured["override_params"] == {"period": "1m"}
+    assert captured["override_body"] == {"period": "1m"}
+
+
+def test_generic_http_get_minute_omits_params_when_not_configured():
+    """Issue 3 向后兼容: 未配 asset_type_param/freq_param → override 为 None, 不传上游。"""
+    config = _make_minute_config()  # 无 asset_type_param / freq_param
+    provider = GenericHTTPProvider(config)
+    captured = _capture_request_rows(provider)
+
+    provider.get_minute(["600519.SH"], None, None, asset_type="etf", freq="1m")
+
+    # override 为 None (空 dict → `override or None`), 不传上游
+    assert captured["override_params"] is None
+    assert captured["override_body"] is None
+
+
+# ---------- 测试 18: sync_and_persist_minute resolver 异常时优雅返回 0 (观察项加固) ----------
+
+def test_sync_and_persist_minute_resolver_exception_returns_zero(monkeypatch, tmp_path):
+    """观察项加固: sync_and_persist_minute 开头 _resolve_minute_provider 异常 →
+    不向接口抛 500, 优雅降级 (minute_is_custom=False → 走 capset 检查 → 无权限 return 0)。
+    """
+    monkeypatch.setattr(
+        kline_sync.preferences,
+        "get_minute_data_provider",
+        lambda: "mock_src",
+    )
+    # provider_has_dataset 抛异常 (模拟 registry 损坏)
+    def _raising_has_dataset(name, ds):
+        raise RuntimeError("registry corrupted")
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        _raising_has_dataset,
+    )
+
+    # 无 KLINE_MINUTE_BATCH 权限 → resolver 异常视为非 custom → capset 检查失败 → return 0
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = False
+
+    mock_repo = MagicMock()
+    mock_repo.store.data_dir = tmp_path
+
+    # 不应抛异常, 优雅降级到 0
+    written = kline_sync.sync_and_persist_minute(
+        ["600519.SH"], mock_repo, mock_capset,
+    )
+
+    assert written == 0
+
+
+# ---------- 测试 19: _resolve_minute_provider helper 单元测试 ----------
+
+def test_resolve_minute_provider_tickflow_returns_silent_fallback():
+    """观察项加固: provider_name == "tickflow" → (None, True, None) 静默降级, 无 err。"""
+    provider, fallback, err = kline_sync._resolve_minute_provider("tickflow")
+    assert provider is None
+    assert fallback is True
+    assert err is None
+
+
+def test_resolve_minute_provider_no_dataset_returns_silent_fallback(monkeypatch):
+    """观察项加固: 配了 custom 但未配 minute dataset → (None, True, None) 静默降级。"""
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        lambda name, ds: False,  # 已注册但未配 minute
+    )
+    provider, fallback, err = kline_sync._resolve_minute_provider("mock_src")
+    assert provider is None
+    assert fallback is True
+    assert err is None  # 未配 ≠ 异常, 不应触发 warning
+
+
+def test_resolve_minute_provider_has_dataset_exception_returns_err(monkeypatch):
+    """观察项加固: provider_has_dataset 抛异常 → (None, True, str(e)), 上层据此 warning。"""
+    def _raising(name, ds):
+        raise RuntimeError("registry corrupted")
+    monkeypatch.setattr("app.data_providers.custom.provider_has_dataset", _raising)
+    provider, fallback, err = kline_sync._resolve_minute_provider("mock_src")
+    assert provider is None
+    assert fallback is True
+    assert err is not None
+    assert "registry corrupted" in err
+
+
+def test_resolve_minute_provider_get_provider_exception_returns_err(monkeypatch):
+    """观察项加固: provider_has_dataset 返回 True 但 get_provider 抛 → (None, True, str(e))。"""
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        lambda name, ds: True,
+    )
+    def _raising_get(name):
+        raise ValueError("not found")
+    monkeypatch.setattr("app.data_providers.custom.get_provider", _raising_get)
+    provider, fallback, err = kline_sync._resolve_minute_provider("mock_src")
+    assert provider is None
+    assert fallback is True
+    assert err is not None
+    assert "not found" in err
+
+
+def test_resolve_minute_provider_success_returns_provider(monkeypatch):
+    """观察项加固: 正常路径 → (provider, False, None)。"""
+    mock_provider = object()  # 任意 truthy 对象即可
+    monkeypatch.setattr(
+        "app.data_providers.custom.provider_has_dataset",
+        lambda name, ds: True,
+    )
+    monkeypatch.setattr(
+        "app.data_providers.custom.get_provider",
+        lambda name: mock_provider,
+    )
+    provider, fallback, err = kline_sync._resolve_minute_provider("mock_src")
+    assert provider is mock_provider
+    assert fallback is False
+    assert err is None

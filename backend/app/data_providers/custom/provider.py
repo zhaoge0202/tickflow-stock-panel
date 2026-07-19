@@ -111,16 +111,31 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType = "stock",  # noqa: ARG002
-        freq: str = "1m",  # noqa: ARG002
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
+        """拉取分钟 K。
+
+        asset_type / freq 默认不传上游 (minute dataset URL 应返回 1m 数据)。
+        在 dataset 配置中设置 asset_type_param / freq_param 后, 这两个参数会以
+        配置的参数名注入请求 (GET → params, POST → body), 用于上游需区分
+        stock/ETF/index 或固定频率的场景。
+        """
         cfg = self._dataset("minute")
+        override: dict[str, Any] = {}
+        if cfg.asset_type_param:
+            override[cfg.asset_type_param] = asset_type
+        if cfg.freq_param:
+            override[cfg.freq_param] = freq
         frames: list[pl.DataFrame] = []
         chunks = chunked(symbols, cfg.batch)
         for i, chunk in enumerate(chunks):
             sleep_between_batches(i, cfg.rpm)
-            rows = self._request_rows(cfg, symbols=chunk, start_time=start_time, end_time=end_time)
+            rows = self._request_rows(
+                cfg, symbols=chunk, start_time=start_time, end_time=end_time,
+                override_params=override or None, override_body=override or None,
+            )
             df = self._mapped_frame(cfg, rows)
             df = self._normalize_minute(df)
             if not df.is_empty():
