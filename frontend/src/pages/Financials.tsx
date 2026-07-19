@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { RefreshCw, Lock, Loader2, X, Search, FileText, Database, Clock, CheckCircle2, Hourglass, Lightbulb, ExternalLink, ChartPie } from 'lucide-react'
+import { RefreshCw, Download, Lock, Loader2, X, Search, FileText, Database, Clock, CheckCircle2, Hourglass, Lightbulb, ExternalLink, ChartPie } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -239,11 +239,11 @@ export function Financials() {
                         className="text-muted hover:text-accent transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                         onClick={() => handleSync(key)}
                         disabled={syncing}
-                        title={syncing ? '正在同步…' : `同步${label}`}
+                        title={syncing ? '正在同步…' : `更新${label}`}
                       >
                         {syncing
                           ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          : <RefreshCw className="h-3.5 w-3.5" />}
+                          : <Download className="h-3.5 w-3.5" />}
                       </button>
                     </div>
                     <div className="mt-2 text-xl font-semibold tabular-nums text-foreground">
