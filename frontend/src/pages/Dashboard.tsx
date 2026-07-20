@@ -94,8 +94,7 @@ const _SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent/40', warn: 'bg-warning', critical: 'bg-danger',
 }
 
-function MonitorWidget() {
-  const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
+function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => void }) {
   const alerts = useQuery({
     queryKey: ['alerts', ''],
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
@@ -134,7 +133,7 @@ function MonitorWidget() {
               {/* 第一行: 代码 + 名称 + 价格 + 涨跌幅 (点击代码/名称弹日K) */}
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={() => ev.symbol && setPreviewEv(ev)}
+                  onClick={() => ev.symbol && onStockClick(ev)}
                   title={ev.symbol ? `查看 ${ev.symbol} 日K` : undefined}
                   className="inline-flex items-center gap-1 min-w-0 shrink-0 rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 cursor-pointer"
                 >
@@ -198,19 +197,6 @@ function MonitorWidget() {
           )
         })}
       </div>
-
-      <StockPreviewDialog
-        symbol={previewEv?.symbol ?? null}
-        name={previewEv?.name ?? undefined}
-        triggerInfo={previewEv ? {
-          price: previewEv.price ?? null,
-          changePct: previewEv.change_pct ?? null,
-          ts: previewEv.ts,
-          signals: previewEv.signals,
-          message: previewEv.message,
-        } : null}
-        onClose={() => setPreviewEv(null)}
-      />
     </>
   )
 }
@@ -533,7 +519,7 @@ export function Dashboard() {
   const qc = useQueryClient()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
-  const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string} | null>(null)
+  const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
   const [showWelcomeModal, setShowWelcomeModal] = useState(false)
   const dataStatus = useDataStatus({ staleTime: 60_000 })
@@ -826,7 +812,9 @@ export function Dashboard() {
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </Link>
             </div>
-            <MonitorWidget />
+            <MonitorWidget onStockClick={(event) => {
+              if (event.symbol) setPreviewStock({ symbol: event.symbol, name: event.name ?? undefined, alert: event })
+            }} />
           </section>
         </aside>
       </div>
@@ -834,6 +822,13 @@ export function Dashboard() {
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}
         name={previewStock?.name}
+        triggerInfo={previewStock?.alert ? {
+          price: previewStock.alert.price ?? null,
+          changePct: previewStock.alert.change_pct ?? null,
+          ts: previewStock.alert.ts,
+          signals: previewStock.alert.signals,
+          message: previewStock.alert.message,
+        } : null}
         onClose={() => setPreviewStock(null)}
       />
     </div>
