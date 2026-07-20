@@ -229,7 +229,7 @@ export function StockDailyKChart({
                   volumeCompare.enabled ? 'bg-accent' : 'bg-elevated'
                 }`}
               >
-                <span className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform ${
+                <span className={`absolute left-0 top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform ${
                   volumeCompare.enabled ? 'translate-x-3' : 'translate-x-0.5'
                 }`} />
               </button>
