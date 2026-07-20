@@ -677,6 +677,10 @@ def compute_limit_signals(
             continue
         if c in instruments.columns:
             inst_cols.append(c)
+    if need_price_limits and "as_of" in instruments.columns:
+        inst_cols.append(
+            pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
+        )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
     if need_price_limits and "name" in instruments.columns:
@@ -741,19 +745,28 @@ def compute_limit_signals(
         .alias("_theoretical_limit_down")
     )
 
-    # 生效涨跌停价: 最新日优先使用维表权威值; 历史日期继续使用理论价。
-    # instruments 只有最新快照, 不能用于历史日期; >=10000 视为新股无涨跌停限制哨兵值。
+    # 生效涨跌停价: 维表日期与行情日期一致时使用权威值, 否则使用理论价。
+    # 旧版维表没有 as_of, 保持仅在最新行情日使用权威值的兼容行为。
     _SENTINEL = 10000.0
-    is_latest_date = pl.col("date") == pl.col("date").max()
+    if "_instrument_as_of" in df.columns:
+        authoritative_date = (
+            pl.col("_instrument_as_of") == pl.col("date").cast(pl.Date, strict=False)
+        )
+    else:
+        authoritative_date = pl.col("date") == pl.col("date").max()
     if "limit_up" in df.columns:
         effective_limit_up = pl.when(
-            is_latest_date & pl.col("limit_up").is_not_null() & (pl.col("limit_up") < _SENTINEL)
+            authoritative_date
+            & pl.col("limit_up").is_not_null()
+            & (pl.col("limit_up") < _SENTINEL)
         ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
     else:
         effective_limit_up = pl.col("_theoretical_limit_up")
     if "limit_down" in df.columns:
         effective_limit_down = pl.when(
-            is_latest_date & pl.col("limit_down").is_not_null() & (pl.col("limit_down") < _SENTINEL)
+            authoritative_date
+            & pl.col("limit_down").is_not_null()
+            & (pl.col("limit_down") < _SENTINEL)
         ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
     else:
         effective_limit_down = pl.col("_theoretical_limit_down")
@@ -870,7 +883,7 @@ def compute_limit_signals(
     cleanup = ["_prev_raw_close", "_limit_pct",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
-               "_grp_up", "_grp_down"]
+               "_grp_up", "_grp_down", "_instrument_as_of"]
     if "_is_st" in df.columns:
         cleanup.append("_is_st")
     # 清理 join 产生的重复列
@@ -1658,6 +1671,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     for c in ["float_shares", "limit_up", "limit_down"]:
         if c in instruments.columns:
             inst_cols.append(c)
+    if "as_of" in instruments.columns:
+        inst_cols.append(
+            pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
+        )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
     if "name" in instruments.columns:
         st_flag = (
@@ -1704,19 +1721,28 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     limit_up_price = polars_limit_price(prev_raw, limit_pct, up=True)
     limit_down_price = polars_limit_price(prev_raw, limit_pct, up=False)
 
-    # 生效涨跌停价: 优先用维表权威值 (instruments.limit_up/down, 交易所级别精确价),
-    # 维表缺失 (新股上市前 5 日: limit_up 为 null 或哨兵 100000) 回退自算理论价。
+    # 生效涨跌停价: 维表日期与行情日期一致时优先使用交易所权威值;
+    # 维表过期、价格缺失或新股哨兵值均回退自算理论价。旧版无 as_of 维表保持兼容。
     # 哨兵阈值 10000 用于识别 "新股无涨跌停限制" 的占位值 (实际涨停价不可能上万)。
     _SENTINEL = 10000.0
+    authoritative_date = (
+        pl.col("_instrument_as_of") == trade_date.cast(pl.Date, strict=False)
+        if "_instrument_as_of" in df.columns
+        else pl.lit(True)
+    )
     if "limit_up" in df.columns:
         effective_limit_up = pl.when(
-            pl.col("limit_up").is_not_null() & (pl.col("limit_up") < _SENTINEL)
+            authoritative_date
+            & pl.col("limit_up").is_not_null()
+            & (pl.col("limit_up") < _SENTINEL)
         ).then(pl.col("limit_up")).otherwise(limit_up_price)
     else:
         effective_limit_up = limit_up_price
     if "limit_down" in df.columns:
         effective_limit_down = pl.when(
-            pl.col("limit_down").is_not_null() & (pl.col("limit_down") < _SENTINEL)
+            authoritative_date
+            & pl.col("limit_down").is_not_null()
+            & (pl.col("limit_down") < _SENTINEL)
         ).then(pl.col("limit_down")).otherwise(limit_down_price)
     else:
         effective_limit_down = limit_down_price
@@ -1772,7 +1798,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     ])
 
     # 清理
-    cleanup = ["_limit_pct", "_is_st", "limit_up", "limit_down"]
+    cleanup = ["_limit_pct", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)

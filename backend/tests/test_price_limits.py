@@ -8,6 +8,7 @@ import pytest
 
 from app.api import kline
 from app.backtest.matrix import load_market_data_matrix_from_parquet
+from app.indicators import pipeline
 from app.price_limits import (
     numpy_limit_price,
     numpy_price_limit_matrix,
@@ -145,3 +146,72 @@ def test_minute_price_limit_prefers_authoritative_prices_only_today(monkeypatch)
         "limit_down": None,
         "source": "rule",
     }
+
+
+def _daily_limit_rows(current_close: float) -> pl.DataFrame:
+    return pl.DataFrame({
+        "symbol": ["600001.SH", "600001.SH"],
+        "date": [date(2026, 7, 17), date(2026, 7, 20)],
+        "open": [10.0, current_close],
+        "high": [10.0, current_close],
+        "low": [10.0, current_close],
+        "close": [10.0, current_close],
+        "raw_close": [10.0, current_close],
+        "raw_high": [10.0, current_close],
+    })
+
+
+@pytest.mark.parametrize(
+    ("instrument_as_of", "expected"),
+    [
+        (date(2026, 7, 17), False),
+        (date(2026, 7, 20), True),
+        (None, True),
+    ],
+)
+def test_daily_limit_prices_require_matching_instrument_date(instrument_as_of, expected):
+    instrument_data = {
+        "symbol": ["600001.SH"],
+        "name": ["普通股"],
+        "limit_up": [10.90],
+        "limit_down": [9.10],
+    }
+    if instrument_as_of is not None:
+        instrument_data["as_of"] = [instrument_as_of]
+
+    result = pipeline.compute_limit_signals(
+        _daily_limit_rows(9.10),
+        pl.DataFrame(instrument_data),
+        needed={"signal_limit_down"},
+    )
+
+    assert result["signal_limit_down"][-1] is expected
+    assert "_instrument_as_of" not in result.columns
+
+
+def test_realtime_limit_prices_ignore_stale_instrument_date():
+    today = date(2026, 7, 20)
+    rows = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "date": [today],
+        "open": [9.10],
+        "high": [9.10],
+        "low": [9.10],
+        "close": [9.10],
+        "raw_close": [9.10],
+        "raw_high": [9.10],
+        "_prev_close_raw": [10.0],
+        "volume": [1000.0],
+    })
+    instruments = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "name": ["普通股"],
+        "limit_up": [10.90],
+        "limit_down": [9.10],
+        "as_of": [date(2026, 7, 17)],
+    })
+
+    result = pipeline._compute_limit_signals_today(rows, instruments)
+
+    assert result["signal_limit_down"][0] is False
+    assert "_instrument_as_of" not in result.columns
