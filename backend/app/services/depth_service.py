@@ -97,20 +97,65 @@ class DepthService:
     # ================================================================
 
     def boot_check(self) -> None:
-        """启动补跑: 当天 depth5 文件不存在则 finalize 一次; 已存在则恢复内存缓存。"""
+        """启动补跑: 当天 depth5 缺失或明显残缺则 finalize; 否则恢复内存缓存。
+
+        残缺判定: 已落盘条数明显少于当前 enriched 涨跌停数 (例如旧文件只覆盖
+        部分涨停, 前端会大量显示「待确认」)。此时强制重拉并覆盖定版。
+        """
         if not self._has_capability():
             logger.info("depth sealed: 无五档来源(TickFlow depth5.batch 或 tdxapi), 跳过启动补跑")
             return
         today = cn_today()
-        if self._persisted_for_date(today):
-            # parquet 已存在: 恢复内存缓存(避免重启后每次查询都读 parquet)
+        if self._persisted_for_date(today) and not self._depth5_incomplete(today):
+            # parquet 已存在且覆盖完整: 恢复内存缓存(避免重启后每次查询都读 parquet)
             self._restore_from_parquet(today)
             return
-        logger.info("depth sealed: 启动补跑今天定版")
+        if self._persisted_for_date(today):
+            logger.info("depth sealed: 当天定版残缺, 启动补跑重拉")
+        else:
+            logger.info("depth sealed: 启动补跑今天定版")
         try:
             self.finalize()
         except Exception as e:  # noqa: BLE001
             logger.warning("depth sealed 启动补跑失败: %s", e)
+            # 重拉失败时尽量回退到已有 parquet, 避免完全无封单数据
+            if self._persisted_for_date(today):
+                self._restore_from_parquet(today)
+
+    def _depth5_incomplete(self, d: date) -> bool:
+        """当天 depth5 是否明显少于当前涨跌停名单。"""
+        if not self._repo:
+            return False
+        out = self._repo.store.data_dir / "depth5" / f"date={d.isoformat()}" / "part.parquet"
+        if not out.exists():
+            return True
+        try:
+            persisted = pl.read_parquet(out)
+            persisted_n = len(persisted)
+        except Exception:  # noqa: BLE001
+            return True
+
+        expected = 0
+        try:
+            enriched, enriched_date = self._repo.get_enriched_latest()
+            if enriched_date == d and not enriched.is_empty():
+                if "signal_limit_up" in enriched.columns:
+                    expected += int(enriched.filter(pl.col("signal_limit_up").fill_null(False)).height)
+                if "signal_limit_down" in enriched.columns:
+                    expected += int(enriched.filter(pl.col("signal_limit_down").fill_null(False)).height)
+        except Exception:  # noqa: BLE001
+            return False
+
+        # 无涨跌停信号可比时不强制重拉; 覆盖率 < 80% 视为残缺
+        if expected <= 0:
+            return False
+        incomplete = persisted_n < max(1, int(expected * 0.8))
+        if incomplete:
+            logger.info(
+                "depth sealed 覆盖不足: persisted=%d expected_limit=%d date=%s",
+                persisted_n, expected, d,
+            )
+        return incomplete
 
     def _restore_from_parquet(self, d: date) -> None:
         """从 parquet 恢复内存缓存(服务重启后)。"""
