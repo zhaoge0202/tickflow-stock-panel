@@ -517,37 +517,71 @@ def limit_ladder(
         return {"as_of": str(as_of), "tiers": [], "counts": {"up": 0, "down": 0}}
 
     # 双方向涨跌停计数(不论当前 direction, 前端始终同时显示)
-    count_up_raw = int(df.filter(pl.col("signal_limit_up").fill_null(False)).height) if "signal_limit_up" in df.columns else 0
-    count_down_raw = int(df.filter(pl.col("signal_limit_down").fill_null(False)).height) if "signal_limit_down" in df.columns else 0
+    limit_up_mask = (
+        pl.col("signal_limit_up").fill_null(False)
+        if "signal_limit_up" in df.columns else pl.lit(False)
+    )
+    limit_down_mask = (
+        pl.col("signal_limit_down").fill_null(False)
+        if "signal_limit_down" in df.columns else pl.lit(False)
+    )
+    limit_up_symbols = set(
+        df.filter(limit_up_mask)["symbol"].to_list()
+    ) if "signal_limit_up" in df.columns and "symbol" in df.columns else set()
+    limit_down_symbols = set(
+        df.filter(limit_down_mask)["symbol"].to_list()
+    ) if "signal_limit_down" in df.columns and "symbol" in df.columns else set()
+    count_up_raw = len(limit_up_symbols)
+    count_down_raw = len(limit_down_symbols)
 
-    # 双方向 sealed 修正: 减去各自的假涨停(假涨停已归炸板, 不计入涨停数)
+    # 双方向 sealed 修正: 只扣“当前仍判定为涨/跌停”集合内的假封板。
+    # 旧 depth5 可能是残缺名单(或隔日残留), 若对整表 fake 直接相减会把计数扣穿
+    # (典型: raw 95/315 被扣成 69/259, 而 fake 几乎都不在当前涨跌停集合里)。
     depth_svc_global = getattr(request.app.state, "depth_service", None)
     fake_up = 0
     fake_down = 0
     sealed_up_ready = False
     sealed_down_ready = False
+    up_map: dict = {}
+    down_map: dict = {}
     if depth_svc_global:
-        up_map = depth_svc_global.get_sealed_map(as_of, is_down=False)
-        down_map = depth_svc_global.get_sealed_map(as_of, is_down=True)
+        up_map = depth_svc_global.get_sealed_map(as_of, is_down=False) or {}
+        down_map = depth_svc_global.get_sealed_map(as_of, is_down=True) or {}
         sealed_up_ready = bool(up_map) and depth_svc_global.is_sealed_ready(as_of)
         sealed_down_ready = bool(down_map) and depth_svc_global.is_sealed_ready(as_of)
-        if up_map:
-            fake_up = sum(1 for v in up_map.values() if v.get("sealed") is False)
-        if down_map:
-            fake_down = sum(1 for v in down_map.values() if v.get("sealed") is False)
-    count_up = count_up_raw - fake_up if sealed_up_ready else count_up_raw
-    count_down = count_down_raw - fake_down if sealed_down_ready else count_down_raw
+        if up_map and limit_up_symbols:
+            fake_up = sum(
+                1 for sym, v in up_map.items()
+                if sym in limit_up_symbols and v.get("sealed") is False
+            )
+        if down_map and limit_down_symbols:
+            fake_down = sum(
+                1 for sym, v in down_map.items()
+                if sym in limit_down_symbols and v.get("sealed") is False
+            )
+    count_up = max(0, count_up_raw - fake_up) if sealed_up_ready else count_up_raw
+    count_down = max(0, count_down_raw - fake_down) if sealed_down_ready else count_down_raw
 
     # 双方向 sealed 明细(供前端弹窗同时显示涨跌停)
-    def _count_sealed(m: dict, ready: bool):
+    def _count_sealed(m: dict, ready: bool, active_symbols: set[str] | None = None):
         if not m or not ready:
             return {"real": 0, "fake": 0, "pending": 0}
-        real = sum(1 for v in m.values() if v.get("sealed") is True)
-        fake = sum(1 for v in m.values() if v.get("sealed") is False)
-        pending = sum(1 for v in m.values() if v.get("sealed") is None)
+        items = (
+            ((sym, v) for sym, v in m.items() if sym in active_symbols)
+            if active_symbols is not None else m.items()
+        )
+        real = fake = pending = 0
+        for _, v in items:
+            sealed = v.get("sealed")
+            if sealed is True:
+                real += 1
+            elif sealed is False:
+                fake += 1
+            else:
+                pending += 1
         return {"real": real, "fake": fake, "pending": pending}
-    sealed_counts_up = _count_sealed(up_map, sealed_up_ready)
-    sealed_counts_down = _count_sealed(down_map, sealed_down_ready)
+    sealed_counts_up = _count_sealed(up_map, sealed_up_ready, limit_up_symbols)
+    sealed_counts_down = _count_sealed(down_map, sealed_down_ready, limit_down_symbols)
 
     # 加载前一日的 prev consecutive_limit_ups/downs
     # 窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (存储列, 直接谓词下推读 parquet),
