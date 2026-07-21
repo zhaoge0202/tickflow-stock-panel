@@ -670,8 +670,26 @@ def test_get_financials_maps_tdx_finance_snapshot(monkeypatch, table, expected_f
     assert df["source"][0] == "tdxapi"
     assert df["table"][0] == table
     assert df["report_date"][0] == dt.date(2026, 3, 31)
+    assert df["period_end"][0] == "2026-03-31"
+    assert df["announce_date"][0] == "2026-03-31"
     assert df["ipo_date"][0] == dt.date(2001, 8, 27)
     assert df[expected_field][0] == expected_value
+    # 前端契约字段: 从 TDX 快照派生, 避免页面大面积 "—"
+    if table == "metrics":
+        assert abs(df["eps_basic"][0] - (65000000000.0 / 1256197800.0)) < 1e-6
+        assert abs(df["roe"][0] - (65000000000.0 / 200000000000.0 * 100)) < 1e-6
+        assert df["revenue"][0] == 120000000000.0
+        assert df["net_income"][0] == 65000000000.0
+    elif table == "income":
+        assert df["revenue"][0] == 120000000000.0
+        assert df["net_income"][0] == 65000000000.0
+    elif table == "balance_sheet":
+        assert df["total_assets"][0] == 300000000000.0
+        assert df["total_equity"][0] == 200000000000.0
+        assert df["total_liabilities"][0] == 60000000000.0
+    elif table == "cash_flow":
+        assert df["net_operating_cash_flow"][0] == 70000000000.0
+        assert df["net_cash_change"][0] == 60000000000.0
 
 
 def test_symbol_helpers():
