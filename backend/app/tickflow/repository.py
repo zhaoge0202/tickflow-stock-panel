@@ -571,6 +571,36 @@ class KlineRepository:
                     if df_today.is_empty():
                         raise ValueError(f"最新日 {latest} 指标计算结果为空")
 
+                    # 若最新分区已落盘涨跌停信号, 以磁盘信号为准覆盖内存重算结果。
+                    # 启动预热用 150 日 enriched 历史窗口重算 limit 时, 会因历史 raw/昨收链
+                    # 不完整与离线全量日K重算产生分叉 (例如磁盘 121/28, 内存变成 95/315)。
+                    signal_cols = [
+                        c for c in (
+                            "signal_limit_up",
+                            "signal_limit_down",
+                            "signal_broken_limit_up",
+                            "signal_limit_down_recovery",
+                            "consecutive_limit_ups",
+                            "consecutive_limit_downs",
+                        )
+                        if c in df_latest.columns and c in df_today.columns
+                    ]
+                    if signal_cols and "symbol" in df_latest.columns:
+                        disk_signals = (
+                            df_latest
+                            .select(["symbol", *signal_cols])
+                            .unique(subset=["symbol"], keep="last")
+                        )
+                        df_today = (
+                            df_today
+                            .drop(signal_cols)
+                            .join(disk_signals, on="symbol", how="left")
+                        )
+                        logger.info(
+                            "enriched refresh: 使用磁盘涨跌停信号覆盖内存重算 (%s)",
+                            ",".join(signal_cols),
+                        )
+
                     # 维表只 JOIN 最新日，避免把名称和股本复制到整个历史中间表。
                     if instruments is not None and not instruments.is_empty():
                         inst_cols = [c for c in ["name", "total_shares", "float_shares"]
