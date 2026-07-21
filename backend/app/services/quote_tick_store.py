@@ -2,21 +2,28 @@
 
 只记录系统从实时源看到的价格事实, 不表达买卖建议。当前决策台要求依赖
 tdxapi, 因此 QuoteService 只会把 tdxapi 实时记录写入这里。
+
+内存热缓存按 symbol 维护:
+  - _latest: 每个 symbol 最新一条
+  - _series: 每个 symbol 最近 N 条 (供决策台盘中序列, 不再用全市场大 ring)
+写入范围由调用方收窄 (自选/持仓/监控); 全市场最新价走 MySQL quote_latest。
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
+import shutil
 import threading
 import time
 from collections import defaultdict, deque
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import polars as pl
 
+from app.config import settings
 from app.market_time import cn_today
 from app.parquet import scan_parquet_compat
 
@@ -25,7 +32,8 @@ logger = logging.getLogger(__name__)
 CN_TZ = ZoneInfo("Asia/Shanghai")
 FLUSH_INTERVAL_S = 3.0
 FLUSH_BATCH_SIZE = 5000
-RING_MAX_ROWS = 20000
+# 每个 symbol 热序列上限: 决策台分时/信号帧够用, 避免全市场 2 万行 Python dict ring。
+SERIES_MAX_PER_SYMBOL = 300
 STALE_MS = 15_000
 # 无 symbol 条件的磁盘读取只允许读取最近文件，避免误把整天全市场快照物化。
 UNSCOPED_READ_MAX_FILES = 16
@@ -65,7 +73,12 @@ QUOTE_TICK_SCHEMA_OVERRIDES = {
 
 _lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
-_rings: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=RING_MAX_ROWS))
+# data_dir -> symbol -> latest row
+_latest: dict[str, dict[str, dict]] = defaultdict(dict)
+# data_dir -> symbol -> recent rows (bounded)
+_series: dict[str, dict[str, deque[dict]]] = defaultdict(
+    lambda: defaultdict(lambda: deque(maxlen=SERIES_MAX_PER_SYMBOL))
+)
 _last_flush: dict[str, float] = defaultdict(float)
 _quality: dict[str, dict] = {}
 
@@ -80,6 +93,7 @@ def append_many(
     """追加一批行情事实, 并按批次写入 parquet。
 
     返回本轮质量摘要。异常由调用方捕获; 本函数内部尽量只处理数据问题。
+    热缓存按 symbol 更新最新价 + 有界短序列, 不再保留全市场大 ring。
     """
     ingest_ts = int(time.time() * 1000)
     rows = [_normalize_record(r, source=source, ingest_ts=ingest_ts) for r in records]
@@ -88,8 +102,17 @@ def append_many(
     now = time.monotonic()
 
     with _lock:
-        ring = _rings[key]
-        ring.extend(rows)
+        latest_map = _latest[key]
+        series_map = _series[key]
+        for row in rows:
+            symbol = row["symbol"]
+            series_map[symbol].append(row)
+            prev = latest_map.get(symbol)
+            if prev is None or (row.get("event_ts") or 0, row.get("ingest_ts") or 0) >= (
+                prev.get("event_ts") or 0,
+                prev.get("ingest_ts") or 0,
+            ):
+                latest_map[symbol] = row
         _buffers[key].extend(rows)
         summary = _build_quality(rows, source=source, ingest_ts=ingest_ts)
         _quality[key] = summary
@@ -338,12 +361,181 @@ def _recent_rows(
 
 
 def _hot_rows(data_dir: Path, *, target_date: date) -> list[dict]:
+    """热路径: 每 symbol 有界短序列 + 未 flush buffer。"""
     key = str(data_dir)
     ds = target_date.isoformat()
     with _lock:
-        ring_rows = [dict(r) for r in _rings.get(key, []) if r.get("trade_date") == ds]
+        series_rows: list[dict] = []
+        for rows in _series.get(key, {}).values():
+            series_rows.extend(dict(r) for r in rows if r.get("trade_date") == ds)
+        # latest 兜底: 序列因跨日清空后仍能返回当日最新一条
+        for row in _latest.get(key, {}).values():
+            if row.get("trade_date") == ds:
+                series_rows.append(dict(row))
         buffered = [dict(r) for r in _buffers.get(key, []) if r.get("trade_date") == ds]
-    return _dedupe_rows(ring_rows + buffered)
+    return _dedupe_rows(series_rows + buffered)
+
+
+def cleanup_old_partitions(
+    data_dir: Path,
+    *,
+    keep_days: int | None = None,
+) -> dict:
+    """删除过期/非法 quote_ticks 分区, 控制磁盘膨胀。
+
+    keep_days 默认取 settings.quote_ticks_retention_days。
+    非法日期 (解析失败 / 明显越界如 1970、2263) 一并清理。
+    """
+    retention = settings.quote_ticks_retention_days if keep_days is None else int(keep_days)
+    retention = max(1, retention)
+    base = data_dir / "quote_ticks"
+    if not base.exists():
+        return {"removed": [], "kept": [], "retention_days": retention}
+
+    today = cn_today()
+    cutoff = today - timedelta(days=retention - 1)
+    removed: list[str] = []
+    kept: list[str] = []
+    for path in sorted(base.iterdir()):
+        if not path.is_dir() or not path.name.startswith("date="):
+            continue
+        ds = path.name[5:]
+        drop = False
+        try:
+            day = date.fromisoformat(ds)
+        except ValueError:
+            drop = True
+        else:
+            # 脏分区 / 过期分区
+            if day.year < 1990 or day.year > today.year + 1 or day < cutoff:
+                drop = True
+        if drop:
+            try:
+                shutil.rmtree(path)
+                removed.append(ds)
+            except OSError as exc:
+                logger.warning("quote_ticks 清理失败(%s): %s", path, exc)
+        else:
+            kept.append(ds)
+
+    # 顺手丢掉非今日的内存热缓存, 防止跨日残留占内存
+    key = str(data_dir)
+    today_ds = today.isoformat()
+    with _lock:
+        latest_map = _latest.get(key)
+        if latest_map:
+            stale_symbols = [
+                symbol for symbol, row in latest_map.items()
+                if row.get("trade_date") != today_ds
+            ]
+            for symbol in stale_symbols:
+                latest_map.pop(symbol, None)
+                series = _series.get(key, {})
+                series.pop(symbol, None)
+
+    if removed:
+        logger.info(
+            "quote_ticks 清理完成: removed=%d kept=%d retention_days=%d",
+            len(removed),
+            len(kept),
+            retention,
+        )
+    return {"removed": removed, "kept": kept, "retention_days": retention}
+
+
+def compact_partition(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    symbols: set[str] | list[str] | None = None,
+) -> dict:
+    """把某日 quote_ticks 压成「仅关注标的 + 每小时一个文件」。
+
+    用于收窄写入策略上线前已经落盘的全市场残量。symbols 为空时只合并文件不筛标的。
+    压缩过程用临时目录 + 原子替换, 避免半写状态。
+    """
+    target_date = target_date or cn_today()
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    if not base.exists():
+        return {"date": ds, "hours": 0, "rows": 0, "symbols": 0, "removed_files": 0}
+
+    wanted = {str(s).strip().upper() for s in (symbols or []) if s}
+    hour_dirs = sorted(p for p in base.iterdir() if p.is_dir() and p.name.startswith("hour="))
+    total_rows = 0
+    kept_symbols: set[str] = set()
+    removed_files = 0
+    written_hours = 0
+
+    for hour_dir in hour_dirs:
+        paths = sorted(hour_dir.glob("*.parquet"))
+        if not paths:
+            continue
+        try:
+            frame = scan_parquet_compat(
+                [str(path) for path in paths],
+                schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                hive_partitioning=False,
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            if wanted:
+                frame = frame.filter(pl.col("symbol").is_in(sorted(wanted)))
+            df = frame.collect(engine="streaming")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quote_ticks 压缩读取失败(%s): %s", hour_dir, exc)
+            continue
+
+        # 先写临时文件, 成功后再删旧 part, 最后 rename
+        tmp_path = hour_dir / f".compact-{int(time.time() * 1000)}.parquet"
+        final_path = hour_dir / f"part-compact-{ds}-{hour_dir.name[5:]}.parquet"
+        try:
+            if df.is_empty():
+                # 该小时没有关注标的: 清空整个 hour 目录
+                for path in paths:
+                    try:
+                        path.unlink()
+                        removed_files += 1
+                    except OSError:
+                        pass
+                try:
+                    hour_dir.rmdir()
+                except OSError:
+                    pass
+                continue
+
+            df.write_parquet(tmp_path)
+            for path in paths:
+                if path.resolve() == tmp_path.resolve():
+                    continue
+                try:
+                    path.unlink()
+                    removed_files += 1
+                except OSError as exc:
+                    logger.warning("quote_ticks 压缩删旧失败(%s): %s", path, exc)
+            tmp_path.replace(final_path)
+            total_rows += len(df)
+            if "symbol" in df.columns:
+                kept_symbols.update(str(s).upper() for s in df["symbol"].unique().to_list())
+            written_hours += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quote_ticks 压缩写入失败(%s): %s", hour_dir, exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    result = {
+        "date": ds,
+        "hours": written_hours,
+        "rows": total_rows,
+        "symbols": len(kept_symbols),
+        "removed_files": removed_files,
+    }
+    logger.info(
+        "quote_ticks 压缩完成: date=%s hours=%d rows=%d symbols=%d removed_files=%d",
+        ds, written_hours, total_rows, len(kept_symbols), removed_files,
+    )
+    return result
 
 
 def _symbols_covered(rows: list[dict], wanted: set[str]) -> bool:

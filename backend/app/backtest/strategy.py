@@ -388,6 +388,10 @@ def prewarm_matrix_cache(
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
     }
     del market
+    # 预热只为落盘 mmap; 进程内句柄立刻丢掉, 并回收构建期临时数组。
+    import gc
+
+    gc.collect()
     return result
 
 

@@ -571,6 +571,7 @@ class QuoteService:
 
     def _poll_loop(self) -> None:
         while self._running and self._enabled:
+            sleep_s = self._interval
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 if self._paused:
@@ -595,12 +596,14 @@ class QuoteService:
                             self._final_sync_failed[key] = "fetch_failed"
                             logger.warning("%s 最终行情同步失败, 将继续重试", "午休" if phase == "morning_final" else "收盘")
                 else:
+                    # 休盘/已定版: 降频空转, 避免整夜每 6s 醒一次空转线程。
+                    sleep_s = max(self._interval, 30.0)
                     logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
             except Exception as e:  # noqa: BLE001
                 logger.warning("行情轮询异常: %s", e)
 
             waited = 0.0
-            while self._running and self._enabled and not self._paused and waited < self._interval:
+            while self._running and self._enabled and not self._paused and waited < sleep_s:
                 time.sleep(0.5)
                 waited += 0.5
 
@@ -760,7 +763,9 @@ class QuoteService:
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
+        # MySQL 最新快照 + 关注标的 quote_ticks 先写; 之后不再需要完整 records 列表。
         self._append_quote_ticks_if_tdxapi(records)
+        del records
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
         daily_df = self._build_daily(stock_records)
@@ -780,6 +785,8 @@ class QuoteService:
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
         quote_extra = self._build_quote_extra(stock_records)
         etf_quote_extra = self._build_quote_extra(etf_records)
+        # dict 列表已转成 Polars, 尽早释放, 降低与 enriched 计算重叠的峰值。
+        del stock_records, etf_records, index_records
 
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo:
@@ -792,6 +799,8 @@ class QuoteService:
 
         # ---- 策略监控 + 告警评估 ----
         self._evaluate_monitors(daily_df, quote_extra)
+        # 本轮临时表不再需要; 缓存已在 repo 内更新。
+        del daily_df, etf_daily_df, quote_extra, etf_quote_extra
 
     def _fetch_watchlist_quotes(self) -> None:
         """Free 档自选股实时: 只拉取最多 5 个 symbols。"""
@@ -885,6 +894,10 @@ class QuoteService:
 
         quote_ticks 是决策台事实来源。为了避免混入 TickFlow 快照, 这里只在
         实时数据源明确为 tdxapi 时写入。
+
+        全市场最新价走 MySQL quote_latest (每 symbol 一行热缓存);
+        本地 quote_ticks 只保留自选/持仓/监控标的的短序列, 避免全市场
+        秒级落盘把磁盘和内存打满。
         """
         if not self._repo or not records:
             return
@@ -894,17 +907,79 @@ class QuoteService:
             provider_name = preferences.get_realtime_data_provider()
             if provider_name != "tdxapi":
                 return
-            quote_tick_store.append_many(
-                self._repo.store.data_dir,
-                records,
-                source="tdxapi",
-            )
-            # MySQL 只保存每个 symbol 的最新状态，作为重启后的热缓存；
-            # 写入由有界后台线程完成，数据库异常不能阻塞行情轮询。
+
+            # MySQL: 全市场最新快照 (有界后台线程, 失败不阻塞行情轮询)
             from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
             quote_snapshot_ingestor.submit(records)
+
+            # 本地 quote_ticks: 仅关注标的
+            focused = self._filter_quote_tick_records(records)
+            if not focused:
+                return
+            quote_tick_store.append_many(
+                self._repo.store.data_dir,
+                focused,
+                source="tdxapi",
+            )
         except Exception as e:
             logger.warning("quote_ticks 追加失败: %s", e)
+
+    def _filter_quote_tick_records(self, records: list[dict]) -> list[dict]:
+        """收窄本地 quote_ticks 写入范围: 自选 + 持仓 + 规则监控指定标的 + 核心指数。"""
+        wanted = self._quote_tick_focus_symbols()
+        if not wanted:
+            return []
+        out: list[dict] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            symbol = str(record.get("symbol") or "").strip().upper()
+            if symbol and symbol in wanted:
+                out.append(record)
+        return out
+
+    def _quote_tick_focus_symbols(self) -> set[str]:
+        """本地秒级事实层关注的 symbol 集合。
+
+        全市场最新价已由 MySQL quote_latest 承担; 这里只给决策台/回放留短序列。
+        """
+        symbols: set[str] = set()
+        # 核心指数始终保留 (看板/决策台常用)
+        symbols.update(self.CORE_INDEX_SYMBOLS)
+
+        try:
+            from app.services import watchlist
+
+            for row in watchlist.list_symbols() or []:
+                symbol = str((row or {}).get("symbol") or "").strip().upper()
+                if symbol:
+                    symbols.add(symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("quote_ticks 自选列表读取失败: %s", e)
+
+        try:
+            symbols.update(self._custom_realtime_manual_position_symbols())
+        except Exception as e:  # noqa: BLE001
+            logger.debug("quote_ticks 持仓列表读取失败: %s", e)
+
+        # 监控规则 scope=symbols 的标的; scope=all 不扩展到全市场 (那会打回原点)
+        if self._repo and getattr(self._repo, "store", None):
+            try:
+                from app.strategy import monitor_rules
+
+                for rule in monitor_rules.load_all(self._repo.store.data_dir) or []:
+                    if not isinstance(rule, dict) or not rule.get("enabled", True):
+                        continue
+                    if rule.get("scope", "symbols") != "symbols":
+                        continue
+                    for symbol in rule.get("symbols") or []:
+                        text = str(symbol or "").strip().upper()
+                        if text:
+                            symbols.add(text)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("quote_ticks 监控规则读取失败: %s", e)
+
+        return symbols
 
     def _custom_realtime_index_symbols(self) -> list[str]:
         """自定义实时源显式补拉指数, 避免核心指数被全市场快照遗漏。"""
@@ -1087,6 +1162,7 @@ class QuoteService:
         """A股行情轮询阶段(北京时间)。
 
         final 阶段用于午休/收盘定版: 需要至少成功拉取一版边界后的行情, 才算进入休盘。
+        close_final 仅保留到 15:30: 超时后进入 closed, 避免收盘失败时整夜全市场重试。
         """
         now = cn_now()
         if now.weekday() >= 5:
@@ -1102,7 +1178,7 @@ class QuoteService:
             return "pre_afternoon"
         if dt_time(13, 0) <= t < dt_time(15, 0):
             return "afternoon"
-        if t >= dt_time(15, 0):
+        if dt_time(15, 0) <= t < dt_time(15, 30):
             return "close_final"
         return "closed"
 
@@ -1509,21 +1585,13 @@ class QuoteService:
                 table = "kline_etf_daily" if asset_type == "etf" else "kline_daily"
                 daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
                 ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
-                hist_df = (
-                    scan_daily_parquet(daily_glob)
-                    .filter(pl.col("date") >= cutoff)
-                    .sort(["symbol", "date"])
-                    .collect()
-                )
-                if hist_df.is_empty():
+                daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
+                if daily_ohlcv.is_empty() or "symbol" not in daily_ohlcv.columns:
                     return
 
-                hist_cols = [c for c in ohlcv_cols if c in hist_df.columns]
-                hist_df = hist_df.select(hist_cols).filter(pl.col("date") != today)
-                daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
-                full_df = pl.concat([hist_df, daily_ohlcv], how="diagonal_relaxed")
-                full_df = full_df.sort(["symbol", "date"])
-
+                # 全量回退按 symbol 分批, 避免一次物化 90 日 × 全市场形成内存尖峰。
+                symbols = daily_ohlcv["symbol"].unique().sort().to_list()
+                batch_size = 512
                 factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
                 factor_path = self._repo.store.data_dir / factor_dir / "all.parquet"
                 factors = pl.DataFrame()
@@ -1532,8 +1600,48 @@ class QuoteService:
                         factors = pl.read_parquet(factor_path)
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
-                enriched_full = compute_enriched(full_df, factors=factors, instruments=instruments)
-                enriched_today = enriched_full.filter(pl.col("date") == today)
+                today_parts: list[pl.DataFrame] = []
+                hist_lf = scan_daily_parquet(daily_glob).filter(
+                    (pl.col("date") >= cutoff) & (pl.col("date") != today)
+                )
+                hist_schema = set(hist_lf.collect_schema().names())
+                hist_cols = [c for c in ohlcv_cols if c in hist_schema]
+                if not hist_cols:
+                    return
+                hist_lf = hist_lf.select(hist_cols)
+
+                for offset in range(0, len(symbols), batch_size):
+                    batch = symbols[offset:offset + batch_size]
+                    hist_batch = (
+                        hist_lf.filter(pl.col("symbol").is_in(batch))
+                        .collect(engine="streaming")
+                    )
+                    daily_batch = daily_ohlcv.filter(pl.col("symbol").is_in(batch))
+                    full_batch = pl.concat(
+                        [hist_batch, daily_batch], how="diagonal_relaxed"
+                    ).sort(["symbol", "date"])
+                    del hist_batch, daily_batch
+                    if full_batch.is_empty():
+                        continue
+                    batch_factors = factors
+                    if not factors.is_empty() and "symbol" in factors.columns:
+                        batch_factors = factors.filter(pl.col("symbol").is_in(batch))
+                    batch_instruments = instruments
+                    if instruments is not None and not instruments.is_empty() and "symbol" in instruments.columns:
+                        batch_instruments = instruments.filter(pl.col("symbol").is_in(batch))
+                    enriched_batch = compute_enriched(
+                        full_batch, factors=batch_factors, instruments=batch_instruments,
+                    )
+                    del full_batch
+                    today_batch = enriched_batch.filter(pl.col("date") == today)
+                    del enriched_batch
+                    if not today_batch.is_empty():
+                        today_parts.append(today_batch)
+
+                if not today_parts:
+                    return
+                enriched_today = pl.concat(today_parts, how="diagonal_relaxed")
+                del today_parts
 
             if enriched_today.is_empty():
                 return

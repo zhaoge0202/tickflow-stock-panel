@@ -82,6 +82,13 @@ class DataStore:
 
         # DuckDB 内存模式 — 不建 .db 文件(§7.1)
         self.db = duckdb.connect(database=":memory:")
+        # 默认 memory_limit 可达主机 80%, 冷查询/视图扫描会把进程 RSS 顶得很高。
+        # 热路径走 Polars 缓存; DuckDB 只服务元数据/自定义 SQL, 收紧工作区即可。
+        try:
+            self.db.execute("PRAGMA memory_limit='512MB'")
+            self.db.execute("PRAGMA threads=2")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DuckDB memory pragma skipped: %s", exc)
         self._register_views()
 
     def _migrate_legacy_data_dir(self) -> None:
@@ -408,6 +415,10 @@ class KlineRepository:
             try:
                 logger.info("enriched warmup thread started")
                 self._refresh_enriched()
+                # 预热中间表(150 日分批/指标)算完后主动回收, 降低启动尖峰残留。
+                import gc
+
+                gc.collect()
                 logger.info("enriched warmup thread done (%.1fs)", time.perf_counter() - t0)
                 self._notify_refresh_done()
             except Exception:  # noqa: BLE001
@@ -632,8 +643,11 @@ class KlineRepository:
                 symbols=batch,
             )
             if df_hist.is_empty() or agg_a.is_empty():
+                del df_hist, agg_a
                 continue
             state = self._build_live_agg_state(df_hist, agg_a, latest, consec)
+            # 历史窗口只服务本批 state, 立刻丢掉避免 90 日中间表叠在 parts 上。
+            del df_hist, agg_a
             if not state.is_empty():
                 parts.append(state)
 
@@ -648,6 +662,7 @@ class KlineRepository:
             .unique(subset=["symbol"], keep="last")
             .sort(["symbol"])
         )
+        del parts
         self._live_agg_cache_date = latest
         logger.info("live agg build done: rows=%d (%.2fs)", len(self._live_agg_cache), time.perf_counter() - started)
 
@@ -808,6 +823,12 @@ class KlineRepository:
             return df_hist, pl.DataFrame()
 
         df_with_indicators = compute_indicators(df_hist)
+        # indicators 中间表只保留算 state 需要的列, 降低后续 join/agg 的峰值。
+        keep_hist = [c for c in [
+            "symbol", "date", "open", "high", "low", "close", "volume",
+            "raw_close", "raw_high", "raw_low",
+        ] if c in df_hist.columns]
+        df_hist = df_hist.select(keep_hist)
 
         state_cols = [
             "symbol",
@@ -820,6 +841,7 @@ class KlineRepository:
         ]
         existing_state = [c for c in state_cols if c in df_with_indicators.columns]
         agg_a = df_with_indicators.filter(pl.col("date") == latest).select(existing_state)
+        del df_with_indicators
 
         return df_hist, agg_a
 
