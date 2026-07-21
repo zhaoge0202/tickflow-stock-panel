@@ -782,6 +782,17 @@ class QuoteService:
             except Exception as e:
                 logger.warning("ETF 日K写盘失败: %s", e)
 
+        # ---- 写 kline_index_daily (指数当日点位) ----
+        # 指数点位此前只更新内存缓存, 从不落盘; 服务重启后休盘态不再拉取,
+        # 看板回退到 kline_index_daily 最新分区 → 显示昨日点位 (如上证 3864 变 3796)。
+        # 这里补落当日指数日K, 让盘中/盘后重启都能读到今日点位。
+        index_daily_df = self._build_daily(index_records)
+        if not index_daily_df.is_empty() and self._repo:
+            try:
+                self._repo.flush_live_daily_asset("index", index_daily_df)
+            except Exception as e:
+                logger.warning("指数日K写盘失败: %s", e)
+
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
         quote_extra = self._build_quote_extra(stock_records)
         etf_quote_extra = self._build_quote_extra(etf_records)
