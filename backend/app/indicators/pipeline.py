@@ -770,20 +770,39 @@ def compute_limit_signals(
         .alias("_theoretical_limit_down")
     )
 
-    # 生效涨跌停价: 最新日优先使用维表权威值; 历史日期继续使用理论价。
-    # instruments 只有最新快照, 不能用于历史日期; >=10000 视为新股无涨跌停限制哨兵值。
+    # 生效涨跌停价:
+    # - 历史日期始终用理论价 (instruments 只有最新快照, 不能回填历史)
+    # - 最新日可优先用维表, 但必须和理论价一致: 有些数据源的 limit_up/down
+    #   实际是“下一交易日涨跌停价”(≈今日收盘×(1±pct)), 会把今日真实涨停误判成未涨停。
+    #   与理论价偏差超过 1 分钱时回退理论价, 对齐同花顺等终端口径。
+    # - >=10000 视为新股无涨跌停限制哨兵值。
     _SENTINEL = 10000.0
     is_latest_date = pl.col("date") == pl.col("date").max()
     if "limit_up" in df.columns:
-        effective_limit_up = pl.when(
-            is_latest_date & pl.col("limit_up").is_not_null() & (pl.col("limit_up") < _SENTINEL)
-        ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
+        instrument_limit_up_ok = (
+            is_latest_date
+            & pl.col("limit_up").is_not_null()
+            & (pl.col("limit_up") < _SENTINEL)
+            & pl.col("_theoretical_limit_up").is_not_null()
+            & ((pl.col("limit_up") - pl.col("_theoretical_limit_up")).abs() <= 0.011)
+        )
+        effective_limit_up = pl.when(instrument_limit_up_ok).then(
+            pl.col("limit_up")
+        ).otherwise(pl.col("_theoretical_limit_up"))
     else:
         effective_limit_up = pl.col("_theoretical_limit_up")
     if "limit_down" in df.columns:
-        effective_limit_down = pl.when(
-            is_latest_date & pl.col("limit_down").is_not_null() & (pl.col("limit_down") < _SENTINEL)
-        ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
+        instrument_limit_down_ok = (
+            is_latest_date
+            & pl.col("limit_down").is_not_null()
+            & (pl.col("limit_down") < _SENTINEL)
+            & (pl.col("limit_down") > 0)
+            & pl.col("_theoretical_limit_down").is_not_null()
+            & ((pl.col("limit_down") - pl.col("_theoretical_limit_down")).abs() <= 0.011)
+        )
+        effective_limit_down = pl.when(instrument_limit_down_ok).then(
+            pl.col("limit_down")
+        ).otherwise(pl.col("_theoretical_limit_down"))
     else:
         effective_limit_down = pl.col("_theoretical_limit_down")
     effective_exprs: list[pl.Expr] = []
