@@ -28,6 +28,9 @@ _KLINE_BATCH = 8
 _MINUTE_FETCH_ATTEMPTS = 3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+# TDX /api/finance 只有单票财务快照(~37 字段), 不是完整三大表历史。
+# 这里同时保留原始映射, 并在 _financial_row 中派生前端契约字段
+# (eps_basic / revenue / period_end 等), 避免页面大面积显示 "—"。
 _FINANCIAL_TABLE_FIELDS: dict[str, dict[str, str]] = {
     "metrics": {
         "market": "Market",
@@ -903,12 +906,17 @@ def availability() -> tuple[bool, str]:
 def _financial_row(table: str, symbol: str, item: dict) -> dict | None:
     if not isinstance(item, dict) or not item:
         return None
+
+    report_date = _yyyymmdd_date(item.get("UpdatedDate"))
     row: dict = {
         "symbol": symbol,
         "source": "tdxapi",
         "table": table,
-        "report_date": _yyyymmdd_date(item.get("UpdatedDate")),
-        "updated_date": _yyyymmdd_date(item.get("UpdatedDate")),
+        # 前端/AI 以 period_end/announce_date 为主; TDX 只有 UpdatedDate。
+        "period_end": report_date.isoformat() if report_date else None,
+        "announce_date": report_date.isoformat() if report_date else None,
+        "report_date": report_date,
+        "updated_date": report_date,
         "ipo_date": _yyyymmdd_date(item.get("IPODate")),
     }
     for out_name, raw_name in _FINANCIAL_TABLE_FIELDS[table].items():
@@ -919,6 +927,107 @@ def _financial_row(table: str, symbol: str, item: dict) -> dict | None:
             row[out_name] = str(value or "").strip()
         else:
             row[out_name] = _float_or_none(value)
+
+    # 从 TDX 快照派生前端契约字段 / 常用比率。
+    # TDX 无完整科目树, 只能覆盖能直接映射或用股本/资产推算的指标;
+    # 费用明细、YoY、投资/筹资现金流等仍为空。
+    revenue = _float_or_none(item.get("ZhuYingShouRu"))
+    main_profit = _float_or_none(item.get("ZhuYingLiRun"))
+    operating_profit = _float_or_none(item.get("YingYeLiRun"))
+    total_profit = _float_or_none(item.get("LiRunZongHe"))
+    net_profit = _float_or_none(item.get("JingLiRun"))
+    profit_after_tax = _float_or_none(item.get("ShuiHouLiRun"))
+    retained_profit = _float_or_none(item.get("WeiFenLiRun"))
+    total_assets = _float_or_none(item.get("ZongZiChan"))
+    net_assets = _float_or_none(item.get("JingZiChan"))
+    current_assets = _float_or_none(item.get("LiuDongZiChan"))
+    current_liabilities = _float_or_none(item.get("LiuDongFuZhai"))
+    long_term_liabilities = _float_or_none(item.get("ChangQiFuZhai"))
+    total_shares = _float_or_none(item.get("ZongGuBen"))
+    op_cf = _float_or_none(item.get("JingYingXianJinLiu"))
+    total_cf = _float_or_none(item.get("ZongXianJinLiu"))
+
+    total_liabilities = None
+    if current_liabilities is not None or long_term_liabilities is not None:
+        total_liabilities = (current_liabilities or 0.0) + (long_term_liabilities or 0.0)
+
+    def _safe_div(num: float | None, den: float | None) -> float | None:
+        if num is None or den is None or den == 0:
+            return None
+        return num / den
+
+    def _pct(num: float | None, den: float | None) -> float | None:
+        ratio = _safe_div(num, den)
+        return None if ratio is None else ratio * 100.0
+
+    if table == "metrics":
+        row.update({
+            # 前端核心指标契约
+            "eps_basic": _safe_div(net_profit, total_shares),
+            "eps_diluted": _safe_div(net_profit, total_shares),
+            "bps": _safe_div(net_assets, total_shares),
+            "ocfps": _safe_div(op_cf, total_shares),
+            "roe": _pct(net_profit, net_assets),
+            "roe_diluted": _pct(net_profit, net_assets),
+            "roa": _pct(net_profit, total_assets),
+            # 主营利润/主营收入 近似毛利率(TDX 无完整营业成本)
+            "gross_margin": _pct(main_profit, revenue),
+            "net_margin": _pct(net_profit, revenue),
+            "debt_to_asset_ratio": _pct(total_liabilities, total_assets),
+            "operating_cash_to_revenue": _pct(op_cf, revenue),
+            # 兼容旧字段
+            "revenue": revenue,
+            "net_income": net_profit,
+            "net_operating_cash_flow": op_cf,
+        })
+    elif table == "income":
+        row.update({
+            "revenue": revenue,
+            "operating_profit": operating_profit,
+            "total_profit": total_profit,
+            "income_tax": (
+                None if total_profit is None or profit_after_tax is None
+                else total_profit - profit_after_tax
+            ),
+            "net_income": net_profit,
+            "net_income_attributable": net_profit,
+            "basic_eps": _safe_div(net_profit, total_shares),
+            "diluted_eps": _safe_div(net_profit, total_shares),
+            "retained_earnings": retained_profit,
+            # TDX 无: operating_cost / selling_expense / admin_expense / rd_expense ...
+        })
+    elif table == "balance_sheet":
+        row.update({
+            "total_assets": total_assets,
+            "total_current_assets": current_assets,
+            "total_non_current_assets": (
+                None if total_assets is None or current_assets is None
+                else total_assets - current_assets
+            ),
+            "accounts_receivable": _float_or_none(item.get("YingShouZhangKuan")),
+            "inventory": _float_or_none(item.get("CunHuo")),
+            "fixed_assets": _float_or_none(item.get("GuDingZiChan")),
+            "intangible_assets": _float_or_none(item.get("WuXingZiChan")),
+            "total_liabilities": total_liabilities,
+            "total_current_liabilities": current_liabilities,
+            "total_non_current_liabilities": long_term_liabilities,
+            "total_equity": net_assets,
+            "equity_attributable": net_assets,
+            "retained_earnings": retained_profit,
+            # 兼容旧字段
+            "current_assets": current_assets,
+            "current_liabilities": current_liabilities,
+            "net_assets": net_assets,
+        })
+    elif table == "cash_flow":
+        row.update({
+            "net_operating_cash_flow": op_cf,
+            "net_cash_change": total_cf,
+            # 兼容旧字段
+            "operating_cash_flow": op_cf,
+            "total_cash_flow": total_cf,
+            # TDX 无: investing / financing / capex
+        })
     return row
 
 
