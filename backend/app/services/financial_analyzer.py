@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from datetime import date, datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import polars as pl
 
@@ -22,10 +24,27 @@ logger = logging.getLogger(__name__)
 _MAX_PERIODS = 4
 
 
+def _json_safe(value: Any) -> Any:
+    """把 polars/DateFrame 常见类型转成 JSON 可序列化值。"""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
 def _load_stock_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
     """读取该标的的 4 张财务表,返回 {table: [records...]}(按 period_end 降序,截取最新 N 期)。
 
-    数值统一做 NaN/Inf → null 清洗,保证 JSON 序列化不报错。
+    数值统一做 NaN/Inf → null 清洗, date/datetime → ISO 字符串,保证 JSON 序列化不报错。
     """
     result: dict[str, list[dict]] = {}
     for table in ("metrics", "income", "balance_sheet", "cash_flow"):
@@ -40,18 +59,14 @@ def _load_stock_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]
         # 按 period_end 降序,截取最新 N 期
         if "period_end" in df.columns:
             df = df.sort("period_end", descending=True).head(_MAX_PERIODS)
-        # 清洗 NaN/Inf,转成 JSON 安全的 dict 列表
+        # 清洗 NaN/Inf/date,转成 JSON 安全的 dict 列表
         rows = []
         for rec in df.to_dicts():
             clean = {}
             for k, v in rec.items():
                 if k == "symbol":
                     continue  # 不需要重复回传 symbol
-                if isinstance(v, float):
-                    import math
-                    clean[k] = None if not math.isfinite(v) else v
-                else:
-                    clean[k] = v
+                clean[k] = _json_safe(v)
             rows.append(clean)
         result[table] = rows
     return result
