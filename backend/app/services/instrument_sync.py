@@ -4,15 +4,20 @@
 获取全量标的元数据，flatten ext 字段，写入 instruments.parquet。
 
 Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
+
+涨跌停价 (limit_up/down) 在入库前必须用本地昨收重算校验:
+  部分数据源会回填过期或“下一交易日”口径的 limit, 直接入库会污染涨停统计。
 """
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -26,6 +31,11 @@ _INSTRUMENT_META_FIELDS = [
     "limit_up",
     "limit_down",
 ]
+# 与 indicators.pipeline 保持一致: 主板 ST 2026-07-06 起 10%。
+_ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE = date(2026, 7, 6)
+# 与 compute_limit_signals 一致: 超过 1 分钱视为脏维表价。
+_LIMIT_PRICE_TOLERANCE = 0.011
+_LIMIT_SENTINEL = 10000.0
 
 
 def _flatten_instruments(items: list[dict]) -> list[dict]:
@@ -121,6 +131,155 @@ def _merge_instrument_rows(primary_rows: list[dict], fallback_rows: list[dict]) 
     return list(merged.values())
 
 
+def _limit_pct_for_symbol(symbol: str, name: str | None, as_of: date) -> float:
+    """板块 + ST 规则下的涨跌幅限制。"""
+    code = str(symbol or "").split(".", 1)[0]
+    is_chinext = code.startswith(("300", "301"))
+    is_star = code.startswith(("688", "689"))
+    is_bj = str(symbol or "").upper().endswith(".BJ") or code.startswith(("8", "4", "9"))
+    if is_chinext or is_star:
+        board = 0.20
+    elif is_bj:
+        board = 0.30
+    else:
+        board = 0.10
+
+    is_st = "ST" in str(name or "").upper()
+    if (
+        is_st
+        and not (is_chinext or is_star or is_bj)
+        and as_of < _ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE
+    ):
+        return 0.05
+    return board
+
+
+def _limit_price_value(prev: float, limit_pct: float, *, up: bool) -> float:
+    """与 pipeline._limit_price 相同的分整数算术, 返回 float 元。"""
+    sign = 1 if up else -1
+    num = int(round((1 + sign * limit_pct) * 100))  # 105/95, 110/90, ...
+    cents = int(prev * 100 + 0.5)
+    return ((cents * num + 50) // 100) / 100.0
+
+
+def _finite_price(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price <= 0:
+        return None
+    if price >= _LIMIT_SENTINEL:
+        return None
+    return price
+
+
+def _latest_prev_close_map(data_dir: Path, as_of: date) -> tuple[date | None, dict[str, float]]:
+    """读取本地日 K, 取 as_of 之前最近一个交易日的收盘价作涨跌停基准。"""
+    root = data_dir / "kline_daily"
+    if not root.exists():
+        return None, {}
+
+    dates: list[date] = []
+    for path in root.glob("date=*"):
+        if not path.is_dir():
+            continue
+        try:
+            day = date.fromisoformat(path.name[5:])
+        except ValueError:
+            continue
+        dates.append(day)
+    if not dates:
+        return None, {}
+
+    dates.sort()
+    earlier = [d for d in dates if d < as_of]
+    base_day = earlier[-1] if earlier else dates[-1]
+    part = root / f"date={base_day.isoformat()}" / "part.parquet"
+    if not part.exists():
+        return base_day, {}
+    try:
+        df = pl.read_parquet(part, columns=["symbol", "close"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取昨收基准失败(%s): %s", part, e)
+        return base_day, {}
+
+    out: dict[str, float] = {}
+    for row in df.iter_rows(named=True):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        close = _finite_price(row.get("close"))
+        if symbol and close is not None:
+            out[symbol] = close
+    return base_day, out
+
+
+def sanitize_limit_prices(
+    rows: list[dict],
+    *,
+    prev_close_by_symbol: dict[str, float],
+    as_of: date,
+    base_date: date | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    """校验/重算 limit_up/down, 返回新行列表与统计。
+
+    规则:
+      1. 有昨收: 用板块规则算理论涨跌停价
+      2. 上游价与理论价差 ≤ 1 分: 保留上游 (source=provider)
+      3. 否则改写为理论价 (source=theoretical)
+      4. 无昨收: 清空 limit, 避免脏值入库
+    """
+    stats = {
+        "total": 0,
+        "kept_provider": 0,
+        "rewritten": 0,
+        "cleared": 0,
+        "no_prev_close": 0,
+    }
+    out: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        stats["total"] += 1
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            out.append(row)
+            continue
+        row["symbol"] = symbol
+        prev = prev_close_by_symbol.get(symbol)
+        if prev is None:
+            row["limit_up"] = None
+            row["limit_down"] = None
+            row["limit_base_date"] = None
+            row["limit_source"] = "missing_prev_close"
+            stats["cleared"] += 1
+            stats["no_prev_close"] += 1
+            out.append(row)
+            continue
+
+        pct = _limit_pct_for_symbol(symbol, row.get("name"), as_of)
+        theo_up = _limit_price_value(prev, pct, up=True)
+        theo_down = _limit_price_value(prev, pct, up=False)
+        src_up = _finite_price(row.get("limit_up"))
+        src_down = _finite_price(row.get("limit_down"))
+
+        up_ok = src_up is not None and abs(src_up - theo_up) <= _LIMIT_PRICE_TOLERANCE
+        down_ok = src_down is not None and abs(src_down - theo_down) <= _LIMIT_PRICE_TOLERANCE
+        if up_ok and down_ok:
+            row["limit_up"] = round(src_up, 2)
+            row["limit_down"] = round(src_down, 2)
+            row["limit_source"] = "provider"
+            stats["kept_provider"] += 1
+        else:
+            row["limit_up"] = theo_up
+            row["limit_down"] = theo_down
+            row["limit_source"] = "theoretical"
+            stats["rewritten"] += 1
+        row["limit_base_date"] = base_date.isoformat() if base_date else None
+        out.append(row)
+    return out, stats
+
+
 def sync_instruments(data_dir: Path) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
@@ -138,8 +297,25 @@ def sync_instruments(data_dir: Path) -> int:
     if not all_rows:
         return 0
 
+    as_of = cn_today()
+    base_date, prev_close = _latest_prev_close_map(data_dir, as_of)
+    all_rows, limit_stats = sanitize_limit_prices(
+        all_rows,
+        prev_close_by_symbol=prev_close,
+        as_of=as_of,
+        base_date=base_date,
+    )
+    logger.info(
+        "instruments limit sanitize: base_date=%s prev_close=%d kept=%d rewritten=%d cleared=%d",
+        base_date,
+        len(prev_close),
+        limit_stats["kept_provider"],
+        limit_stats["rewritten"],
+        limit_stats["cleared"],
+    )
+
     df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    df = df.with_columns(pl.lit(as_of).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
