@@ -24,7 +24,8 @@ def _ms_on(day: int, hour: int, minute: int, second: int = 0) -> int:
 def _clear_hot_rows(data_dir) -> None:
     key = str(data_dir)
     with quote_tick_store._lock:
-        quote_tick_store._rings.pop(key, None)
+        quote_tick_store._latest.pop(key, None)
+        quote_tick_store._series.pop(key, None)
         quote_tick_store._buffers.pop(key, None)
 
 
@@ -239,6 +240,44 @@ def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, 
     assert latest[0]["last_price"] == 10.3
     assert bars[-1]["close"] == 10.3
     assert set(seen_symbols) == {"002491.SZ"}
+
+
+def test_cleanup_old_partitions_removes_illegal_and_stale_dates(tmp_path, monkeypatch):
+    monkeypatch.setattr(quote_tick_store, "cn_today", lambda: date(2026, 7, 21))
+    base = tmp_path / "quote_ticks"
+    for ds in ["1970-06-10", "2263-03-03", "2026-07-10", "2026-07-21"]:
+        part = base / f"date={ds}" / "hour=09"
+        part.mkdir(parents=True)
+        (part / "x.parquet").write_bytes(b"ok")
+
+    result = quote_tick_store.cleanup_old_partitions(tmp_path, keep_days=3)
+    remaining = sorted(p.name for p in base.iterdir())
+
+    assert "1970-06-10" in result["removed"]
+    assert "2263-03-03" in result["removed"]
+    assert "2026-07-10" in result["removed"]
+    assert remaining == ["date=2026-07-21"]
+
+
+def test_compact_partition_keeps_only_focused_symbols(tmp_path):
+    quote_tick_store.append_many(tmp_path, [
+        {"symbol": "002491.SZ", "last_price": 10.0, "timestamp": _ms(9, 30, 0)},
+        {"symbol": "300750.SZ", "last_price": 319.1, "timestamp": _ms(9, 30, 1)},
+        {"symbol": "000001.SZ", "last_price": 11.0, "timestamp": _ms(9, 30, 2)},
+    ], source="tdxapi", force_flush=True)
+
+    result = quote_tick_store.compact_partition(
+        tmp_path,
+        target_date=TRADE_DATE,
+        symbols={"002491.SZ"},
+    )
+    # compact 改的是磁盘分区; 清掉热缓存后再读, 验证磁盘侧只剩关注标的
+    _clear_hot_rows(tmp_path)
+    rows = quote_tick_store.read_ticks(tmp_path, target_date=TRADE_DATE, symbols=["002491.SZ", "300750.SZ", "000001.SZ"])
+
+    assert result["symbols"] == 1
+    assert result["rows"] >= 1
+    assert {r["symbol"] for r in rows} == {"002491.SZ"}
 
 
 def test_quote_service_realtime_frames_write_late_numeric_columns():

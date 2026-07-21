@@ -933,6 +933,28 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 盘后: 清理过期 quote_ticks 分区 (默认保留 3 天; 全市场最新价已在 MySQL)
+    def _cleanup_quote_ticks():
+        from app.services import quote_tick_store
+
+        result = quote_tick_store.cleanup_old_partitions(repo.store.data_dir)
+        removed = result.get("removed") or []
+        if removed:
+            logger.info(
+                "scheduled quote_ticks cleanup: removed=%d kept=%d",
+                len(removed),
+                len(result.get("kept") or []),
+            )
+        return result
+
+    scheduler.add_job(
+        _cleanup_quote_ticks,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Shanghai"),
+        id="quote_ticks_cleanup",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
     # 只热更新 app.state.capabilities(API 端点、盘后管道 _pipeline_then_refresh 均读它);
     # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。
@@ -974,9 +996,11 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
                     review_sched["hour"], review_sched["minute"])
 
     scheduler.start()
-    logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
-                inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
-                depth_sched["hour"], depth_sched["minute"])
+    logger.info(
+        "scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d, quote_ticks_cleanup@15:40 mon-fri",
+        inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
+        depth_sched["hour"], depth_sched["minute"],
+    )
     return scheduler
 
 

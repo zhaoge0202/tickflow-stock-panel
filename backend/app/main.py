@@ -79,6 +79,19 @@ async def lifespan(app: FastAPI):
     from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
     quote_snapshot_ingestor.start()
     app.state.quote_snapshot_ingestor = quote_snapshot_ingestor
+    # 启动时清理过期/脏 quote_ticks 分区, 控制磁盘与后续扫描成本
+    try:
+        from app.services import quote_tick_store
+
+        cleanup = quote_tick_store.cleanup_old_partitions(store.data_dir)
+        if cleanup.get("removed"):
+            logger.info(
+                "quote_ticks cleanup on boot: removed=%d kept=%d",
+                len(cleanup["removed"]),
+                len(cleanup.get("kept") or []),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("quote_ticks cleanup failed: %s", e)
     qs.boot_check()
 
     # QuoteService 需要访问 strategy_monitor 等单例
@@ -190,12 +203,27 @@ async def lifespan(app: FastAPI):
         def _prewarm() -> None:
             nonlocal matrix_prewarm_running
             try:
+                # 盘中不抢实时行情内存; 休盘/收盘后再预热。
+                try:
+                    from app.services.quote_service import QuoteService
+
+                    phase = QuoteService._market_phase()
+                    if phase in {
+                        "preopen", "morning", "morning_final",
+                        "pre_afternoon", "afternoon", "close_final",
+                    }:
+                        logger.info("matrix cache prewarm deferred: market phase=%s", phase)
+                        return
+                except Exception:  # noqa: BLE001
+                    pass
+
                 latest = repo.latest_enriched_date("stock")
                 if latest is None:
                     logger.info("matrix cache prewarm skipped: no stock enriched data")
                     return
                 from app.backtest.engine import BacktestEngine
                 from app.backtest.strategy import prewarm_matrix_cache
+                import gc
 
                 result = prewarm_matrix_cache(
                     BacktestEngine(repo),
@@ -204,6 +232,7 @@ async def lifespan(app: FastAPI):
                     latest_date=latest,
                     years=settings.backtest_matrix_cache_prewarm_years,
                 )
+                gc.collect()
                 logger.info("matrix cache prewarm done: %s", result)
             except Exception:  # noqa: BLE001
                 logger.exception("matrix cache prewarm failed")
@@ -216,6 +245,19 @@ async def lifespan(app: FastAPI):
             name="matrix-cache-prewarm",
             daemon=True,
         ).start()
+
+    # 清理上次预热残留的临时目录, 避免磁盘/扫描噪音。
+    try:
+        matrix_root = store.data_dir / ".backtest_matrix_cache"
+        if matrix_root.exists():
+            import shutil
+
+            for path in matrix_root.glob("*.tmp"):
+                shutil.rmtree(path, ignore_errors=True)
+            for path in matrix_root.glob(".*.tmp"):
+                shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("matrix cache tmp cleanup skipped: %s", e)
 
     repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
     if repo.enriched_ready:

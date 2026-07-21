@@ -97,8 +97,9 @@ class Settings(BaseSettings):
     backtest_range_guard: bool = False
     backtest_matrix_disk_cache_enabled: bool = True
     backtest_matrix_cache_max_mb: int = 512
-    backtest_matrix_cache_prewarm: bool = True
-    backtest_matrix_cache_prewarm_years: int = 5
+    # 启动自动预热会物化多年全市场矩阵, 和盘中行情争内存; 默认关, 首次回测时再按需构建。
+    backtest_matrix_cache_prewarm: bool = False
+    backtest_matrix_cache_prewarm_years: int = 2
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
@@ -116,6 +117,10 @@ class Settings(BaseSettings):
 
     # Latest quote snapshot — 复用逐笔成交 MySQL URL, 每个 symbol 只保留最新一行。
     quote_snapshot_mysql_enabled: bool = True
+
+    # quote_ticks 本地秒级事实层: 仅保留近期分区, 避免全市场历史把磁盘和内存打满。
+    # 全市场最新价走 MySQL quote_latest; 本地只为自选/持仓/监控标的保留短序列。
+    quote_ticks_retention_days: int = 3
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
