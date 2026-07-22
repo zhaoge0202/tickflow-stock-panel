@@ -353,12 +353,17 @@ export function Screener() {
   const dailyKVisible = candleColumnEnabled && dailyKChartVisible
 
   // 批量日k数据 (仅当蜡烛图可见时加载，省请求)
-  const resultSymbolsKey = useMemo(() => displayRows.map((r: any) => r.symbol).join(','), [displayRows])
+  const dailyKSymbols = useMemo(
+    () => [...new Set(displayRows.map((r: any) => r.symbol as string))].sort(),
+    [displayRows],
+  )
+  const resultSymbolsKey = dailyKSymbols.join(',')
   const klineBatch = useQuery({
     queryKey: QK.screenerKlineBatch(`${resultSymbolsKey}|${candleDays}`),
-    queryFn: () => api.klineDailyBatch(displayRows.map((r: any) => r.symbol), candleDays),
-    enabled: dailyKVisible && displayRows.length > 0,
+    queryFn: () => api.klineDailyBatch(dailyKSymbols, candleDays),
+    enabled: dailyKVisible && dailyKSymbols.length > 0,
     staleTime: 5 * 60_000,
+    placeholderData: previousData => previousData,
   })
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
@@ -395,13 +400,18 @@ export function Screener() {
     () => intradayTruncated ? allIntradaySymbols.slice(0, minuteBatchCap) : allIntradaySymbols,
     [allIntradaySymbols, intradayTruncated, minuteBatchCap],
   )
-  const intradaySymbolsKey = intradaySymbols.join(',')
+  const intradayRequestSymbols = useMemo(
+    () => [...new Set(intradaySymbols)].sort(),
+    [intradaySymbols],
+  )
+  const intradaySymbolsKey = intradayRequestSymbols.join(',')
 
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(intradaySymbolsKey),
-    queryFn: () => api.klineMinuteBatch(intradaySymbols),
-    enabled: intradayVisible && intradaySymbols.length > 0,
+    queryFn: () => api.klineMinuteBatch(intradayRequestSymbols),
+    enabled: intradayVisible && intradayRequestSymbols.length > 0,
     staleTime: 10_000,
+    placeholderData: previousData => previousData,
     // 仅当开启分时刷新偏好 且 盘中实时行情运行时 才轮询 (省 rpm)
     refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
