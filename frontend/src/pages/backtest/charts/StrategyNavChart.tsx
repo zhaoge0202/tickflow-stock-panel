@@ -25,6 +25,18 @@ export function StrategyNavChart({ result }: Props) {
     const benchmarkValues = dates.map(d => benchmarkByDate.get(d) ?? null)
     const hasBenchmark = benchmarkValues.some(v => v != null)
     const ddValues = result.drawdown_curve.map(r => r.value * 100)
+    const positionValues = result.equity_curve.map(r => {
+      if (r.exposure != null) return r.exposure * 100
+      if (r.cash != null && r.value > 0) {
+        return Math.max(0, Math.min(100, (1 - r.cash / r.value) * 100))
+      }
+      return null
+    })
+    const hasPosition = positionValues.some(v => v != null)
+    const navColor = '#3b82f6'
+    const benchmarkColor = '#64748b'
+    const drawdownColor = '#f04438'
+    const positionColor = '#f59e0b'
 
     return {
       animation: false,
@@ -91,6 +103,15 @@ export function StrategyNavChart({ result }: Props) {
           splitLine: { lineStyle: { color: ct.grid } },
           axisLine: { show: false },
         },
+        ...(hasPosition ? [{
+          type: 'value',
+          gridIndex: 0,
+          min: 0,
+          max: 100,
+          show: false,
+          splitLine: { show: false },
+          axisLine: { show: false },
+        }] : []),
       ],
       dataZoom: [
         {
@@ -127,10 +148,11 @@ export function StrategyNavChart({ result }: Props) {
             if (p.value == null) continue
             const isDrawdown = p.seriesName === '回撤'
             const isBenchmark = p.seriesName === '同期上证指数'
+            const isPosition = p.seriesName === '仓位'
             html += `<div style="display:flex;justify-content:space-between;gap:16px">
               <span style="color:${p.color}">${p.seriesName}</span>
               <span style="font-family:monospace">${
-                isDrawdown
+                isDrawdown || isPosition
                   ? `${(p.value as number).toFixed(2)}%`
                   : isBenchmark
                     ? `${valueFmt.format(p.value as number)} 点`
@@ -149,7 +171,8 @@ export function StrategyNavChart({ result }: Props) {
           yAxisIndex: hasBenchmark ? 1 : 0,
           data: navValues,
           symbol: 'none',
-          lineStyle: { color: '#3b82f6', width: 2.2 },
+          itemStyle: { color: navColor },
+          lineStyle: { color: navColor, width: 2.2 },
           areaStyle: {
             color: {
               type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
@@ -168,7 +191,8 @@ export function StrategyNavChart({ result }: Props) {
           data: benchmarkValues,
           symbol: 'none',
           connectNulls: true,
-          lineStyle: { color: 'rgba(148,163,184,0.45)', width: 1, type: 'dashed' },
+          itemStyle: { color: benchmarkColor },
+          lineStyle: { color: benchmarkColor, opacity: 0.55, width: 1, type: 'dashed' },
         }] : []),
         {
           name: '回撤',
@@ -177,9 +201,23 @@ export function StrategyNavChart({ result }: Props) {
           yAxisIndex: 2,
           data: ddValues,
           symbol: 'none',
-          lineStyle: { color: 'rgba(240,68,56,0.6)', width: 1 },
+          itemStyle: { color: drawdownColor },
+          lineStyle: { color: drawdownColor, opacity: 0.65, width: 1 },
           areaStyle: { color: 'rgba(240,68,56,0.12)' },
         },
+        ...(hasPosition ? [{
+          name: '仓位',
+          type: 'line',
+          step: 'end',
+          xAxisIndex: 0,
+          yAxisIndex: 3,
+          data: positionValues,
+          symbol: 'none',
+          itemStyle: { color: positionColor },
+          lineStyle: { color: positionColor, width: 1.2 },
+          areaStyle: { color: 'rgba(245,158,11,0.08)' },
+          z: 1,
+        }] : []),
       ],
     } as any
   }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct])
@@ -190,16 +228,22 @@ export function StrategyNavChart({ result }: Props) {
     <div>
       <div className="flex flex-wrap items-center gap-4 px-4 pb-2">
         <span className="flex items-center gap-1.5 text-[10px] text-secondary">
-          <span className="w-3 h-0.5 rounded bg-accent" />
+          <span className="w-3 h-0.5 rounded bg-[#3b82f6]" />
           策略净值
         </span>
         <span className="flex items-center gap-1.5 text-[10px] text-secondary">
-          <span className="w-3 h-0.5 rounded bg-red-400/60" />
+          <span className="w-3 h-0.5 rounded bg-[#f04438]" />
           回撤
         </span>
+        {result.equity_curve.some(r => r.exposure != null || (r.cash != null && r.value > 0)) && (
+          <span className="flex items-center gap-1.5 text-[10px] text-secondary">
+            <span className="w-3 h-0.5 rounded bg-[#f59e0b]" />
+            仓位
+          </span>
+        )}
         {(result.benchmark_curve?.length ?? 0) > 0 && (
           <span className="flex items-center gap-1.5 text-[10px] text-secondary">
-            <span className="w-3 h-0.5 rounded border-t border-dashed border-slate-400/60" />
+            <span className="w-3 h-0.5 rounded border-t border-dashed border-[#64748b]" />
             同期上证指数
           </span>
         )}
