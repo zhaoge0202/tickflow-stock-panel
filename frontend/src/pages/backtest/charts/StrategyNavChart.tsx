@@ -1,4 +1,5 @@
-import { useMemo } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import * as echarts from 'echarts'
 import { useECharts } from './useECharts'
 import type { StrategyBacktestResult } from '@/lib/api'
 import { useChartTheme } from '@/lib/theme'
@@ -9,8 +10,25 @@ interface Props {
 
 export function StrategyNavChart({ result }: Props) {
   const ct = useChartTheme()
+  // 可点击隐藏的图例(series name 为 key)。策略净值/回撤保持常显。
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  // 保存上一次 dataZoom 的 start/end, 切换图例重绘(notMerge:true)时回填, 避免缩放窗口复位。
+  const containerRef = useRef<HTMLDivElement>(null)
+  const toggleLegend = (name: string) =>
+    setHidden(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
   const option = useMemo(() => {
     if (!result.equity_curve.length) return null
+
+    // 回填上次 dataZoom 的 start/end, 切换图例(notMerge:true 全量重绘)时不丢失缩放窗口。
+    const prevInstance = containerRef.current ? echarts.getInstanceByDom(containerRef.current) : null
+    const prevZoom = (prevInstance?.getOption() as any)?.dataZoom?.[0]
+    const zoomStart = prevZoom && typeof prevZoom.start === 'number' ? prevZoom.start : undefined
+    const zoomEnd = prevZoom && typeof prevZoom.end === 'number' ? prevZoom.end : undefined
 
     const moneyFmt = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 })
     const valueFmt = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -121,6 +139,8 @@ export function StrategyNavChart({ result }: Props) {
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: false,
+          ...(zoomStart !== undefined ? { start: zoomStart } : {}),
+          ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
         },
         {
           type: 'slider',
@@ -134,6 +154,8 @@ export function StrategyNavChart({ result }: Props) {
           handleStyle: { color: ct.text, borderColor: '#94a3b8' },
           textStyle: { color: ct.text, fontSize: 10 },
           brushSelect: false,
+          ...(zoomStart !== undefined ? { start: zoomStart } : {}),
+          ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
         },
       ],
       tooltip: {
@@ -183,7 +205,7 @@ export function StrategyNavChart({ result }: Props) {
             } as any,
           },
         },
-        ...(hasBenchmark ? [{
+        ...(hasBenchmark && !hidden.has('同期上证指数') ? [{
           name: '同期上证指数',
           type: 'line',
           xAxisIndex: 0,
@@ -205,7 +227,7 @@ export function StrategyNavChart({ result }: Props) {
           lineStyle: { color: drawdownColor, opacity: 0.65, width: 1 },
           areaStyle: { color: 'rgba(240,68,56,0.12)' },
         },
-        ...(hasPosition ? [{
+        ...(hasPosition && !hidden.has('仓位') ? [{
           name: '仓位',
           type: 'line',
           step: 'end',
@@ -220,9 +242,9 @@ export function StrategyNavChart({ result }: Props) {
         }] : []),
       ],
     } as any
-  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct])
+  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct, hidden])
 
-  const chartRef = useECharts(option, [result.run_id, ct])
+  const chartRef = useECharts(option, [result.run_id, ct], containerRef)
 
   return (
     <div>
@@ -236,16 +258,30 @@ export function StrategyNavChart({ result }: Props) {
           回撤
         </span>
         {result.equity_curve.some(r => r.exposure != null || (r.cash != null && r.value > 0)) && (
-          <span className="flex items-center gap-1.5 text-[10px] text-secondary">
+          <button
+            type="button"
+            onClick={() => toggleLegend('仓位')}
+            title="点击显示/隐藏"
+            className={`flex items-center gap-1.5 text-[10px] text-secondary cursor-pointer transition-opacity ${
+              hidden.has('仓位') ? 'opacity-40' : 'opacity-100'
+            }`}
+          >
             <span className="w-3 h-0.5 rounded bg-[#f59e0b]" />
             仓位
-          </span>
+          </button>
         )}
         {(result.benchmark_curve?.length ?? 0) > 0 && (
-          <span className="flex items-center gap-1.5 text-[10px] text-secondary">
+          <button
+            type="button"
+            onClick={() => toggleLegend('同期上证指数')}
+            title="点击显示/隐藏"
+            className={`flex items-center gap-1.5 text-[10px] text-secondary cursor-pointer transition-opacity ${
+              hidden.has('同期上证指数') ? 'opacity-40' : 'opacity-100'
+            }`}
+          >
             <span className="w-3 h-0.5 rounded border-t border-dashed border-[#64748b]" />
             同期上证指数
-          </span>
+          </button>
         )}
         <span className="ml-auto text-[10px] text-muted">滚轮缩放 · 拖动平移</span>
       </div>
