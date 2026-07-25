@@ -50,6 +50,33 @@ const FIELD_LABELS: Record<string, string> = {
   session: '交易时段',
 }
 
+function normalizeConfig(config: CustomSourceConfig): CustomSourceConfig {
+  return {
+    ...config,
+    name: config.name.toLowerCase().trim(),
+    display_name: config.display_name.trim() || config.name.toLowerCase().trim(),
+    datasets: Object.fromEntries(
+      Object.entries(config.datasets).map(([key, dataset]) => {
+        const normalized = { ...dataset }
+        if (key === 'realtime') {
+          delete normalized.symbols_param
+          delete normalized.start_param
+          delete normalized.end_param
+        }
+        return [
+          key,
+          {
+            ...normalized,
+            field_map: Object.fromEntries(
+              Object.entries(dataset.field_map).filter(([source]) => !source.startsWith('__pending_'))
+            ),
+          },
+        ]
+      })
+    ),
+  }
+}
+
 function emptyConfig(): CustomSourceConfig {
   return { name: '', display_name: '', auth: { type: 'none' }, datasets: {} }
 }
@@ -96,36 +123,16 @@ export function DataSourceEditor({
         if (!ds.url.trim()) {
           throw new Error(`数据集「${DATASET_LABEL[key as DatasetKey] || key}」未填写接口 URL`)
         }
-        if (ds.timeout != null && (!Number.isFinite(ds.timeout) || ds.timeout <= 0)) {
-          throw new Error(`数据集「${DATASET_LABEL[key as DatasetKey] || key}」超时必须大于 0 秒`)
+        if (
+          ds.timeout != null &&
+          (!Number.isFinite(ds.timeout) || ds.timeout <= 0 || ds.timeout > 300)
+        ) {
+          throw new Error(
+            `数据集「${DATASET_LABEL[key as DatasetKey] || key}」超时必须在 0 到 300 秒之间`
+          )
         }
       }
-      // 提交时去掉 field_map 里的 __pending_ 临时 key (未填外部字段名的草稿行)
-      const cleaned: CustomSourceConfig = {
-        ...config,
-        name: config.name.toLowerCase().trim(),
-        display_name: config.display_name.trim() || config.name.toLowerCase().trim(),
-        datasets: Object.fromEntries(
-          Object.entries(config.datasets).map(([k, ds]) => {
-            const normalized = { ...ds }
-            if (k === 'realtime') {
-              delete normalized.symbols_param
-              delete normalized.start_param
-              delete normalized.end_param
-            }
-            return [
-              k,
-              {
-                ...normalized,
-                field_map: Object.fromEntries(
-                  Object.entries(ds.field_map).filter(([src]) => !src.startsWith('__pending_'))
-                ),
-              },
-            ]
-          })
-        ),
-      }
-      return api.saveDataSource(cleaned)
+      return api.saveDataSource(normalizeConfig(config))
     },
     onSuccess: () => {
       toast(isNew ? '数据源已创建' : '数据源已更新', 'success')
@@ -279,6 +286,7 @@ export function DataSourceEditor({
           <div className="p-5">
             <DatasetDetail
               key={activeTab}
+              config={config}
               datasetKey={activeTab}
               cfg={config.datasets[activeTab]}
               providerName={config.name.toLowerCase().trim() || existingName || ''}
@@ -314,6 +322,7 @@ export function DataSourceEditor({
 }
 
 function DatasetDetail({
+  config,
   datasetKey,
   cfg,
   providerName,
@@ -321,6 +330,7 @@ function DatasetDetail({
   onFieldMap,
   onToggle,
 }: {
+  config: CustomSourceConfig
   datasetKey: DatasetKey
   cfg?: DatasetConfig
   providerName: string
@@ -337,6 +347,10 @@ function DatasetDetail({
       providerName,
       datasetKey,
       testSymbols.split(/[,\s]+/).map(s => s.trim()).filter(Boolean),
+      normalizeConfig({
+        ...config,
+        datasets: cfg ? { [datasetKey]: cfg } : {},
+      }),
     ),
   })
 
@@ -402,6 +416,7 @@ function DatasetDetail({
                 <input
                   type="number"
                   min="0.1"
+                  max="300"
                   step="any"
                   value={cfg.timeout ?? ''}
                   onChange={e => onUpdate({ timeout: e.target.value ? Number(e.target.value) : null })}
@@ -539,7 +554,7 @@ function DatasetDetail({
                 />
                 <button
                   onClick={() => test.mutate()}
-                  disabled={test.isPending || !cfg.url || !providerName}
+                  disabled={test.isPending || !cfg.url}
                   className="inline-flex items-center gap-1 px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:text-foreground text-xs disabled:opacity-40 transition-colors"
                 >
                   {test.isPending ? '测试中...' : '测试'}

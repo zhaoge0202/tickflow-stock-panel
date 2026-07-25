@@ -1018,10 +1018,15 @@ export const api = {
       `/api/settings/plugins/${encodeURIComponent(name)}/install`,
       { method: 'DELETE' },
     ),
-  testDataSource: (provider: string, dataset: string, symbols?: string[]) =>
+  testDataSource: (
+    provider: string,
+    dataset: string,
+    symbols?: string[],
+    config?: CustomSourceConfig,
+  ) =>
     request<DataSourceTestResult>('/api/settings/data-sources/test', {
       method: 'POST',
-      body: JSON.stringify({ provider, dataset, symbols }),
+      body: JSON.stringify({ provider, dataset, symbols, config }),
     }),
   updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
     request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(

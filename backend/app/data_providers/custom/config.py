@@ -1,7 +1,6 @@
 """Custom HTTP data source configuration."""
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +8,8 @@ from typing import Any, Literal
 import yaml
 
 DatasetName = Literal["daily", "adj_factor", "realtime", "minute", "financial"]
+DEFAULT_TIMEOUT = 30.0
+MAX_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class DatasetConfig:
     method: str = "GET"
     batch: int | None = None
     rpm: int | None = None
-    timeout: float = 30.0
+    timeout: float = DEFAULT_TIMEOUT
     response_path: str = ""
     field_map: dict[str, str] = field(default_factory=dict)
     transforms: dict[str, str] = field(default_factory=dict)
@@ -61,12 +62,18 @@ def _auth_from_dict(raw: dict[str, Any] | None) -> AuthConfig:
 
 
 def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
-    try:
-        timeout = float(raw.get("timeout", 30.0) or 30.0)
-    except (TypeError, ValueError):
-        timeout = 30.0
-    if not math.isfinite(timeout) or timeout <= 0:
-        timeout = 30.0
+    timeout_raw = raw.get("timeout")
+    if timeout_raw is None:
+        timeout = DEFAULT_TIMEOUT
+    else:
+        try:
+            timeout = float(timeout_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"timeout must be a number between 0 and {MAX_TIMEOUT:g} seconds"
+            ) from e
+        if not 0 < timeout <= MAX_TIMEOUT:
+            raise ValueError(f"timeout must be between 0 and {MAX_TIMEOUT:g} seconds")
 
     return DatasetConfig(
         url=str(raw.get("url", "") or ""),
@@ -87,14 +94,14 @@ def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
     )
 
 
-def load_config(path: Path) -> CustomSourceConfig:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+def config_from_dict(raw: dict[str, Any], path: Path | None = None) -> CustomSourceConfig:
     datasets = {
         name: _dataset_from_dict(cfg)
         for name, cfg in (raw.get("datasets") or {}).items()
         if name in {"daily", "adj_factor", "realtime", "minute", "financial"} and isinstance(cfg, dict)
     }
-    name = str(raw.get("name", path.stem) or path.stem).lower()
+    default_name = path.stem if path else "preview"
+    name = str(raw.get("name", default_name) or default_name).lower()
     return CustomSourceConfig(
         name=name,
         display_name=str(raw.get("display_name", name) or name),
@@ -102,3 +109,8 @@ def load_config(path: Path) -> CustomSourceConfig:
         datasets=datasets,
         path=path,
     )
+
+
+def load_config(path: Path) -> CustomSourceConfig:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return config_from_dict(raw, path)

@@ -12,7 +12,13 @@ from pathlib import Path
 import yaml
 
 from app.config import settings
-from app.data_providers.custom.config import CustomSourceConfig, load_config
+from app.data_providers.custom.config import (
+    DEFAULT_TIMEOUT,
+    MAX_TIMEOUT,
+    CustomSourceConfig,
+    config_from_dict,
+    load_config,
+)
 from app.data_providers.custom.provider import GenericHTTPProvider
 
 logger = logging.getLogger(__name__)
@@ -247,6 +253,17 @@ def get_provider(name: str) -> GenericHTTPProvider:
     return provider
 
 
+def create_provider(config: dict) -> GenericHTTPProvider:
+    """Build a validated temporary provider without writing or registering it."""
+    parsed = config_from_dict(_sanitize_for_yaml(config))
+    provider = GenericHTTPProvider(parsed)
+    errors = provider.validate()
+    if errors:
+        provider.close()
+        raise ValueError("; ".join(errors))
+    return provider
+
+
 def is_custom_provider(name: str) -> bool:
     return (name or "").lower() in _PROVIDERS
 
@@ -291,7 +308,7 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             "method": ds.method,
             **({"batch": ds.batch} if ds.batch is not None else {}),
             **({"rpm": ds.rpm} if ds.rpm is not None else {}),
-            **({"timeout": ds.timeout} if ds.timeout != 30.0 else {}),
+            **({"timeout": ds.timeout} if ds.timeout != DEFAULT_TIMEOUT else {}),
             "response_path": ds.response_path,
             "field_map": dict(ds.field_map),
             **({"transforms": dict(ds.transforms)} if ds.transforms else {}),
@@ -389,10 +406,17 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
     if ds_cfg.get("timeout") is not None:
         try:
             timeout = float(ds_cfg["timeout"])
-            if math.isfinite(timeout) and timeout > 0:
-                out["timeout"] = timeout
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"{ds_name}: timeout must be a number between 0 and "
+                f"{MAX_TIMEOUT:g} seconds"
+            ) from e
+        if not math.isfinite(timeout) or not 0 < timeout <= MAX_TIMEOUT:
+            raise ValueError(
+                f"{ds_name}: timeout must be between 0 and {MAX_TIMEOUT:g} seconds"
+            )
+        if timeout != DEFAULT_TIMEOUT:
+            out["timeout"] = timeout
     out["response_path"] = str(ds_cfg.get("response_path", "") or "")
     field_map = {
         str(k): str(v)
@@ -425,6 +449,22 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
             out["asset_type_param"] = asset_type_param
         if freq_param:
             out["freq_param"] = freq_param
+    request_params = [
+        out.get("symbols_param", "symbols"),
+        out.get("start_param", "start_time"),
+        out.get("end_param", "end_time"),
+    ]
+    if ds_name == "minute":
+        request_params.extend(
+            name for name in (out.get("asset_type_param"), out.get("freq_param")) if name
+        )
+    duplicates = sorted({
+        name for name in request_params if request_params.count(name) > 1
+    })
+    if ds_name != "realtime" and duplicates:
+        raise ValueError(
+            f"{ds_name}: duplicate request parameter names: {', '.join(duplicates)}"
+        )
     return out
 
 
