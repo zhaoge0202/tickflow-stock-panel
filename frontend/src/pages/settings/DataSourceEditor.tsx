@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-  import { KeyRound, Play, Plus, Save, Trash2, X, Zap, Check, ChevronDown } from 'lucide-react'
+import { KeyRound, Play, Plus, Save, Trash2, X, Zap, Check, ChevronDown } from 'lucide-react'
 import { api, type CustomSourceConfig, type DatasetConfig } from '@/lib/api'
 import { toast } from '@/components/Toast'
 
@@ -96,6 +96,9 @@ export function DataSourceEditor({
         if (!ds.url.trim()) {
           throw new Error(`数据集「${DATASET_LABEL[key as DatasetKey] || key}」未填写接口 URL`)
         }
+        if (ds.timeout != null && (!Number.isFinite(ds.timeout) || ds.timeout <= 0)) {
+          throw new Error(`数据集「${DATASET_LABEL[key as DatasetKey] || key}」超时必须大于 0 秒`)
+        }
       }
       // 提交时去掉 field_map 里的 __pending_ 临时 key (未填外部字段名的草稿行)
       const cleaned: CustomSourceConfig = {
@@ -103,15 +106,23 @@ export function DataSourceEditor({
         name: config.name.toLowerCase().trim(),
         display_name: config.display_name.trim() || config.name.toLowerCase().trim(),
         datasets: Object.fromEntries(
-          Object.entries(config.datasets).map(([k, ds]) => [
-            k,
-            {
-              ...ds,
-              field_map: Object.fromEntries(
-                Object.entries(ds.field_map).filter(([src]) => !src.startsWith('__pending_'))
-              ),
-            },
-          ])
+          Object.entries(config.datasets).map(([k, ds]) => {
+            const normalized = { ...ds }
+            if (k === 'realtime') {
+              delete normalized.symbols_param
+              delete normalized.start_param
+              delete normalized.end_param
+            }
+            return [
+              k,
+              {
+                ...normalized,
+                field_map: Object.fromEntries(
+                  Object.entries(ds.field_map).filter(([src]) => !src.startsWith('__pending_'))
+                ),
+              },
+            ]
+          })
         ),
       }
       return api.saveDataSource(cleaned)
@@ -390,6 +401,8 @@ function DatasetDetail({
               <Field label="超时">
                 <input
                   type="number"
+                  min="0.1"
+                  step="any"
                   value={cfg.timeout ?? ''}
                   onChange={e => onUpdate({ timeout: e.target.value ? Number(e.target.value) : null })}
                   onWheel={e => e.currentTarget.blur()}

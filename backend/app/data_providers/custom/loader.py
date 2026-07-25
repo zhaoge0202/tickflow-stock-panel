@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -294,11 +295,13 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             "response_path": ds.response_path,
             "field_map": dict(ds.field_map),
             **({"transforms": dict(ds.transforms)} if ds.transforms else {}),
-            "symbols_param": ds.symbols_param,
-            "start_param": ds.start_param,
-            "end_param": ds.end_param,
-            **({"asset_type_param": ds.asset_type_param} if ds.asset_type_param else {}),
-            **({"freq_param": ds.freq_param} if ds.freq_param else {}),
+            **({
+                "symbols_param": ds.symbols_param,
+                "start_param": ds.start_param,
+                "end_param": ds.end_param,
+            } if ds_name != "realtime" else {}),
+            **({"asset_type_param": ds.asset_type_param} if ds_name == "minute" and ds.asset_type_param else {}),
+            **({"freq_param": ds.freq_param} if ds_name == "minute" and ds.freq_param else {}),
         }
     return out
 
@@ -358,14 +361,14 @@ def _sanitize_for_yaml(config: dict) -> dict:
             continue
         if not isinstance(ds_cfg, dict):
             continue
-        ds = _sanitize_dataset(ds_cfg)
+        ds = _sanitize_dataset(ds_name, ds_cfg)
         if ds:
             datasets_out[ds_name] = ds
     out["datasets"] = datasets_out
     return out
 
 
-def _sanitize_dataset(ds_cfg: dict) -> dict:
+def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
     out: dict = {}
     url = str(ds_cfg.get("url", "") or "").strip()
     if not url:
@@ -385,7 +388,9 @@ def _sanitize_dataset(ds_cfg: dict) -> dict:
             pass
     if ds_cfg.get("timeout") is not None:
         try:
-            out["timeout"] = float(ds_cfg["timeout"])
+            timeout = float(ds_cfg["timeout"])
+            if math.isfinite(timeout) and timeout > 0:
+                out["timeout"] = timeout
         except (TypeError, ValueError):
             pass
     out["response_path"] = str(ds_cfg.get("response_path", "") or "")
@@ -403,16 +408,23 @@ def _sanitize_dataset(ds_cfg: dict) -> dict:
     }
     if transforms:
         out["transforms"] = transforms
-    if ds_cfg.get("symbols_param"):
-        out["symbols_param"] = str(ds_cfg["symbols_param"])
-    if ds_cfg.get("start_param"):
-        out["start_param"] = str(ds_cfg["start_param"])
-    if ds_cfg.get("end_param"):
-        out["end_param"] = str(ds_cfg["end_param"])
-    if ds_cfg.get("asset_type_param"):
-        out["asset_type_param"] = str(ds_cfg["asset_type_param"])
-    if ds_cfg.get("freq_param"):
-        out["freq_param"] = str(ds_cfg["freq_param"])
+    if ds_name != "realtime":
+        symbols_param = str(ds_cfg.get("symbols_param") or "").strip()
+        start_param = str(ds_cfg.get("start_param") or "").strip()
+        end_param = str(ds_cfg.get("end_param") or "").strip()
+        if symbols_param:
+            out["symbols_param"] = symbols_param
+        if start_param:
+            out["start_param"] = start_param
+        if end_param:
+            out["end_param"] = end_param
+    if ds_name == "minute":
+        asset_type_param = str(ds_cfg.get("asset_type_param") or "").strip()
+        freq_param = str(ds_cfg.get("freq_param") or "").strip()
+        if asset_type_param:
+            out["asset_type_param"] = asset_type_param
+        if freq_param:
+            out["freq_param"] = freq_param
     return out
 
 

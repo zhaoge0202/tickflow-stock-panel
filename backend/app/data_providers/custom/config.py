@@ -1,6 +1,7 @@
 """Custom HTTP data source configuration."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -60,22 +61,29 @@ def _auth_from_dict(raw: dict[str, Any] | None) -> AuthConfig:
 
 
 def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
+    try:
+        timeout = float(raw.get("timeout", 30.0) or 30.0)
+    except (TypeError, ValueError):
+        timeout = 30.0
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = 30.0
+
     return DatasetConfig(
         url=str(raw.get("url", "") or ""),
         method=str(raw.get("method", "GET") or "GET").upper(),
         batch=int(raw["batch"]) if raw.get("batch") is not None else None,
         rpm=int(raw["rpm"]) if raw.get("rpm") is not None else None,
-        timeout=float(raw.get("timeout", 30.0) or 30.0),
+        timeout=timeout,
         response_path=str(raw.get("response_path", "") or ""),
         field_map={str(k): str(v) for k, v in (raw.get("field_map") or {}).items()},
         transforms={str(k): str(v) for k, v in (raw.get("transforms") or {}).items()},
         params=dict(raw.get("params") or {}),
         body=dict(raw.get("body") or {}),
-        symbols_param=str(raw.get("symbols_param", "symbols") or "symbols"),
-        start_param=str(raw.get("start_param", "start_time") or "start_time"),
-        end_param=str(raw.get("end_param", "end_time") or "end_time"),
-        asset_type_param=str(raw.get("asset_type_param")) if raw.get("asset_type_param") else None,
-        freq_param=str(raw.get("freq_param")) if raw.get("freq_param") else None,
+        symbols_param=str(raw.get("symbols_param", "symbols") or "symbols").strip() or "symbols",
+        start_param=str(raw.get("start_param", "start_time") or "start_time").strip() or "start_time",
+        end_param=str(raw.get("end_param", "end_time") or "end_time").strip() or "end_time",
+        asset_type_param=(str(raw.get("asset_type_param") or "").strip() or None),
+        freq_param=(str(raw.get("freq_param") or "").strip() or None),
     )
 
 

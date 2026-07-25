@@ -8,7 +8,7 @@ import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import secrets_store
 from app.tickflow import client as tf_client
@@ -373,7 +373,7 @@ class DatasetConfigIn(BaseModel):
     end_param: str = "end_time"
     asset_type_param: str | None = None
     freq_param: str | None = None
-    timeout: float | None = None
+    timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class AuthConfigIn(BaseModel):
