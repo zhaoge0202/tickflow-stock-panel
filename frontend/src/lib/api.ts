@@ -509,6 +509,8 @@ export interface MonitorCondition {
   value?: number | null   // op 非 truth 时必填
 }
 
+export type StrategyNotifyEvent = 'buy_signal' | 'sell_signal' | 'pool_entry' | 'pool_exit'
+
 export interface MonitorRule {
   id: string
   name: string
@@ -520,6 +522,7 @@ export interface MonitorRule {
   sector?: string | null
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
+  notify_events?: StrategyNotifyEvent[]
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
   cooldown_seconds: number
