@@ -82,8 +82,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const [symbolQuery, setSymbolQuery] = useState('')
   const [strategyQuery, setStrategyQuery] = useState('')
   const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai'>('all')
-  // ETF 规则时标的搜索一并搜出 ETF。
-  const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : 'stock'
+  // 标的搜索资产类型: ETF 一并搜股票; 指数只搜指数; 否则只搜股票。
+  const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : assetType === 'index' ? 'index' : 'stock'
   const symbolSearch = useQuery({
     queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes),
     queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes),
@@ -158,6 +158,20 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     ...SIGNAL_OPTIONS.map(key => ({ key, label: cnSignal(key) })),
     ...(options.data?.builtin_signals ?? []).filter(option => MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(option.key)),
   ]
+  // 指数: 隐藏涨跌停/连板类 (指数无这些列) 与分时信号 (无本地分钟K, 会静默不触发)
+  const INDEX_HIDDEN_SIGNALS = (key: string) =>
+    key.includes('limit') || MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(key)
+  const pickerSignals = assetType === 'index'
+    ? monitorBuiltinSignals.filter(o => !INDEX_HIDDEN_SIGNALS(o.key))
+    : monitorBuiltinSignals
+  // 指数: 监控类型仅 signal/price (无涨跌停/策略/封单语义)
+  const visibleTypes = (options.data?.types ?? []).filter(
+    t => assetType !== 'index' || t.key === 'signal' || t.key === 'price',
+  )
+  // 指数: 作用范围仅 symbols (无全市场/板块语义)
+  const visibleScopes = (options.data?.scopes ?? []).filter(
+    s => assetType !== 'index' || s.key === 'symbols',
+  )
   const thresholdConds = draft.conditions.filter(c => c.op !== 'truth')
   const strategyPresets = strategies.data?.presets ?? []
   const selectedStrategy = strategyPresets.find(strategy => strategy.id === draft.strategy_id)
@@ -212,7 +226,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             signals={selectedSignals}
             onChange={onSignalPickerChange}
             kind="entry"
-            builtinSignals={monitorBuiltinSignals}
+            builtinSignals={pickerSignals}
             disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
             disabledSignalHint={intradaySupport?.reason}
           />
@@ -287,26 +301,33 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </button>
       </div>
 
-      {/* 资产类型: 股票 / ETF (个股极简模式不显示) */}
+      {/* 资产类型: 股票 / ETF / 指数 (个股极简模式不显示) */}
       {!simple && (
         <div className="space-y-1.5">
           <span className="text-[11px] text-muted">资产类型</span>
           <div className="inline-flex h-9 rounded-btn border border-border overflow-hidden">
-            {(['stock', 'etf'] as const).map(t => (
+            {(['stock', 'etf', 'index'] as const).map(t => (
               <button
                 key={t}
                 type="button"
                 aria-pressed={assetType === t}
                 onClick={() => {
                   if (assetType === t) return
-                  setDraft(d => ({ ...d, asset_type: t, strategy_id: null, symbols: [] }))
+                  setDraft(d => ({
+                    ...d,
+                    asset_type: t,
+                    strategy_id: null,
+                    symbols: [],
+                    type: t === 'index' && d.type !== 'signal' && d.type !== 'price' ? 'signal' : d.type,
+                    scope: t === 'index' ? 'symbols' : d.scope,
+                  }))
                   setStrategyQuery('')
                   setStrategyCategory('all')
                 }}
                 className={`h-full px-4 text-xs font-medium transition-colors cursor-pointer
                   ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
               >
-                {t === 'stock' ? '股票' : 'ETF'}
+                {t === 'stock' ? '股票' : t === 'etf' ? 'ETF' : '指数'}
               </button>
             ))}
           </div>
@@ -317,7 +338,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       <div className="space-y-1.5">
         <span className="text-[11px] text-muted">监控类型</span>
         <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-          {(options.data?.types ?? []).map(t => {
+          {visibleTypes.map(t => {
             const Icon = TYPE_ICONS[t.key as keyof typeof TYPE_ICONS] ?? Activity
             const active = draft.type === t.key
             return (
@@ -354,7 +375,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         <span className="text-[11px] text-muted">作用范围</span>
         <div className="flex items-center gap-2">
           <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-9 w-32 rounded-btn border border-border bg-base px-3 text-xs text-foreground">
-            {(options.data?.scopes ?? []).map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
+            {visibleScopes.map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
           </select>
           {draft.scope === 'symbols' && (
             <div className="flex-1 flex flex-wrap items-center gap-1.5">
@@ -417,7 +438,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 signals={selectedSignals}
                 onChange={onSignalPickerChange}
                 kind="entry"
-                builtinSignals={monitorBuiltinSignals}
+                builtinSignals={pickerSignals}
                 disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
                 disabledSignalHint={intradaySupport?.reason}
               />
