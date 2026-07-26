@@ -7,13 +7,19 @@ import { toast } from '@/components/Toast'
 
 const BASE = ''
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const isFormData = init?.body instanceof FormData
+type RequestOptions = RequestInit & {
+  /** 为 true 时不弹错误 toast（由调用方自行汇总提示，如多图串行队列） */
+  quiet?: boolean
+}
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+  const { quiet, ...fetchInit } = init ?? {}
+  const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
   if (!isFormData) headers['Content-Type'] = 'application/json'
   // 合并调用方传入的 headers (此前会被整体覆盖丢弃)
-  Object.assign(headers, init?.headers as Record<string, string> | undefined)
-  const res = await fetch(`${BASE}${path}`, { ...init, headers })
+  Object.assign(headers, fetchInit.headers as Record<string, string> | undefined)
+  const res = await fetch(`${BASE}${path}`, { ...fetchInit, headers })
   if (!res.ok) {
     let detail = ''
     try {
@@ -30,7 +36,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
     // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
-    if (res.status !== 401) toast(msg, 'error')
+    if (res.status !== 401 && !quiet) toast(msg, 'error')
     throw new Error(msg)
   }
   return res.json() as Promise<T>
@@ -1380,13 +1386,14 @@ export const api = {
     }),
   watchlistOcrStatus: () =>
     request<{ provider: string; available: boolean }>('/api/watchlist/ocr-status'),
-  watchlistImportImage: (file: File, signal?: AbortSignal) => {
+  watchlistImportImage: (file: File, signal?: AbortSignal, quiet = false) => {
     const fd = new FormData()
     fd.append('file', file)
     return request<WatchlistImportResult>('/api/watchlist/import-image', {
       method: 'POST',
       body: fd,
       signal,
+      quiet,
     })
   },
   watchlistRemove: (symbol: string) =>
