@@ -1059,7 +1059,7 @@ class QuoteService:
                                 "source": ev["source"],
                                 "type": ev["type"],
                                 "rule_id": ev.get("rule_id"),
-                                "strategy_id": ev.get("rule_id") if ev["source"] == "strategy" else None,
+                                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
                                 "symbol": ev["symbol"],
                                 "name": ev["name"],
                                 "message": ev["message"],
