@@ -4,6 +4,7 @@ import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
 import { api, type WatchlistImportCandidate } from '@/lib/api'
 import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
+import { getOcrInstallHint } from '@/lib/ocrInstallHint'
 
 interface Props {
   open: boolean
@@ -12,25 +13,59 @@ interface Props {
 
 export function WatchlistImportDialog({ open, onClose }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const genRef = useRef(0)
   const [busy, setBusy] = useState(false)
   const [provider, setProvider] = useState<string>('')
   const [candidates, setCandidates] = useState<WatchlistImportCandidate[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
+  const [installHint, setInstallHint] = useState('')
   const batchAdd = useWatchlistBatchAdd()
 
+  const abortInFlight = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    genRef.current += 1
+  }, [])
+
   const reset = useCallback(() => {
+    abortInFlight()
     setBusy(false)
     setCandidates([])
     setSelected(new Set())
     setProvider('')
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewUrl(null)
+    setOcrAvailable(null)
+    setInstallHint('')
+    setPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
     if (inputRef.current) inputRef.current.value = ''
-  }, [previewUrl])
+  }, [abortInFlight])
 
   useEffect(() => {
-    if (!open) reset()
+    if (!open) {
+      reset()
+      return
+    }
+    let cancelled = false
+    void api.watchlistOcrStatus().then(
+      res => {
+        if (cancelled) return
+        setOcrAvailable(res.available)
+        if (!res.available) setInstallHint(getOcrInstallHint())
+      },
+      () => {
+        if (cancelled) return
+        setOcrAvailable(false)
+        setInstallHint(getOcrInstallHint())
+      },
+    )
+    return () => {
+      cancelled = true
+    }
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const runRecognize = async (file: File) => {
@@ -38,13 +73,21 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       toast('请选择图片文件', 'error')
       return
     }
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewUrl(URL.createObjectURL(file))
+    abortInFlight()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const gen = genRef.current
+
+    setPreviewUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return URL.createObjectURL(file)
+    })
     setBusy(true)
     setCandidates([])
     setSelected(new Set())
     try {
-      const res = await api.watchlistImportImage(file)
+      const res = await api.watchlistImportImage(file, controller.signal)
+      if (gen !== genRef.current) return
       setProvider(res.provider)
       setCandidates(res.candidates)
       const defaults = new Set(
@@ -58,10 +101,13 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       } else if (res.matched_count === 0) {
         toast('识别到代码但未能匹配证券主数据', 'error')
       }
-    } catch {
-      /* toast already in request() */
+    } catch (err) {
+      if (gen !== genRef.current) return
+      if (controller.signal.aborted) return
+      /* toast already in request() for non-abort errors */
+      void err
     } finally {
-      setBusy(false)
+      if (gen === genRef.current) setBusy(false)
     }
   }
 
@@ -94,8 +140,8 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       return
     }
     try {
-      await batchAdd.mutateAsync(symbols)
-      toast(`已添加 ${symbols.length} 只自选`, 'success')
+      const data = await batchAdd.mutateAsync(symbols)
+      toast(`已添加 ${data.added} 只自选`, 'success')
       onClose()
     } catch {
       /* toast in request */
@@ -103,6 +149,8 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
   }
 
   if (!open) return null
+
+  const ocrBlocked = ocrAvailable === false
 
   return (
     <Modal
@@ -116,7 +164,9 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
             从截图导入自选
           </h2>
           <p className="text-[11px] text-muted mt-0.5">
-            上传券商自选列表截图，识别代码后确认添加
+            {ocrBlocked
+              ? 'OCR 引擎不可用'
+              : '上传券商自选列表截图，识别代码后确认添加'}
             {provider ? ` · ${provider}` : ''}
           </p>
         </div>
@@ -131,99 +181,107 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       </div>
 
       <div className="px-4 py-3 overflow-y-auto flex-1 space-y-3">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,.jpg,.jpeg,.png"
-          className="hidden"
-          onChange={e => onPick(e.target.files?.[0])}
-        />
-
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => inputRef.current?.click()}
-          onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
-          onDrop={e => {
-            e.preventDefault()
-            onPick(e.dataTransfer.files?.[0])
-          }}
-          className="w-full flex flex-col items-center justify-center gap-2 rounded-btn border border-dashed border-border bg-elevated/40 hover:bg-elevated/70 px-4 py-6 text-secondary transition-colors disabled:opacity-50"
-        >
-          {busy ? (
-            <Loader2 className="h-6 w-6 animate-spin text-accent" />
-          ) : (
-            <ImagePlus className="h-6 w-6 text-accent" />
-          )}
-          <span className="text-xs">
-            {busy ? '识别中…' : '点击选择或拖拽截图到此处'}
-          </span>
-        </button>
-
-        {previewUrl && (
-          <div className="rounded-btn overflow-hidden border border-border bg-black/40 max-h-40">
-            <img src={previewUrl} alt="预览" className="w-full h-full object-contain max-h-40" />
+        {ocrBlocked ? (
+          <div className="rounded-btn border border-border bg-elevated/40 px-4 py-5 text-xs text-secondary leading-relaxed whitespace-pre-wrap">
+            {installHint}
           </div>
-        )}
+        ) : (
+          <>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,.jpg,.jpeg,.png"
+              className="hidden"
+              onChange={e => onPick(e.target.files?.[0])}
+            />
 
-        {candidates.length > 0 && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-secondary">
-                识别 {candidates.length} 个代码 · 匹配 {matched.length} · 已选 {selected.size}
-              </span>
-              {selectable.length > 0 && (
-                <button
-                  type="button"
-                  onClick={toggleAll}
-                  className="text-[11px] text-accent hover:underline"
-                >
-                  {allSelected ? '取消全选' : '全选可添加'}
-                </button>
+            <button
+              type="button"
+              disabled={busy || ocrAvailable === null}
+              onClick={() => inputRef.current?.click()}
+              onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
+              onDrop={e => {
+                e.preventDefault()
+                onPick(e.dataTransfer.files?.[0])
+              }}
+              className="w-full flex flex-col items-center justify-center gap-2 rounded-btn border border-dashed border-border bg-elevated/40 hover:bg-elevated/70 px-4 py-6 text-secondary transition-colors disabled:opacity-50"
+            >
+              {busy || ocrAvailable === null ? (
+                <Loader2 className="h-6 w-6 animate-spin text-accent" />
+              ) : (
+                <ImagePlus className="h-6 w-6 text-accent" />
               )}
-            </div>
-            <ul className="divide-y divide-border/60 rounded-btn border border-border overflow-hidden">
-              {candidates.map(c => {
-                const key = c.symbol || c.code
-                const disabled = !c.matched || !c.symbol
-                const checked = !!(c.symbol && selected.has(c.symbol))
-                return (
-                  <li key={key}>
-                    <label
-                      className={`flex items-center gap-3 px-3 py-2.5 text-sm ${
-                        disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-elevated/50'
-                      }`}
+              <span className="text-xs">
+                {busy ? '识别中…' : ocrAvailable === null ? '检查 OCR…' : '点击选择或拖拽截图到此处'}
+              </span>
+            </button>
+
+            {previewUrl && (
+              <div className="rounded-btn overflow-hidden border border-border bg-black/40 max-h-40">
+                <img src={previewUrl} alt="预览" className="w-full h-full object-contain max-h-40" />
+              </div>
+            )}
+
+            {candidates.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-secondary">
+                    识别 {candidates.length} 个代码 · 匹配 {matched.length} · 已选 {selected.size}
+                  </span>
+                  {selectable.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleAll}
+                      className="text-[11px] text-accent hover:underline"
                     >
-                      <input
-                        type="checkbox"
-                        disabled={disabled}
-                        checked={checked}
-                        onChange={() => c.symbol && toggle(c.symbol)}
-                        className="rounded border-border"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-baseline gap-2">
-                          <span className="font-medium text-foreground truncate">
-                            {c.name || (c.matched ? c.symbol : '未匹配')}
-                          </span>
-                          <span className="text-[11px] text-muted tabular-nums shrink-0">
-                            {c.code}
-                            {c.symbol ? ` · ${c.symbol}` : ''}
-                          </span>
-                        </div>
-                        {c.already_in_watchlist && (
-                          <span className="text-[10px] text-muted">已在自选</span>
-                        )}
-                        {!c.matched && (
-                          <span className="text-[10px] text-warning/90">主数据未找到，已跳过</span>
-                        )}
-                      </div>
-                    </label>
-                  </li>
-                )
-              })}
-            </ul>
-          </div>
+                      {allSelected ? '取消全选' : '全选可添加'}
+                    </button>
+                  )}
+                </div>
+                <ul className="divide-y divide-border/60 rounded-btn border border-border overflow-hidden">
+                  {candidates.map(c => {
+                    const key = c.symbol || c.code
+                    const disabled = !c.matched || !c.symbol || c.already_in_watchlist
+                    const checked = !!(c.symbol && selected.has(c.symbol))
+                    return (
+                      <li key={key}>
+                        <label
+                          className={`flex items-center gap-3 px-3 py-2.5 text-sm ${
+                            disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-elevated/50'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            disabled={disabled}
+                            checked={checked}
+                            onChange={() => c.symbol && toggle(c.symbol)}
+                            className="rounded border-border"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-baseline gap-2">
+                              <span className="font-medium text-foreground truncate">
+                                {c.name || (c.matched ? c.symbol : '未匹配')}
+                              </span>
+                              <span className="text-[11px] text-muted tabular-nums shrink-0">
+                                {c.code}
+                                {c.symbol ? ` · ${c.symbol}` : ''}
+                              </span>
+                            </div>
+                            {c.already_in_watchlist && (
+                              <span className="text-[10px] text-muted">已在自选</span>
+                            )}
+                            {!c.matched && (
+                              <span className="text-[10px] text-warning/90">主数据未找到，已跳过</span>
+                            )}
+                          </div>
+                        </label>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -237,7 +295,7 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
         </button>
         <button
           type="button"
-          disabled={selected.size === 0 || batchAdd.isPending || busy}
+          disabled={ocrBlocked || selected.size === 0 || batchAdd.isPending || busy}
           onClick={() => void confirmAdd()}
           className="h-8 px-3 rounded-btn text-xs inline-flex items-center gap-1.5 bg-accent text-white hover:bg-accent/90 disabled:opacity-40"
         >

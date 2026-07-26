@@ -16,6 +16,7 @@ import {
   type DimensionMembersTarget,
 } from '@/components/DimensionMembersDialog'
 import { WatchlistImportDialog } from '@/components/WatchlistImportDialog'
+import { getOcrInstallHint } from '@/lib/ocrInstallHint'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
@@ -570,12 +571,33 @@ export function Watchlist() {
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
+  const [ocrInstallHint, setOcrInstallHint] = useState('')
   const columnsLoaded = useRef(false)
 
   useEffect(() => {
     if (columnsLoaded.current) return
     columnsLoaded.current = true
     loadColumnConfig().then(setColumns)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void api.watchlistOcrStatus().then(
+      res => {
+        if (cancelled) return
+        setOcrAvailable(res.available)
+        if (!res.available) setOcrInstallHint(getOcrInstallHint())
+      },
+      () => {
+        if (cancelled) return
+        setOcrAvailable(false)
+        setOcrInstallHint(getOcrInstallHint())
+      },
+    )
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const handleColumnsChange = useCallback((next: ColumnConfig[]) => {
@@ -1004,9 +1026,17 @@ export function Watchlist() {
               onAdd={(sym) => addMutation.mutate(sym)}
             />
             <button
-              onClick={() => setImportOpen(true)}
-              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
-              title="从截图导入自选"
+              onClick={() => {
+                if (ocrAvailable === false) return
+                setImportOpen(true)
+              }}
+              disabled={ocrAvailable === false}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-elevated disabled:hover:text-secondary"
+              title={
+                ocrAvailable === false
+                  ? ocrInstallHint || 'OCR 不可用，请先安装 Tesseract'
+                  : '从截图导入自选'
+              }
             >
               <ImagePlus className="h-4 w-4" />
             </button>

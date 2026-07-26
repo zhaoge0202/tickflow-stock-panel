@@ -1380,12 +1380,13 @@ export const api = {
     }),
   watchlistOcrStatus: () =>
     request<{ provider: string; available: boolean }>('/api/watchlist/ocr-status'),
-  watchlistImportImage: (file: File) => {
+  watchlistImportImage: (file: File, signal?: AbortSignal) => {
     const fd = new FormData()
     fd.append('file', file)
     return request<WatchlistImportResult>('/api/watchlist/import-image', {
       method: 'POST',
       body: fd,
+      signal,
     })
   },
   watchlistRemove: (symbol: string) =>
