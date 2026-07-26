@@ -180,8 +180,10 @@ def watchlist_enriched(
     # 按资产拆分自选 symbol; ETF enriched 是独立缓存, 仅自选真的含 ETF 才去加载
     # (避免无 ETF 用户在缓存冷启动时触发 ETF 全量懒加载)
     etf_set = repo.get_etf_symbol_set()
-    stock_symbols = [s for s in symbols if s not in etf_set]
+    index_set = repo.get_index_symbol_set()
     etf_symbols = [s for s in symbols if s in etf_set]
+    index_symbols = [s for s in symbols if s not in etf_set and s in index_set]
+    stock_symbols = [s for s in symbols if s not in etf_set and s not in index_set]
 
     df_e, cache_date = repo.get_enriched_latest()
 
@@ -210,8 +212,19 @@ def watchlist_enriched(
             df_etf = etf_watchlist_df
         df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
 
-    # as_of 取两类缓存中较旧者, 避免把旧的 ETF 行标成股票缓存日期
-    dates = [d for d in (cache_date if stock_symbols else None, etf_date) if d is not None]
+    # 指数行合并 (镜像 ETF 分支); 缺失列 (换手率/涨跌停信号等) 为 null
+    index_date = None
+    if index_symbols:
+        df_idx_all, index_date = repo.get_enriched_latest_asset("index")
+        idx_watchlist_df = pl.DataFrame({"symbol": index_symbols})
+        if not df_idx_all.is_empty():
+            df_idx = idx_watchlist_df.join(df_idx_all, on="symbol", how="left")
+        else:
+            df_idx = idx_watchlist_df
+        df = df_idx if df.is_empty() else pl.concat([df, df_idx], how="diagonal_relaxed")
+
+    # as_of 取三类缓存中较旧者
+    dates = [d for d in (cache_date if stock_symbols else None, etf_date, index_date) if d is not None]
     as_of = min(dates) if dates else None
     if df.is_empty():
         return {"rows": [], "as_of": str(as_of) if as_of else None, "elapsed_ms": 0}
@@ -225,8 +238,14 @@ def watchlist_enriched(
         pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name")
     )
 
+    # 标注资产类型: 前端据此渲染徽标/豁免板块筛选/分时列降级
+    asset_map = {**{s: "etf" for s in etf_symbols}, **{s: "index" for s in index_symbols}}
+    df = df.with_columns(
+        pl.col("symbol").replace_strict(asset_map, default="stock", return_dtype=pl.Utf8).alias("asset_type")
+    )
+
     # 选择内置需要的列
-    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares"] if c in df.columns]
+    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type"] if c in df.columns]
     df = df.select(keep)
 
     # 动态 JOIN 扩展数据表

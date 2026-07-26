@@ -106,6 +106,16 @@ def validate(rule: dict) -> None:
     if rule.get("type") not in RULE_TYPES:
         raise ValueError(f"type 必须是 {RULE_TYPES} 之一")
 
+    # 指数规则: 仅 signal/price + symbols 作用域 + 不含分时信号
+    # (指数无涨跌停/策略/封单语义; 无本地分钟K, 分时信号会静默不触发)
+    if rule.get("asset_type") == "index":
+        if rule.get("type") not in ("signal", "price"):
+            raise ValueError("指数监控仅支持 signal/price 类型 (无涨跌停/策略/封单语义)")
+        if rule.get("scope") != "symbols":
+            raise ValueError("指数监控仅支持指定标的 (scope=symbols)")
+        if uses_intraday_signals(rule):
+            raise ValueError("指数无本地分钟K数据, 不支持分时信号条件")
+
     # 策略类型: 需要 strategy_id + direction,conditions 可空
     if rule.get("type") == "strategy":
         if not rule.get("strategy_id"):

@@ -316,6 +316,8 @@ class KlineRepository:
         # symbol 集合 memo (随对应 instruments 缓存失效): 供每请求资产分流用
         self._index_symbol_set_cache: set[str] | None = None
         self._etf_symbol_set_cache: set[str] | None = None
+        self._index_enriched_cache: pl.DataFrame | None = None
+        self._index_enriched_cache_date: date | None = None
 
         # ---- enriched 后台预热 ----
         # 启动时 compute_indicators (107万行, 低配机 50s+) 移出 lifespan 关键路径,
@@ -383,6 +385,9 @@ class KlineRepository:
         # 避免自选无 ETF 的用户在管道后白付全量重算成本
         self._etf_enriched_cache = None
         self._etf_enriched_cache_date = None
+        # 指数 enriched 同样只失效不重建 (懒加载)
+        self._index_enriched_cache = None
+        self._index_enriched_cache_date = None
 
         if background:
             logger.info("cache refresh: enriched 推后台线程预热")
@@ -473,6 +478,8 @@ class KlineRepository:
         self._etf_instruments_cache = None
         self._index_symbol_set_cache = None
         self._etf_symbol_set_cache = None
+        self._index_enriched_cache = None
+        self._index_enriched_cache_date = None
 
     def _refresh_enriched(self) -> None:
         """从 parquet 加载 enriched 最新日到内存 + 构建聚合表。
@@ -879,6 +886,50 @@ class KlineRepository:
         except Exception as e:  # noqa: BLE001
             logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
+    def _refresh_index_enriched(self) -> None:
+        """从指数 enriched parquet 加载最新日到内存缓存 (300天重算通用指标)。
+
+        磁盘窄表无指标列, 必须 scan 近 300 天重算, 否则监控信号规则无列可评估。
+        指数无复权需求, 不读 raw_close/raw_high/raw_low。
+        """
+        try:
+            enriched_dir = self.store.data_dir / "kline_index_enriched"
+            dates = sorted(
+                p.name[5:] for p in enriched_dir.glob("date=*")
+                if p.is_dir() and p.name.startswith("date=")
+            ) if enriched_dir.exists() else []
+            if not dates:
+                self._index_enriched_cache = None
+                self._index_enriched_cache_date = None
+                return
+            latest = date.fromisoformat(dates[-1])
+            target_parquet = enriched_dir / f"date={dates[-1]}" / "part.parquet"
+            df_latest = pl.read_parquet(target_parquet)
+            if df_latest.is_empty():
+                return
+
+            from datetime import timedelta
+            start_full = latest - timedelta(days=300)
+            read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
+                                     "volume", "amount"]
+                         if c in df_latest.columns]
+            df_hist = (
+                scan_enriched_parquet(self._index_enriched_glob,
+                                cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+                .filter(pl.col("date") >= start_full)
+                .select(read_cols)
+                .sort(["symbol", "date"])
+                .collect()
+            )
+            if df_hist.is_empty():
+                self._index_enriched_cache = df_latest.sort(["symbol"])
+            else:
+                df_full = self._compute_index_enriched_range(df_hist)
+                self._index_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+            self._index_enriched_cache_date = latest
+        except Exception as e:  # noqa: BLE001
+            logger.debug("指数 enriched 缓存刷新跳过: %s", e)
+
     def _refresh_instruments(self) -> None:
         """加载 instruments 到内存。"""
         try:
@@ -952,6 +1003,12 @@ class KlineRepository:
             if self._etf_enriched_cache is None:
                 return pl.DataFrame(), self._etf_enriched_cache_date
             return self._etf_enriched_cache, self._etf_enriched_cache_date
+        if asset_type == "index":
+            if self._index_enriched_cache is None and refresh:
+                self._refresh_index_enriched()
+            if self._index_enriched_cache is None:
+                return pl.DataFrame(), self._index_enriched_cache_date
+            return self._index_enriched_cache, self._index_enriched_cache_date
         return pl.DataFrame(), None
 
     def get_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame | None:
@@ -1130,13 +1187,13 @@ class KlineRepository:
         return "stock"
 
     def get_name_map(self, symbols: list[str] | None = None) -> dict[str, str]:
-        """返回 {symbol: name} 映射, 合并股票 + ETF instruments (股票优先去重)。
+        """返回 {symbol: name} 映射, 合并股票 + ETF + 指数 instruments (股票优先去重)。
 
         自选列表/名称批查等场景的统一名称解析入口, 避免各调用方自行合并两份缓存。
         symbols 非 None 时只返回命中的条目。
         """
         name_map: dict[str, str] = {}
-        for df in (self.get_instruments(), self.get_etf_instruments()):
+        for df in (self.get_instruments(), self.get_etf_instruments(), self.get_instruments_asset("index")):
             if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
                 continue
             if symbols is not None:
@@ -1924,7 +1981,7 @@ class KlineRepository:
             existing_cache = self._etf_enriched_cache if self._etf_enriched_cache_date == dt else pl.DataFrame()
         elif asset_type == "index":
             table = "kline_index_enriched"
-            existing_cache = pl.DataFrame()
+            existing_cache = self._index_enriched_cache if self._index_enriched_cache_date == dt else pl.DataFrame()
         else:
             return
 
@@ -1941,6 +1998,9 @@ class KlineRepository:
         elif asset_type == "etf":
             self._etf_enriched_cache = merged_cache
             self._etf_enriched_cache_date = dt
+        elif asset_type == "index":
+            self._index_enriched_cache = merged_cache
+            self._index_enriched_cache_date = dt
 
         from app.indicators.pipeline import ENRICHED_STORAGE_COLS
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
@@ -2006,6 +2066,8 @@ class KlineRepository:
             self._etf_enriched_cache_date = dt
             table = "kline_etf_enriched"
         elif asset_type == "index":
+            self._index_enriched_cache = cache_df
+            self._index_enriched_cache_date = dt
             table = "kline_index_enriched"
         else:
             return

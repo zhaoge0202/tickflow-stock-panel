@@ -95,7 +95,7 @@ def search_instruments(
 
 @router.post("/instruments/names")
 def instruments_names(request: Request, symbols: list[str]):
-    """批量查标的名称 (股票 + ETF)。传入 symbol 列表, 返回 {symbol: name}。"""
+    """批量查标的名称 (股票 + ETF + 指数)。传入 symbol 列表, 返回 {symbol: name}。"""
     if not symbols:
         return {"names": {}}
     repo = request.app.state.repo
@@ -430,10 +430,37 @@ def get_daily_batch(request: Request, body: dict):
     start = end - timedelta(days=days * 2)  # 多取一些确保交易日够
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
-    df = repo.get_daily_batch(symbols, start, end, columns=cols)
 
-    if df.is_empty():
+    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
+    stock_symbols: list[str] = []
+    etf_symbols: list[str] = []
+    index_symbols: list[str] = []
+    for s in symbols:
+        t = repo.resolve_asset_type(s)
+        if t == "etf":
+            etf_symbols.append(s)
+        elif t == "index":
+            index_symbols.append(s)
+        else:
+            stock_symbols.append(s)
+
+    frames: list[pl.DataFrame] = []
+    if stock_symbols:
+        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
+        if not df_stock.is_empty():
+            frames.append(df_stock)
+    for sym in etf_symbols:
+        sub = repo.get_etf_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+    for sym in index_symbols:
+        sub = repo.get_index_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+
+    if not frames:
         return {"data": {}}
+    df = pl.concat(frames, how="diagonal_relaxed")
 
     # 按 symbol 分组, 每只取最近 N 条
     result: dict[str, list[dict]] = {}
