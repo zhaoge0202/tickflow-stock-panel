@@ -1293,6 +1293,7 @@ export const api = {
       date: string | null
       rows: MinuteKlineRow[]
       source?: 'local' | 'live' | 'none'
+      asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,

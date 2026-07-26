@@ -20,7 +20,7 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '个股信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控',
+  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控',
 }
 
 const TYPE_ICONS = {
@@ -110,7 +110,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           if (c.op !== 'truth' && (c.value === null || c.value === undefined)) throw new Error('阈值条件需要数值')
         }
       }
-      if (d.scope === 'symbols' && d.symbols.length === 0) throw new Error('请选择至少一只股票')
+      if (d.scope === 'symbols' && d.symbols.length === 0) throw new Error('请选择至少一只标的')
       return api.monitorRuleSave(d)
     },
     onSuccess: () => {
@@ -391,7 +391,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 <input
                   value={symbolQuery}
                   onChange={e => setSymbolQuery(e.target.value)}
-                  placeholder="搜索股票..."
+                  placeholder="搜索代码或名称..."
                   className="h-7 w-32 rounded border border-border bg-base pl-6 pr-2 text-[11px] text-foreground focus:outline-none focus:border-accent/50"
                 />
                 <Search className="absolute left-1.5 top-1.5 h-3.5 w-3.5 text-muted" />
@@ -408,7 +408,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               </div>
             </div>
           )}
-          {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有股票生效</span>}
+          {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有标的生效</span>}
           {draft.scope === 'sector' && <span className="text-[11px] text-muted/60">板块精确过滤(开发中,当前等同全市场)</span>}
         </div>
       </div>
@@ -446,7 +446,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 <div className={`mt-2 text-[10px] ${intradaySupport?.available === false ? 'text-danger' : 'text-muted'}`}>
                   {intradaySupport?.available === false
                     ? intradaySupport.reason
-                    : `分时穿越按已完成的一分钟判断,仅支持指定股票,当前最多监听 ${intradaySupport?.max_symbols ?? 0} 只。`}
+                    : `分时穿越按已完成的一分钟判断,仅支持指定标的,当前最多监听 ${intradaySupport?.max_symbols ?? 0} 只。`}
                 </div>
               )}
             </div>

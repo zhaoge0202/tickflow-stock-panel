@@ -18,7 +18,7 @@ import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget
 import { usePreferences } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
-  signal: '个股信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控',
+  signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -336,7 +336,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
         <EmptyState
           icon={Bell}
           title="暂无触发记录"
-          hint="监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在个股详情页加入监控。"
+          hint="监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在标的详情页加入监控。"
         />
       ) : (
         <div className="space-y-2">
@@ -633,11 +633,11 @@ function RulesList({ rulesQuery, onEdit }: {
         <EmptyState
           icon={RadioTower}
           title="暂无监控规则"
-          hint="点击标题栏「+」新建规则,或在个股详情页点「加监控」快速添加。"
+          hint="点击标题栏「+」新建规则,或在标的详情页点「加监控」快速添加。"
         />
       ) : (
         rules.map(r => {
-          // 名称截取: "策略监控 · MACD金叉" → "MACD金叉", "个股信号监控 · 300750.SZ" → "个股信号监控"
+          // 名称截取: "策略监控 · MACD金叉" → "MACD金叉", "信号监控 · 300750.SZ" → "信号监控"
           const dotIdx = r.name.indexOf(' · ')
           const displayName = dotIdx >= 0 ? r.name.slice(dotIdx + 3) : r.name
           return (
