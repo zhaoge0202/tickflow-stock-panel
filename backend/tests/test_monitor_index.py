@@ -70,3 +70,39 @@ def test_evaluate_index_round_triggers_and_isolates():
     assert all(e["rule_id"] != "r_stock" for e in events)
     assert events[0]["name"] == "上证指数"
     assert eng.latest_strategy_results() == {}  # 策略结果缓存未被触碰
+
+
+# ---- 资产类型纠正: 误存为 stock 的指数规则 ----
+
+class _FakeRepo:
+    def resolve_asset_type(self, symbol):
+        return {"000001.SH": "index"}.get(symbol, "stock")
+
+
+def test_reconcile_index_asset_type_corrects_index_only_rule():
+    from app.api.monitor_rules import _reconcile_index_asset_type
+
+    rule = {"asset_type": "stock", "scope": "symbols", "symbols": ["000001.SH"]}
+    assert _reconcile_index_asset_type(rule, _FakeRepo())["asset_type"] == "index"
+
+
+def test_reconcile_index_asset_type_keeps_stock_and_mixed():
+    from app.api.monitor_rules import _reconcile_index_asset_type
+
+    repo = _FakeRepo()
+    # 纯股票 → 不动
+    assert _reconcile_index_asset_type(
+        {"asset_type": "stock", "scope": "symbols", "symbols": ["600000.SH"]}, repo,
+    )["asset_type"] == "stock"
+    # 股票+指数混合 → 不动 (asset_type 语义覆盖整条规则)
+    assert _reconcile_index_asset_type(
+        {"asset_type": "stock", "scope": "symbols", "symbols": ["000001.SH", "600000.SH"]}, repo,
+    )["asset_type"] == "stock"
+    # 已是 index → 不动
+    assert _reconcile_index_asset_type(
+        {"asset_type": "index", "scope": "symbols", "symbols": ["000001.SH"]}, repo,
+    )["asset_type"] == "index"
+    # 非 symbols 范围 → 不动
+    assert _reconcile_index_asset_type(
+        {"asset_type": "stock", "scope": "all", "symbols": []}, repo,
+    )["asset_type"] == "stock"

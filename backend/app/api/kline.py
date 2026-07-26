@@ -652,6 +652,7 @@ def get_minute(
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
+            "asset_type": asset_type,
             "price_limit": price_limit,
         }
 
@@ -683,6 +684,7 @@ def get_minute(
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+            "asset_type": asset_type,
             "price_limit": price_limit,
         }
 
@@ -692,6 +694,7 @@ def get_minute(
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),
         "source": "live" if not live_df.is_empty() else "none",
+        "asset_type": asset_type,
         "price_limit": price_limit,
     }
 
@@ -787,6 +790,9 @@ async def sync_minute(request: Request):
                     universe = sorted(set(universe) | set(inst["symbol"].to_list()))
                 except Exception:  # noqa: BLE001
                     pass
+            # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
+            index_set = repo.get_index_symbol_set()
+            universe = [s for s in universe if s not in index_set]
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
             days = override_days if override_days else get_minute_sync_days()
@@ -840,6 +846,11 @@ async def sync_minute_single(request: Request, body: dict):
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
+
+    # 指数分钟K无本地存储, 落库会污染股票分钟表 kline_minute;
+    # 指数分钟数据走 /api/index/minute 实时读取, 此端点显式拒绝。
+    if repo.resolve_asset_type(symbol) == "index":
+        raise HTTPException(status_code=400, detail="指数分钟K不支持落库同步 (指数分钟数据走 /api/index/minute 实时读取)")
 
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
