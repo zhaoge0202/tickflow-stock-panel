@@ -514,7 +514,7 @@ export interface MonitorRule {
   name: string
   enabled: boolean
   type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder'
-  asset_type?: 'stock' | 'etf'
+  asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector'
   symbols: string[]
   sector?: string | null
@@ -1409,7 +1409,7 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType?: 'stock' | 'etf') => {
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
     )
@@ -1473,7 +1473,7 @@ export const api = {
     stop_loss_pct?: number
     max_hold_days?: number
     matching?: 'close_t' | 'open_t+1'
-    asset_type?: 'stock' | 'etf'
+    asset_type?: 'stock' | 'etf' | 'index'
   }) =>
     request<BacktestResult>('/api/backtest/run', {
       method: 'POST',
@@ -1493,7 +1493,7 @@ export const api = {
     weight?: 'equal' | 'factor_weight'
     fees_pct?: number
     slippage_bps?: number
-    asset_type?: 'stock' | 'etf'
+    asset_type?: 'stock' | 'etf' | 'index'
   }) =>
     request<FactorBacktestResult>('/api/backtest/factor/run', {
       method: 'POST',
@@ -1517,7 +1517,7 @@ export const api = {
     max_positions?: number
     initial_capital?: number
     position_sizing?: 'equal' | 'score_weight'
-    asset_type?: 'stock' | 'etf'
+    asset_type?: 'stock' | 'etf' | 'index'
     minute_fill?: boolean
   }) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {

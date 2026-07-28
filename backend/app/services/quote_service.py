@@ -720,16 +720,21 @@ class QuoteService:
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
         if not etf_daily_df.is_empty() and self._repo:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
-        # ---- 指数: 仅有指数监控规则时才 flush 焐热 (无规则零成本) ----
+        # ---- 指数: 仅有指数监控规则时才写盘 (无规则零成本) ----
+        # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine and engine.has_asset_rules("index") and self._repo:
             index_daily_df = self._build_daily(index_records)
             if not index_daily_df.is_empty():
+                use_flush = preferences.get_realtime_index_mode() == "all"
                 try:
-                    self._repo.flush_live_daily_asset("index", index_daily_df)
+                    if use_flush:
+                        self._repo.flush_live_daily_asset("index", index_daily_df)
+                    else:
+                        self._repo.merge_live_daily_asset("index", index_daily_df)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("指数日K写盘失败: %s", e)
-                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index")
+                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=not use_flush)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -738,12 +743,15 @@ class QuoteService:
         self._evaluate_monitors(daily_df, quote_extra)
 
     def _fetch_watchlist_quotes(self) -> None:
-        """Free 档自选股实时: 只拉取最多 5 个 symbols。"""
+        """Free 档自选股实时: 按 capability batch 上限分批拉取。"""
         from app.services import preferences
         from app.tickflow.client import get_paid_realtime_client
+        from app.tickflow.capabilities import Cap
+        from app.tickflow.policy import detect_capabilities
+        from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
 
         symbols = preferences.get_realtime_watchlist_symbols()
-        # 指数监控规则标的并入轮询 (独立于股票前5名额)
+        # 指数监控规则标的并入轮询 (与股票共享 batch 额度)
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine:
             for _r in list(engine.rules.values()):
@@ -760,13 +768,20 @@ class QuoteService:
             logger.warning("自选实时拉取失败:未配置付费服务器 API Key")
             return
 
+        # 按 capability batch 上限分批: 股票+指数共享额度, 超过上限会导致整轮失败
+        capset = detect_capabilities()
+        lim = resolve_limit(capset, Cap.QUOTE_BY_SYMBOL, default_batch=5)
+        batches = chunked(symbols, lim.batch)
+
         t0 = time.perf_counter()
         now_ts = time.perf_counter()
-        try:
-            resp = tf.quotes.get(symbols=symbols) or []
-        except Exception as e:  # noqa: BLE001
-            logger.warning("自选实时拉取失败: %s", e)
-            return
+        resp = []
+        for i, batch in enumerate(batches):
+            sleep_between_batches(i, lim.rpm)
+            try:
+                resp.extend(tf.quotes.get(symbols=batch) or [])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("自选实时批次 %d/%d 拉取失败: %s", i + 1, len(batches), e)
 
         if not resp:
             logger.warning("自选实时行情数据为空")
@@ -1050,14 +1065,12 @@ class QuoteService:
                 return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
-            if enriched_today.is_empty():
-                return
-            # 快照日期必须是北京当日: 节假日或数据未刷新时 enriched_date 会落后于当日,
-            # 说明市场未在交易 → 跳过。无需维护 A股交易日历即可挡住节假日与陈旧价告警。
-            if enriched_date != cn_today():
-                logger.debug("监控评估跳过: enriched 快照日期 %s 非当日 %s (节假日/数据未刷新)",
-                             enriched_date, cn_today())
-                return
+            # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
+            # ETF/指数轮有各自的空表+日期守卫, 不受影响 (纯指数行情/自选场景可独立评估)。
+            stock_ready = (not enriched_today.is_empty()) and (enriched_date == cn_today())
+            if not stock_ready:
+                logger.debug("股票快照未就绪(空=%s, 日期=%s), 跳过股票轮",
+                             enriched_today.is_empty(), enriched_date)
 
             all_alerts: list[dict] = []
             rule_events: list[dict] = []
@@ -1094,14 +1107,15 @@ class QuoteService:
                             engine.set_name_map(name_map)
                     except Exception as e:  # noqa: BLE001
                         logger.debug("name_map 构建失败 (不影响监控): %s", e)
-                    # 连板梯队封单监控: 有 ladder 规则时, 从 depth_service 注入封单量到 enriched
-                    eval_df = enriched_today
-                    if engine.has_rule_type("ladder"):
-                        eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
-                    eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
-                    rule_events = engine.evaluate(eval_df, asset_type="stock")
-                    if engine.consume_strategy_result_updates():
-                        self.notify_strategy_results_updated()
+                    # 股票轮: 快照未就绪时跳过 (ladder 封单也依赖股票快照日期, 一并跳过)
+                    if stock_ready:
+                        eval_df = enriched_today
+                        if engine.has_rule_type("ladder"):
+                            eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
+                        eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
+                        rule_events = engine.evaluate(eval_df, asset_type="stock")
+                        if engine.consume_strategy_result_updates():
+                            self.notify_strategy_results_updated()
                     # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
                     # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时

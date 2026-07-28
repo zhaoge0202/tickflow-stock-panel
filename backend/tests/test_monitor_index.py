@@ -106,3 +106,97 @@ def test_reconcile_index_asset_type_keeps_stock_and_mixed():
     assert _reconcile_index_asset_type(
         {"asset_type": "stock", "scope": "all", "symbols": []}, repo,
     )["asset_type"] == "stock"
+
+
+# ---- 股票快照为空时指数轮仍独立评估 (PR #46 问题 2) ----
+
+def test_evaluate_monitors_index_round_survives_empty_stock_snapshot():
+    """纯指数行情/自选场景: 股票 enriched 为空时, 指数监控轮仍独立评估。"""
+    from datetime import date
+    from unittest.mock import MagicMock, patch
+
+    import polars as pl
+
+    from app.services.quote_service import QuoteService
+
+    svc = QuoteService.__new__(QuoteService)
+    svc._repo = MagicMock()
+
+    engine = MagicMock()
+    engine.rule_count = 1
+    engine.has_asset_rules.side_effect = lambda at: at == "index"
+    engine.has_rule_type.return_value = False
+    engine.evaluate.return_value = []  # 无触发, 简化后续
+
+    svc._app_state = MagicMock()
+    svc._app_state.monitor_engine = engine
+    svc._app_state.repo = svc._repo
+
+    svc._repo.get_instruments.return_value = pl.DataFrame()
+    svc._repo.get_instruments_asset.return_value = pl.DataFrame()
+    svc._repo.get_enriched_latest_asset.return_value = (
+        pl.DataFrame({"symbol": ["000001.SH"], "close": [3000.0], "rsi_14": [40.0]}),
+        date(2026, 7, 28),
+    )
+
+    with (
+        patch.object(QuoteService, "_is_continuous_trading", return_value=True),
+        patch.object(QuoteService, "get_enriched_today",
+                     return_value=(pl.DataFrame(), None)),  # 股票快照为空
+        patch.object(QuoteService, "_inject_intraday_signals",
+                     side_effect=lambda df, e, at: df),
+        patch("app.services.quote_service.cn_today", return_value=date(2026, 7, 28)),
+    ):
+        svc._evaluate_monitors(pl.DataFrame(), None)
+
+    # 指数轮执行了 (asset_type="index")
+    index_calls = [c for c in engine.evaluate.call_args_list
+                   if c[1].get("asset_type") == "index"]
+    assert len(index_calls) == 1, "股票快照为空时指数轮仍应评估"
+    # 股票轮被跳过 (stock_ready=False)
+    stock_calls = [c for c in engine.evaluate.call_args_list
+                   if c[1].get("asset_type") == "stock"]
+    assert len(stock_calls) == 0, "股票快照为空时股票轮应跳过"
+
+
+def test_evaluate_monitors_stock_round_runs_when_snapshot_ready():
+    """股票快照就绪时, 股票轮正常执行 (回归确认未破坏原有行为)。"""
+    from datetime import date
+    from unittest.mock import MagicMock, patch
+
+    import polars as pl
+
+    from app.services.quote_service import QuoteService
+
+    svc = QuoteService.__new__(QuoteService)
+    svc._repo = MagicMock()
+
+    engine = MagicMock()
+    engine.rule_count = 1
+    engine.has_asset_rules.return_value = False
+    engine.has_rule_type.return_value = False
+    engine.evaluate.return_value = []
+    engine.consume_strategy_result_updates.return_value = False
+
+    svc._app_state = MagicMock()
+    svc._app_state.monitor_engine = engine
+    svc._app_state.repo = svc._repo
+
+    svc._repo.get_instruments.return_value = pl.DataFrame()
+
+    stock_df = pl.DataFrame({"symbol": ["600000.SH"], "close": [10.0], "rsi_14": [50.0]})
+
+    with (
+        patch.object(QuoteService, "_is_continuous_trading", return_value=True),
+        patch.object(QuoteService, "get_enriched_today",
+                     return_value=(stock_df, date(2026, 7, 28))),
+        patch.object(QuoteService, "_inject_intraday_signals",
+                     side_effect=lambda df, e, at: df),
+        patch("app.services.quote_service.cn_today", return_value=date(2026, 7, 28)),
+    ):
+        svc._evaluate_monitors(pl.DataFrame(), None)
+
+    # 股票轮正常执行
+    stock_calls = [c for c in engine.evaluate.call_args_list
+                   if c[1].get("asset_type") == "stock"]
+    assert len(stock_calls) == 1, "股票快照就绪时股票轮应正常执行"
