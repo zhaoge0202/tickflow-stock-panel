@@ -238,6 +238,22 @@ const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverr
   max_hold_days: detail.max_hold_days,
 })
 
+const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringify({
+  execution_backend: detail.execution_backend,
+  basic_filter: detail.basic_filter,
+  params: detail.params,
+  params_defaults: detail.params_defaults,
+  scoring: detail.scoring,
+  entry_signals: detail.entry_signals,
+  exit_signals: detail.exit_signals,
+  stop_loss: detail.stop_loss,
+  take_profit: detail.take_profit,
+  trailing_stop: detail.trailing_stop,
+  trailing_take_profit_activate: detail.trailing_take_profit_activate,
+  trailing_take_profit_drawdown: detail.trailing_take_profit_drawdown,
+  max_hold_days: detail.max_hold_days,
+})
+
 const fmtMoney = (v: number | null | undefined) => {
   if (v == null || Number.isNaN(v)) return '—'
   return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -941,16 +957,24 @@ export function StrategyBacktest() {
 
   useEffect(() => {
     const detail = strategyDetail.data
-    if (!detail || loadedStrategyRef.current === detail.id) return
-    loadedStrategyRef.current = detail.id
-    if (saved?.selectedStrategy === detail.id && (saved.params || saved.overrides)) {
+    if (!detail) return
+    const configSignature = strategyBacktestConfigSignature(detail)
+    const configKey = `${assetType}:${detail.id}:${configSignature}`
+    if (loadedStrategyRef.current === configKey) return
+    loadedStrategyRef.current = configKey
+    if (
+      saved?.assetType === assetType
+      && saved.selectedStrategy === detail.id
+      && saved.strategyConfigSignature === configSignature
+      && (saved.params || saved.overrides)
+    ) {
       setStrategyParams(mergeStrategyParams(detail, saved.params))
       setOverrides(normalizeStrategyOverrides(detail, saved.overrides ?? buildDefaultOverrides(detail)))
       return
     }
     resetConfigFromDetail(detail)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategyDetail.data])
+  }, [assetType, strategyDetail.data])
 
   // 当全局回测任务完成时, 把结果写入组件 (切页回来也能恢复)
   useEffect(() => {
@@ -980,6 +1004,9 @@ export function StrategyBacktest() {
         minuteFill: highGranularity,
         params: strategyParams,
         overrides,
+        strategyConfigSignature: strategyDetail.data
+          ? strategyBacktestConfigSignature(strategyDetail.data)
+          : undefined,
         result: backtestTask.result,
       })
     }
