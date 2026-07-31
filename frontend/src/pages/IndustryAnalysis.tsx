@@ -14,6 +14,7 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
+import { SectorFlowBubbles } from '@/components/SectorFlowBubbles'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { api, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -308,7 +309,9 @@ export function IndustryAnalysis() {
   const marketQuery = useQuery({
     queryKey: QK.marketSnapshot,
     queryFn: api.marketSnapshot,
-    staleTime: 60_000,
+    // 板块动能气泡需要更勤刷新; 与实时行情轮询同量级
+    staleTime: 5_000,
+    refetchInterval: 8_000,
   })
 
   const marketMap = useMemo(() => buildMarketMap(marketQuery.data?.rows ?? []), [marketQuery.data?.rows])
@@ -429,6 +432,17 @@ export function IndustryAnalysis() {
       <div className="min-h-full bg-[radial-gradient(circle_at_12%_0%,rgba(245,158,11,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)] px-6 py-5">
         <div className="mx-auto max-w-[1440px] space-y-5">
           <HeroPanel leading={leading[0]} falling={falling[0]} activeIndustry={activeIndustry} industryBreadth={industryBreadth} />
+
+          {stats.length > 0 && (
+            <SectorFlowBubbles
+              title="行业实时动能气泡"
+              items={stats}
+              selectedKey={selected?.key ?? null}
+              onSelect={setSelectedKey}
+              height={360}
+              maxItems={48}
+            />
+          )}
 
           <MarketPulse
             leading={leading}
