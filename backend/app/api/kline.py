@@ -95,7 +95,7 @@ def search_instruments(
 
 @router.post("/instruments/names")
 def instruments_names(request: Request, symbols: list[str]):
-    """批量查标的名称 (股票 + ETF)。传入 symbol 列表, 返回 {symbol: name}。"""
+    """批量查标的名称 (股票 + ETF + 指数)。传入 symbol 列表, 返回 {symbol: name}。"""
     if not symbols:
         return {"names": {}}
     repo = request.app.state.repo
@@ -430,10 +430,37 @@ def get_daily_batch(request: Request, body: dict):
     start = end - timedelta(days=days * 2)  # 多取一些确保交易日够
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
-    df = repo.get_daily_batch(symbols, start, end, columns=cols)
 
-    if df.is_empty():
+    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
+    stock_symbols: list[str] = []
+    etf_symbols: list[str] = []
+    index_symbols: list[str] = []
+    for s in symbols:
+        t = repo.resolve_asset_type(s)
+        if t == "etf":
+            etf_symbols.append(s)
+        elif t == "index":
+            index_symbols.append(s)
+        else:
+            stock_symbols.append(s)
+
+    frames: list[pl.DataFrame] = []
+    if stock_symbols:
+        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
+        if not df_stock.is_empty():
+            frames.append(df_stock)
+    for sym in etf_symbols:
+        sub = repo.get_etf_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+    for sym in index_symbols:
+        sub = repo.get_index_daily(sym, start, end, columns=cols)
+        if not sub.is_empty():
+            frames.append(sub)
+
+    if not frames:
         return {"data": {}}
+    df = pl.concat(frames, how="diagonal_relaxed")
 
     # 按 symbol 分组, 每只取最近 N 条
     result: dict[str, list[dict]] = {}
@@ -625,6 +652,7 @@ def get_minute(
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
+            "asset_type": asset_type,
             "price_limit": price_limit,
         }
 
@@ -656,6 +684,7 @@ def get_minute(
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+            "asset_type": asset_type,
             "price_limit": price_limit,
         }
 
@@ -665,6 +694,7 @@ def get_minute(
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),
         "source": "live" if not live_df.is_empty() else "none",
+        "asset_type": asset_type,
         "price_limit": price_limit,
     }
 
@@ -760,6 +790,9 @@ async def sync_minute(request: Request):
                     universe = sorted(set(universe) | set(inst["symbol"].to_list()))
                 except Exception:  # noqa: BLE001
                     pass
+            # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
+            index_set = repo.get_index_symbol_set()
+            universe = [s for s in universe if s not in index_set]
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
             days = override_days if override_days else get_minute_sync_days()
@@ -813,6 +846,11 @@ async def sync_minute_single(request: Request, body: dict):
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
+
+    # 指数分钟K无本地存储, 落库会污染股票分钟表 kline_minute;
+    # 指数分钟数据走 /api/index/minute 实时读取, 此端点显式拒绝。
+    if repo.resolve_asset_type(symbol) == "index":
+        raise HTTPException(status_code=400, detail="指数分钟K不支持落库同步 (指数分钟数据走 /api/index/minute 实时读取)")
 
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")

@@ -220,8 +220,8 @@ function StockSearchBox({
   const [activeIdx, setActiveIdx] = useState(-1)
 
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query, 'stock,etf'),
-    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf'),
+    queryKey: QK.instrumentSearch(query, 'stock,etf,index'),
+    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index'),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
@@ -304,6 +304,9 @@ function StockSearchBox({
                     <span className="truncate text-secondary flex-1">{r.name}</span>
                     {r.asset_type === 'etf' && (
                       <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
+                    )}
+                    {r.asset_type === 'index' && (
+                      <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
                     )}
                   </button>
                   <button
@@ -693,6 +696,13 @@ export function Watchlist() {
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
   const symbolsKey = symbols.join(',')
 
+  // 指数无本地分钟K数据, 分时批量请求剔除指数 symbol (省请求, 避免逐只 404)
+  const minuteSymbols = useMemo(
+    () => symbols.filter((s: string) => (enriched.data?.rows ?? []).find((r: any) => r.symbol === s)?.asset_type !== 'index'),
+    [symbols, enriched.data],
+  )
+  const minuteSymbolsKey = minuteSymbols.join(',')
+
   // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
   const quoteStatus = useQuoteStatus()
   const realtimeRunning = quoteStatus.data?.running ?? false
@@ -714,9 +724,9 @@ export function Watchlist() {
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
   const minuteBatch = useQuery({
-    queryKey: QK.minuteBatch(symbolsKey),
-    queryFn: () => api.klineMinuteBatch(symbols),
-    enabled: intradayVisible && symbols.length > 0,
+    queryKey: QK.minuteBatch(minuteSymbolsKey),
+    queryFn: () => api.klineMinuteBatch(minuteSymbols),
+    enabled: intradayVisible && minuteSymbols.length > 0,
     staleTime: 10_000,
     refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
@@ -868,6 +878,8 @@ export function Watchlist() {
     let result = rows
     if (boardFilter.size > 0 && boardFilter.size < BOARDS.length) {
       result = result.filter(r => {
+        // 非股票 (指数/ETF) 无板块语义, 不受板块筛选影响 (顺带修复 ETF 行被误过滤)
+        if (r.asset_type && r.asset_type !== 'stock') return true
         const board = getBoardType(r.symbol)
         return board != null && boardFilter.has(board)
       })
@@ -1363,6 +1375,18 @@ export function Watchlist() {
                 }
                 // 分时列
                 if (key === 'intraday') {
+                  // 指数无本地分钟K数据, 分时列降级为占位符
+                  if (r.asset_type === 'index') {
+                    const iw = intradayChartVisible ? intradayResolved.width : 40
+                    const ih = intradayChartVisible ? intradayResolved.height : 40
+                    return (
+                      <td className="pl-3 pr-2 py-1.5 border-l border-border/30" style={{ width: iw + 4, minWidth: iw + 4, maxWidth: iw + 4, height: ih }}>
+                        <div className="flex items-center justify-center">
+                          <span className="text-[10px] text-muted">—</span>
+                        </div>
+                      </td>
+                    )
+                  }
                   const rows: MinuteKlineRow[] = minuteData[r.symbol] ?? []
                   // 眼睛关闭(收起)时用小尺寸 (和日k收起态一致 40x40); 开启时用配置值
                   const iw = intradayChartVisible ? intradayResolved.width : 40
