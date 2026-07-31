@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Search, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { boardTag } from '@/components/stock-table/primitives'
 
 interface Props {
   onSelect: (symbol: string, name: string) => void
@@ -118,6 +119,12 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
                 >
                   <span className="font-mono shrink-0 text-xs w-[88px]">{r.symbol}</span>
                   <span className="truncate text-sm flex-1">{r.name}</span>
+                  {(() => {
+                    const b = boardTag(r.symbol)
+                    return b && (
+                      <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
+                    )
+                  })()}
                   {r.asset_type === 'index' && (
                     <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
                   )}
