@@ -38,6 +38,17 @@ def enriched_dirname(asset_type: str) -> str:
     return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
 
 
+def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
+    """从已按 symbol/date 排序的数据中取每只标的最后一条有效状态。"""
+    if df.is_empty():
+        return df
+    return (
+        df.filter(pl.col("date") <= cutoff)
+        .group_by("symbol", maintain_order=True)
+        .last()
+    )
+
+
 class DataStore:
     """唯一的存储入口 — 进程启动时创建。"""
 
@@ -309,6 +320,11 @@ class KlineRepository:
         self._live_agg_cache_date: date | None = None
         self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
         self._instruments_cache: pl.DataFrame | None = None
+        self._historical_shares_cache: pl.DataFrame | None = None
+        self._historical_shares_mtime_ns: int | None = None
+        # 完整 enriched 历史 (含所有指标, 供 filter_history 策略使用)
+        self._enriched_history_cache: pl.DataFrame | None = None  # ~100万行
+        self._enriched_history_start: date | None = None
         self._index_instruments_cache: pl.DataFrame | None = None
         self._etf_enriched_cache: pl.DataFrame | None = None
         self._etf_enriched_cache_date: date | None = None
@@ -555,7 +571,11 @@ class KlineRepository:
                     history_rows += len(df_hist)
                     df_full = compute_signals(compute_indicators(df_hist))
                     if instruments is not None and not instruments.is_empty():
-                        df_full = compute_limit_signals(df_full, instruments)
+                        df_full = compute_limit_signals(
+                        df_full,
+                        instruments,
+                        historical_shares=self.get_historical_shares(),
+                    )
                     df_batch_today = df_full.filter(pl.col("date") == latest)
                     if not df_batch_today.is_empty():
                         today_parts.append(df_batch_today)
@@ -617,6 +637,13 @@ class KlineRepository:
 
                     self._enriched_cache = df_today
                     self._enriched_cache_date = latest
+                    # 用同日原始日K补齐旧实时快照漏写的正常成交股票
+                    repaired_today = self._restore_missing_latest_rows(
+                        latest, df_today, pl.DataFrame(),
+                    )
+                    if len(repaired_today) > len(df_today):
+                        self._enriched_cache = repaired_today
+                        df_today = repaired_today
                     del today_parts
 
                     # 构建盘中递推基准: 若最新分区是今天的实时盘中数据,
@@ -643,57 +670,297 @@ class KlineRepository:
             logger.info("enriched refresh done fallback (%.2fs)", time.perf_counter() - started)
         except Exception as e:  # noqa: BLE001
             logger.warning("enriched 缓存刷新失败: %s", e)
+    def get_historical_shares(self) -> pl.DataFrame:
+        """读取财务股本历史，并在文件更新后自动刷新缓存。"""
+        path = self.store.data_dir / "financials" / "shares" / "part.parquet"
+        mtime_ns = path.stat().st_mtime_ns if path.exists() else None
+        if self._historical_shares_cache is None or mtime_ns != self._historical_shares_mtime_ns:
+            from app.share_capital import load_share_history
+            self._historical_shares_cache = load_share_history(self.store.data_dir)
+            self._historical_shares_mtime_ns = mtime_ns
+        return self._historical_shares_cache
+
+    def _restore_missing_latest_rows(
+        self,
+        latest: date,
+        df_today: pl.DataFrame,
+        history: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """用同日原始日K补齐旧实时快照漏写的正常成交股票。"""
+        if self._live_agg_cache is None or self._live_agg_cache.is_empty():
+            return df_today
+        daily_path = (
+            self.store.data_dir
+            / "kline_daily"
+            / f"date={latest.isoformat()}"
+            / "part.parquet"
+        )
+        if not daily_path.exists():
+            return df_today
+
+        try:
+            from app.indicators.pipeline import compute_enriched_today, filter_halt_days
+
+            daily = filter_halt_days(pl.read_parquet(daily_path))
+            missing = daily.join(
+                df_today.select("symbol").unique(),
+                on="symbol",
+                how="anti",
+            )
+            if missing.is_empty():
+                return df_today
+
+            missing_symbols = missing.select("symbol").unique()
+            previous = history.filter(pl.col("date") < latest).join(
+                missing_symbols,
+                on="symbol",
+                how="semi",
+            )
+            if not previous.is_empty():
+                previous = _last_available_rows(previous, latest)
+            recovered = compute_enriched_today(
+                self._live_agg_cache,
+                previous,
+                missing,
+                self.get_instruments(),
+            )
+            if recovered.is_empty():
+                return df_today
+            recovered = self._with_instrument_metadata("stock", recovered)
+            result = pl.concat(
+                [df_today, recovered],
+                how="diagonal_relaxed",
+            ).unique(subset=["symbol", "date"], keep="last").sort("symbol")
+            logger.info(
+                "enriched latest cache restored from daily: date=%s, rows=%d",
+                latest,
+                len(result) - len(df_today),
+            )
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.warning("enriched latest cache restore skipped: %s", e)
+            return df_today
+
+    def _with_instrument_metadata(self, asset_type: str, df: pl.DataFrame) -> pl.DataFrame:
+        """补齐实时内存缓存所需的维表字段；这些字段不会写入 enriched 分区。"""
+        if asset_type not in {"stock", "etf"} or df.is_empty():
+            return df
+        instruments = self.get_instruments_asset(asset_type)
+        if instruments.is_empty() or "symbol" not in instruments.columns:
+            return df
+        metadata_cols = [
+            c for c in ("name", "total_shares", "float_shares")
+            if c in instruments.columns and c not in df.columns
+        ]
+        if not metadata_cols:
+            return df
+        metadata = instruments.select(["symbol", *metadata_cols]).unique(
+            subset=["symbol"], keep="last",
+        )
+        return df.join(metadata, on="symbol", how="left")
+
 
     def _build_live_agg(self, latest: date) -> None:
         """从 OHLCV 即时计算递推状态 + 窗口聚合, 构建盘中实时聚合表。
 
-        历史数据按 90 日范围和 symbol 批次从 Parquet 下推读取，计算结束后仅
-        保留约 5500 行状态，避免异常重复分区或全市场指标中间表形成内存尖峰。
+        优化: 优先使用 _enriched_history_cache (启动时已计算), 避免重复 compute_indicators。
         """
         from datetime import timedelta
+        from app.indicators.pipeline import _ema_alpha
 
         started = time.perf_counter()
         logger.info("live agg build start: latest=%s", latest)
         start_60d = latest - timedelta(days=90)  # 日历90天 ≈ 60个交易日
 
-        symbols: list[str] | None = (
-            self._enriched_cache["symbol"].unique().sort().to_list()
-            if self._enriched_cache is not None and "symbol" in self._enriched_cache.columns
-            else None
-        )
-        if not symbols:
-            symbols = self._symbols_for_enriched_date(latest)
-        consec = self._load_consecutive_state(latest)
-        parts: list[pl.DataFrame] = []
-        for offset in range(0, len(symbols), _HISTORY_SYMBOL_BATCH_SIZE):
-            batch = symbols[offset:offset + _HISTORY_SYMBOL_BATCH_SIZE]
-            df_hist, agg_a = self._build_live_agg_from_parquet(
-                latest,
-                start_60d,
-                symbols=batch,
-            )
-            if df_hist.is_empty() or agg_a.is_empty():
-                del df_hist, agg_a
-                continue
-            state = self._build_live_agg_state(df_hist, agg_a, latest, consec)
-            # 历史窗口只服务本批 state, 立刻丢掉避免 90 日中间表叠在 parts 上。
-            del df_hist, agg_a
-            if not state.is_empty():
-                parts.append(state)
+        # 优先使用已有的历史缓存 (避免重复 scan_parquet + compute_indicators)
+        if self._enriched_history_cache is not None and not self._enriched_history_cache.is_empty():
+            hist_all = self._enriched_history_cache
+            if "date" in hist_all.columns and hist_all["date"].min() <= start_60d:
+                # 从历史缓存中提取所需列 (历史缓存已有指标列)
+                base_cols = [
+                    "symbol", "date", "open", "high", "low", "close", "volume",
+                    "raw_close", "raw_high", "raw_low",
+                    "consecutive_limit_ups", "consecutive_limit_downs",
+                ]
+                needed = [c for c in base_cols if c in hist_all.columns]
+                step = time.perf_counter()
+                logger.info("live agg step start: slice history cache")
+                df_hist = hist_all.filter(
+                    (pl.col("date") >= start_60d) & (pl.col("date") <= latest)
+                ).select(needed).sort(["symbol", "date"])
+                logger.info("live agg step done: slice history cache rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
 
-        if not parts:
+                state_cols = [
+                    "symbol",
+                    "ema5", "ema10", "ema20", "ema30", "ema60",
+                    "macd_dea",
+                    "kdj_k", "kdj_d",
+                    "atr_14",
+                    "close", "high", "low",
+                    "annual_vol_20d",
+                ]
+                existing_state = [c for c in state_cols if c in hist_all.columns]
+                state_source = _last_available_rows(
+                    hist_all.select("date", *existing_state), latest,
+                )
+                agg_a = state_source.select(existing_state)
+            else:
+                df_hist = pl.DataFrame()
+                agg_a = pl.DataFrame()
+        else:
+            # 降级: 读 parquet + compute_indicators
+            df_hist, agg_a = self._build_live_agg_from_parquet(latest, start_60d)
+
+        if df_hist.is_empty():
+            self._live_agg_cache = pl.DataFrame()
+            self._live_agg_cache_date = None
+            logger.info("live agg build skipped: empty history (%.2fs)", time.perf_counter() - started)
+            return
+
+        if agg_a.is_empty():
             self._live_agg_cache = pl.DataFrame()
             self._live_agg_cache_date = None
             logger.info("live agg build skipped: empty state (%.2fs)", time.perf_counter() - started)
             return
 
-        self._live_agg_cache = (
-            pl.concat(parts, how="diagonal_relaxed")
-            .unique(subset=["symbol"], keep="last")
-            .sort(["symbol"])
+        # 单独计算 _ema12 / _ema26 (compute_indicators 内部会 drop 掉)
+        step = time.perf_counter()
+        logger.info("live agg step start: ema state")
+        df_ema = _last_available_rows(
+            df_hist.sort(["symbol", "date"]).with_columns([
+                pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
+                pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
+            ]).select("symbol", "date", "_ema12", "_ema26"),
+            latest,
+        ).select("symbol", "_ema12", "_ema26")
+
+        agg_a = agg_a.join(df_ema, on="symbol", how="inner")
+        logger.info("live agg step done: ema state (%.2fs)", time.perf_counter() - step)
+
+        # 单独计算 RSI 状态列 (compute_indicators 内部会 drop 掉)
+        step = time.perf_counter()
+        logger.info("live agg step start: rsi state")
+        df_rsi_base = df_hist.sort(["symbol", "date"]).with_columns(
+            pl.col("close").diff().over("symbol").alias("_daily_delta")
         )
-        del parts
+        gain = pl.when(pl.col("_daily_delta") > 0).then(pl.col("_daily_delta")).otherwise(0.0)
+        loss = pl.when(pl.col("_daily_delta") < 0).then(-pl.col("_daily_delta")).otherwise(0.0)
+        rsi_exprs = []
+        for n in (6, 14, 24):
+            a = 1.0 / n
+            rsi_exprs.append(gain.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"))
+            rsi_exprs.append(loss.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"))
+        df_rsi = (
+            _last_available_rows(
+                df_rsi_base.with_columns(rsi_exprs), latest,
+            )
+            .select("symbol", *[f"_rsi_avg_gain_{n}" for n in (6, 14, 24)],
+                              *[f"_rsi_avg_loss_{n}" for n in (6, 14, 24)])
+        )
+        agg_a = agg_a.join(df_rsi, on="symbol", how="inner")
+        logger.info("live agg step done: rsi state (%.2fs)", time.perf_counter() - step)
+
+        # 前复权因子: adj_factor = close(复权) / raw_close(原始)
+        if "raw_close" in df_hist.columns:
+            step = time.perf_counter()
+            logger.info("live agg step start: adj factor state")
+            adj_factor_df = (
+                _last_available_rows(
+                    df_hist.select("symbol", "date", "close", "raw_close"), latest,
+                )
+                .select("symbol", (pl.col("close") / pl.col("raw_close")).alias("_adj_factor"))
+            )
+            agg_a = agg_a.join(adj_factor_df, on="symbol", how="left")
+            if "_adj_factor" in agg_a.columns:
+                agg_a = agg_a.with_columns(pl.col("_adj_factor").fill_null(1.0))
+            logger.info("live agg step done: adj factor state (%.2fs)", time.perf_counter() - step)
+
+        # annual_vol_20d 递推状态: 最近 19 天日收益率的部分和 / 平方和
+        step = time.perf_counter()
+        logger.info("live agg step start: annual vol state")
+        df_daily_pct = (
+            df_hist.sort(["symbol", "date"])
+            .with_columns(
+                pl.col("close").pct_change().over("symbol").alias("_daily_pct")
+            )
+        )
+        df_vol = df_daily_pct.group_by("symbol").agg([
+            pl.col("_daily_pct").tail(19).sum().alias("_vol_19d_pct_sum"),
+            (pl.col("_daily_pct") ** 2).tail(19).sum().alias("_vol_19d_pct_sq_sum"),
+        ])
+        agg_a = agg_a.join(df_vol, on="symbol", how="left")
+        logger.info("live agg step done: annual vol state (%.2fs)", time.perf_counter() - step)
+
+        # 昨日连板数: 使用每只股票最后一个有效交易日状态 (用于增量计算同向 +1)
+        step = time.perf_counter()
+        logger.info("live agg step start: consecutive state")
+        consec_cols = [c for c in ["symbol", "consecutive_limit_ups", "consecutive_limit_downs"]
+                       if c in df_hist.columns]
+        consec_source = df_hist
+        if len(consec_cols) != 3:
+            lf = (
+                scan_enriched_parquet(self._enriched_glob)
+                .filter((pl.col("date") >= start_60d) & (pl.col("date") <= latest))
+                .sort(["symbol", "date"])
+            )
+            consec_cols = [
+                c for c in ["symbol", "consecutive_limit_ups", "consecutive_limit_downs"]
+                if c in lf.collect_schema().names()
+            ]
+            consec_source = lf.select("date", *consec_cols).collect()
+        if len(consec_cols) == 3:
+            consec_df = _last_available_rows(
+                consec_source.select("date", *consec_cols), latest,
+            )
+            if not consec_df.is_empty():
+                consec = consec_df.select(
+                    "symbol",
+                    pl.col("consecutive_limit_ups").alias("_prev_consec_up"),
+                    pl.col("consecutive_limit_downs").alias("_prev_consec_down"),
+                )
+                agg_a = agg_a.join(consec, on="symbol", how="left")
+        logger.info("live agg step done: consecutive state (%.2fs)", time.perf_counter() - step)
+
+        # B类: 按 symbol 分组聚合 — 窗口统计
+        step = time.perf_counter()
+        logger.info("live agg step start: rolling windows")
+        agg_b = (
+            df_hist.sort(["symbol", "date"])
+            .group_by("symbol")
+            .agg([
+                pl.col("close").tail(4).sum().alias("_ma5_partial_sum"),
+                pl.col("close").tail(9).sum().alias("_ma10_partial_sum"),
+                pl.col("close").tail(19).sum().alias("_ma20_partial_sum"),
+                pl.col("close").tail(29).sum().alias("_ma30_partial_sum"),
+                pl.col("close").tail(59).sum().alias("_ma60_partial_sum"),
+
+                pl.col("close").tail(19).sum().alias("_boll_partial_sum"),
+                (pl.col("close").tail(19) ** 2).sum().alias("_boll_partial_sq_sum"),
+
+                pl.col("high").tail(59).max().alias("_high_59d"),
+                pl.col("low").tail(59).min().alias("_low_59d"),
+
+                pl.col("close").tail(5).first().alias("_close_5d_ago"),
+                pl.col("close").tail(10).first().alias("_close_10d_ago"),
+                pl.col("close").tail(20).first().alias("_close_20d_ago"),
+                pl.col("close").tail(30).first().alias("_close_30d_ago"),
+                pl.col("close").tail(60).first().alias("_close_60d_ago"),
+
+                pl.col("volume").tail(4).sum().alias("_vol_ma5_partial_sum"),
+                pl.col("volume").tail(9).sum().alias("_vol_ma10_partial_sum"),
+                # 标准量比分母: 前5日成交量之和(不含当天), 用于 vol_ratio_5d
+                pl.col("volume").tail(5).sum().alias("_vol_ma5_prev_sum"),
+
+                pl.col("low").tail(8).min().alias("_kdj_8d_low"),
+                pl.col("high").tail(8).max().alias("_kdj_8d_high"),
+
+                pl.col("close").tail(59).len().alias("_window_len"),
+            ])
+        )
+
+        self._live_agg_cache = agg_a.join(agg_b, on="symbol", how="inner")
         self._live_agg_cache_date = latest
+        logger.info("live agg step done: rolling windows (%.2fs)", time.perf_counter() - step)
         logger.info("live agg build done: rows=%d (%.2fs)", len(self._live_agg_cache), time.perf_counter() - started)
 
     def _symbols_for_enriched_date(self, target_date: date) -> list[str]:
@@ -732,10 +999,13 @@ class KlineRepository:
         from app.indicators.pipeline import _ema_alpha
 
         ordered = df_hist.sort(["symbol", "date"])
-        df_ema = ordered.with_columns([
-            pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
-            pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
-        ]).filter(pl.col("date") == latest).select("symbol", "_ema12", "_ema26")
+        df_ema = _last_available_rows(
+            ordered.with_columns([
+                pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
+                pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
+            ]).select("symbol", "date", "_ema12", "_ema26"),
+            latest,
+        ).select("symbol", "_ema12", "_ema26")
         agg_a = agg_a.join(df_ema, on="symbol", how="inner")
 
         df_rsi_base = ordered.with_columns(pl.col("close").diff().over("symbol").alias("_daily_delta"))
@@ -748,20 +1018,20 @@ class KlineRepository:
                 loss.ewm_mean(alpha=1.0 / n, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"),
             ])
         df_rsi = (
-            df_rsi_base.with_columns(rsi_exprs)
-            .filter(pl.col("date") == latest)
-            .select(
-                "symbol",
-                *[f"_rsi_avg_gain_{n}" for n in (6, 14, 24)],
-                *[f"_rsi_avg_loss_{n}" for n in (6, 14, 24)],
+            _last_available_rows(
+                df_rsi_base.with_columns(rsi_exprs), latest,
             )
+            .select("symbol", *[f"_rsi_avg_gain_{n}" for n in (6, 14, 24)],
+                              *[f"_rsi_avg_loss_{n}" for n in (6, 14, 24)])
         )
         agg_a = agg_a.join(df_rsi, on="symbol", how="inner")
 
         if "raw_close" in ordered.columns:
-            adj_factor = ordered.filter(pl.col("date") == latest).select(
-                "symbol",
-                (pl.col("close") / pl.col("raw_close")).alias("_adj_factor"),
+            adj_factor = (
+                _last_available_rows(
+                    ordered.select("symbol", "date", "close", "raw_close"), latest,
+                )
+                .select("symbol", (pl.col("close") / pl.col("raw_close")).alias("_adj_factor"))
             )
             agg_a = agg_a.join(adj_factor, on="symbol", how="left").with_columns(
                 pl.col("_adj_factor").fill_null(1.0)
@@ -836,9 +1106,9 @@ class KlineRepository:
                                  "raw_close", "raw_high", "raw_low"]
                      if c in lf.collect_schema().names()]
         if not symbols:
+            # 取窗口内出现过的全部标的 (含停牌/缺最新日), 再由 _last_available_rows 取各标的最后状态
             symbols = (
-                lf.filter(pl.col("date") == latest)
-                .select("symbol")
+                lf.select("symbol")
                 .unique()
                 .collect(engine="streaming")["symbol"]
                 .sort()
@@ -870,7 +1140,9 @@ class KlineRepository:
             "annual_vol_20d",
         ]
         existing_state = [c for c in state_cols if c in df_with_indicators.columns]
-        agg_a = df_with_indicators.filter(pl.col("date") == latest).select(existing_state)
+        agg_a = _last_available_rows(
+            df_with_indicators.select("date", *existing_state), latest,
+        ).select(existing_state)
         del df_with_indicators
 
         return df_hist, agg_a
@@ -1423,7 +1695,11 @@ class KlineRepository:
             df = compute_indicators(df)
             df = compute_signals(df)
             instruments = self.get_instruments()
-            df = compute_limit_signals(df, instruments)
+            df = compute_limit_signals(
+                df,
+                instruments,
+                historical_shares=self.get_historical_shares(),
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)
         return df
@@ -1991,9 +2267,10 @@ class KlineRepository:
         else:
             return
 
-        merged_cache = df
+        cache_df = self._with_instrument_metadata(asset_type, df)
+        merged_cache = cache_df
         if existing_cache is not None and not existing_cache.is_empty():
-            merged_cache = pl.concat([existing_cache, df], how="diagonal_relaxed").unique(
+            merged_cache = pl.concat([existing_cache, cache_df], how="diagonal_relaxed").unique(
                 subset=["symbol", "date"], keep="last"
             )
         merged_cache = merged_cache.sort(["symbol"])
@@ -2059,12 +2336,13 @@ class KlineRepository:
             return
         df = self._dedupe_symbol_date(df, f"{asset_type} flush_live_enriched 入参")
         dt = df["date"][0]
+        cache_df = self._with_instrument_metadata(asset_type, df).sort(["symbol"])
         if asset_type == "stock":
-            self._enriched_cache = df.sort(["symbol"])
+            self._enriched_cache = cache_df
             self._enriched_cache_date = dt
             table = "kline_daily_enriched"
         elif asset_type == "etf":
-            self._etf_enriched_cache = df.sort(["symbol"])
+            self._etf_enriched_cache = cache_df
             self._etf_enriched_cache_date = dt
             table = "kline_etf_enriched"
         elif asset_type == "index":

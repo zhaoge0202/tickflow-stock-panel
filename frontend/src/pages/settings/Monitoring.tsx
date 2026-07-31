@@ -59,7 +59,10 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     dataSourceSupportsDataset(dataSources, realtimeProvider, 'realtime')
     || prefs?.realtime_allowed === true
   )
+  // None 档但配了自定义实时源时, 后端 is_realtime_allowed 仍返回 True (realtime_mode=full_market)
+  // 此时不应拦截实时监控页 — 用 quoteStatus.realtime_allowed 作为最终判据
   const isNoneTier = !usesProviderRealtime && tier < 0
+  const realtimeAllowed = quoteStatus?.realtime_allowed ?? !isNoneTier
   const isFreeTier = !usesProviderRealtime && tier === 0
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 分时图实时刷新间隔 (秒), 与后端 [3,60] clamp 对齐; 默认 6
@@ -290,7 +293,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     }
   }, [highlight])
 
-  if (isNoneTier) {
+  if (isNoneTier && !realtimeAllowed) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl

@@ -193,6 +193,13 @@ export interface MinuteKlineRow {
   amount: number
 }
 
+export interface PriceLimitInfo {
+  rate: number
+  limit_up: number | null
+  limit_down: number | null
+  source: 'rule' | 'instrument'
+}
+
 export interface TradeTickRow {
   symbol: string
   trade_date: string
@@ -1561,6 +1568,7 @@ export const api = {
       date: string | null
       rows: MinuteKlineRow[]
       source?: 'local' | 'live' | 'none'
+      price_limit?: PriceLimitInfo | null
     }>(`/api/kline/minute?${params.toString()}`)
   },
   tradeTicks: (

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
+from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.services import kline_sync
 from app.services.symbols import normalize_symbol
 
@@ -25,10 +27,10 @@ def _minute_allowed(capset) -> bool:
         return True
     from app.services import preferences
     provider = preferences.get_minute_data_provider()
-    if provider == "tickflow":
-        return False
-    from app.data_providers import custom as custom_sources
-    return custom_sources.provider_has_dataset(provider, "minute")
+    _, fallback, error = kline_sync._resolve_minute_provider(provider)
+    if error is not None:
+        logger.warning("minute provider resolution failed while checking access: %s", error)
+    return not fallback
 
 
 @router.get("/instruments/search")
@@ -216,6 +218,66 @@ def _compute_live_daily_rows(request: Request, symbol: str, start: date, end: da
     if "date" in enriched.columns:
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
     return enriched.tail(days).to_dicts()
+
+def _get_price_limit_info(
+    repo,
+    symbol: str,
+    trade_date: date,
+    asset_type: str,
+    instrument_name: str | None,
+) -> dict | None:
+    """Return the date-aware limit rule and today's authoritative prices."""
+    if asset_type == "index":
+        return None
+
+    info = {
+        "rate": price_limit_pct(
+            symbol,
+            trade_date,
+            is_risk_warning=(
+                asset_type == "stock" and is_risk_warning_name(instrument_name)
+            ),
+        ),
+        "limit_up": None,
+        "limit_down": None,
+        "source": "rule",
+    }
+    if trade_date != cn_today():
+        return info
+
+    try:
+        import polars as pl
+
+        instruments = repo.get_instruments_asset(asset_type)
+        available = [
+            column
+            for column in ("symbol", "limit_up", "limit_down")
+            if column in instruments.columns
+        ]
+        if "symbol" not in available or len(available) == 1:
+            return info
+        hit = instruments.filter(pl.col("symbol") == symbol).select(available).head(1)
+        row = hit.to_dicts()[0] if not hit.is_empty() else None
+    except Exception:
+        return info
+    if row is None:
+        return info
+
+    has_authoritative_price = False
+    for field in ("limit_up", "limit_down"):
+        value = row.get(field)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric) and 0 < numeric < 10_000:
+            info[field] = numeric
+            has_authoritative_price = True
+    if has_authoritative_price:
+        info["source"] = "instrument"
+    return info
 
 
 @router.get("/daily")
@@ -585,20 +647,46 @@ def get_minute_batch(request: Request, body: dict):
         start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
         end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
         lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
-        live_df = kline_sync.sync_minute_batch(
-            incomplete,
-            start_time=start_time,
-            end_time=end_time,
-            batch_size=lim.batch if lim else None,
-            rpm=lim.rpm if lim else None,
-        )
-        if not live_df.is_empty():
+        # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
+        # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
+        # 契约: 本端点只接受 stock/ETF (指数分钟K走 /api/index/minute 独立路径),
+        # 故两分支已覆盖全部 incomplete。若未来放开指数支持, 需额外加 index 分支
+        # 以避免被误路由为 stock。
+        stock_incomplete = [s for s in incomplete if s not in etf_set]
+        etf_incomplete = [s for s in incomplete if s in etf_set]
+        live_parts: list[pl.DataFrame] = []
+        if stock_incomplete:
+            df_s = kline_sync.sync_minute_batch(
+                stock_incomplete,
+                start_time=start_time,
+                end_time=end_time,
+                batch_size=lim.batch if lim else None,
+                rpm=lim.rpm if lim else None,
+                asset_type="stock",
+            )
+            if not df_s.is_empty():
+                live_parts.append(df_s)
+        if etf_incomplete:
+            df_e = kline_sync.sync_minute_batch(
+                etf_incomplete,
+                start_time=start_time,
+                end_time=end_time,
+                batch_size=lim.batch if lim else None,
+                rpm=lim.rpm if lim else None,
+                asset_type="etf",
+            )
+            if not df_e.is_empty():
+                live_parts.append(df_e)
+        if live_parts:
+            live_df = pl.concat(live_parts, how="diagonal_relaxed")
             for sym in incomplete:
                 sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
                 if not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
     return {"data": result}
+
+
 
 
 @router.get("/minute")
@@ -618,7 +706,6 @@ def get_minute(
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
-    today = date.today()
 
     if trade_date is None:
         # 默认看今天, 而不是本地落盘的最近日 (盘中后者是昨天)。
@@ -642,27 +729,36 @@ def get_minute(
     if trade_date is None:
         # 本地无任何分钟K，尝试从 TickFlow 拉取当天
         trade_date = cn_today()
-        df = _fetch_minute_or_502(symbol, trade_date)
+        df = _fetch_minute_or_502(symbol, trade_date, asset_type=asset_type)
+        price_limit = _get_price_limit_info(
+            repo, symbol, trade_date, asset_type, stock_name,
+        )
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
+            "price_limit": price_limit,
         }
 
+    price_limit = _get_price_limit_info(
+        repo, symbol, trade_date, asset_type, stock_name,
+    )
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
     # 今天优先实时拉，避免本地旧分区阻断盘中刷新；历史日再按完整度判断。
     today = cn_today()
     if trade_date == today:
-        live_df = _fetch_minute_or_502(symbol, trade_date)
+        live_df = _fetch_minute_or_502(symbol, trade_date, asset_type=asset_type)
         if not live_df.is_empty():
             return {
                 "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                 "date": str(trade_date), "rows": live_df.to_dicts(), "source": "live",
+                "price_limit": price_limit,
             }
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(),
             "source": "local" if not df.is_empty() else "none",
+            "price_limit": price_limit,
         }
 
     # 历史完整交易日应有 240 条分钟K。
@@ -674,20 +770,23 @@ def get_minute(
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+            "price_limit": price_limit,
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
-    live_df = _fetch_minute_or_502(symbol, trade_date)
+    live_df = _fetch_minute_or_502(symbol, trade_date, asset_type=asset_type)
     return {
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),
         "source": "live" if not live_df.is_empty() else "none",
+        "price_limit": price_limit,
     }
 
 
-def _fetch_minute_or_502(symbol: str, trade_date: date) -> pl.DataFrame:
+
+def _fetch_minute_or_502(symbol: str, trade_date: date, asset_type: str = "stock"):
     try:
-        return kline_sync.fetch_minute_single(symbol, trade_date)
+        return kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
     except kline_sync.MinuteFetchError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 
