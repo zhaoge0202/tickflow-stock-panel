@@ -193,6 +193,17 @@ export interface MinuteKlineRow {
   amount: number
 }
 
+export interface FinancialSharesRecord {
+  symbol?: string
+  period_end: string
+  announce_date?: string | null
+  total_shares?: number | null
+  float_shares?: number | null
+  [key: string]: any
+}
+
+/** AI 财务分析历史报告 */
+
 export interface PriceLimitInfo {
   rate: number
   limit_up: number | null
@@ -455,6 +466,25 @@ export interface StrategyParamDef {
   options?: string[]
 }
 
+export interface ScreenerResultSummary {
+  total: number
+  as_of: string
+}
+
+export interface ScreenerCachedSummary {
+  as_of: string | null
+  results: Record<string, ScreenerResultSummary>
+  today_ever_counts: Record<string, number>
+  updated_at: number | null
+}
+
+export interface ScreenerCachedResult {
+  result: ScreenerResult | null
+  today_ever_rows: Record<string, any> | null
+  strategy_ids_by_symbol: Record<string, string[]>
+  updated_at: number | null
+}
+
 export interface StrategyDetail {
   id: string
   name: string
@@ -471,6 +501,7 @@ export interface StrategyDetail {
   scoring: Record<string, number>
   entry_signals: string[]
   exit_signals: string[]
+  minute_exit_trigger_supported_signals: string[]
   stop_loss: number | null
   take_profit: number | null
   trailing_stop: number | null
@@ -483,6 +514,7 @@ export interface StrategyDetail {
   descending: boolean
   limit: number
 }
+
 
 export interface StrategyBuildResult {
   code: string
@@ -543,6 +575,8 @@ export interface MonitorCondition {
   value?: number | null   // op 非 truth 时必填
 }
 
+export type StrategyNotifyEvent = 'buy_signal' | 'sell_signal' | 'pool_entry' | 'pool_exit'
+
 export interface MonitorRule {
   id: string
   name: string
@@ -554,6 +588,7 @@ export interface MonitorRule {
   sector?: string | null
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
+  notify_events?: StrategyNotifyEvent[]
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
   cooldown_seconds: number
@@ -563,10 +598,12 @@ export interface MonitorRule {
   webhook_enabled?: boolean  // 兼容老规则, 已由 webhook_channels 取代
   webhook_channels?: string[]  // 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
+  runtime_warning?: string
   // ladder 专属: 封单监控
   metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 额(元)
   threshold?: number                        // 封单 <= 此值时报警
 }
+
 
 export interface MonitorRuleOptions {
   threshold_fields: { key: string; label: string }[]
@@ -578,7 +615,14 @@ export interface MonitorRuleOptions {
   logics: { key: string; label: string }[]
   severities: { key: string; label: string }[]
   directions: { key: string; label: string }[]
+  intraday_signal_support: {
+    available: boolean
+    source: string | null
+    max_symbols: number
+    reason: string
+  }
 }
+
 
 export interface AlertEvent {
   ts: number
@@ -874,7 +918,10 @@ export interface LimitLadderStock {
   sealed_status?: 'real' | 'fake' | 'pending' | null
   /** 封单量(买一/卖一量), 仅真封板有值 */
   sealed_vol?: number | null
+  /** 最终状态为涨跌停且当天开高低收四价相同 */
+  is_one_word?: boolean
 }
+
 
 export interface LimitLadderTier {
   boards: number
@@ -1108,6 +1155,17 @@ export interface DataSourceTestResult {
   preview: Record<string, unknown>[]
 }
 
+export interface DimensionMembersResult {
+  id: string
+  label: string
+  date: string | null
+  field: string
+  value: string
+  total: number
+  limit: number
+  rows: Record<string, any>[]
+}
+
 export interface DatasetConfig {
   url: string
   method: string
@@ -1119,7 +1177,11 @@ export interface DatasetConfig {
   symbols_param?: string
   start_param?: string
   end_param?: string
+  asset_type_param?: string | null
+  freq_param?: string | null
+  timeout?: number | null
 }
+
 
 export interface AuthConfig {
   type: string
@@ -1295,10 +1357,15 @@ export const api = {
       `/api/settings/plugins/${encodeURIComponent(name)}/install`,
       { method: 'DELETE' },
     ),
-  testDataSource: (provider: string, dataset: string, symbols?: string[]) =>
+  testDataSource: (
+    provider: string,
+    dataset: string,
+    symbols?: string[],
+    config?: CustomSourceConfig,
+  ) =>
     request<DataSourceTestResult>('/api/settings/data-sources/test', {
       method: 'POST',
-      body: JSON.stringify({ provider, dataset, symbols }),
+      body: JSON.stringify({ provider, dataset, symbols, config }),
     }),
   updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
     request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>(
@@ -1739,6 +1806,16 @@ export const api = {
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
     ),
+  screenerCachedSummary: () =>
+    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
+
+  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+    request<ScreenerCachedResult>(
+      extColumns
+        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
+        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
+    ),
+
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
@@ -1868,6 +1945,13 @@ export const api = {
   // ===== 扩展数据 =====
   extDataList: () =>
     request<{ items: ExtDataConfig[] }>('/api/ext-data'),
+
+  dimensionMembers: (id: string, opts: { field: string; value: string; date?: string; limit?: number }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    if (opts.limit) qs.set('limit', String(opts.limit))
+    return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
+  },
 
   extDataRows: (id: string, opts?: { date?: string; limit?: number; columns?: string[] }) => {
     const qs = new URLSearchParams()
@@ -2007,6 +2091,11 @@ export const api = {
     ),
 
   /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
+  financialShares: (symbol?: string) =>
+    request<{ data: FinancialSharesRecord[] }>(
+      `/api/financials/shares${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
+    ),
+
   financialSync: (table: string) =>
     request<{ status: string; synced: { started: boolean; reason?: string } }>(
       `/api/financials/sync/${table}`, { method: 'POST' },
