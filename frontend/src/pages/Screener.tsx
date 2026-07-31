@@ -233,6 +233,24 @@ export function Screener() {
   )
   const cacheCoversPool = visiblePool.length > 0 && missingStrategyIds.length === 0
 
+  // 防止 reload / auto-run / StrictMode 叠出并发 run_all（后端 Numba 会崩溃）
+  // 用 ref 同步门闩，避免同一渲染周期内 isPending 尚未更新导致重复触发
+  const runAllPendingRef = useRef(false)
+  const requestRunAll = useCallback((
+    vars: { date?: string; strategyIds?: string[] } = {},
+    options?: Parameters<typeof runAll.mutate>[1],
+  ) => {
+    if (runAllPendingRef.current || runAll.isPending) return
+    runAllPendingRef.current = true
+    runAll.mutate(vars, {
+      ...options,
+      onSettled: (...args) => {
+        runAllPendingRef.current = false
+        options?.onSettled?.(...args)
+      },
+    })
+  }, [runAll])
+
   // 摘要只同步当前日期的卡片数量，避免旧日期缓存短暂显示成当前结果。
   useEffect(() => {
     if (!summaryQuery.data || !asOf) return
@@ -434,8 +452,8 @@ export function Screener() {
     // 未覆盖: 受系统开关控制
     if (!screenerAutoRun) return
     runAllDateRef.current = runKey
-    runAll.mutate({ date: asOf, strategyIds: missingStrategyIds })
-  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending])
+    requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
+  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending, requestRunAll])
 
   const run = useMutation({
     mutationFn: ({ id, date }: { id: string; date: string }) =>
@@ -502,7 +520,7 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
-      if (asOf) runAll.mutate({ date: asOf })
+      if (asOf) requestRunAll({ date: asOf })
     },
   })
 
