@@ -211,7 +211,11 @@ class ScreenerService:
                 continue
             df_full = compute_signals(compute_indicators(df_hist))
             if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
-                df_full = compute_limit_signals(df_full, instruments)
+                df_full = compute_limit_signals(
+                    df_full,
+                    instruments,
+                    historical_shares=self.repo.get_historical_shares(),
+                )
             df_result = df_full.filter(
                 (pl.col("date") >= result_start) & (pl.col("date") <= result_end)
             )

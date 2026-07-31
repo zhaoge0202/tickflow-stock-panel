@@ -1,8 +1,6 @@
 """逼近涨停 — 涨幅 > 7% 且距涨停 < 3%, 盘后选股"""
-from datetime import date
 
 import numpy as np
-import polars as pl
 
 from app.backtest.matrix import (
     MarketDataMatrix,
@@ -13,35 +11,6 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
-
-ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE = date(2026, 7, 6)
-_MILLISECONDS_PER_DAY = 86_400_000
-_ST_MAIN_BOARD_10PCT_EFFECTIVE_TIMESTAMP = (
-    ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE - date(1970, 1, 1)
-).days * _MILLISECONDS_PER_DAY
-
-
-def _limit_pct(date_col: str | None = None) -> pl.Expr:
-    """根据板块和 ST 动态计算涨跌幅限制 (小数)。
-    创业板(300/301)/科创板(688): 20% (含其 ST)
-    北交所(.BJ): 30%
-    主板 ST: 2026-07-06 前 5%, 之后 10%
-    主板普通: 10%
-    """
-    is_st = pl.col("name").str.contains("(?i)ST").fill_null(False)
-    is_cyb = pl.col("symbol").str.starts_with("300") | pl.col("symbol").str.starts_with("301")
-    is_kcb = pl.col("symbol").str.starts_with("688")
-    is_bj = pl.col("symbol").str.contains(r"\.BJ$")
-    is_before_st_upgrade = (
-        pl.col(date_col) < ST_MAIN_BOARD_10PCT_EFFECTIVE_DATE
-        if date_col else pl.lit(False)
-    )
-    return (
-        pl.when(is_cyb | is_kcb).then(0.20)
-        .when(is_bj).then(0.30)
-        .when(is_st & is_before_st_upgrade).then(0.05)
-        .otherwise(0.10)
-    )
 
 META = {
     "id": "near_limit_up",
@@ -93,29 +62,11 @@ ALERTS = []
 
 class NearLimitUpMatrixStrategy:
     def required_fields(self) -> frozenset[str]:
-        return frozenset({"close"})
+        return frozenset({"close", "price_limit_pct"})
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
         return 60
-
-    @staticmethod
-    def _limit_pct(market: MarketDataMatrix) -> np.ndarray:
-        """返回最后一个交易日各标的限幅，供诊断和兼容调用。"""
-        return NearLimitUpMatrixStrategy._limit_pct_matrix(market)[-1]
-
-    @staticmethod
-    def _limit_pct_matrix(market: MarketDataMatrix) -> np.ndarray:
-        values = np.full(market.shape, 0.10, dtype=np.float32)
-        before_st_upgrade = market.timestamps < _ST_MAIN_BOARD_10PCT_EFFECTIVE_TIMESTAMP
-        for asset_id, (symbol, name) in enumerate(zip(market.symbols, market.names, strict=True)):
-            if symbol.startswith(("300", "301", "688")):
-                values[:, asset_id] = 0.20
-            elif symbol.endswith(".BJ"):
-                values[:, asset_id] = 0.30
-            elif "ST" in name.upper():
-                values[:, asset_id] = np.where(before_st_upgrade, 0.05, 0.10)
-        return values
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         change = matrix_feature(market, "change_pct")
@@ -123,9 +74,10 @@ class NearLimitUpMatrixStrategy:
         if params.get("use_change_filter", True):
             entry &= change > float(params.get("min_change", 7.0)) / 100.0
         if params.get("use_limit_gap_filter", True):
+            limit_pct = matrix_feature(market, "price_limit_pct")
             entry &= (
                 change
-                < self._limit_pct_matrix(market) - float(params.get("limit_gap", 3.0)) / 100.0
+                >= limit_pct - float(params.get("limit_gap", 3.0)) / 100.0
             )
         ma20 = matrix_feature(market, "ma20")
         exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))

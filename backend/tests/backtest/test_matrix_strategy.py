@@ -66,6 +66,19 @@ def test_common_matrix_features_match_polars_indicator_pipeline():
         actual = matrix_feature(market, name)[:, 0]
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5, equal_nan=True)
 
+    expected_bias = (
+        enriched.sort(["date", "symbol"])["close"].to_numpy()
+        / enriched.sort(["date", "symbol"])["ma20"].to_numpy()
+        - 1.0
+    )
+    np.testing.assert_allclose(
+        matrix_feature(market, "ma20_bias")[:, 0],
+        expected_bias,
+        rtol=2e-5,
+        atol=2e-5,
+        equal_nan=True,
+    )
+
 
 def _panel_with_missing_asset_bar() -> pl.DataFrame:
     rows = []
@@ -279,6 +292,19 @@ def test_market_matrix_derives_live_raw_close_when_requested():
     live.update(panel.with_columns(pl.lit(date(2024, 1, 2)).alias("date")))
     snapshot = live.snapshot()
     np.testing.assert_array_equal(snapshot.field("raw_close")[-1], snapshot.close[-1])
+
+
+def test_direct_parquet_matrix_reports_actionable_error_when_enriched_is_empty(tmp_path):
+    market_root = tmp_path / "kline_daily_enriched"
+    market_root.mkdir()
+
+    with pytest.raises(ValueError, match="本地指标数据为空"):
+        load_market_data_matrix_from_parquet(
+            market_root,
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            field_columns=set(),
+        )
 
 
 def test_direct_parquet_matrix_matches_panel_builder_and_reuses_mmap(tmp_path):
@@ -584,7 +610,7 @@ def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     del first
     gc.collect()
     assert second.close[0, 0] == pytest.approx(11.0)
-    assert len(list(cache_root.glob("v3-*"))) == 1
+    assert len(list(cache_root.glob("v4-*"))) == 1
     assert list(cache_root.glob(".*.tmp")) == []
     assert len(list(cache_root.glob(".axes-v1-*.json"))) == 1
 
@@ -637,7 +663,7 @@ def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tm
     assert changed.cache_path != first.cache_path
     del first, repeated
     gc.collect()
-    assert len(list(cache_root.glob("v3-*"))) == 1
+    assert len(list(cache_root.glob("v4-*"))) == 1
 
 
 def test_registered_builtin_matrix_strategies_share_one_cache_profile():

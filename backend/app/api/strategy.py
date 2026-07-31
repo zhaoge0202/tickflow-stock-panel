@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
 import re
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
@@ -24,6 +26,7 @@ from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
+logger = logging.getLogger(__name__)
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -53,6 +56,57 @@ def _invalidate_strategy_runtime(request: Request) -> None:
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
     if monitor_engine is not None:
         monitor_engine.invalidate_strategy_state()
+
+
+def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
+    """尽力清理删除后的派生状态, 清理失败不应把已成功的源文件删除变成 500。"""
+    from app.services import preferences
+    from app.strategy import monitor_rules
+
+    data_dir = _data_dir(request)
+    warnings: list[str] = []
+
+    try:
+        strategy_config.delete_override(data_dir, strategy_id)
+    except Exception as e:
+        warnings.append(f"覆盖配置清理失败: {e}")
+
+    try:
+        _invalidate_strategy_runtime(request)
+    except Exception as e:
+        warnings.append(f"运行缓存清理失败: {e}")
+
+    try:
+        monitored_ids = preferences.get_strategy_monitor_ids()
+        if strategy_id in monitored_ids:
+            preferences.set_realtime_monitor_config({
+                "strategy_monitor_ids": [sid for sid in monitored_ids if sid != strategy_id],
+            })
+    except Exception as e:
+        warnings.append(f"监控偏好清理失败: {e}")
+
+    try:
+        rules_changed = False
+        for rule in monitor_rules.load_all(data_dir):
+            if (
+                rule.get("type") == "strategy"
+                and rule.get("strategy_id") == strategy_id
+                and rule.get("enabled", True)
+            ):
+                rule = dict(rule)
+                rule["enabled"] = False
+                monitor_rules.save_one(data_dir, rule)
+                rules_changed = True
+
+        monitor_engine = getattr(request.app.state, "monitor_engine", None)
+        if rules_changed and monitor_engine is not None:
+            monitor_engine.set_rules(monitor_rules.load_all(data_dir))
+    except Exception as e:
+        warnings.append(f"关联监控清理失败: {e}")
+
+    for warning in warnings:
+        logger.warning("delete strategy %s: %s", strategy_id, warning)
+    return warnings
 
 
 def _safe(result_dict: dict) -> dict:
@@ -99,6 +153,7 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
         "scoring": scoring,
         "entry_signals": overrides.get("entry_signals", s.entry_signals) if overrides else s.entry_signals,
         "exit_signals": overrides.get("exit_signals", s.exit_signals) if overrides else s.exit_signals,
+        "minute_exit_trigger_supported_signals": sorted(MINUTE_EXIT_TRIGGER_SIGNALS),
         "stop_loss": overrides.get("stop_loss", s.stop_loss) if overrides else s.stop_loss,
         "take_profit": getattr(s, "take_profit", None),
         "trailing_stop": getattr(s, "trailing_stop", None),
@@ -504,6 +559,7 @@ def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRe
     # 安全校验始终执行 (此前 strict 字段可被客户端设 false 绕过, 已移除)
     AIStrategyGenerator._validate_safety(code)
     meta = AIStrategyGenerator._extract_meta(code)
+    AIStrategyGenerator._validate_meta_semantics(code, meta)
     return {"code": code, "meta": meta}
 
 
@@ -760,34 +816,46 @@ async def ai_save(req: AISaveRequest, request: Request):
 
 @router.delete("/{strategy_id}")
 def delete_strategy(strategy_id: str, request: Request):
-    """删除自定义策略 — 清除 .py 文件 + overrides + 热重载。内置策略不可删除。"""
+    """删除自定义策略 — 清除源文件、运行时注册和关联状态。内置策略不可删除。"""
 
     engine = _get_engine(request)
     try:
         s = engine.get(strategy_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在") from e
 
     if s.source == "builtin":
         raise HTTPException(status_code=403, detail="内置策略不可删除")
 
-    data_dir = _data_dir(request)
     path = s.file_path
-    previous_code = path.read_text(encoding="utf-8") if path and path.exists() else None
-    if path and path.exists():
-        path.unlink()
-    try:
-        engine.reload()
-    except Exception as e:
-        if path is not None and previous_code is not None:
-            path.write_text(previous_code, encoding="utf-8")
-            engine.reload()
-        raise HTTPException(status_code=400, detail=f"策略删除失败: {e}") from e
+    data_dir = _data_dir(request)
+    if path is None or s.source not in {"custom", "ai"}:
+        raise HTTPException(status_code=400, detail="策略源文件路径无效, 无法删除")
 
-    override_path = data_dir / "user_data" / "strategy_overrides" / f"{strategy_id}.json"
-    override_path.unlink(missing_ok=True)
-    _invalidate_strategy_runtime(request)
-    return {"ok": True}
+    try:
+        allowed_dir = (data_dir / "strategies" / s.source).resolve()
+        resolved_path = path.resolve()
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=f"无法访问策略文件: {e}") from e
+    if not resolved_path.is_relative_to(allowed_dir):
+        raise HTTPException(status_code=400, detail="策略源文件不在用户策略目录, 拒绝删除")
+
+    try:
+        resolved_path.unlink(missing_ok=True)
+    except OSError as e:
+        reason = e.strerror or str(e)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"无法删除策略文件 {resolved_path.name}: {reason}。"
+                "请确认数据目录可写; Docker 部署请检查数据卷不是只读挂载。"
+            ),
+        ) from e
+
+    # 删除只影响当前策略, 全量 reload 会让其他损坏或重复 ID 的文件阻塞本次删除。
+    engine.unregister(strategy_id)
+    warnings = _cleanup_deleted_strategy(request, strategy_id)
+    return {"ok": True, "warnings": warnings}
 
 
 # ── 监控 ─────────────────────────────────────────────────────────────
