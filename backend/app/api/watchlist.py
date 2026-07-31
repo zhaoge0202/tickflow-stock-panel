@@ -6,6 +6,7 @@ import math
 import time
 from datetime import date
 
+import anyio
 import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
@@ -27,6 +28,8 @@ _IMPORT_IMAGE_TYPES = {
     "image/bmp",
     "image/gif",
 }
+# OCR 独立并发上限：避免多张大图同时解码 + 多 Tesseract 子进程
+_OCR_LIMITER = anyio.CapacityLimiter(2)
 
 
 class AddRequest(BaseModel):
@@ -66,9 +69,14 @@ def add_one(req: AddRequest, request: Request):
 
 @router.post("/batch")
 def add_batch(req: BatchAddRequest, request: Request):
+    existing = {r["symbol"] for r in watchlist.list_symbols()}
+    added = 0
     for sym in req.symbols:
+        if sym not in existing:
+            added += 1
+            existing.add(sym)
         watchlist.add(sym, req.note)
-    return {"symbols": _with_names(watchlist.list_symbols(), request), "added": len(req.symbols)}
+    return {"symbols": _with_names(watchlist.list_symbols(), request), "added": added}
 
 
 @router.get("/ocr-status")
@@ -81,8 +89,6 @@ def ocr_status():
 @router.post("/import-image")
 async def import_from_image(request: Request, file: UploadFile = File(...)):
     """从自选截图识别股票代码，返回候选列表（不自动写入自选）。"""
-    import anyio
-
     content_type = (file.content_type or "").split(";")[0].strip().lower()
     filename = (file.filename or "").lower()
     # 严格白名单：不接受任意 image/*（如 image/svg+xml）
@@ -100,9 +106,10 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
     existing = {r["symbol"] for r in watchlist.list_symbols()}
     data_dir = request.app.state.repo.store.data_dir
     try:
-        # OCR 为同步 CPU/子进程；丢进线程池，避免卡住事件循环（行情 SSE 等）
+        # OCR 为同步 CPU/子进程；独立 limiter 限制并发，避免卡住事件循环（行情 SSE 等）
         result = await anyio.to_thread.run_sync(
             lambda: import_watchlist_image(data, data_dir, existing_symbols=existing),
+            limiter=_OCR_LIMITER,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
