@@ -612,6 +612,40 @@ def test_get_instruments_from_codes(monkeypatch):
     assert TDXAPIProvider().get_instruments("etf") == []
 
 
+def _tdx_finance_snapshot() -> dict:
+    return {
+        "Market": 1,
+        "Code": "600519",
+        "LiuTongGuBen": 1256197800.0,
+        "Province": 24,
+        "Industry": 36,
+        "UpdatedDate": 20260331,
+        "IPODate": 20010827,
+        "ZongGuBen": 1256197800.0,
+        "ZongZiChan": 300000000000.0,
+        "LiuDongZiChan": 200000000000.0,
+        "GuDingZiChan": 10000000000.0,
+        "WuXingZiChan": 1000000000.0,
+        "GuDongRenShu": 180000.0,
+        "LiuDongFuZhai": 50000000000.0,
+        "ChangQiFuZhai": 10000000000.0,
+        "ZiBenGongJiJin": 1000000000.0,
+        "JingZiChan": 200000000000.0,
+        "ZhuYingShouRu": 120000000000.0,
+        "ZhuYingLiRun": 90000000000.0,
+        "YingShouZhangKuan": 1000000000.0,
+        "YingYeLiRun": 80000000000.0,
+        "TouZiShouYi": 100000000.0,
+        "JingYingXianJinLiu": 70000000000.0,
+        "ZongXianJinLiu": 60000000000.0,
+        "CunHuo": 40000000000.0,
+        "LiRunZongHe": 85000000000.0,
+        "ShuiHouLiRun": 65000000000.0,
+        "JingLiRun": 65000000000.0,
+        "WeiFenLiRun": 100000000000.0,
+    }
+
+
 @pytest.mark.parametrize(
     ("table", "expected_field", "expected_value"),
     [
@@ -619,6 +653,7 @@ def test_get_instruments_from_codes(monkeypatch):
         ("income", "main_revenue", 120000000000.0),
         ("balance_sheet", "inventory", 40000000000.0),
         ("cash_flow", "operating_cash_flow", 70000000000.0),
+        ("shares", "float_shares", 1256197800.0),
     ],
 )
 def test_get_financials_maps_tdx_finance_snapshot(monkeypatch, table, expected_field, expected_value):
@@ -626,37 +661,7 @@ def test_get_financials_maps_tdx_finance_snapshot(monkeypatch, table, expected_f
 
     def fake(self, method, path, **kwargs):
         calls.append((method, path, kwargs))
-        return {
-            "Market": 1,
-            "Code": "600519",
-            "LiuTongGuBen": 1256197800.0,
-            "Province": 24,
-            "Industry": 36,
-            "UpdatedDate": 20260331,
-            "IPODate": 20010827,
-            "ZongGuBen": 1256197800.0,
-            "ZongZiChan": 300000000000.0,
-            "LiuDongZiChan": 200000000000.0,
-            "GuDingZiChan": 10000000000.0,
-            "WuXingZiChan": 1000000000.0,
-            "GuDongRenShu": 180000.0,
-            "LiuDongFuZhai": 50000000000.0,
-            "ChangQiFuZhai": 10000000000.0,
-            "ZiBenGongJiJin": 1000000000.0,
-            "JingZiChan": 200000000000.0,
-            "ZhuYingShouRu": 120000000000.0,
-            "ZhuYingLiRun": 90000000000.0,
-            "YingShouZhangKuan": 1000000000.0,
-            "YingYeLiRun": 80000000000.0,
-            "TouZiShouYi": 100000000.0,
-            "JingYingXianJinLiu": 70000000000.0,
-            "ZongXianJinLiu": 60000000000.0,
-            "CunHuo": 40000000000.0,
-            "LiRunZongHe": 85000000000.0,
-            "ShuiHouLiRun": 65000000000.0,
-            "JingLiRun": 65000000000.0,
-            "WeiFenLiRun": 100000000000.0,
-        }
+        return _tdx_finance_snapshot()
 
     monkeypatch.setattr(TDXAPIProvider, "_request", fake)
 
@@ -690,6 +695,51 @@ def test_get_financials_maps_tdx_finance_snapshot(monkeypatch, table, expected_f
     elif table == "cash_flow":
         assert df["net_operating_cash_flow"][0] == 70000000000.0
         assert df["net_cash_change"][0] == 60000000000.0
+    elif table == "shares":
+        # 上游 historical shares 契约: symbol/period_end/float_shares (+ total_shares)
+        assert df["total_shares"][0] == 1256197800.0
+        assert {"symbol", "period_end", "float_shares"} <= set(df.columns)
+
+
+def test_get_financials_shares_rejects_missing_float(monkeypatch):
+    def fake(self, method, path, **kwargs):
+        snap = _tdx_finance_snapshot()
+        snap["LiuTongGuBen"] = 0
+        return snap
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+    df = TDXAPIProvider().get_financials("shares", ["600519.SH"])
+    assert df.is_empty()
+
+
+def test_get_minute_accepts_asset_type_before_freq(monkeypatch):
+    """对齐上游 MarketDataProvider 签名: asset_type, freq, on_chunk_done。"""
+    progress: list[tuple[int, int]] = []
+
+    def fake(self, method, path, **kwargs):
+        return {
+            "list": [{
+                "Time": "2026-01-05T09:31:00+08:00",
+                "Open": 10000,
+                "High": 10000,
+                "Low": 10000,
+                "Close": 10000,
+                "Volume": 1,
+                "Amount": 1,
+            }],
+        }
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+    df = TDXAPIProvider().get_minute(
+        ["002491.SZ"],
+        dt.datetime(2026, 1, 5, 9, 30),
+        dt.datetime(2026, 1, 5, 15, 0),
+        asset_type="etf",
+        freq="1m",
+        on_chunk_done=lambda cur, total: progress.append((cur, total)),
+    )
+    assert df.height == 1
+    assert progress == [(1, 1)]
 
 
 def test_symbol_helpers():

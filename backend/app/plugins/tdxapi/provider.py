@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import polars as pl
 
+from app.data_providers.base import AssetType
 from app.data_providers.normalizer import normalize_daily
 from app.services.symbols import guess_exchange_suffix
 from app.tickflow.rate_limits import chunked
@@ -77,6 +79,13 @@ _FINANCIAL_TABLE_FIELDS: dict[str, dict[str, str]] = {
         "operating_cash_flow": "JingYingXianJinLiu",
         "total_cash_flow": "ZongXianJinLiu",
     },
+    # 上游 v0.1.86+ 新增 historical shares 表。
+    # TDX /api/finance 只有当前快照, 无完整股本变更史; 这里用 UpdatedDate 作为
+    # period_end/announce_date, 供 share_capital 做 asof 回填 (至少覆盖最新股本)。
+    "shares": {
+        "float_shares": "LiuTongGuBen",
+        "total_shares": "ZongGuBen",
+    },
 }
 _CORE_INDEXES = {
     "000001.SH": "上证指数",
@@ -122,8 +131,8 @@ class TDXAPIProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",
-        on_chunk_done=None,
+        asset_type: AssetType = "stock",  # noqa: ARG002
+        on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
@@ -155,9 +164,9 @@ class TDXAPIProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",
-        on_chunk_done=None,
+        asset_type: AssetType = "stock",  # noqa: ARG002 — TDX 分钟接口不按资产类型分流
         freq: str = "1m",
+        on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
@@ -356,12 +365,15 @@ class TDXAPIProvider:
         self,
         table: str,
         symbols: list[str],
-        latest_only: bool = True,
+        latest_only: bool = True,  # noqa: ARG002 — TDX 只有当前快照, 无历史序列
     ) -> pl.DataFrame:
         """拉取通达信财务/基本面快照。
 
-        TDX 该接口是单票当前快照, 不是完整历史财报。这里按项目的四张
-        financial 表拆分字段, 便于绕过 TickFlow Expert 门槛做基础分析。
+        TDX 该接口是单票当前快照, 不是完整历史财报。这里按项目的财务报表
+        (metrics/income/balance_sheet/cash_flow) 以及上游新增的 shares 股本表
+        拆分字段, 便于绕过 TickFlow Expert 门槛做基础分析 / 历史换手率回填。
+
+        latest_only 参数保留以兼容 financial_sync 契约; TDX 侧始终只返回当前快照。
         """
         table = str(table or "").strip().lower()
         if table not in _FINANCIAL_TABLE_FIELDS:
@@ -389,7 +401,7 @@ class TDXAPIProvider:
         return pl.DataFrame(rows) if rows else pl.DataFrame()
 
     # ---- instruments ----
-    def get_instruments(self, asset_type: str = "stock") -> list[dict]:
+    def get_instruments(self, asset_type: AssetType | str = "stock") -> list[dict]:
         asset_type = str(asset_type or "stock").lower()
         if asset_type in self._instrument_cache:
             return self._instrument_cache[asset_type]
@@ -410,6 +422,9 @@ class TDXAPIProvider:
             if not symbol:
                 continue
             exchange = symbol.split(".")[-1]
+            # ext 留给 instrument_sync 抽取 total/float_shares、limit_up/down。
+            # TDX /api/codes 本身不带股本/涨跌停, 这些由 financial shares 同步
+            # 与本地昨收重算补齐; 这里保留空 ext 以兼容 flatten 契约。
             out.append({
                 "symbol": symbol,
                 "name": item.get("name") or symbol,
@@ -575,6 +590,7 @@ class TDXAPIProvider:
                 "preview": rows[:5],
             }
         if dataset == "financial":
+            # 默认测 metrics; 调用方也可通过 symbols 旁路约定测其它表
             df = self.get_financials("metrics", symbols[:1], latest_only=True)
             return _preview(self.name, "financial", df)
         raise ValueError(f"tdx-api 不支持数据集: {dataset}")
@@ -1028,6 +1044,19 @@ def _financial_row(table: str, symbol: str, item: dict) -> dict | None:
             "total_cash_flow": total_cf,
             # TDX 无: investing / financing / capex
         })
+    elif table == "shares":
+        float_shares = _float_or_none(item.get("LiuTongGuBen"))
+        # 股本表最低契约: symbol + period_end + float_shares
+        # total_shares 一并给出, 方便前端股本页展示。
+        if float_shares is None or float_shares <= 0:
+            return None
+        row.update({
+            "float_shares": float_shares,
+            "total_shares": total_shares,
+        })
+        # shares 表没有 report_date 语义时也要保证 period_end 可用
+        if not row.get("period_end"):
+            return None
     return row
 
 
