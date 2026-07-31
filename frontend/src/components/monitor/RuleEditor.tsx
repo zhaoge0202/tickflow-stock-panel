@@ -5,6 +5,7 @@ import { Activity, Check, Plus, RadioTower, Save, Search, TrendingUp, Waypoints,
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
+import { boardTag } from '@/components/stock-table/primitives'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { MONITOR_INTRADAY_SIGNAL_OPTIONS, SIGNAL_OPTIONS, cnSignal } from '@/lib/signals'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -430,6 +431,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     {symbolSearch.data.results.map(r => (
                       <button key={r.symbol} onClick={() => addSymbol(r.symbol)} className="block w-full px-2 py-1 text-left text-[11px] hover:bg-elevated cursor-pointer">
                         <span className="font-mono text-foreground/80">{r.symbol}</span>
+                        {(() => { const b = boardTag(r.symbol); return b && <span className={`ml-1 inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span> })()}
                         <span className="ml-1 text-muted">{r.name}</span>
                       </button>
                     ))}

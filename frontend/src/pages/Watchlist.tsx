@@ -308,6 +308,12 @@ function StockSearchBox({
                     {r.asset_type === 'index' && (
                       <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
                     )}
+                    {(() => {
+                      const b = boardTag(r.symbol)
+                      return b && (
+                        <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
+                      )
+                    })()}
                   </button>
                   <button
                     type="button"

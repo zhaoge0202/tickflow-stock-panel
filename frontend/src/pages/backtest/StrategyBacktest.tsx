@@ -13,6 +13,7 @@ import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/lib/board'
+import { boardTag as boardBadge } from '@/components/stock-table/primitives'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
@@ -794,6 +795,12 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
                   >
                     <span className="w-[78px] shrink-0 font-mono">{r.symbol}</span>
                     <span className="min-w-0 flex-1 truncate text-secondary">{r.name}</span>
+                    {(() => {
+                      const b = boardBadge(r.symbol)
+                      return b && (
+                        <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
+                      )
+                    })()}
                     <Plus className={`h-3.5 w-3.5 ${added ? 'opacity-30' : 'text-accent'}`} />
                   </button>
                 )
