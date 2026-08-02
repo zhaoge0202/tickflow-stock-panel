@@ -71,7 +71,11 @@ def regime_history(
             df = df.filter(pl_col_date(df, ">=", start))
         if end:
             df = df.filter(pl_col_date(df, "<=", end))
-        df = df.sort("date", descending=True).head(limit).sort("date")
+        # limit 仅在"最近 N 天"模式(未传 start/end)生效;
+        # 日期范围模式(传了 start/end, 如"全部")应返回完整范围, 不截断。
+        if start is None and end is None:
+            df = df.sort("date", descending=True).head(limit)
+        df = df.sort("date")
         rows = _df_to_records(df)
         result = {"rows": rows, "total": len(rows)}
 

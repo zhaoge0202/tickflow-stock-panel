@@ -518,21 +518,29 @@ def run_now(
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
+    # 默认关闭: regime 是本地聚合计算(非拉取), 首次/regime 表为空时需全量回填
+    # 多日, 内存与耗时较高。用户可在数据页「市场环境」卡片设置里开启自动计算,
+    # 或直接在该页面点「重算」手动触发(不受此开关影响)。
     regime_days = 0
-    try:
-        emit("compute_regime", 90, "计算市场环境…")
-        from app.services import regime_builder
-        from app.api.regime import invalidate_regime_cache
-        new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
-        regime_days = new_regime.height if not new_regime.is_empty() else 0
-        if regime_days:
-            invalidate_regime_cache()
-            logger.info("compute_regime: %d days", regime_days)
-        emit("compute_regime", 92, f"市场环境 {regime_days} 天")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("compute_regime failed (soft): %s", e)
-        stage_errors.append(f"compute_regime: {e}")
+    from app.services import preferences as _prefs_regime
+    if not _prefs_regime.get_pipeline_regime_enabled():
         skipped.append("regime")
+        logger.info("compute_regime skipped: user disabled (pipeline_regime_enabled=False)")
+    else:
+        try:
+            emit("compute_regime", 90, "计算市场环境…")
+            from app.services import regime_builder
+            from app.api.regime import invalidate_regime_cache
+            new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
+            regime_days = new_regime.height if not new_regime.is_empty() else 0
+            if regime_days:
+                invalidate_regime_cache()
+                logger.info("compute_regime: %d days", regime_days)
+            emit("compute_regime", 92, f"市场环境 {regime_days} 天")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compute_regime failed (soft): %s", e)
+            stage_errors.append(f"compute_regime: {e}")
+            skipped.append("regime")
 
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")

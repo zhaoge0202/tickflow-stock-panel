@@ -145,10 +145,8 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
     if "date" not in avail or "change_pct" not in avail:
         return pl.DataFrame()
 
-    # 基础聚合
-    agg_exprs = []
-    if "change_pct" in avail:
-        agg_exprs.append(pl.col("change_pct"))
+    # 基础聚合 — 全部用 group_by 一次性向量化算出, 避免逐日 filter 扫全表(OOM/超时元凶)。
+    has_ma20 = "close" in avail and "ma20" in avail
     grouped = df.group_by("date").agg(
         *[
             pl.col("change_pct").gt(0).sum().alias("up_count")
@@ -181,9 +179,20 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             [pl.col("amount").mean().alias("avg_amount")]
             if "amount" in avail else [pl.lit(0).alias("avg_amount")]
         ),
+        # MA20 上方占比: 向量化一次算出 (避免逐日 filter 扫全表)。
+        # 仅统计 ma20 有效(非空且>0)的行中, close>ma20 的占比。
+        *(
+            [
+                pl.when(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0) & (pl.col("close") > pl.col("ma20")))
+                  .then(1).otherwise(None).sum().alias("_above_cnt"),
+                pl.when(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0))
+                  .then(1).otherwise(None).sum().alias("_valid_cnt"),
+            ]
+            if has_ma20 else []
+        ),
     ).sort("date")
 
-    # 转成 dict 列表做后续计算(polars 表达式难表达的比率/MA20占比/分类)
+    # 转成 dict 列表做分类(规则引擎需逐日算, 但只扫 grouped 行数=天数, 不再回扫全表)
     index_pct_map = index_pct_map or {}
     rows = []
     for r in grouped.iter_rows(named=True):
@@ -191,15 +200,10 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
         down = r.get("down_count", 0) or 0
         limit_up = r.get("limit_up", 0) or 0
         broken = r.get("broken_limit", 0) or 0
-        # MA20 上方占比
-        ma20_above = 0
-        if "close" in avail and "ma20" in avail:
-            day_df = df.filter(pl.col("date") == r["date"])
-            if not day_df.is_empty() and "ma20" in day_df.columns:
-                valid = day_df.filter(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0))
-                if not valid.is_empty():
-                    above = valid.filter(pl.col("close") > pl.col("ma20"))
-                    ma20_above = above.height / valid.height
+        # MA20 上方占比: 来自向量化聚合 (None→0)
+        valid_cnt = r.get("_valid_cnt") or 0
+        above_cnt = r.get("_above_cnt") or 0
+        ma20_above = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.0
         metrics = {
             "limit_up": limit_up,
             "limit_down": r.get("limit_down", 0) or 0,
@@ -235,29 +239,95 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
 
+# 全量回填分批参数(控制内存峰值) —— 实际值从用户偏好读取(preferences.get_regime_*),
+# 这里的常量仅作 fallback(偏好读取失败时)和文档说明:
+# - batch_days: 每批目标交易日数。越小内存越省、批次越多越慢; ma20 需 20 交易日。
+# - warmup_days: 每批前缀预热天数(日历日), 必须 > ma20 的 20 交易日(≈28 日历日)。
+_REGIME_BATCH_DAYS_DEFAULT = 60
+_REGIME_WARMUP_DAYS_DEFAULT = 40
+
+
+def _compute_batch(repo, enriched_dir, instruments, historical_shares,
+                   batch_start: date, batch_end: date, warmup_days: int) -> pl.DataFrame:
+    """单批: 读 [batch_start-warmup, batch_end] → 算指标 → 截断回 [batch_start, batch_end]。
+
+    warmup 前缀保证每批边界的滚动窗口指标(ma20)正确, 不依赖相邻批次。
+    返回目标区间(不含 warmup)的含指标列 DataFrame。
+    """
+    from datetime import timedelta
+    from app.indicators.pipeline import compute_indicators, compute_limit_signals
+    warmup_start = batch_start - timedelta(days=warmup_days)
+    df = pl.scan_parquet(enriched_dir / "**" / "*.parquet").filter(
+        (pl.col("date") >= warmup_start) & (pl.col("date") <= batch_end)
+    ).collect()
+    if df.is_empty():
+        return pl.DataFrame()
+    df = compute_indicators(df, needed={"change_pct", "ma20", "vol_ratio_5d"})
+    if instruments is not None and not instruments.is_empty():
+        df = compute_limit_signals(
+            df, instruments,
+            needed={"signal_limit_up", "signal_limit_down", "signal_broken_limit_up"},
+            historical_shares=historical_shares,
+        )
+    # 丢弃 warmup 行, 只留目标区间
+    return df.filter((pl.col("date") >= batch_start) & (pl.col("date") <= batch_end))
+
+
 def _scan_enriched_fallback(repo, start: date, end: date) -> pl.DataFrame | None:
-    """缓存不覆盖时的慢路径: 一次性 scan 全部 enriched parquet + 重算指标。
+    """缓存不覆盖时的慢路径: scan enriched parquet + 重算所需指标列。
 
     仅在 regime 首次全量回填或缓存未预热时触发。返回含信号列的多日 DataFrame。
 
-    enriched 持久化只存基础列(OHLCV + raw_*/turnover/consecutive_*), 不含
-    change_pct/ma20/signal_* 等派生列, 故此处需用 compute_all 补算全套指标。
+    内存控制(关键, 两层优化):
+    1. needed 白名单: regime 只需 change_pct/ma20/涨跌停信号等少数列, 不用 compute_all
+       算 72 列全套指标(那会让全量峰值达 6.8GB)。
+    2. 分批: 范围超过 batch_days 个交易日时按批切片, 每批带 warmup 前缀算完后 concat。
+       batch_days / warmup_days 由用户偏好控制(数据页「市场环境」卡片设置),
+       实测默认值(60/40)全量(515万行)峰值约 1.9GB, 4GB 内存机器可稳跑。
     必须传入 instruments(涨跌停价表), 否则 compute_limit_signals 会跳过涨跌停信号。
     """
+    try:
+        from app.services import preferences
+        batch_days = preferences.get_regime_batch_days()
+        warmup_days = preferences.get_regime_warmup_days()
+    except Exception:  # noqa: BLE001
+        batch_days = _REGIME_BATCH_DAYS_DEFAULT
+        warmup_days = _REGIME_WARMUP_DAYS_DEFAULT
+
     try:
         enriched_dir = repo.store.data_dir / "kline_daily_enriched"
         if not enriched_dir.exists():
             return None
-        from app.indicators.pipeline import compute_all
-        df = pl.scan_parquet(enriched_dir / "**" / "*.parquet").filter(
-            (pl.col("date") >= start) & (pl.col("date") <= end)
-        ).collect()
-        if df.is_empty():
-            return None
         instruments = repo.get_instruments()
         historical_shares = repo.get_historical_shares()
-        df = compute_all(df, instruments=instruments, historical_shares=historical_shares)
-        return df
+
+        # 收集目标区间内所有交易日, 决定是否分批
+        target_dates = sorted(d for d in enriched_date_set(repo)
+                              if start <= d <= end)
+        if not target_dates:
+            return None
+
+        # 小范围: 单次算(无分批开销)
+        if len(target_dates) <= batch_days:
+            df = _compute_batch(repo, enriched_dir, instruments, historical_shares,
+                                target_dates[0], target_dates[-1], warmup_days)
+            return df if not df.is_empty() else None
+
+        # 大范围: 按交易日分批, 逐批算 + concat
+        batches = [
+            (target_dates[i], target_dates[min(i + batch_days - 1, len(target_dates) - 1)])
+            for i in range(0, len(target_dates), batch_days)
+        ]
+        logger.info("regime fallback: %d 天分 %d 批 (每批≤%d天 + %d天warmup)",
+                    len(target_dates), len(batches), batch_days, warmup_days)
+        parts: list[pl.DataFrame] = []
+        for bs, be in batches:
+            df = _compute_batch(repo, enriched_dir, instruments, historical_shares, bs, be, warmup_days)
+            if not df.is_empty():
+                parts.append(df)
+        if not parts:
+            return None
+        return pl.concat(parts, how="vertical_relaxed")
     except Exception as e:  # noqa: BLE001
         logger.warning("regime scan_enriched_fallback failed: %s", e)
         return None

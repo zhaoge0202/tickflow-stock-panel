@@ -418,6 +418,9 @@ def get_preferences() -> dict:
         "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
         "pipeline_pull_etf": preferences.get_pipeline_pull_etf(),
         "pipeline_pull_index": preferences.get_pipeline_pull_index(),
+        "pipeline_regime_enabled": preferences.get_pipeline_regime_enabled(),
+        "regime_batch_days": preferences.get_regime_batch_days(),
+        "regime_warmup_days": preferences.get_regime_warmup_days(),
         "pipeline_index_symbols": preferences.get_pipeline_index_symbols(),
         "pipeline_schedule": preferences.get_pipeline_schedule(),
         "instruments_schedule": preferences.get_instruments_schedule(),
@@ -828,6 +831,42 @@ def update_pipeline_pull_types(req: PipelinePullTypesIn) -> dict:
     from app.services import preferences
     cfg = req.model_dump(exclude_none=True)
     return preferences.set_pipeline_pull_types(cfg)
+
+
+class PipelineRegimeEnabledIn(BaseModel):
+    """盘后管道是否自动计算市场环境(regime)。"""
+    pipeline_regime_enabled: bool
+
+
+@router.put("/preferences/pipeline-regime-enabled")
+def update_pipeline_regime_enabled(req: PipelineRegimeEnabledIn) -> dict:
+    """更新盘后管道 regime 自动计算开关。"""
+    from app.services import preferences
+    preferences.save({"pipeline_regime_enabled": bool(req.pipeline_regime_enabled)})
+    return {"pipeline_regime_enabled": preferences.get_pipeline_regime_enabled()}
+
+
+class RegimeBatchParamsIn(BaseModel):
+    """regime 全量回填分批参数(控制内存峰值)。"""
+    batch_days: int | None = None
+    warmup_days: int | None = None
+
+
+@router.put("/preferences/regime-batch-params")
+def update_regime_batch_params(req: RegimeBatchParamsIn) -> dict:
+    """更新 regime 分批参数。仅在传入字段时保存对应项(支持部分更新)。"""
+    from app.services import preferences
+    updates: dict = {}
+    if req.batch_days is not None:
+        updates["regime_batch_days"] = req.batch_days
+    if req.warmup_days is not None:
+        updates["regime_warmup_days"] = req.warmup_days
+    if updates:
+        preferences.save(updates)
+    return {
+        "regime_batch_days": preferences.get_regime_batch_days(),
+        "regime_warmup_days": preferences.get_regime_warmup_days(),
+    }
 
 
 class PipelineIndexSymbolsIn(BaseModel):
