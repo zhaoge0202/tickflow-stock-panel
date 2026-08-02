@@ -239,19 +239,24 @@ def _scan_enriched_fallback(repo, start: date, end: date) -> pl.DataFrame | None
     """缓存不覆盖时的慢路径: 一次性 scan 全部 enriched parquet + 重算指标。
 
     仅在 regime 首次全量回填或缓存未预热时触发。返回含信号列的多日 DataFrame。
+
+    enriched 持久化只存基础列(OHLCV + raw_*/turnover/consecutive_*), 不含
+    change_pct/ma20/signal_* 等派生列, 故此处需用 compute_all 补算全套指标。
+    必须传入 instruments(涨跌停价表), 否则 compute_limit_signals 会跳过涨跌停信号。
     """
     try:
         enriched_dir = repo.store.data_dir / "kline_daily_enriched"
         if not enriched_dir.exists():
             return None
-        from app.indicators.pipeline import compute_indicators, compute_limit_signals
+        from app.indicators.pipeline import compute_all
         df = pl.scan_parquet(enriched_dir / "**" / "*.parquet").filter(
             (pl.col("date") >= start) & (pl.col("date") <= end)
         ).collect()
         if df.is_empty():
             return None
-        df = compute_indicators(df)
-        df = compute_limit_signals(df)
+        instruments = repo.get_instruments()
+        historical_shares = repo.get_historical_shares()
+        df = compute_all(df, instruments=instruments, historical_shares=historical_shares)
         return df
     except Exception as e:  # noqa: BLE001
         logger.warning("regime scan_enriched_fallback failed: %s", e)
@@ -391,15 +396,7 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
     existing = load_regime_history(data_dir)
 
     # 缺口: enriched 有哪些天, regime 缺哪些
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    enriched_dates: set[date] = set()
-    if enriched_dir.exists():
-        for part in enriched_dir.glob("date=*/part.parquet"):
-            try:
-                ds = part.parent.name.replace("date=", "")
-                enriched_dates.add(date.fromisoformat(ds))
-            except ValueError:
-                continue
+    enriched_dates = enriched_date_set(repo)
     existing_dates = set(existing["date"].to_list()) if not existing.is_empty() else set()
     missing = sorted(d for d in enriched_dates if d not in existing_dates and d <= today)
 
@@ -417,3 +414,24 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
     if not new_rows.is_empty():
         upsert_regime_history(data_dir, new_rows)
     return new_rows
+
+
+def enriched_date_set(repo) -> set[date]:
+    """扫描 kline_daily_enriched 分区目录, 返回所有已有日期集合。"""
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    dates: set[date] = set()
+    if not enriched_dir.exists():
+        return dates
+    for part in enriched_dir.glob("date=*/part.parquet"):
+        try:
+            ds = part.parent.name.replace("date=", "")
+            dates.add(date.fromisoformat(ds))
+        except ValueError:
+            continue
+    return dates
+
+
+def earliest_enriched_date(repo) -> date | None:
+    """返回 enriched 最早日期(供全量重算定起点)。无数据返回 None。"""
+    dates = enriched_date_set(repo)
+    return min(dates) if dates else None

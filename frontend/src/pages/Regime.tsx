@@ -15,6 +15,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
 import { fmtBigNum } from '@/lib/format'
+import { toast } from '@/components/Toast'
 
 const STATE_ORDER: RegimeState[] = ['strong', 'lean_strong', 'range', 'lean_weak', 'weak']
 
@@ -120,12 +121,16 @@ export function Regime() {
   const handleRecompute = async () => {
     setRecomputing(true)
     try {
-      await api.regimeRecompute()
+      const r = await api.regimeRecompute()
+      // computed=0 表示无缺口/stale, 数据未变更; >0 表示新增/重算了 N 天
+      toast(r.computed > 0 ? `重算完成 · 新增 ${r.computed} 天` : '重算完成 · 数据已是最新', 'success')
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['regime-history'] }),
         qc.invalidateQueries({ queryKey: ['regime-states'] }),
         qc.invalidateQueries({ queryKey: ['regime-latest'] }),
       ])
+    } catch (e) {
+      toast(`重算失败 · ${String((e as Error)?.message || e)}`, 'error')
     } finally {
       setRecomputing(false)
     }
@@ -148,7 +153,7 @@ export function Regime() {
           <button onClick={handleRecompute} disabled={recomputing}
             className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn border border-border bg-base text-xs text-secondary hover:text-accent disabled:opacity-50">
             {recomputing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            重算
+            {recomputing ? '重算中…' : '重算'}
           </button>
         </div>
       </div>

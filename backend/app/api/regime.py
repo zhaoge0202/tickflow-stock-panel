@@ -132,16 +132,25 @@ def regime_coverage(request: Request):
 
 @router.post("/recompute")
 def regime_recompute(request: Request, start: date | None = None, end: date | None = None):
-    """手动触发重算(全量或指定区间)。管理员操作。"""
+    """手动触发重算(全量或指定区间)。管理员操作。
+
+    - 不传 start: 强制全量重算(enriched 最早日 ~ 今天), 覆盖所有已有行。
+      与 daily_pipeline 的增量补差(compute_regime_incremental)不同 —— 此接口面向
+      人工「我要重新算一遍」的预期, 必须真正重算而非增量补缺口。
+    - 传 start: 仅重算 [start, end] 区间。
+    """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
     end = end or date.today()
     if start is None:
-        # 全量: 从 enriched 最早日算到今天
-        new_rows = regime_builder.compute_regime_incremental(repo, data_dir, today=end)
-    else:
-        new_rows = regime_builder.run_regime_batch(repo, start=start, end=end)
-        if not new_rows.is_empty():
-            regime_builder.upsert_regime_history(data_dir, new_rows)
+        # 全量: 从 enriched 最早日强制重算到今天
+        earliest = regime_builder.earliest_enriched_date(repo)
+        if earliest is None:
+            invalidate_regime_cache()
+            return {"ok": True, "computed": 0}
+        start = earliest
+    new_rows = regime_builder.run_regime_batch(repo, start=start, end=end)
+    if not new_rows.is_empty():
+        regime_builder.upsert_regime_history(data_dir, new_rows)
     invalidate_regime_cache()
     return {"ok": True, "computed": new_rows.height if not new_rows.is_empty() else 0}
