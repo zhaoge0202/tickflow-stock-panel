@@ -232,29 +232,29 @@ export function Regime() {
         axisLine: { lineStyle: { color: ct.grid } },
       },
       yAxis: [
-        { type: 'value', name: '综合分', min: 0, max: 100, axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
-        { type: 'value', name: '涨停', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '涨停', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '综合分', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
       ],
       dataZoom: [
         { type: 'inside', start: Math.max(0, 100 - (60 / days) * 100) },
         { type: 'slider', bottom: 8, height: 16, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
       ],
       series: [
-        // 涨停数柱状(半透明背景)
-        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 1, barMaxWidth: 6,
+        // 涨停数柱状(半透明背景, 左轴)
+        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 0, barMaxWidth: 6,
           itemStyle: { color: REGIME_STATE_COLORS.strong, opacity: 0.35 }, z: 1 },
-        // 4 子维度曲线: 帮助理解综合分由什么驱动(点图例可切换)
-        { name: '赚钱', type: 'line', data: profit, smooth: true, symbol: 'none',
+        // 4 子维度曲线(右轴=综合分): 帮助理解综合分由什么驱动(点图例可切换)
+        { name: '赚钱', type: 'line', data: profit, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#f59e0b' }, z: 2 },
-        { name: '投机', type: 'line', data: speculation, smooth: true, symbol: 'none',
+        { name: '投机', type: 'line', data: speculation, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#a855f7' }, z: 2 },
-        { name: '抗跌', type: 'line', data: resilience, smooth: true, symbol: 'none',
+        { name: '抗跌', type: 'line', data: resilience, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#10b981' }, z: 2 },
-        { name: '趋势', type: 'line', data: trend, smooth: true, symbol: 'none',
+        { name: '趋势', type: 'line', data: trend, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#3b82f6' }, z: 2 },
-        // 综合分主线(加粗置顶) + 状态背景色带 + 阈值横虚线
-        { name: '综合分', type: 'line', data: scores, smooth: true, symbol: 'none',
-          lineStyle: { width: 2.5, color: ct.textStrong }, areaStyle: { opacity: 0.06 }, z: 3,
+        // 综合分主线(加粗置顶, 右轴) + 状态背景色带 + 阈值横虚线
+        { name: '综合分', type: 'line', data: scores, smooth: true, symbol: 'none', yAxisIndex: 1,
+          lineStyle: { width: 1.5, color: ct.textStrong }, areaStyle: { opacity: 0.06 }, z: 3,
           markArea: { silent: true, data: stateBands },
           markLine: {
             silent: true,
@@ -264,6 +264,8 @@ export function Regime() {
             data: [
               { yAxis: 70, lineStyle: { color: REGIME_STATE_COLORS.strong },
                 label: { formatter: '强势 70', color: '#fff', backgroundColor: REGIME_STATE_COLORS.strong } },
+              { yAxis: 55, lineStyle: { color: REGIME_STATE_COLORS.lean_strong },
+                label: { formatter: '偏强 55', color: '#fff', backgroundColor: REGIME_STATE_COLORS.lean_strong } },
               { yAxis: 45, lineStyle: { color: REGIME_STATE_COLORS.range },
                 label: { formatter: '震荡 45', color: '#fff', backgroundColor: REGIME_STATE_COLORS.range } },
               { yAxis: 30, lineStyle: { color: REGIME_STATE_COLORS.lean_weak },
