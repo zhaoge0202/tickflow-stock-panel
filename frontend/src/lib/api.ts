@@ -437,6 +437,15 @@ export interface RegimeRow {
   above_ma20_pct: number
   total_amount: number
   avg_turnover: number
+  // 4 个子维度分(0-100, 重算后才有; 旧数据可能缺) — 综合分的加权来源
+  avg_pct?: number
+  median_pct?: number
+  strong_up_pct?: number
+  strong_down_pct?: number
+  profit_score?: number
+  speculation_score?: number
+  resilience_score?: number
+  trend_score?: number
 }
 
 export interface RegimeHistory {
