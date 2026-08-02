@@ -22,32 +22,24 @@ import polars as pl
 logger = logging.getLogger(__name__)
 
 # ───────────────────────── 状态分类阈值(可调) ─────────────────────────
-# 各维度子分用归一化映射(线性插值到 0-100), 再加权求和。
-# 综合 = 赚钱效应×0.4 + 指数趋势×0.3 + 板块结构×0.2 + 活跃度×0.1
+# 评分模型对齐看板情绪分(market_overview_builder): 采用 _score(low,high) 归一化
+# (比多点插值简洁、不易设错), 4 个轻量维度(赚钱/投机/抗跌/趋势), 阈值与看板统一。
+# 设计取舍: 不复制看板的"量能/主线"维度 — 它们依赖 vol_ratio_5d/概念主线等重列,
+# 全量回填补算会爆内存; 这两维对历史择时影响小, 且用户可在看板单独查看。
 
 WEIGHTS = {
-    "money_effect": 0.4,   # 赚钱效应(涨停/封板率/涨跌比)
-    "index_trend": 0.3,    # 指数趋势(指数涨幅/MA20上方占比)
-    "board_structure": 0.2,  # 板块结构(涨跌离散度, 简化)
-    "activity": 0.1,       # 活跃度(成交额/换手)
+    "profit": 0.35,        # 赚钱(涨家数/均涨幅/中位涨幅/强弱差) — 最反映赚钱难度
+    "speculation": 0.25,   # 投机(涨停数/封板率/连板高度)
+    "resilience": 0.20,    # 抗跌(跌家数/大跌股占比) — 识别弱势的关键, 原模型缺失
+    "trend": 0.20,         # 趋势(指数涨幅/MA20上方占比)
 }
 
-# 离散状态阈值(综合分)
-STATE_STRONG = 75       # >= 强势
-STATE_LEAN_STRONG = 60  # 60-75 偏强
-STATE_RANGE = 40        # 40-60 震荡
-STATE_LEAN_WEAK = 25    # 25-40 偏弱
-# < 25 弱势
-
-# 归一化映射的参考点(线性插值 0-100)
-_LIN = {
-    "limit_up": [(0, 0), (15, 40), (30, 70), (50, 100)],       # 涨停数
-    "seal_rate": [(0.3, 0), (0.5, 40), (0.7, 70), (0.9, 100)],  # 封板率
-    "up_ratio": [(0.4, 0), (1.0, 40), (2.0, 70), (3.0, 100)],   # 涨跌比
-    "index_pct": [(-0.02, 0), (0.0, 40), (0.01, 70), (0.02, 100)],  # 指数涨幅
-    "above_ma20": [(0.3, 0), (0.5, 40), (0.6, 70), (0.8, 100)],  # MA20上方占比
-    "amount": [(0.5e11, 0), (1e11, 40), (1.5e11, 70), (2.5e11, 100)],  # 成交额
-}
+# 离散状态阈值(与看板情绪分统一)
+STATE_STRONG = 70       # >= 强势
+STATE_LEAN_STRONG = 55  # 55-70 偏强
+STATE_RANGE = 45        # 45-55 震荡
+STATE_LEAN_WEAK = 30    # 30-45 偏弱
+# < 30 弱势
 
 STATE_LABELS = {
     "strong": "强势",
@@ -58,62 +50,64 @@ STATE_LABELS = {
 }
 
 
-def _linear_score(value: float, points: list[tuple[float, float]]) -> float:
-    """分段线性插值。points 是 [(输入值, 输出分)] 升序列表。"""
-    if value <= points[0][0]:
-        return float(points[0][1])
-    if value >= points[-1][0]:
-        return float(points[-1][1])
-    for i in range(len(points) - 1):
-        x0, y0 = points[i]
-        x1, y1 = points[i + 1]
-        if x0 <= value <= x1:
-            if x1 == x0:
-                return float(y0)
-            return float(y0 + (y1 - y0) * (value - x0) / (x1 - x0))
-    return float(points[-1][1])
+def _score(value: float, low: float, high: float) -> float:
+    """归一化: 把 value 在 [low, high] 区间线性映射到 [0, 100], 钳制边界。
+
+    与看板 market_overview_builder._score 同款。low/high 用 A 股真实分位数校准。
+    """
+    if high <= low:
+        return 50.0
+    return float(max(0, min(100, round((value - low) / (high - low) * 100))))
 
 
 def classify_state(metrics: dict) -> tuple[str, int]:
-    """规则引擎: 多维指标 → 离散状态 + 综合分(0-100)。
+    """规则引擎: 4 维指标 → 离散状态 + 综合分(0-100)。
 
-    各维度子分加权: 赚钱效应(涨停数/封板率/涨跌比) + 指数趋势(涨幅/MA20)
-    + 板块结构(涨跌离散度简化) + 活跃度(成交额)。
+    对齐看板情绪分的轻量维度(去掉量能/主线以控制内存):
+    - 赚钱 profit: 涨家数占比 + 均涨幅 + 中位涨幅 + 强弱差
+    - 投机 speculation: 涨停数 + 封板率 + 连板高度
+    - 抗跌 resilience: 跌家数占比 + 大跌股占比(大跌日此项暴跌 → 总分进 weak)
+    - 趋势 trend: 指数涨幅 + MA20 上方占比
+
+    metrics 期望字段(由 _aggregate_daily 聚合):
+      up_pct, down_pct, avg_pct, median_pct, strong_up_pct, strong_down_pct,
+      strong_diff_pct, limit_up, seal_rate(0-1), max_consecutive,
+      index_pct(小数), above_ma20_pct(0-1)
     """
-    # 赚钱效应子分 = 涨停/封板率/涨跌比 三者平均
-    limit_up = metrics.get("limit_up", 0) or 0
-    seal_rate = metrics.get("seal_rate", 0.5) or 0.5
-    up_ratio = metrics.get("up_ratio", 1.0) or 1.0
-    money = (
-        _linear_score(limit_up, _LIN["limit_up"])
-        + _linear_score(seal_rate, _LIN["seal_rate"])
-        + _linear_score(up_ratio, _LIN["up_ratio"])
-    ) / 3
+    # 赚钱维度
+    # _score 的 low/high 用 A 股 2022-2026 真实 p15/p85 分位数校准,
+    # 使各子分 ~70% 数据落在 15-85 分, 综合分呈健康钟形(避免两极化/挤压震荡)。
+    profit = (
+        _score(metrics.get("up_pct", 50), 21, 75) * 0.45      # 涨家数占比 p15/p85
+        + _score(metrics.get("avg_pct", 0) * 100, -1.2, 1.3) * 0.25  # 均涨幅
+        + _score(metrics.get("median_pct", 0) * 100, -1.2, 1.3) * 0.20  # 中位涨幅(同均涨幅分位)
+        + _score(metrics.get("strong_diff_pct", 0), -13, 14) * 0.10  # 强弱差 p15/p85
+    )
 
-    index_pct = metrics.get("index_pct", 0.0) or 0.0
-    above_ma20 = metrics.get("above_ma20_pct", 0.5) or 0.5
-    index_trend = (
-        _linear_score(index_pct, _LIN["index_pct"])
-        + _linear_score(above_ma20, _LIN["above_ma20"])
-    ) / 2
+    # 投机维度
+    speculation = (
+        _score(metrics.get("limit_up", 0), 35, 97) * 0.30     # 涨停数 p15/p85
+        + _score((metrics.get("seal_rate", 0.5) or 0.5) * 100, 57, 75) * 0.40  # 封板率 p15/p85
+        + _score(metrics.get("max_consecutive", 0), 4, 9) * 0.30  # 连板高度 p15/p85
+    )
 
-    # 板块结构: 用涨跌家数比的偏离度简化(涨跌越均衡=震荡, 极端=方向明确)
-    # up_ratio 接近 1 → 震荡(中分); 远离 1 → 方向明确(高低分看方向)
-    # 已在 money_effect 的 up_ratio 体现, 这里用涨停+跌停的对比做补充
-    limit_down = metrics.get("limit_down", 0) or 0
-    if limit_up + limit_down > 0:
-        board = (limit_up - limit_down) / max(limit_up + limit_down, 1) * 50 + 50
-    else:
-        board = 50.0
+    # 抗跌维度(关键: 大跌日 strong_down_pct 飙升 → 子分低 → 总分进 weak)
+    # 只用 strong_down_pct(大跌股≤-3%占比), 不用 down_pct — 后者与 profit 的 up_pct
+    # 是同一信息的正反面, 叠加会放大两极化、挤压震荡区间。strong_down_pct 才是独立信号。
+    # low=2/high=18 取 p15/p85, 大跌日(>18%)→子分趋0, 正常日(<2%)→满分。
+    resilience = 100 - _score(metrics.get("strong_down_pct", 0), 2, 18)
 
-    total_amount = metrics.get("total_amount", 1e11) or 1e11
-    activity = _linear_score(total_amount, _LIN["amount"])
+    # 趋势维度
+    trend = (
+        _score(metrics.get("index_pct", 0) * 100, -2.5, 2.5) * 0.50  # 指数涨幅(对称)
+        + _score((metrics.get("above_ma20_pct", 0.5) or 0.5) * 100, 22, 76) * 0.50  # MA20上方 p15/p85
+    )
 
     score = (
-        money * WEIGHTS["money_effect"]
-        + index_trend * WEIGHTS["index_trend"]
-        + board * WEIGHTS["board_structure"]
-        + activity * WEIGHTS["activity"]
+        profit * WEIGHTS["profit"]
+        + speculation * WEIGHTS["speculation"]
+        + resilience * WEIGHTS["resilience"]
+        + trend * WEIGHTS["trend"]
     )
     score = max(0, min(100, round(score)))
 
@@ -155,6 +149,19 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             if "change_pct" in avail else pl.lit(0).alias("down_count"),
             pl.len().alias("total_count"),
         ],
+        # 新增: 涨跌幅分布(赚钱/抗跌维度所需) — 全部向量化, 一次算出
+        *(
+            [
+                pl.col("change_pct").mean().alias("avg_pct"),
+                pl.col("change_pct").median().alias("median_pct"),
+                pl.col("change_pct").ge(0.03).sum().alias("strong_up_count"),
+                pl.col("change_pct").le(-0.03).sum().alias("strong_down_count"),
+            ]
+            if "change_pct" in avail else [
+                pl.lit(0).alias("avg_pct"), pl.lit(0).alias("median_pct"),
+                pl.lit(0).alias("strong_up_count"), pl.lit(0).alias("strong_down_count"),
+            ]
+        ),
         *(
             [pl.col("signal_limit_up").cast(pl.Boolean).sum().alias("limit_up")]
             if "signal_limit_up" in avail else [pl.lit(0).alias("limit_up")]
@@ -198,12 +205,20 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
     for r in grouped.iter_rows(named=True):
         up = r.get("up_count", 0) or 0
         down = r.get("down_count", 0) or 0
+        total = r.get("total_count", 0) or 0
         limit_up = r.get("limit_up", 0) or 0
         broken = r.get("broken_limit", 0) or 0
         # MA20 上方占比: 来自向量化聚合 (None→0)
         valid_cnt = r.get("_valid_cnt") or 0
         above_cnt = r.get("_above_cnt") or 0
         ma20_above = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.0
+        # 涨跌幅分布(占比, 0-100)
+        up_pct = (up / total * 100) if total > 0 else 0.0
+        down_pct = (down / total * 100) if total > 0 else 0.0
+        strong_up_pct = ((r.get("strong_up_count", 0) or 0) / total * 100) if total > 0 else 0.0
+        strong_down_pct = ((r.get("strong_down_count", 0) or 0) / total * 100) if total > 0 else 0.0
+        avg_pct = r.get("avg_pct", 0.0) or 0.0
+        median_pct = r.get("median_pct", 0.0) or 0.0
         metrics = {
             "limit_up": limit_up,
             "limit_down": r.get("limit_down", 0) or 0,
@@ -217,6 +232,14 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "above_ma20_pct": ma20_above,
             "total_amount": r.get("total_amount", 0) or 0,
             "avg_turnover": r.get("avg_amount", 0) or 0,
+            # 新模型所需(对齐看板)
+            "up_pct": up_pct,
+            "down_pct": down_pct,
+            "avg_pct": avg_pct,
+            "median_pct": median_pct,
+            "strong_up_pct": strong_up_pct,
+            "strong_down_pct": strong_down_pct,
+            "strong_diff_pct": strong_up_pct - strong_down_pct,
         }
         state, score = classify_state(metrics)
         rows.append({
@@ -235,6 +258,11 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "above_ma20_pct": round(ma20_above, 4),
             "total_amount": metrics["total_amount"],
             "avg_turnover": metrics["avg_turnover"],
+            # 新增列(供未来策略按强势股占比等过滤)
+            "avg_pct": round(avg_pct, 4),
+            "median_pct": round(median_pct, 4),
+            "strong_up_pct": round(strong_up_pct, 4),
+            "strong_down_pct": round(strong_down_pct, 4),
         })
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
@@ -262,7 +290,9 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     ).collect()
     if df.is_empty():
         return pl.DataFrame()
-    df = compute_indicators(df, needed={"change_pct", "ma20", "vol_ratio_5d"})
+    # 新评分模型只需 change_pct(赚钱/抗跌维) + ma20(趋势维); 不再需要 vol_ratio_5d
+    # (compute_limit_signals 文档虽提及但函数体未实际使用, 已验证可安全省去 → 省内存)
+    df = compute_indicators(df, needed={"change_pct", "ma20"})
     if instruments is not None and not instruments.is_empty():
         df = compute_limit_signals(
             df, instruments,
@@ -394,6 +424,8 @@ def upsert_regime_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
     """按 date 覆盖(upsert): 重算的天覆盖旧行, 新天追加。
 
     读旧 → anti-join 掉 new_rows 的天 → concat new_rows → 排序 → 写回。
+    schema 兼容: 旧 parquet 可能缺新列(评分模型迭代新增的 avg_pct 等),
+    concat 前给旧数据补缺失列(null), 让旧 parquet 首次重写时自动迁移到新 schema。
     """
     if new_rows.is_empty() or "date" not in new_rows.columns:
         return
@@ -405,6 +437,18 @@ def upsert_regime_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
         combined = new_rows
     else:
         kept = old.filter(~pl.col("date").is_in(list(new_dates)))
+        # schema 对齐: 以 new_rows 的列名+顺序为权威, 旧数据补缺失列(null),
+        # 并按相同列顺序 select, 确保 concat 不报 "schema names/lengths differ"。
+        # 这样旧 parquet 首次重写时自动迁移到新 schema(新列在旧日期为 null)。
+        target_cols = new_rows.columns
+        keep_exprs = []
+        for c in target_cols:
+            if c in kept.columns:
+                keep_exprs.append(pl.col(c))
+            else:
+                keep_exprs.append(pl.lit(None).alias(c))
+        kept = kept.select(keep_exprs)
+        new_rows = new_rows.select(target_cols)
         combined = pl.concat([kept, new_rows], how="vertical_relaxed")
     combined = combined.sort("date").unique(subset=["date"], keep="last")
     combined.write_parquet(p)

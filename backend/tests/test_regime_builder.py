@@ -17,42 +17,76 @@ import polars as pl
 from app.services import regime_builder
 
 # ───────────────────────── 状态分类 ─────────────────────────
+# 新评分模型(对齐看板情绪分): 4 维 profit/speculation/resilience/trend,
+# metrics 字段为 up_pct/down_pct/avg_pct/median_pct/strong_up_pct/strong_down_pct/
+# strong_diff_pct/limit_up/seal_rate/max_consecutive/index_pct/above_ma20_pct。
 
 
 def test_classify_strong():
+    """普涨行情: 涨家数多、跌幅小、涨停多 → 强势。"""
     state, score = regime_builder.classify_state({
-        "limit_up": 40, "limit_down": 1, "seal_rate": 0.85, "up_ratio": 3.0,
-        "index_pct": 0.02, "above_ma20_pct": 0.7, "total_amount": 2e11,
+        "up_pct": 80, "down_pct": 15, "avg_pct": 0.025, "median_pct": 0.02,
+        "strong_up_pct": 12, "strong_down_pct": 1, "strong_diff_pct": 11,
+        "limit_up": 90, "seal_rate": 0.8, "max_consecutive": 6,
+        "index_pct": 0.015, "above_ma20_pct": 0.8,
     })
     assert state == "strong"
-    assert score >= 75
+    assert score >= 70
 
 
 def test_classify_weak():
+    """千股跌停: 跌家数多、大跌股多 → 抗跌维暴跌 → 弱势。"""
     state, score = regime_builder.classify_state({
-        "limit_up": 1, "limit_down": 20, "seal_rate": 0.2, "up_ratio": 0.2,
-        "index_pct": -0.025, "above_ma20_pct": 0.2, "total_amount": 5e10,
+        "up_pct": 10, "down_pct": 85, "avg_pct": -0.035, "median_pct": -0.03,
+        "strong_up_pct": 1, "strong_down_pct": 30, "strong_diff_pct": -29,
+        "limit_up": 5, "seal_rate": 0.3, "max_consecutive": 1,
+        "index_pct": -0.02, "above_ma20_pct": 0.1,
     })
     assert state == "weak"
-    assert score < 25
+    assert score < 30
 
 
 def test_classify_range():
+    """均衡市: 涨跌各半、无明显方向 → 震荡。"""
     state, score = regime_builder.classify_state({
-        "limit_up": 8, "limit_down": 6, "seal_rate": 0.5, "up_ratio": 1.0,
-        "index_pct": 0.0, "above_ma20_pct": 0.5, "total_amount": 1e11,
+        "up_pct": 48, "down_pct": 48, "avg_pct": 0.0, "median_pct": 0.0,
+        "strong_up_pct": 4, "strong_down_pct": 4, "strong_diff_pct": 0,
+        "limit_up": 40, "seal_rate": 0.6, "max_consecutive": 2,
+        "index_pct": 0.0, "above_ma20_pct": 0.5,
     })
     assert state == "range"
-    assert 40 <= score < 60
+    assert 45 <= score < 55
 
 
-def test_classify_monotonic_limit_up():
-    """涨停数越多, 综合分越高(其他条件相同)。"""
-    base = {"limit_down": 2, "seal_rate": 0.7, "up_ratio": 2.0,
-            "index_pct": 0.01, "above_ma20_pct": 0.6, "total_amount": 1.5e11}
-    s_low = regime_builder.classify_state({**base, "limit_up": 5})[1]
-    s_mid = regime_builder.classify_state({**base, "limit_up": 20})[1]
-    s_high = regime_builder.classify_state({**base, "limit_up": 45})[1]
+def test_classify_resilience_drives_weak():
+    """抗跌维度专项: 同样的涨跌家数, 大跌股占比飙升会让总分大幅下降。
+
+    验证抗跌维是识别弱势的关键 — 即使涨停数不少, 但大跌股多也会判弱。
+    """
+    base = {
+        "up_pct": 40, "down_pct": 55, "avg_pct": -0.005, "median_pct": -0.005,
+        "strong_up_pct": 3, "limit_up": 30, "seal_rate": 0.6, "max_consecutive": 2,
+        "index_pct": -0.003, "above_ma20_pct": 0.4,
+    }
+    # 大跌股少 → 分数较高
+    s_few_down = regime_builder.classify_state({**base, "down_pct": 55, "strong_down_pct": 3, "strong_diff_pct": 0})[1]
+    # 大跌股飙升 → 分数显著下降(抗跌维暴跌)
+    s_many_down = regime_builder.classify_state({**base, "down_pct": 55, "strong_down_pct": 15, "strong_diff_pct": -12})[1]
+    assert s_many_down < s_few_down
+    assert s_few_down - s_many_down >= 10  # 抗跌维影响显著(权重0.25)
+
+
+def test_classify_monotonic_up_pct():
+    """涨家数占比越高, 综合分越高(其他条件相同)。"""
+    base = {
+        "down_pct": 30, "avg_pct": 0.01, "median_pct": 0.01,
+        "strong_up_pct": 5, "strong_down_pct": 3, "strong_diff_pct": 2,
+        "limit_up": 40, "seal_rate": 0.65, "max_consecutive": 3,
+        "index_pct": 0.005, "above_ma20_pct": 0.55,
+    }
+    s_low = regime_builder.classify_state({**base, "up_pct": 30})[1]
+    s_mid = regime_builder.classify_state({**base, "up_pct": 50})[1]
+    s_high = regime_builder.classify_state({**base, "up_pct": 75})[1]
     assert s_low < s_mid < s_high
 
 
