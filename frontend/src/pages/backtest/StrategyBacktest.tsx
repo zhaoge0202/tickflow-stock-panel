@@ -8,6 +8,8 @@ import {
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
+  REGIME_STATE_LABELS,
+  REGIME_STATE_COLORS,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -883,6 +885,9 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
+  // 市场环境过滤(空=不过滤)
+  const [regimeStates, setRegimeStates] = useState<string[]>([])
+  const [regimeMinScore, setRegimeMinScore] = useState<number | ''>('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1047,6 +1052,12 @@ export function StrategyBacktest() {
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
       minute_fill: highGranularity,
+      regime_filter: regimeStates.length > 0 || regimeMinScore !== ''
+        ? {
+            ...(regimeStates.length > 0 ? { states: regimeStates } : {}),
+            ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
+          }
+        : null,
     })
   }
 
@@ -1713,6 +1724,40 @@ export function StrategyBacktest() {
               </div>
             )
           )}
+        </div>
+
+        {/* 市场环境过滤: 只在指定环境的交易日入场(强制 T-1, 用前一日环境判定) */}
+        <div className="rounded-btn border border-border bg-surface/50 px-3 py-2 space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Gauge className="h-3.5 w-3.5 text-accent" />
+            <span className="text-xs font-medium text-foreground">环境过滤</span>
+            <span className="text-[10px] text-muted">仅在前一日环境满足时入场(防未来函数)</span>
+            <div className="ml-auto flex items-center gap-1">
+              <span className="text-[10px] text-muted">最低分</span>
+              <input type="number" min={0} max={100} value={regimeMinScore} placeholder="不限"
+                onChange={e => setRegimeMinScore(e.target.value ? Number(e.target.value) : '')}
+                className="w-14 h-6 px-1 rounded border border-border bg-base text-[11px] text-foreground text-center focus:outline-none focus:border-accent/50" />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {(Object.keys(REGIME_STATE_LABELS) as (keyof typeof REGIME_STATE_LABELS)[]).map(s => {
+              const active = regimeStates.includes(s)
+              return (
+                <button key={s} onClick={() => setRegimeStates(prev => active ? prev.filter(x => x !== s) : [...prev, s])}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition-colors cursor-pointer ${
+                    active ? 'border-transparent text-white' : 'border-border text-muted hover:text-secondary'
+                  }`}
+                  style={active ? { backgroundColor: REGIME_STATE_COLORS[s] } : undefined}>
+                  <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: active ? '#fff' : REGIME_STATE_COLORS[s] }} />
+                  {REGIME_STATE_LABELS[s]}
+                </button>
+              )
+            })}
+            {(regimeStates.length > 0 || regimeMinScore !== '') && (
+              <button onClick={() => { setRegimeStates([]); setRegimeMinScore('') }}
+                className="text-[10px] text-muted hover:text-danger px-1">清除</button>
+            )}
+          </div>
         </div>
 
         {result?.error && (

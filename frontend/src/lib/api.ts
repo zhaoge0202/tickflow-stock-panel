@@ -402,6 +402,66 @@ export interface RpsRotationData {
   concept_count: number
 }
 
+// ===== 市场环境(Regime) =====
+export type RegimeState = 'strong' | 'lean_strong' | 'range' | 'lean_weak' | 'weak'
+
+export const REGIME_STATE_LABELS: Record<RegimeState, string> = {
+  strong: '强势',
+  lean_strong: '偏强',
+  range: '震荡',
+  lean_weak: '偏弱',
+  weak: '弱势',
+}
+
+export const REGIME_STATE_COLORS: Record<RegimeState, string> = {
+  strong: '#ef4444',      // 红(强)
+  lean_strong: '#f97316', // 橙
+  range: '#6b7280',       // 灰
+  lean_weak: '#3b82f6',   // 蓝
+  weak: '#10b981',        // 绿(弱)
+}
+
+export interface RegimeRow {
+  date: string
+  state: RegimeState
+  score: number
+  limit_up: number
+  limit_down: number
+  broken_limit: number
+  max_consecutive: number
+  seal_rate: number
+  up_count: number
+  down_count: number
+  up_ratio: number
+  index_pct: number
+  above_ma20_pct: number
+  total_amount: number
+  avg_turnover: number
+}
+
+export interface RegimeHistory {
+  rows: RegimeRow[]
+  total: number
+}
+
+export interface RegimeStateItem {
+  state: RegimeState
+  label: string
+  count: number
+  pct: number
+}
+
+export interface RegimeStates {
+  distribution: RegimeStateItem[]
+  days: number
+}
+
+export interface RegimeCoverage {
+  rows: number
+  earliest_date: string | null
+  latest_date: string | null
+}
+
 // ===== 大盘复盘 =====
 export interface AiReviewReport {
   id: string
@@ -1473,6 +1533,26 @@ export const api = {
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number) =>
     request<RpsRotationData>(`/api/rps/rotation?days=${days}`),
+
+  // 市场环境(Regime)
+  regimeHistory: (start?: string, end?: string, limit?: number) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    if (limit) params.set('limit', String(limit))
+    const qs = params.toString()
+    return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
+  },
+  regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
+  regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
+  regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
+  regimeRecompute: (start?: string, end?: string) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    const qs = params.toString()
+    return request<{ ok: boolean; computed: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
