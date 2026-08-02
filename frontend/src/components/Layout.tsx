@@ -80,7 +80,7 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
-  { to: '/regime', label: '市场环境', icon: Gauge },
+  { to: '/regime', label: '市场环境', icon: Gauge, badge: 'beta' },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
@@ -381,11 +381,12 @@ export function Layout() {
   }, [alertsTotal])
 
   // 合并内置页面 + 可见的扩展分析菜单
-  const analysisNav = (analysisMenus?.items ?? [])
+  type NavItem = { to: string; label: string; icon: typeof Gauge; badge?: string }
+  const analysisNav: NavItem[] = (analysisMenus?.items ?? [])
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
 
-  const allNav = [...nav, ...analysisNav]
+  const allNav: NavItem[] = [...nav, ...analysisNav]
   const savedOrder = prefs?.nav_order ?? []
 
   const navItems = savedOrder.length > 0
@@ -463,7 +464,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon }) => (
+          {visibleNavItems.map(({ to, label, icon: Icon, badge }) => (
             <NavLink
               key={to}
               to={to}
@@ -480,6 +481,11 @@ export function Layout() {
                 <>
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
+                  {badge && (
+                    <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+                      {badge}
+                    </span>
+                  )}
                   {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
                   {to === '/data' && isDataSyncing && (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
