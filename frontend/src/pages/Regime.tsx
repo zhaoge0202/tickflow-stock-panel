@@ -179,8 +179,21 @@ export function Regime() {
       backgroundColor: 'transparent',
       tooltip: { trigger: 'item', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, textStyle: { color: ct.tooltipText } },
       series: [{
-        type: 'pie', radius: ['42%', '70%'], center: ['50%', '52%'],
-        label: { color: ct.text, fontSize: 10, formatter: '{b}\n{d}%' },
+        type: 'pie', radius: ['42%', '65%'], center: ['50%', '52%'],
+        // 标签外置 + 引导虚线, 避免 5 个状态标签互相重叠(原 label 紧贴扇区会挤在一起)。
+        label: {
+          position: 'outside',
+          color: ct.text, fontSize: 10,
+          formatter: '{b}  {d}%',
+        },
+        labelLine: {
+          show: true,
+          length: 8,        // 第一段(扇区到拐点)
+          length2: 10,      // 第二段(拐点到标签)
+          lineStyle: { color: ct.border, type: 'dashed', width: 1 },
+        },
+        // labelLayout 自动调整标签位置防重叠: 相邻标签过近时自动错开
+        labelLayout: { hideOverlap: false },
         data: STATE_ORDER
           .map(s => dist.find(d => d.state === s))
           .filter((x): x is NonNullable<typeof x> => !!x)
