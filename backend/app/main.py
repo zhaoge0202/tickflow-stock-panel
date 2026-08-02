@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
 
     # 策略引擎
     from app.strategy.engine import StrategyEngine
+    from app.strategy import config as strategy_config
     from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
 
@@ -150,9 +151,11 @@ async def lifespan(app: FastAPI):
         Path(__file__).resolve().parent / "strategy" / "builtin",
         store.data_dir / "strategies" / "custom",
         store.data_dir / "strategies" / "ai",
+        store.data_dir / "strategies" / "composite",
     ]
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
+        override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))

@@ -22,6 +22,7 @@ import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDi
 import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
+import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -48,6 +49,7 @@ export function Screener() {
   const [showBuilder, setShowBuilder] = useState(false)
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
+  const [showComposite, setShowComposite] = useState(false)
   const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
@@ -666,6 +668,16 @@ export function Screener() {
                 {visiblePool.length}/{strategyPresets.length}
               </span>
             </button>
+            {/* 创建叠加策略 */}
+            <button
+              onClick={() => setShowComposite(true)}
+              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn
+                text-xs font-medium text-teal-400 border border-teal-500/20 bg-teal-500/5
+                hover:bg-teal-500/15 transition-colors cursor-pointer"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              叠加策略
+            </button>
             {/* 创建策略 */}
             <button
               onClick={() => { setBuilderMode('create'); setShowBuilder(true) }}
@@ -991,6 +1003,15 @@ export function Screener() {
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
+          addToPool(id)
+        }}
+      />
+
+      <CompositeStrategyDialog
+        open={showComposite}
+        onClose={() => setShowComposite(false)}
+        onSavedId={async id => {
+          await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
           addToPool(id)
         }}
       />

@@ -36,6 +36,7 @@ const STRATEGY_SOURCE_META = {
   builtin: { label: '内置', className: 'border-accent/25 bg-accent/10 text-accent' },
   custom: { label: '自定义', className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-400' },
   ai: { label: 'AI', className: 'border-amber-400/25 bg-amber-400/10 text-amber-400' },
+  composite: { label: '叠加', className: 'border-teal-500/25 bg-teal-500/10 text-teal-400' },
 } as const
 
 const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
@@ -94,7 +95,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const [error, setError] = useState('')
   const [symbolQuery, setSymbolQuery] = useState('')
   const [strategyQuery, setStrategyQuery] = useState('')
-  const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai'>('all')
+  const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai' | 'composite'>('all')
   // 标的搜索资产类型: ETF 一并搜股票; 指数只搜指数; 否则只搜股票。
   const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : assetType === 'index' ? 'index' : 'stock'
   const symbolSearch = useQuery({
@@ -212,6 +213,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     { key: 'builtin' as const, label: '内置', count: strategyPresets.filter(strategy => strategy.source === 'builtin').length },
     { key: 'custom' as const, label: '自定义', count: strategyPresets.filter(strategy => strategy.source === 'custom').length },
     { key: 'ai' as const, label: 'AI', count: strategyPresets.filter(strategy => strategy.source === 'ai').length },
+    { key: 'composite' as const, label: '叠加', count: strategyPresets.filter(strategy => strategy.source === 'composite').length },
   ]
 
   const onSignalPickerChange = (next: string[]) => {
