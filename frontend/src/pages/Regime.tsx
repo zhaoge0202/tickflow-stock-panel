@@ -225,7 +225,7 @@ export function Regime() {
         // 默认只显示综合分 + 涨停数(简洁); 4 个子维度默认隐藏, 点图例展开看驱动因素
         selected: { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false },
       },
-      grid: { left: 48, right: 48, top: 36, bottom: 56 },
+      grid: { left: 48, right: 64, top: 36, bottom: 56 },
       xAxis: {
         type: 'category', data: dates, boundaryGap: false,
         axisLabel: { color: ct.text, fontSize: 10, formatter: (v: string) => v.slice(5) },
@@ -256,11 +256,20 @@ export function Regime() {
         { name: '综合分', type: 'line', data: scores, smooth: true, symbol: 'none',
           lineStyle: { width: 2.5, color: ct.textStrong }, areaStyle: { opacity: 0.06 }, z: 3,
           markArea: { silent: true, data: stateBands },
-          markLine: { silent: true, lineStyle: { type: 'dashed', color: ct.grid }, data: [
-            { yAxis: 70, label: { formatter: '强势', color: ct.text, fontSize: 9 } },
-            { yAxis: 45, label: { formatter: '震荡', color: ct.text, fontSize: 9 } },
-            { yAxis: 30, label: { formatter: '偏弱', color: ct.text, fontSize: 9 } },
-          ] } },
+          markLine: {
+            silent: true,
+            symbol: 'none',
+            lineStyle: { type: 'dashed', width: 1.5 },
+            label: { position: 'end', fontSize: 10, fontWeight: 'bold', padding: [2, 4], borderRadius: 3 },
+            data: [
+              { yAxis: 70, lineStyle: { color: REGIME_STATE_COLORS.strong },
+                label: { formatter: '强势 70', color: '#fff', backgroundColor: REGIME_STATE_COLORS.strong } },
+              { yAxis: 45, lineStyle: { color: REGIME_STATE_COLORS.range },
+                label: { formatter: '震荡 45', color: '#fff', backgroundColor: REGIME_STATE_COLORS.range } },
+              { yAxis: 30, lineStyle: { color: REGIME_STATE_COLORS.lean_weak },
+                label: { formatter: '偏弱 30', color: '#fff', backgroundColor: REGIME_STATE_COLORS.lean_weak } },
+            ],
+          } },
       ],
     }
   }, [rows, days, ct])
