@@ -35,6 +35,7 @@ import {
   TrendingUp,
   Flame,
   BarChart3,
+  Gauge,
   Sparkles,
   Layers3,
   Landmark,
@@ -79,6 +80,7 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
+  { to: '/regime', label: '市场环境', icon: Gauge },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 

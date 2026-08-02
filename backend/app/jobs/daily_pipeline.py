@@ -516,6 +516,24 @@ def run_now(
         else:
             logger.info("sync_minute skipped: user disabled")
 
+    # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
+    # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
+    regime_days = 0
+    try:
+        emit("compute_regime", 90, "计算市场环境…")
+        from app.services import regime_builder
+        from app.api.regime import invalidate_regime_cache
+        new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
+        regime_days = new_regime.height if not new_regime.is_empty() else 0
+        if regime_days:
+            invalidate_regime_cache()
+            logger.info("compute_regime: %d days", regime_days)
+        emit("compute_regime", 92, f"市场环境 {regime_days} 天")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("compute_regime failed (soft): %s", e)
+        stage_errors.append(f"compute_regime: {e}")
+        skipped.append("regime")
+
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
@@ -534,6 +552,7 @@ def run_now(
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
         "minute_rows": written_minute,
+        "regime_days": regime_days,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,

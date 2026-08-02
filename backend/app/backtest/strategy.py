@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -473,6 +474,9 @@ class StrategyBacktestConfig:
     holding_days: int = 5
     # 分钟K精确成交: 开启后用当日分钟K确定穿越价/VWAP (需 Pro+ 分钟K能力)
     minute_fill: bool = False
+    # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
+    # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
+    regime_filter: dict | None = None
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
@@ -846,6 +850,13 @@ class StrategyBacktestService:
             first.start,
             first.end,
         )
+        # 市场环境过滤(优化器共享, 用首个 config 的 regime_filter)
+        _rm = self._build_regime_mask(
+            market_data.timestamp_labels, first.regime_filter,
+            getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+        )
+        if _rm is not None:
+            entry_time_mask = entry_time_mask & _rm
         exit_time_mask = self._matrix_date_range_mask(
             market_data.timestamp_labels,
             first.start,
@@ -1127,6 +1138,13 @@ class StrategyBacktestService:
                 config.start,
                 config.end,
             )
+            # 市场环境过滤(强制 T-1): 只叠加 entry, 不影响 exit
+            _rm = self._build_regime_mask(
+                market_data.timestamp_labels, config.regime_filter,
+                getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+            )
+            if _rm is not None:
+                entry_time_mask = entry_time_mask & _rm
             exit_time_mask = self._matrix_date_range_mask(
                 market_data.timestamp_labels,
                 config.start,
@@ -1220,6 +1238,12 @@ class StrategyBacktestService:
                     config.start,
                     config.end,
                 )
+                _rm = self._build_regime_mask(
+                    market_data.timestamp_labels, config.regime_filter,
+                    getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                )
+                if _rm is not None:
+                    entry_time_mask = entry_time_mask & _rm
                 exit_time_mask = self._matrix_date_range_mask(
                     market_data.timestamp_labels,
                     config.start,
@@ -1619,6 +1643,56 @@ class StrategyBacktestService:
             dtype=bool,
             count=len(timestamp_labels),
         )
+
+    @staticmethod
+    def _build_regime_mask(
+        timestamp_labels: tuple[str, ...],
+        regime_filter: dict | None,
+        data_dir: Path | None,
+    ) -> np.ndarray | None:
+        """构造逐日 regime mask。强制 T-1 防未来函数: regime[T-1] 决定 entry[T]。
+
+        timestamp_labels[i] 的入场资格 = 它的"前一交易日"的 regime 是否满足条件。
+        "前一交易日"用 timestamp_labels 自身的顺序确定(回测时间轴上的前一天)。
+        边界: 首日无前一日环境 → 默认允许(不阻断)。
+        regime_filter 为 None 或无 regime 数据时返回 None(不过滤)。
+        """
+        if not regime_filter or data_dir is None:
+            return None
+        allowed_states = set(regime_filter.get("states") or [])
+        min_score = regime_filter.get("min_score")
+        if not allowed_states and min_score is None:
+            return None
+
+        from app.services import regime_builder
+        regime_df = regime_builder.load_regime_history(data_dir)
+        if regime_df.is_empty():
+            return None
+
+        # 构建 date(ISO) → (state, score) 映射
+        regime_map: dict[str, tuple[str, int]] = {}
+        for r in regime_df.iter_rows(named=True):
+            d = r.get("date")
+            ds = str(d)[:10] if d is not None else None
+            if ds:
+                regime_map[ds] = (str(r.get("state", "")), int(r.get("score", 0) or 0))
+
+        # 对每个 label, 找它的前一交易日的 regime(timestamp_labels 顺序里的前一天)
+        n = len(timestamp_labels)
+        mask = np.ones(n, dtype=bool)  # 默认允许
+        for i in range(1, n):
+            prev_label = timestamp_labels[i - 1][:10]
+            entry = regime_map.get(prev_label)
+            if entry is None:
+                continue  # 无前一日环境数据 → 允许(不阻断)
+            state, score = entry
+            ok = True
+            if allowed_states and state not in allowed_states:
+                ok = False
+            if min_score is not None and score < min_score:
+                ok = False
+            mask[i] = ok
+        return mask
 
     def _build_candidate_filter_mask(
         self,
