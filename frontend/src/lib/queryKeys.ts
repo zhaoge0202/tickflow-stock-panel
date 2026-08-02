@@ -89,6 +89,7 @@ export const QK = {
   regimeHistory:        (limit?: number) => ['regime-history', limit ?? 0] as const,
   regimeLatest:         ['regime-latest'] as const,
   regimeStates:         (days: number) => ['regime-states', days] as const,
+  regimeCoverage:       ['regime-coverage'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

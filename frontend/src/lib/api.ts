@@ -969,6 +969,9 @@ export interface Preferences {
   pipeline_pull_a_share: boolean
   pipeline_pull_etf: boolean
   pipeline_pull_index: boolean
+  pipeline_regime_enabled: boolean
+  regime_batch_days: number
+  regime_warmup_days: number
   pipeline_index_symbols: string
   pipeline_schedule: { hour: number; minute: number }
   instruments_schedule: { hour: number; minute: number }
@@ -1131,6 +1134,16 @@ export const api = {
     }>('/api/settings/preferences/pipeline-pull-types', {
       method: 'PUT',
       body: JSON.stringify(cfg),
+    }),
+  updatePipelineRegimeEnabled: (enabled: boolean) =>
+    request<{ pipeline_regime_enabled: boolean }>('/api/settings/preferences/pipeline-regime-enabled', {
+      method: 'PUT',
+      body: JSON.stringify({ pipeline_regime_enabled: enabled }),
+    }),
+  updateRegimeBatchParams: (params: { batch_days?: number; warmup_days?: number }) =>
+    request<{ regime_batch_days: number; regime_warmup_days: number }>('/api/settings/preferences/regime-batch-params', {
+      method: 'PUT',
+      body: JSON.stringify(params),
     }),
   updatePipelineIndexSymbols: (symbols: string) =>
     request<{ pipeline_index_symbols: string }>('/api/settings/preferences/pipeline-index-symbols', {
