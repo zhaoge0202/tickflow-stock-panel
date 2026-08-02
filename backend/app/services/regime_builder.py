@@ -60,14 +60,11 @@ def _score(value: float, low: float, high: float) -> float:
     return float(max(0, min(100, round((value - low) / (high - low) * 100))))
 
 
-def classify_state(metrics: dict) -> tuple[str, int]:
-    """规则引擎: 4 维指标 → 离散状态 + 综合分(0-100)。
+def _compute_subscores(metrics: dict) -> dict:
+    """计算 4 个子维度分 + 综合分(未取整)。供 classify_state 和持久化复用。
 
-    对齐看板情绪分的轻量维度(去掉量能/主线以控制内存):
-    - 赚钱 profit: 涨家数占比 + 均涨幅 + 中位涨幅 + 强弱差
-    - 投机 speculation: 涨停数 + 封板率 + 连板高度
-    - 抗跌 resilience: 跌家数占比 + 大跌股占比(大跌日此项暴跌 → 总分进 weak)
-    - 趋势 trend: 指数涨幅 + MA20 上方占比
+    返回 {profit, speculation, resilience, trend, score(float, 0-100)}。
+    子维度分也是 0-100, 供趋势图展示"综合分由什么驱动"。
 
     metrics 期望字段(由 _aggregate_daily 聚合):
       up_pct, down_pct, avg_pct, median_pct, strong_up_pct, strong_down_pct,
@@ -109,7 +106,29 @@ def classify_state(metrics: dict) -> tuple[str, int]:
         + resilience * WEIGHTS["resilience"]
         + trend * WEIGHTS["trend"]
     )
-    score = max(0, min(100, round(score)))
+    return {
+        "profit": profit, "speculation": speculation,
+        "resilience": resilience, "trend": trend,
+        "score": max(0, min(100, score)),
+    }
+
+
+def classify_state(metrics: dict) -> tuple[str, int]:
+    """规则引擎: 4 维指标 → 离散状态 + 综合分(0-100)。
+
+    对齐看板情绪分的轻量维度(去掉量能/主线以控制内存):
+    - 赚钱 profit: 涨家数占比 + 均涨幅 + 中位涨幅 + 强弱差
+    - 投机 speculation: 涨停数 + 封板率 + 连板高度
+    - 抗跌 resilience: 跌家数占比 + 大跌股占比(大跌日此项暴跌 → 总分进 weak)
+    - 趋势 trend: 指数涨幅 + MA20 上方占比
+
+    metrics 期望字段(由 _aggregate_daily 聚合):
+      up_pct, down_pct, avg_pct, median_pct, strong_up_pct, strong_down_pct,
+      strong_diff_pct, limit_up, seal_rate(0-1), max_consecutive,
+      index_pct(小数), above_ma20_pct(0-1)
+    """
+    sub = _compute_subscores(metrics)
+    score = max(0, min(100, round(sub["score"])))
 
     if score >= STATE_STRONG:
         state = "strong"
@@ -242,6 +261,8 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "strong_diff_pct": strong_up_pct - strong_down_pct,
         }
         state, score = classify_state(metrics)
+        # 4 个子维度分(供趋势图展示"综合分由什么驱动" + 未来策略按子维度过滤)
+        sub = _compute_subscores(metrics)
         rows.append({
             "date": r["date"],
             "state": state,
@@ -263,6 +284,11 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "median_pct": round(median_pct, 4),
             "strong_up_pct": round(strong_up_pct, 4),
             "strong_down_pct": round(strong_down_pct, 4),
+            # 4 个子维度分(0-100, 综合分加权来源): 赚钱/投机/抗跌/趋势
+            "profit_score": round(sub["profit"]),
+            "speculation_score": round(sub["speculation"]),
+            "resilience_score": round(sub["resilience"]),
+            "trend_score": round(sub["trend"]),
         })
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 

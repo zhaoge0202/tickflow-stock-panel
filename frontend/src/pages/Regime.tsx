@@ -134,19 +134,49 @@ export function Regime() {
   const rows: RegimeRow[] = history.data?.rows ?? []
   const latest = rows.length > 0 ? rows[rows.length - 1] : null
 
-  // 趋势图: 综合分曲线 + 涨停数柱状
+  // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
     if (rows.length === 0) return null
     const dates = rows.map(r => r.date)
     const scores = rows.map(r => r.score)
     const limitUps = rows.map(r => r.limit_up)
+    const profit = rows.map(r => r.profit_score ?? null)
+    const speculation = rows.map(r => r.speculation_score ?? null)
+    const resilience = rows.map(r => r.resilience_score ?? null)
+    const trend = rows.map(r => r.trend_score ?? null)
+
+    // 状态背景色带: 合并连续同状态日期段, 每段用状态色低透明度着色
+    const stateBands: any[] = []
+    let bandStart = rows[0]?.date
+    let prevState = rows[0]?.state
+    rows.forEach((r, i) => {
+      if (r.state !== prevState || i === rows.length - 1) {
+        const bandEnd = i === rows.length - 1 ? r.date : rows[i - 1].date
+        if (prevState && REGIME_STATE_COLORS[prevState as RegimeState]) {
+          stateBands.push([
+            { xAxis: bandStart, itemStyle: { color: REGIME_STATE_COLORS[prevState as RegimeState], opacity: 0.08 } },
+            { xAxis: bandEnd },
+          ])
+        }
+        bandStart = r.date
+        prevState = r.state
+      }
+    })
+
+    const subLineStyle = { width: 1.2, type: 'dotted' as const, opacity: 0.8 }
+
     return {
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, textStyle: { color: ct.tooltipText } },
-      legend: { data: ['综合分', '涨停数'], textStyle: { color: ct.text }, top: 0 },
-      grid: { left: 48, right: 48, top: 32, bottom: 56 },
+      legend: {
+        data: ['综合分', '涨停数', '赚钱', '投机', '抗跌', '趋势'],
+        textStyle: { color: ct.text, fontSize: 10 }, top: 0,
+        // 默认只显示综合分 + 涨停数(简洁); 4 个子维度默认隐藏, 点图例展开看驱动因素
+        selected: { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false },
+      },
+      grid: { left: 48, right: 48, top: 36, bottom: 56 },
       xAxis: {
-        type: 'category', data: dates,
+        type: 'category', data: dates, boundaryGap: false,
         axisLabel: { color: ct.text, fontSize: 10, formatter: (v: string) => v.slice(5) },
         axisLine: { lineStyle: { color: ct.grid } },
       },
@@ -159,13 +189,27 @@ export function Regime() {
         { type: 'slider', bottom: 8, height: 16, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
       ],
       series: [
+        // 涨停数柱状(半透明背景)
+        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 1, barMaxWidth: 6,
+          itemStyle: { color: REGIME_STATE_COLORS.strong, opacity: 0.35 }, z: 1 },
+        // 4 子维度曲线: 帮助理解综合分由什么驱动(点图例可切换)
+        { name: '赚钱', type: 'line', data: profit, smooth: true, symbol: 'none',
+          lineStyle: { ...subLineStyle, color: '#f59e0b' }, z: 2 },
+        { name: '投机', type: 'line', data: speculation, smooth: true, symbol: 'none',
+          lineStyle: { ...subLineStyle, color: '#a855f7' }, z: 2 },
+        { name: '抗跌', type: 'line', data: resilience, smooth: true, symbol: 'none',
+          lineStyle: { ...subLineStyle, color: '#10b981' }, z: 2 },
+        { name: '趋势', type: 'line', data: trend, smooth: true, symbol: 'none',
+          lineStyle: { ...subLineStyle, color: '#3b82f6' }, z: 2 },
+        // 综合分主线(加粗置顶) + 状态背景色带 + 阈值横虚线
         { name: '综合分', type: 'line', data: scores, smooth: true, symbol: 'none',
-          lineStyle: { width: 2, color: ct.textStrong }, areaStyle: { opacity: 0.08 },
+          lineStyle: { width: 2.5, color: ct.textStrong }, areaStyle: { opacity: 0.06 }, z: 3,
+          markArea: { silent: true, data: stateBands },
           markLine: { silent: true, lineStyle: { type: 'dashed', color: ct.grid }, data: [
-            { yAxis: 75, label: { formatter: '强势', color: ct.text, fontSize: 9 } },
-            { yAxis: 40, label: { formatter: '震荡', color: ct.text, fontSize: 9 } },
+            { yAxis: 70, label: { formatter: '强势', color: ct.text, fontSize: 9 } },
+            { yAxis: 45, label: { formatter: '震荡', color: ct.text, fontSize: 9 } },
+            { yAxis: 30, label: { formatter: '偏弱', color: ct.text, fontSize: 9 } },
           ] } },
-        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 1, barMaxWidth: 6, itemStyle: { color: REGIME_STATE_COLORS.strong } },
       ],
     }
   }, [rows, days, ct])
@@ -373,7 +417,8 @@ export function Regime() {
       {/* ── 趋势图 + 分布图 ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className={cn(cardCls, 'p-3 lg:col-span-2')}>
-          <SectionTitle icon={Activity} title="环境综合分 · 涨停数趋势" />
+          <SectionTitle icon={Activity} title="环境综合分趋势"
+            hint="综合分(粗) · 赚钱/投机/抗跌/趋势(细, 可点图例切换) · 背景色=状态" />
           <div ref={trendRef} className="mt-2 h-[320px]" />
         </div>
         <div className={cn(cardCls, 'p-3')}>
