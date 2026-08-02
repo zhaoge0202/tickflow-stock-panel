@@ -426,13 +426,20 @@ export interface StrategyParamDef {
   options?: string[]
 }
 
+export interface CompositeChildInfo {
+  id: string
+  name: string
+  source: string
+  weight: number
+}
+
 export interface StrategyDetail {
   id: string
   name: string
   description: string
   tags: string[]
-  source: 'builtin' | 'custom' | 'ai'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy'
+  source: 'builtin' | 'custom' | 'ai' | 'composite'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite'
   asset_types: string[]
   timeframes: string[]
   version: string
@@ -454,6 +461,8 @@ export interface StrategyDetail {
   order_by: string
   descending: boolean
   limit: number
+  // 叠加策略(composite)专属: 子策略列表与合并模式。非 composite 时为 null。
+  composite_children?: CompositeChildInfo[] | null
 }
 
 export interface StrategyBuildResult {
@@ -472,7 +481,7 @@ export type StrategyBuildStreamEvent =
 export interface StrategyCodeSaveResult {
   ok: boolean
   strategy_id: string
-  source: 'ai' | 'custom'
+  source: 'ai' | 'custom' | 'composite'
   path: string
   meta: Record<string, any>
 }
@@ -733,6 +742,9 @@ export interface StrategyBacktestResult {
     score_max: number | null
     max_hold_days: number | null
     source: string
+    execution_backend?: string
+    // 叠加策略回测: 子策略构成与权重归因
+    composite_children?: { id: string; weight: number }[]
   }
   elapsed_ms: number
   error: string | null
@@ -2182,6 +2194,21 @@ export const api = {
     description?: string
   }) =>
     request<StrategyCodeSaveResult>('/api/strategies/code/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  /** 创建/更新叠加策略(composite): 声明式引用多个子策略 */
+  strategySaveComposite: (payload: {
+    strategy_id: string
+    name: string
+    description?: string
+    children: { strategy_id: string; weight: number }[]
+    merge_mode: 'union' | 'intersect'
+    min_confirm?: number
+    mode: 'create' | 'update'
+  }) =>
+    request<StrategyCodeSaveResult>('/api/strategies/composite/save', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

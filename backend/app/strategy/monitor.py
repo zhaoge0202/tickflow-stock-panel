@@ -797,6 +797,12 @@ class MonitorRuleEngine:
             as_of=cn_today(),
             current=df,
         )
+        if getattr(s, "execution_backend", "polars_expr") == "composite":
+            # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
+            # 违反"实时热路径不得随历史数据量线性增长"约束。fail-closed 跳过本轮,
+            # /cached 端点回退到盘后 strategy_cache.json 的批量结果。
+            logger.debug("叠加策略 %s 暂不支持实时监控, 跳过", sid)
+            return []
         if getattr(s, "execution_backend", "polars_expr") == "matrix_native":
             matrix = self._active_matrix_snapshots.get(at)
             if matrix is None:

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
@@ -149,12 +149,13 @@ function FillRuleHint() {
   )
 }
 
-const SRC_MAP: Record<string, string> = { builtin: '内置', custom: '自定义', ai: 'AI' }
+const SRC_MAP: Record<string, string> = { builtin: '内置', custom: '自定义', ai: 'AI', composite: '叠加' }
 const TRADE_PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100]
 const BADGE_CLS_MAP: Record<string, string> = {
   builtin: 'bg-secondary/10 text-muted border-border',
   ai: 'bg-purple-500/10 text-purple-400 border-purple-500/30',
   custom: 'bg-amber-400/10 text-amber-400 border-amber-400/30',
+  composite: 'bg-teal-500/10 text-teal-400 border-teal-500/30',
 }
 const FIELD_LABEL: Record<string, string> = {}
 for (const c of BUILTIN_COLUMNS) {
@@ -179,11 +180,12 @@ const BASIC_FILTER_FIELDS = [
   { key: 'turnover_max', label: '最高换手率', unit: '%' },
 ]
 type AdvancedSettingsTab = 'params' | 'filter' | 'entry' | 'exit' | 'scoring' | 'risk' | 'range'
-type StrategyGroup = 'all' | 'custom' | 'ai' | 'builtin'
+type StrategyGroup = 'all' | 'custom' | 'ai' | 'builtin' | 'composite'
 const STRATEGY_GROUPS: { id: StrategyGroup; label: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'custom', label: '自定义' },
   { id: 'ai', label: 'AI' },
+  { id: 'composite', label: '叠加' },
   { id: 'builtin', label: '内置' },
 ]
 const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
@@ -1189,11 +1191,15 @@ export function StrategyBacktest() {
 
   const detail = strategyDetail.data
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
+  const compositeStrategy = detail?.source === 'composite'
   const visibleAdvancedTabs = useMemo(
     () => matrixStrategy
       ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit')
-      : ADVANCED_TABS,
-    [matrixStrategy],
+      : compositeStrategy
+        // composite 的 entry/exit/scoring 由子策略决定, composite 层只调合并参数(params Tab)
+        ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit' && tab.id !== 'scoring')
+        : ADVANCED_TABS,
+    [matrixStrategy, compositeStrategy],
   )
   const basicFilter = (overrides.basic_filter ?? {}) as Record<string, any>
   const entrySignals = (overrides.entry_signals ?? []) as string[]
@@ -1864,6 +1870,18 @@ export function StrategyBacktest() {
                     </span>
                   )}
                 </div>
+                {/* 叠加策略: 子策略构成归因 */}
+                {result.strategy_info.composite_children && result.strategy_info.composite_children.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Layers className="h-3 w-3 text-teal-400 shrink-0" />
+                    <span className="text-[10px] text-muted">叠加 {result.strategy_info.composite_children.length} 策略</span>
+                    {result.strategy_info.composite_children.map(c => (
+                      <span key={c.id} className="text-[9px] px-1.5 py-px rounded border border-teal-500/25 bg-teal-500/10 text-teal-400">
+                        {c.id}<span className="text-teal-400/60 ml-0.5">{(c.weight * 100).toFixed(0)}%</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {result.strategy_info.stop_loss != null && (
                   <span className="text-[10px] text-secondary">止损 {fmtPct(result.strategy_info.stop_loss)}</span>
                 )}
