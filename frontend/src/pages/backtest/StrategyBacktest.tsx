@@ -24,6 +24,7 @@ import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
 import { DatePicker } from '@/components/DatePicker'
+import { toast } from '@/components/Toast'
 import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
@@ -206,6 +207,54 @@ const clamp = (v: number, min?: number, max?: number) => {
   if (min != null) next = Math.max(next, min)
   if (max != null) next = Math.min(next, max)
   return next
+}
+// 截断浮点长尾(如 0.07*100=7.000000000000001 → 7)。用于百分比派生显示。
+const round4 = (v: number) => Math.round(v * 10000) / 10000
+
+/**
+ * 数字输入框 — 解决"删除即跳最小值"问题。
+ * 受控 input 的 onChange 立即 clamp 会让用户键入低于 min 的中间值时被钳到 min,
+ * 无法平滑输入/删除重输。本组件: 输入时只更新文本草稿(不钳制), 失焦时才校正到 [min,max]。
+ */
+function NumberField({ value, onChange, min, max, step, className, placeholder }:
+{
+  value: number | null
+  onChange: (v: number | null) => void
+  min?: number
+  max?: number
+  step?: number
+  className?: string
+  placeholder?: string
+}) {
+  // 文本草稿: null 表示与外部 value 同步(无未提交编辑); 非 null 表示用户正在输入
+  const [draft, setDraft] = useState<string | null>(null)
+  // 显示值: 有草稿用草稿, 否则用外部 value (null 显示空)
+  const display = draft !== null ? draft : (value == null ? '' : String(value))
+  return (
+    <input
+      type="number"
+      value={display}
+      min={min}
+      max={max}
+      step={step}
+      placeholder={placeholder}
+      onChange={e => {
+        // 输入时只更新草稿 + 把原始数字推给父级(不钳制), 让用户自由编辑
+        setDraft(e.target.value)
+        onChange(numOrNull(e.target.value))
+      }}
+      onBlur={() => {
+        // 失焦时校正: 空值保持 null; 否则钳制到 [min,max]
+        const n = numOrNull(draft ?? '')
+        if (n != null && (min != null || max != null)) {
+          const clamped = clamp(n, min, max)
+          if (clamped !== n) onChange(clamped)
+        }
+        setDraft(null) // 清除草稿, 回到外部 value 同步
+      }}
+      className={className}
+    />
+  )
 }
 const strategyDefaultParams = (detail: StrategyDetail) => {
   const values: Record<string, any> = { ...detail.params_defaults }
@@ -693,18 +742,12 @@ function StrategyParamInput({ param, value, onChange }: {
   return (
     <label className="block">
       <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
-      <input
-        type="number"
-        value={value ?? ''}
+      <NumberField
+        value={value == null || value === '' ? null : Number(value)}
         min={param.min}
         max={param.max}
         step={param.step ?? (param.type === 'int' ? 1 : 0.01)}
-        onChange={e => {
-          const n = numOrNull(e.target.value)
-          if (n == null) return onChange('')
-          const next = clamp(n, param.min, param.max)
-          onChange(param.type === 'int' ? Math.round(next) : next)
-        }}
+        onChange={n => onChange(n == null ? '' : (param.type === 'int' ? Math.round(n) : n))}
         className={INPUT_CLS}
       />
     </label>
@@ -961,6 +1004,26 @@ export function StrategyBacktest() {
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
     setOverrides(buildDefaultOverrides(detail))
+  }
+
+  // 「应用到策略」: 把弹窗里当前编辑的 overrides + params 持久化为策略定义,
+  // 使所有页面加载该策略时都用这些参数(后端 save_config → 落盘 strategy_overrides/{id}.json)。
+  const [applying, setApplying] = useState(false)
+  const handleApplyToStrategy = async () => {
+    if (!detail || !selectedStrategy) return
+    setApplying(true)
+    try {
+      // 合并 params 进 overrides(后端 _strategy_detail 会把 params 合并进 params_defaults)
+      const payload = { ...normalizeStrategyOverrides(detail, overrides), params: strategyParams }
+      await api.strategySaveConfig(selectedStrategy, payload)
+      toast('已应用到策略定义', 'success')
+      await strategyDetail.refetch()
+      setSettingsOpen(false)
+    } catch (e) {
+      toast(`应用失败 · ${String((e as Error)?.message || e)}`, 'error')
+    } finally {
+      setApplying(false)
+    }
   }
 
   // 刷新页面后: 从 localStorage 恢复未完成的回测任务
@@ -1228,11 +1291,11 @@ export function StrategyBacktest() {
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoreMinValue = overrides.score_min == null ? '' : String(overrides.score_min)
   const scoreMaxValue = overrides.score_max == null ? '' : String(overrides.score_max)
-  const stopLossPct = overrides.stop_loss == null ? '' : String(Math.abs(Number(overrides.stop_loss)) * 100)
-  const takeProfitPct = overrides.take_profit == null ? '' : String(Math.abs(Number(overrides.take_profit)) * 100)
-  const trailingStopPct = overrides.trailing_stop == null ? '' : String(Math.abs(Number(overrides.trailing_stop)) * 100)
-  const trailingTakeProfitActivatePct = overrides.trailing_take_profit_activate == null ? '' : String(Math.abs(Number(overrides.trailing_take_profit_activate)) * 100)
-  const trailingTakeProfitDrawdownPct = overrides.trailing_take_profit_drawdown == null ? '' : String(Math.abs(Number(overrides.trailing_take_profit_drawdown)) * 100)
+  const stopLossPct = overrides.stop_loss == null ? '' : String(round4(Math.abs(Number(overrides.stop_loss)) * 100))
+  const takeProfitPct = overrides.take_profit == null ? '' : String(round4(Math.abs(Number(overrides.take_profit)) * 100))
+  const trailingStopPct = overrides.trailing_stop == null ? '' : String(round4(Math.abs(Number(overrides.trailing_stop)) * 100))
+  const trailingTakeProfitActivatePct = overrides.trailing_take_profit_activate == null ? '' : String(round4(Math.abs(Number(overrides.trailing_take_profit_activate)) * 100))
+  const trailingTakeProfitDrawdownPct = overrides.trailing_take_profit_drawdown == null ? '' : String(round4(Math.abs(Number(overrides.trailing_take_profit_drawdown)) * 100))
   const maxHoldDaysValue = overrides.max_hold_days == null ? '' : String(overrides.max_hold_days)
   const targetPositionPct = Number(maxPositions) > 0 ? Number(maxExposure) / Number(maxPositions) : 0
 
@@ -2397,19 +2460,15 @@ export function StrategyBacktest() {
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     {BASIC_FILTER_FIELDS.map(field => {
                       const scale = field.scale ?? 1
-                      const value = basicFilter[field.key] == null ? '' : Number(basicFilter[field.key]) / scale
+                      const raw = basicFilter[field.key]
                       return (
                         <label key={field.key} className="block">
                           <span className="mb-1 block text-[11px] text-secondary">{field.label}({field.unit})</span>
-                          <input
-                            type="number"
-                            value={value}
+                          <NumberField
+                            value={raw == null ? null : Number(raw) / scale}
                             min={0}
                             step={field.unit === '%' ? 0.1 : 0.01}
-                            onChange={e => {
-                              const n = numOrNull(e.target.value)
-                              updateBasicFilter(field.key, n == null ? null : n * scale)
-                            }}
+                            onChange={n => updateBasicFilter(field.key, n == null ? null : n * scale)}
                             className={INPUT_CLS}
                           />
                         </label>
@@ -2527,33 +2586,19 @@ export function StrategyBacktest() {
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label className="block">
                         <span className="mb-1 block text-[11px] text-secondary">最小评分</span>
-                        <input
-                          type="number"
-                          value={scoreMinValue}
-                          min={0}
-                          max={100}
-                          step={1}
-                          placeholder="不限"
-                          onChange={e => {
-                            const n = numOrNull(e.target.value)
-                            updateOverride('score_min', n == null ? null : clamp(n, 0, 100))
-                          }}
+                        <NumberField
+                          value={overrides.score_min == null ? null : Number(overrides.score_min)}
+                          min={0} max={100} step={1} placeholder="不限"
+                          onChange={n => updateOverride('score_min', n)}
                           className={INPUT_CLS}
                         />
                       </label>
                       <label className="block">
                         <span className="mb-1 block text-[11px] text-secondary">最大评分</span>
-                        <input
-                          type="number"
-                          value={scoreMaxValue}
-                          min={0}
-                          max={100}
-                          step={1}
-                          placeholder="不限"
-                          onChange={e => {
-                            const n = numOrNull(e.target.value)
-                            updateOverride('score_max', n == null ? null : clamp(n, 0, 100))
-                          }}
+                        <NumberField
+                          value={overrides.score_max == null ? null : Number(overrides.score_max)}
+                          min={0} max={100} step={1} placeholder="不限"
+                          onChange={n => updateOverride('score_max', n)}
                           className={INPUT_CLS}
                         />
                       </label>
@@ -2568,61 +2613,40 @@ export function StrategyBacktest() {
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">止损(%)</span>
-                      <input
-                        type="number"
-                        value={stopLossPct}
-                        min={0}
-                        max={99}
-                        step={0.5}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)
-                        }}
+                      <NumberField
+                        value={numOrNull(stopLossPct)}
+                        min={0} max={99} step={0.5}
+                        onChange={n => updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)}
                         className={INPUT_CLS}
                       />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">止盈(%)</span>
-                      <input
-                        type="number"
-                        value={takeProfitPct}
-                        min={1}
-                        max={500}
-                        step={0.5}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          updateOverride('take_profit', n == null ? null : clamp(Math.abs(n), 1, 500) / 100)
-                        }}
+                      <NumberField
+                        value={numOrNull(takeProfitPct)}
+                        min={1} max={500} step={0.5}
+                        onChange={n => updateOverride('take_profit', n == null ? null : Math.abs(n) / 100)}
                         className={INPUT_CLS}
                       />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">移动止损(%)</span>
-                      <input
-                        type="number"
-                        value={trailingStopPct}
-                        min={0.5}
-                        max={50}
-                        step={0.5}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          updateOverride('trailing_stop', n == null ? null : -clamp(Math.abs(n), 0.5, 50) / 100)
-                        }}
+                      <NumberField
+                        value={numOrNull(trailingStopPct)}
+                        min={0.5} max={50} step={0.5}
+                        onChange={n => updateOverride('trailing_stop', n == null ? null : -Math.abs(n) / 100)}
                         className={INPUT_CLS}
                       />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">回撤止盈启动(%)</span>
-                      <input
-                        type="number"
-                        value={trailingTakeProfitActivatePct}
-                        min={1}
-                        max={200}
-                        step={0.5}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          const next = n == null ? null : clamp(Math.abs(n), 1, 200) / 100
+                      <NumberField
+                        value={numOrNull(trailingTakeProfitActivatePct)}
+                        min={1} max={200} step={0.5}
+                        onChange={n => {
+                          const next = n == null ? null : Math.abs(n) / 100
                           updateOverride('trailing_take_profit_activate', next)
+                          // 联动: 回撤不能超过启动值
                           const drawdown = numOrNull(trailingTakeProfitDrawdownPct)
                           if (next != null && drawdown != null && drawdown / 100 > next) {
                             updateOverride('trailing_take_profit_drawdown', next)
@@ -2633,32 +2657,19 @@ export function StrategyBacktest() {
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">回撤止盈回撤(点)</span>
-                      <input
-                        type="number"
-                        value={trailingTakeProfitDrawdownPct}
-                        min={0.5}
-                        max={50}
-                        step={0.5}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          const activate = numOrNull(trailingTakeProfitActivatePct)
-                          const maxValue = activate == null ? 50 : Math.min(50, Math.abs(activate))
-                          updateOverride('trailing_take_profit_drawdown', n == null ? null : clamp(Math.abs(n), 0.5, maxValue) / 100)
-                        }}
+                      <NumberField
+                        value={numOrNull(trailingTakeProfitDrawdownPct)}
+                        min={0.5} max={50} step={0.5}
+                        onChange={n => updateOverride('trailing_take_profit_drawdown', n == null ? null : Math.abs(n) / 100)}
                         className={INPUT_CLS}
                       />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[11px] text-secondary">最长持仓(天)</span>
-                      <input
-                        type="number"
-                        value={maxHoldDaysValue}
-                        min={1}
-                        step={1}
-                        onChange={e => {
-                          const n = numOrNull(e.target.value)
-                          updateOverride('max_hold_days', n == null ? null : Math.max(1, Math.round(n)))
-                        }}
+                      <NumberField
+                        value={numOrNull(maxHoldDaysValue)}
+                        min={1} step={1}
+                        onChange={n => updateOverride('max_hold_days', n == null ? null : Math.round(n))}
                         className={INPUT_CLS}
                       />
                     </label>
@@ -2675,6 +2686,17 @@ export function StrategyBacktest() {
               >
                 恢复默认
               </button>
+              {/* 应用到策略: 把当前配置持久化为策略定义(仅用户自有策略可改) */}
+              {(detail.source === 'custom' || detail.source === 'ai' || detail.source === 'composite') && (
+                <button
+                  type="button"
+                  onClick={handleApplyToStrategy}
+                  disabled={applying}
+                  className="ml-auto rounded-btn border border-emerald-500/30 bg-emerald-500/8 px-3 py-1.5 text-xs font-medium text-emerald-500 transition-colors hover:bg-emerald-500/15 disabled:opacity-50"
+                >
+                  {applying ? '应用中…' : '应用到策略'}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setSettingsOpen(false)}
