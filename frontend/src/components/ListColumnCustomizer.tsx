@@ -23,6 +23,7 @@ import { useQuery } from '@tanstack/react-query'
 import { QK } from '@/lib/queryKeys'
 import type { ColumnConfig, ColumnGroup, ExtColumnDisplayConfig, CandleColumnConfig, IntradayColumnConfig } from '@/lib/list-columns'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
+import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
 interface ListColumnCustomizerProps {
   columns: ColumnConfig[]
@@ -142,6 +143,7 @@ export function ListColumnCustomizer({
     enabled: open && showExtColumns,
     staleTime: 60_000,
   })
+  const backdrop = useDialogBackdrop(onClose)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
@@ -661,7 +663,7 @@ export function ListColumnCustomizer({
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={onClose}
+            {...backdrop}
           />
           <motion.div
             initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
