@@ -61,6 +61,9 @@ function isNumericFieldType(ft?: string): boolean {
   return true
 }
 
+/** 模块级空数组常量：extSchema 未加载时用，避免 `?? []` 每次创建新引用导致 useMemo 失效。 */
+const EMPTY_EXT_TABLES: readonly { id: string; label: string; mode: string; columns: { name: string; label: string; type: string }[] }[] = []
+
 function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel, extConfig, candleConfig: candlePanel, intradayConfig: intradayPanel, strategiesConfig, showStandaloneToggle, onToggleStandalone }: {
   col: ColumnConfig
   onRemove: (id: string) => void
@@ -166,8 +169,9 @@ export function ListColumnCustomizer({
   })
   const backdrop = useDialogBackdrop(onClose)
 
-  // columns/onChange 用 ref 镜像，让下方 8 个 useCallback 空依赖，
-  // 避免 columns 每次变更都重建 callback 导致 SortableActiveCol 等 memo 失效。
+  // columns/onChange 用 ref 镜像，让下方多数 useCallback 空依赖（addExtColumn 例外，
+  // 依赖 props.extColumnAlign）。callback 引用稳定后，columns 变更不再导致
+  // SortableActiveCol 等子组件因 props 变化而无谓重渲染。
   const columnsRef = useRef(columns)
   columnsRef.current = columns
   const onChangeRef = useRef(onChange)
@@ -320,7 +324,7 @@ export function ListColumnCustomizer({
     })
   }, [])
 
-  const extTables = extSchema.data?.items ?? []
+  const extTables = extSchema.data?.items ?? EMPTY_EXT_TABLES
   const extTableLabelMap = useMemo(() => new Map(extTables.map(t => [t.id, t.label])), [extTables])
 
   const query = searchQuery.trim().toLowerCase()
