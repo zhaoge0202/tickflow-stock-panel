@@ -350,6 +350,11 @@ class DataProvidersIn(BaseModel):
     financial_data_provider: str | None = None
 
 
+class DataSourceJobTimeoutPrefs(BaseModel):
+    data_source_job_timeout_s: int = Field(ge=60)
+    data_source_long_job_timeout_s: int = Field(ge=60)
+
+
 class DatasetFieldMapItem(BaseModel):
     source: str
     target: str
@@ -413,6 +418,8 @@ def get_preferences() -> dict:
         "minute_data_provider": preferences.get_minute_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
+        "data_source_long_job_timeout_s": preferences.get_data_source_long_job_timeout_s(),
         "realtime_watchlist_symbols": preferences.get_realtime_watchlist_symbols(),
         **preferences.get_realtime_quote_scope(),
         "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
@@ -614,6 +621,14 @@ def update_data_providers(req: DataProvidersIn) -> dict:
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
     }
+
+
+@router.put("/preferences/data-source-job-timeouts")
+def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
+    """保存普通与长数据后台任务的卡死判定时间。"""
+    from app.services import preferences
+    preferences.save(req.model_dump())
+    return req.model_dump()
 
 
 @router.get("/preferences/watchlist-columns")
