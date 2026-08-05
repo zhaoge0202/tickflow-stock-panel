@@ -20,9 +20,11 @@ from app import secrets_store
 from app.config import settings
 
 OPENAI_COMPAT_PROVIDER = "openai_compat"
+OPENAI_PROVIDER = "openai"
 CODEX_CLI_PROVIDER = "codex_cli"
 CODEX_DEFAULT_COMMAND = "codex"
 CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+OPENAI_DEFAULT_REASONING_EFFORT = "high"
 
 _CODEX_ENV_ALLOWLIST = (
     "PATH",
@@ -104,10 +106,31 @@ def current_ai_provider() -> str:
     return secrets_store.get_ai_config("ai_provider", settings.ai_provider) or OPENAI_COMPAT_PROVIDER
 
 
+def current_openai_model() -> str:
+    return secrets_store.get_ai_config("ai_model", settings.ai_model)
+
+
+def current_codex_model() -> str:
+    stored = secrets_store.load()
+    model = stored.get("ai_codex_model")
+    # 旧版本的两种 provider 共用 ai_model。仅在旧配置仍启用 Codex 时回退读取,
+    # 避免把正常的 OpenAI-compatible 模型误当作 Codex 模型。
+    if model is None and current_ai_provider() == CODEX_CLI_PROVIDER:
+        model = stored.get("ai_model")
+    return normalize_codex_model(str(model or ""))
+
+
 def current_ai_model() -> str:
     if current_ai_provider() == CODEX_CLI_PROVIDER:
-        return normalize_codex_model(str(secrets_store.load().get("ai_model") or ""))
-    return secrets_store.get_ai_config("ai_model", settings.ai_model)
+        return current_codex_model()
+    return current_openai_model()
+
+
+def current_openai_reasoning_effort() -> str:
+    stored = secrets_store.load()
+    if "ai_reasoning_effort" not in stored:
+        return OPENAI_DEFAULT_REASONING_EFFORT
+    return str(stored.get("ai_reasoning_effort") or "").strip()
 
 
 def current_codex_command() -> str:
@@ -351,10 +374,14 @@ def _is_temperature_rejected(exc: Exception) -> bool:
 
 
 def _openai_kwargs(*, temperature: float | None, max_tokens: int) -> dict:
-    """Build OpenAI create() kwargs; temperature omitted when None."""
+    """Build OpenAI create() kwargs; optional parameters are omitted when empty."""
     kwargs: dict = {"max_tokens": max_tokens}
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if current_ai_provider() == OPENAI_PROVIDER:
+        reasoning_effort = current_openai_reasoning_effort()
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
     return kwargs
 
 
@@ -700,10 +727,14 @@ def _codex_home() -> Path:
 def _write_compatible_codex_config(path: Path) -> None:
     config = _read_codex_config()
     lines: list[str] = []
-    local_provider = _docker_codex_local_provider(config)
+    active_provider = _active_codex_provider(config)
 
-    if local_provider:
-        lines.append(_toml_string("model_provider", "codex_local_access"))
+    if active_provider:
+        lines.append(_toml_string("model_provider", active_provider[0]))
+
+    openai_base_url = config.get("openai_base_url")
+    if isinstance(openai_base_url, str) and openai_base_url:
+        lines.append(_toml_string("openai_base_url", openai_base_url))
 
     model = current_ai_model() or normalize_codex_model(str(config.get("model") or ""))
     if model:
@@ -718,41 +749,43 @@ def _write_compatible_codex_config(path: Path) -> None:
     lines.append(_toml_string("approval_policy", "never"))
     lines.append(_toml_string("sandbox_mode", "read-only"))
 
-    if local_provider:
+    if active_provider:
+        provider_name, provider = active_provider
         lines.append("")
-        lines.append("[model_providers.codex_local_access]")
+        lines.append(f"[model_providers.{_toml_key(provider_name)}]")
         for key in ("name", "base_url", "wire_api", "experimental_bearer_token"):
-            value = local_provider.get(key)
+            value = provider.get(key)
             if isinstance(value, str) and value:
                 lines.append(_toml_string(key, value))
         for key in ("requires_openai_auth", "supports_websockets"):
-            value = local_provider.get(key)
+            value = provider.get(key)
             if isinstance(value, bool):
                 lines.append(f"{key} = {'true' if value else 'false'}")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _docker_codex_local_provider(config: dict) -> dict | None:
-    """Return the local-access provider adapted to Docker's host gateway."""
-    docker_host = os.environ.get("CODEX_DOCKER_HOST", "").strip()
-    if not docker_host or config.get("model_provider") != "codex_local_access":
+def _active_codex_provider(config: dict) -> tuple[str, dict] | None:
+    """Return the active custom provider, adapting loopback URLs for Docker."""
+    provider_name = config.get("model_provider")
+    if not isinstance(provider_name, str) or not provider_name:
         return None
 
     providers = config.get("model_providers")
     if not isinstance(providers, dict):
         return None
-    source = providers.get("codex_local_access")
+    source = providers.get(provider_name)
     if not isinstance(source, dict):
         return None
 
     provider = dict(source)
     base_url = str(provider.get("base_url") or "").strip()
     parsed = urlsplit(base_url)
-    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+    docker_host = os.environ.get("CODEX_DOCKER_HOST", "").strip()
+    if docker_host and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
         port = f":{parsed.port}" if parsed.port else ""
         provider["base_url"] = urlunsplit(parsed._replace(netloc=f"{docker_host}{port}"))
-    return provider
+    return provider_name, provider
 
 
 def _read_codex_config() -> dict:
@@ -784,6 +817,13 @@ def _read_codex_config_lenient(path: Path) -> dict:
 def _toml_string(key: str, value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'{key} = "{escaped}"'
+
+
+def _toml_key(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _clean_process_text(raw: bytes) -> str:
