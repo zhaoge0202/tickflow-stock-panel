@@ -1,6 +1,6 @@
 // 后端 API 客户端 — 全项目统一入口
 //
-// Dev:Vite 代理 /api 到 :3018
+// Dev: Vite 按启动脚本解析出的 BACKEND_HOST/BACKEND_PORT 代理 /api
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
