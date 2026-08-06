@@ -327,12 +327,19 @@ export function Regime() {
     return [...byMonth.entries()].sort().map(([ym, monthRows]) => {
       const [y, m] = ym.split('-')
       const year = Number(y), month = Number(m)
-      // 该月第一天是周几(0=周日 → 转成周一为起始: 周一=0)
-      const firstDay = new Date(year, month - 1, 1)
-      let dow = firstDay.getDay() // 0=Sun..6=Sat
-      dow = dow === 0 ? 6 : dow - 1 // 转成 周一=0..周日=6
-      const cells: (RegimeRow | null)[] = Array(dow).fill(null)
-      for (const r of monthRows) cells.push(r)
+      // 按自然日铺格子: 只有该日为交易日且有数据才填 RegimeRow, 其余日子填 null。
+      // 这样每个格子都对其正确的周几列, 不会因月内数据不连续而把交易日错位到周末列。
+      const dateToRow = new Map<string, RegimeRow>()
+      for (const r of monthRows) dateToRow.set(r.date, r)
+      // 月首的星期偏移(周一=0..周日=6), 与表头 ['一'..'日'] 列顺序一致
+      const firstDow = new Date(year, month - 1, 1).getDay()
+      const leadOffset = firstDow === 0 ? 6 : firstDow - 1
+      const cells: (RegimeRow | null)[] = Array(leadOffset).fill(null)
+      const dayCount = new Date(year, month, 0).getDate()
+      for (let day = 1; day <= dayCount; day++) {
+        const ds = `${y}-${m.padStart(2, '0')}-${String(day).padStart(2, '0')}`
+        cells.push(dateToRow.has(ds) ? dateToRow.get(ds)! : null)
+      }
       // 补齐到 7 的倍数(完整周)
       while (cells.length % 7 !== 0) cells.push(null)
       // 切成每周一组
