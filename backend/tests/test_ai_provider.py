@@ -111,7 +111,7 @@ def test_is_temperature_rejected_matches_moonshot_message():
     assert _is_temperature_rejected(exc) is True
 
 
-def test_is_temperature_rejected_matches_generic_temperature_hint():
+def test_optional_openai_params_use_targeted_400_fallbacks():
     response = httpx.Response(
         400,
         json={"error": {"message": "unsupported parameter: temperature"}},
@@ -122,6 +122,29 @@ def test_is_temperature_rejected_matches_generic_temperature_hint():
         body={"error": {"message": "unsupported parameter: temperature"}},
     )
     assert _is_temperature_rejected(exc) is True
+
+    kwargs = {"max_tokens": 1000, "temperature": 0.3, "reasoning_effort": "high"}
+    assert ai_provider._openai_retry_kwargs(exc, kwargs) == {
+        "max_tokens": 1000,
+        "reasoning_effort": "high",
+    }
+
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "unrecognized request argument", "param": "reasoning_effort"}},
+        request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+    )
+    exc = openai.BadRequestError(
+        "bad request", response=response,
+        body={"error": {"message": "unrecognized request argument", "param": "reasoning_effort"}},
+    )
+    assert _is_temperature_rejected(exc) is False
+    assert ai_provider._is_reasoning_effort_rejected(exc) is True
+    assert ai_provider._openai_retry_kwargs(exc, kwargs) == {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+    }
+    assert kwargs == {"max_tokens": 1000, "temperature": 0.3, "reasoning_effort": "high"}
 
 
 def test_is_temperature_rejected_false_for_other_400():

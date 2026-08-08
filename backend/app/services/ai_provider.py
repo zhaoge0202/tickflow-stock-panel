@@ -269,23 +269,20 @@ async def _run_openai_once(
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
     req_messages = list(messages)
-    try:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=req_messages,
-            **_openai_kwargs(temperature=temperature, max_tokens=max_tokens),
-        )
-    except Exception as exc:
-        # Reasoning 类模型 (如 kimi-k2.7-code, deepseek-r1, o 系列) 拒绝非约定
-        # temperature (Moonshot 报 "only 1 is allowed for this model")。不再靠
-        # 模型名猜测, 而是捕获该错误后去掉 temperature 重试一次 —— 对所有此类模型都稳。
-        if temperature is not None and _is_temperature_rejected(exc):
+    kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
+    while True:
+        try:
             resp = await client.chat.completions.create(
                 model=model,
                 messages=req_messages,
-                **_openai_kwargs(temperature=None, max_tokens=max_tokens),
+                **kwargs,
             )
-        else:
+            break
+        except Exception as exc:
+            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+            if retry_kwargs is not None:
+                kwargs = retry_kwargs
+                continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
@@ -315,23 +312,22 @@ async def _stream_openai(
             if delta and delta.content:
                 yield delta.content
 
-    try:
-        stream = await client.chat.completions.create(
-            model=model,
-            messages=req_messages,
-            **_openai_kwargs(temperature=temperature, max_tokens=max_tokens),
-            stream=True,
-        )
-    except Exception as exc:
-        # 流尚未开始 yield, 可安全重建: 去掉 temperature 后重开 stream。
-        if temperature is not None and _is_temperature_rejected(exc):
+    kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
+    while True:
+        try:
             stream = await client.chat.completions.create(
                 model=model,
                 messages=req_messages,
-                **_openai_kwargs(temperature=None, max_tokens=max_tokens),
+                **kwargs,
                 stream=True,
             )
-        else:
+            break
+        except Exception as exc:
+            # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
+            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+            if retry_kwargs is not None:
+                kwargs = retry_kwargs
+                continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
@@ -358,11 +354,10 @@ def _openai_client(api_key: str, timeout: float):
     )
 
 
-# Reasoning / thinking 类模型 (kimi-k2.7-code, deepseek-r1, OpenAI o 系列等) 不接受
-# 任意 temperature, 上游会以 400 拒绝 (如 Moonshot: "only 1 is allowed for this model")。
-# 这里不靠模型名猜测, 而是在真正命中该错误后自动去掉 temperature 重试 (见
-# _run_openai_once / _stream_openai), 对任意 reasoning 模型都稳健。
-_TEMP_REJECT_HINTS = ("temperature", "only 1 is allowed", "unsupported parameter")
+# 不同模型可能拒绝 temperature 或 reasoning_effort。这里不靠模型名猜测,
+# 只在 400 明确指出对应参数时移除该参数并重试; 每个参数最多移除一次。
+_TEMP_REJECT_HINTS = ("temperature", "only 1 is allowed")
+_REASONING_EFFORT_REJECT_HINTS = ("reasoning_effort", "reasoning effort")
 
 
 def _is_temperature_rejected(exc: Exception) -> bool:
@@ -370,7 +365,41 @@ def _is_temperature_rejected(exc: Exception) -> bool:
     if getattr(exc, "status_code", None) != 400:
         return False
     text = _openai_error_detail(exc) or str(exc)
-    return any(h in text.lower() for h in _TEMP_REJECT_HINTS)
+    return _openai_error_param(exc) == "temperature" or any(
+        h in text.lower() for h in _TEMP_REJECT_HINTS
+    )
+
+
+def _is_reasoning_effort_rejected(exc: Exception) -> bool:
+    """True if the upstream 400 specifically rejects reasoning_effort."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = _openai_error_detail(exc) or str(exc)
+    return _openai_error_param(exc) == "reasoning_effort" or any(
+        h in text.lower() for h in _REASONING_EFFORT_REJECT_HINTS
+    )
+
+
+def _openai_error_param(exc: Exception) -> str:
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if isinstance(error, dict):
+        body = error
+    return str(body.get("param") or "").strip().lower()
+
+
+def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
+    """Remove one explicitly rejected optional argument for a bounded retry."""
+    retry_kwargs = dict(kwargs)
+    if "temperature" in retry_kwargs and _is_temperature_rejected(exc):
+        retry_kwargs.pop("temperature")
+        return retry_kwargs
+    if "reasoning_effort" in retry_kwargs and _is_reasoning_effort_rejected(exc):
+        retry_kwargs.pop("reasoning_effort")
+        return retry_kwargs
+    return None
 
 
 def _openai_kwargs(*, temperature: float | None, max_tokens: int) -> dict:
