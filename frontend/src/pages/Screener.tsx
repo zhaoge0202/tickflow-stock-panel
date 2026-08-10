@@ -22,6 +22,7 @@ import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDi
 import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
+import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -48,6 +49,7 @@ export function Screener() {
   const [showBuilder, setShowBuilder] = useState(false)
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
+  const [showComposite, setShowComposite] = useState(false)
   const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
@@ -232,6 +234,24 @@ export function Screener() {
     [visiblePool, summaryQuery.data, asOf],
   )
   const cacheCoversPool = visiblePool.length > 0 && missingStrategyIds.length === 0
+
+  // 防止 reload / auto-run / StrictMode 叠出并发 run_all（后端 Numba 会崩溃）
+  // 用 ref 同步门闩，避免同一渲染周期内 isPending 尚未更新导致重复触发
+  const runAllPendingRef = useRef(false)
+  const requestRunAll = useCallback((
+    vars: { date?: string; strategyIds?: string[] } = {},
+    options?: Parameters<typeof runAll.mutate>[1],
+  ) => {
+    if (runAllPendingRef.current || runAll.isPending) return
+    runAllPendingRef.current = true
+    runAll.mutate(vars, {
+      ...options,
+      onSettled: (...args) => {
+        runAllPendingRef.current = false
+        options?.onSettled?.(...args)
+      },
+    })
+  }, [runAll])
 
   // 摘要只同步当前日期的卡片数量，避免旧日期缓存短暂显示成当前结果。
   useEffect(() => {
@@ -434,8 +454,8 @@ export function Screener() {
     // 未覆盖: 受系统开关控制
     if (!screenerAutoRun) return
     runAllDateRef.current = runKey
-    runAll.mutate({ date: asOf, strategyIds: missingStrategyIds })
-  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending])
+    requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
+  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending, requestRunAll])
 
   const run = useMutation({
     mutationFn: ({ id, date }: { id: string; date: string }) =>
@@ -502,7 +522,7 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
-      if (asOf) runAll.mutate({ date: asOf })
+      if (asOf) requestRunAll({ date: asOf })
     },
   })
 
@@ -647,6 +667,16 @@ export function Screener() {
               <span className="ml-0.5 min-w-[28px] h-4 flex items-center justify-center rounded-full bg-accent/15 text-accent text-[10px] font-bold">
                 {visiblePool.length}/{strategyPresets.length}
               </span>
+            </button>
+            {/* 创建叠加策略 */}
+            <button
+              onClick={() => setShowComposite(true)}
+              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn
+                text-xs font-medium text-teal-400 border border-teal-500/20 bg-teal-500/5
+                hover:bg-teal-500/15 transition-colors cursor-pointer"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              叠加策略
             </button>
             {/* 创建策略 */}
             <button
@@ -973,6 +1003,15 @@ export function Screener() {
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
+          addToPool(id)
+        }}
+      />
+
+      <CompositeStrategyDialog
+        open={showComposite}
+        onClose={() => setShowComposite(false)}
+        onSavedId={async id => {
+          await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
           addToPool(id)
         }}
       />
