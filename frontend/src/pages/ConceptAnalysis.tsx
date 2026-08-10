@@ -15,7 +15,6 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
-import { SectorFlowBubbles } from '@/components/SectorFlowBubbles'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
 import { api, type MarketSnapshotRow } from '@/lib/api'
@@ -275,9 +274,9 @@ export function ConceptAnalysis() {
     !rowsQuery.isLoading && (rowsQuery.data?.total ?? 0) === 0
 
   const marketQuery = useQuery({
-    queryKey: QK.marketSnapshot,
-    queryFn: api.marketSnapshot,
-    // 板块动能气泡需要更勤刷新; 与实时行情轮询同量级
+    queryKey: QK.marketSnapshot(),
+    queryFn: () => api.marketSnapshot(),
+    // 概念榜单需要跟随最新行情快照刷新。
     staleTime: 5_000,
     refetchInterval: 8_000,
   })
@@ -390,17 +389,6 @@ export function ConceptAnalysis() {
       <div className="min-h-full bg-[radial-gradient(circle_at_12%_0%,rgba(59,130,246,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)] px-6 py-5">
         <div className="mx-auto max-w-[1440px] space-y-5">
           <HeroPanel leading={leading[0]} falling={falling[0]} activeConcept={activeConcept} conceptBreadth={conceptBreadth} />
-
-          {stats.length > 0 && (
-            <SectorFlowBubbles
-              title="概念实时动能气泡"
-              items={stats}
-              selectedKey={selected?.key ?? null}
-              onSelect={setSelectedKey}
-              height={360}
-              maxItems={48}
-            />
-          )}
 
           <MarketPulse
             leading={leading}

@@ -5,8 +5,8 @@ tdxapi, 因此 QuoteService 只会把 tdxapi 实时记录写入这里。
 
 内存热缓存按 symbol 维护:
   - _latest: 每个 symbol 最新一条
-  - _series: 每个 symbol 最近 N 条 (供决策台盘中序列, 不再用全市场大 ring)
-写入范围由调用方收窄 (自选/持仓/监控); 全市场最新价走 MySQL quote_latest。
+  - _series: 关注标的最近 N 条 (供决策台盘中序列, 不再用全市场大 ring)
+本地 parquet 是全市场回放事实层; 调用方用 series_symbols 收窄内存短序列。
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import shutil
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -61,6 +62,7 @@ TEXT_FIELD_NAMES = {
 INT_FIELD_NAMES = {"event_ts", "ingest_ts"}
 FLOAT_FIELD_NAMES = {
     "last_price", "prev_close", "open", "high", "low", "volume", "amount",
+    "change_pct", "change_amount", "amplitude", "turnover_rate",
     "bid1", "ask1", "bid1_vol", "ask1_vol", "auction_price",
     "auction_matched_volume", "auction_unmatched_volume", "auction_change_pct",
     *DEPTH_FIELD_NAMES, *MICROSTRUCTURE_FIELD_NAMES, *AUCTION_EXTRA_FIELD_NAMES,
@@ -70,6 +72,10 @@ QUOTE_TICK_SCHEMA_OVERRIDES = {
     **{field: pl.Int64 for field in INT_FIELD_NAMES},
     **{field: pl.Float64 for field in FLOAT_FIELD_NAMES},
 }
+MARKET_FRAME_SOURCE = "tdxapi_market_frame"
+MINUTE_BACKFILL_SOURCE = "minute_backfill"
+MARKET_REPLAY_SOURCES = {MARKET_FRAME_SOURCE, MINUTE_BACKFILL_SOURCE}
+TIMELINE_MAX_POINTS = 2000
 
 _lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
@@ -89,24 +95,30 @@ def append_many(
     *,
     source: str = "tdxapi",
     force_flush: bool = False,
+    series_symbols: set[str] | list[str] | None = None,
 ) -> dict:
     """追加一批行情事实, 并按批次写入 parquet。
 
     返回本轮质量摘要。异常由调用方捕获; 本函数内部尽量只处理数据问题。
-    热缓存按 symbol 更新最新价 + 有界短序列, 不再保留全市场大 ring。
+    热缓存按 symbol 更新最新价; 有界短序列可用 series_symbols 收窄, 避免
+    全市场回放落盘时把每只股票的 300 条短序列都堆在 Python 内存里。
     """
     ingest_ts = int(time.time() * 1000)
     rows = [_normalize_record(r, source=source, ingest_ts=ingest_ts) for r in records]
     rows = [r for r in rows if r is not None]
     key = str(data_dir)
     now = time.monotonic()
+    keep_series = None
+    if series_symbols is not None:
+        keep_series = {str(s).strip().upper() for s in series_symbols if str(s).strip()}
 
     with _lock:
         latest_map = _latest[key]
         series_map = _series[key]
         for row in rows:
             symbol = row["symbol"]
-            series_map[symbol].append(row)
+            if keep_series is None or symbol in keep_series:
+                series_map[symbol].append(row)
             prev = latest_map.get(symbol)
             if prev is None or (row.get("event_ts") or 0, row.get("ingest_ts") or 0) >= (
                 prev.get("event_ts") or 0,
@@ -331,6 +343,229 @@ def read_ticks(
     return rows
 
 
+def read_all_ticks(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    symbols: list[str] | None = None,
+) -> list[dict]:
+    """读取某天完整 quote_ticks 分区。
+
+    仅供全市场回放/时间线使用。普通详情页仍应传 symbols 走 read_ticks。
+    """
+    target_date = target_date or cn_today()
+    wanted = {s.upper() for s in symbols or [] if s}
+    rows = _read_partition(
+        data_dir,
+        target_date.isoformat(),
+        symbols=wanted or None,
+    )
+    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    if wanted:
+        hot_rows = [
+            row for row in hot_rows
+            if str(row.get("symbol", "")).upper() in wanted
+        ]
+    rows = _dedupe_rows(rows + hot_rows)
+    rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("ingest_ts") or 0))
+    return rows
+
+
+def event_timestamps(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+) -> list[int]:
+    """返回某天全部 event_ts 去重列表, 用于全市场回放时间线。"""
+    target_date = target_date or cn_today()
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    timestamps: set[int] = set()
+    if base.exists():
+        paths = sorted(base.rglob("*.parquet"))
+        if paths:
+            try:
+                frame = scan_parquet_compat(
+                    [str(path) for path in paths],
+                    schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                    hive_partitioning=False,
+                    cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+                )
+                df = (
+                    frame
+                    .select("event_ts")
+                    .filter(pl.col("event_ts").is_not_null())
+                    .unique()
+                    .collect(engine="streaming")
+                )
+                timestamps.update(int(v) for v in df["event_ts"].to_list() if v is not None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("quote_ticks 时间线读取失败(%s): %s", base, e)
+    for row in _hot_rows(data_dir, target_date=target_date):
+        ts = row.get("event_ts")
+        if ts is not None:
+            timestamps.add(int(ts))
+    return sorted(timestamps)
+
+
+def timeline_points(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    step_seconds: int = 60,
+) -> dict:
+    """返回某日可回放时间线摘要。
+
+    points 仍按固定步长生成，避免把全市场分钟帧的全部原始 event_ts 暴露给前端。
+    symbol_count/sources 用于判断旧分区是否只是关注标的稀疏 tick。
+    """
+    target_date = target_date or cn_today()
+    event_ts = event_timestamps(data_dir, target_date=target_date)
+    symbols, sources = _partition_symbols_sources(data_dir, target_date=target_date)
+    if not event_ts:
+        return {
+            "points": [],
+            "start_ts": None,
+            "end_ts": None,
+            "has_ticks": False,
+            "symbol_count": len(symbols),
+            "sources": sorted(sources),
+            "count": 0,
+        }
+
+    start_ts = event_ts[0]
+    end_ts = event_ts[-1]
+    step_ms = max(30, int(step_seconds)) * 1000
+    points: list[int] = []
+    cur = start_ts
+    while cur <= end_ts and len(points) < TIMELINE_MAX_POINTS:
+        points.append(cur)
+        cur += step_ms
+    if (not points or points[-1] != end_ts) and len(points) < TIMELINE_MAX_POINTS:
+        points.append(end_ts)
+    return {
+        "points": points,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "has_ticks": True,
+        "symbol_count": len(symbols),
+        "sources": sorted(sources),
+        "count": len(points),
+    }
+
+
+def materialize_from_minute(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    force: bool = False,
+) -> dict:
+    """用本地 1m K 线补出板块回放用的全市场分钟帧。
+
+    不访问外部 provider；若本地没有 kline_minute，则返回 missing_minute。
+    """
+    target_date = target_date or cn_today()
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    if not force and _partition_has_source(base, MINUTE_BACKFILL_SOURCE):
+        return {"status": "exists", "date": ds, "rows": 0, "symbols": 0, "hours": 0}
+
+    minute_path = data_dir / "kline_minute" / f"date={ds}" / "part.parquet"
+    if not minute_path.exists():
+        return {"status": "missing_minute", "date": ds, "rows": 0, "symbols": 0, "hours": 0}
+
+    try:
+        minute_df = pl.read_parquet(minute_path)
+        tick_df = _minute_frame_to_quote_ticks(data_dir, target_date, minute_df)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("minute replay backfill failed(%s): %s", minute_path, exc)
+        return {"status": "failed", "date": ds, "rows": 0, "symbols": 0, "hours": 0, "error": str(exc)}
+    if tick_df.is_empty():
+        return {"status": "empty_minute", "date": ds, "rows": 0, "symbols": 0, "hours": 0}
+
+    written = 0
+    hours = 0
+    symbols = set(tick_df["symbol"].to_list()) if "symbol" in tick_df.columns else set()
+    for hour_df in tick_df.partition_by("hour"):
+        hour = str(hour_df["hour"][0])
+        target_dir = base / f"hour={hour}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        final_path = target_dir / f"part-minute-backfill-{ds}-{hour}.parquet"
+        tmp_path = target_dir / f".minute-backfill-{int(time.time() * 1000)}.parquet"
+        try:
+            hour_df.write_parquet(tmp_path)
+            tmp_path.replace(final_path)
+            written += hour_df.height
+            hours += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("minute replay backfill write failed(%s): %s", final_path, exc)
+            with suppress(OSError):
+                tmp_path.unlink()
+
+    logger.info(
+        "minute replay backfill complete: date=%s rows=%d symbols=%d hours=%d",
+        ds, written, len(symbols), hours,
+    )
+    return {"status": "materialized", "date": ds, "rows": written, "symbols": len(symbols), "hours": hours}
+
+
+def snapshot_as_of(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    as_of_ts: int | None = None,
+) -> tuple[list[dict], int | None]:
+    """读取某日截止 as_of_ts 的每 symbol 最新一条。
+
+    与 read_ticks 不同, 这里面向全市场回放, 用 Polars 流式扫描分区后在
+    DataFrame 内完成 last-by-symbol, 避免把全天所有 tick 先物化成 Python dict。
+    """
+    target_date = target_date or cn_today()
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    frames: list[pl.DataFrame] = []
+    if base.exists():
+        paths = sorted(base.rglob("*.parquet"))
+        if paths:
+            try:
+                frame = scan_parquet_compat(
+                    [str(path) for path in paths],
+                    schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                    hive_partitioning=False,
+                    cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+                )
+                if as_of_ts is not None:
+                    frame = frame.filter(pl.col("event_ts") <= int(as_of_ts))
+                frames.append(
+                    frame
+                    .sort(["symbol", "event_ts", "ingest_ts"])
+                    .unique(subset=["symbol"], keep="last")
+                    .collect(engine="streaming")
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("quote_ticks 快照读取失败(%s): %s", base, e)
+    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    if as_of_ts is not None:
+        hot_rows = [
+            row for row in hot_rows
+            if (row.get("event_ts") or 0) <= int(as_of_ts)
+        ]
+    if hot_rows:
+        frames.append(_quote_tick_frame(hot_rows))
+    if not frames:
+        return [], None
+    try:
+        df = pl.concat(frames, how="diagonal_relaxed")
+        if df.is_empty() or "symbol" not in df.columns or "event_ts" not in df.columns:
+            return [], None
+        df = df.sort(["symbol", "event_ts", "ingest_ts"]).unique(subset=["symbol"], keep="last")
+        actual_ts = int(df["event_ts"].max())
+        return [_json_safe(row) for row in df.iter_rows(named=True)], actual_ts
+    except Exception as e:  # noqa: BLE001
+        logger.warning("quote_ticks 快照合并失败(%s): %s", base, e)
+        return [], None
+
+
 def _recent_rows(
     data_dir: Path,
     *,
@@ -538,6 +773,182 @@ def compact_partition(
     return result
 
 
+def _partition_symbols_sources(data_dir: Path, *, target_date: date) -> tuple[set[str], set[str]]:
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    symbols: set[str] = set()
+    sources: set[str] = set()
+    paths = sorted(base.rglob("*.parquet")) if base.exists() else []
+    if paths:
+        try:
+            frame = scan_parquet_compat(
+                [str(path) for path in paths],
+                schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                hive_partitioning=False,
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            schema_names = set(frame.collect_schema().names())
+            if "symbol" in schema_names:
+                symbol_df = frame.select(pl.col("symbol").drop_nulls().unique()).collect()
+                symbols.update(
+                    str(s).strip().upper()
+                    for s in symbol_df["symbol"].to_list()
+                    if str(s).strip()
+                )
+            if "source" in schema_names:
+                source_df = frame.select(pl.col("source").drop_nulls().unique()).collect()
+                sources.update(
+                    str(s).strip()
+                    for s in source_df["source"].to_list()
+                    if str(s).strip()
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quote_ticks metadata read failed(%s): %s", base, exc)
+
+    for row in _hot_rows(data_dir, target_date=target_date):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol:
+            symbols.add(symbol)
+        source = str(row.get("source") or "").strip()
+        if source:
+            sources.add(source)
+    return symbols, sources
+
+
+def _partition_has_source(base: Path, source: str) -> bool:
+    if not base.exists():
+        return False
+    paths = sorted(base.rglob("*.parquet"))
+    if not paths:
+        return False
+    try:
+        frame = scan_parquet_compat(
+            [str(path) for path in paths],
+            schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+            hive_partitioning=False,
+            cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+        )
+        if "source" not in frame.collect_schema().names():
+            return False
+        result = frame.filter(pl.col("source") == source).select(pl.len().alias("n")).collect()
+        return int(result["n"][0] or 0) > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quote_ticks source check failed(%s): %s", base, exc)
+        return False
+
+
+def _minute_frame_to_quote_ticks(data_dir: Path, target_date: date, df: pl.DataFrame) -> pl.DataFrame:
+    if df.is_empty() or not {"symbol", "datetime", "close"}.issubset(df.columns):
+        return pl.DataFrame()
+    ds = target_date.isoformat()
+    keep = [c for c in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount") if c in df.columns]
+    df = df.select(keep).filter(
+        pl.col("symbol").is_not_null()
+        & pl.col("datetime").is_not_null()
+        & pl.col("close").is_not_null()
+    )
+    if df.is_empty():
+        return pl.DataFrame()
+
+    dt_type = df.schema["datetime"]
+    if isinstance(dt_type, pl.Datetime):
+        dt_expr = (
+            pl.col("datetime").dt.convert_time_zone("Asia/Shanghai")
+            if dt_type.time_zone
+            else pl.col("datetime").dt.replace_time_zone("Asia/Shanghai")
+        )
+    else:
+        dt_expr = pl.col("datetime").cast(pl.Utf8).str.to_datetime(strict=False).dt.replace_time_zone("Asia/Shanghai")
+
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        if col not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(col))
+        else:
+            df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+
+    ingest_ts = int(time.time() * 1000)
+    df = (
+        df.with_columns([
+            pl.col("symbol").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("symbol"),
+            dt_expr.alias("_dt_cn"),
+        ])
+        .filter(pl.col("symbol") != "")
+        .with_columns([
+            pl.col("_dt_cn").dt.timestamp("ms").alias("event_ts"),
+            pl.col("_dt_cn").dt.strftime("%H").alias("hour"),
+        ])
+        .filter(pl.col("event_ts").is_not_null())
+        .sort(["symbol", "event_ts"])
+    )
+
+    prev_close = _prev_close_frame(data_dir, target_date)
+    if prev_close is not None and not prev_close.is_empty():
+        df = df.join(prev_close, on="symbol", how="left")
+    else:
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("prev_close"))
+
+    df = df.with_columns([
+        pl.first("open").over("symbol").alias("open"),
+        pl.col("high").cum_max().over("symbol").alias("high"),
+        pl.col("low").cum_min().over("symbol").alias("low"),
+        pl.col("volume").fill_null(0).cum_sum().over("symbol").alias("volume"),
+        pl.col("amount").fill_null(0).cum_sum().over("symbol").alias("amount"),
+        pl.when(pl.col("prev_close") > 0)
+        .then(pl.col("close") / pl.col("prev_close") - 1)
+        .otherwise(None)
+        .alias("change_pct"),
+    ])
+    return df.select([
+        pl.col("symbol"),
+        pl.lit(None, dtype=pl.Utf8).alias("name"),
+        pl.lit(MINUTE_BACKFILL_SOURCE).alias("source"),
+        pl.col("event_ts").cast(pl.Int64),
+        pl.lit(ingest_ts).cast(pl.Int64).alias("ingest_ts"),
+        pl.lit(ds).alias("trade_date"),
+        pl.col("hour"),
+        pl.col("close").alias("last_price"),
+        pl.col("prev_close"),
+        pl.col("open"),
+        pl.col("high"),
+        pl.col("low"),
+        pl.col("volume"),
+        pl.col("amount"),
+        pl.col("change_pct"),
+        pl.lit(None, dtype=pl.Float64).alias("change_amount"),
+        pl.lit(None, dtype=pl.Float64).alias("amplitude"),
+        pl.lit(None, dtype=pl.Float64).alias("turnover_rate"),
+        pl.lit("minute_close").alias("price_type"),
+    ])
+
+
+def _prev_close_frame(data_dir: Path, target_date: date) -> pl.DataFrame | None:
+    base = data_dir / "kline_daily"
+    if not base.exists():
+        return None
+    prev_dates: list[date] = []
+    for path in base.iterdir():
+        if not path.is_dir() or not path.name.startswith("date="):
+            continue
+        try:
+            day = date.fromisoformat(path.name[5:])
+        except ValueError:
+            continue
+        if day < target_date:
+            prev_dates.append(day)
+    for day in sorted(prev_dates, reverse=True):
+        path = base / f"date={day.isoformat()}" / "part.parquet"
+        if not path.exists():
+            continue
+        try:
+            return pl.read_parquet(path, columns=["symbol", "close"]).select([
+                pl.col("symbol").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("symbol"),
+                pl.col("close").cast(pl.Float64, strict=False).alias("prev_close"),
+            ]).unique(subset=["symbol"], keep="last")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("prev close read skipped(%s): %s", path, exc)
+    return None
+
+
 def _symbols_covered(rows: list[dict], wanted: set[str]) -> bool:
     if not wanted:
         return bool(rows)
@@ -644,11 +1055,13 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
     last_price = _float_or_none(record.get("last_price") if record.get("last_price") is not None else record.get("close"))
     if last_price is None:
         return None
-    event_ts = _event_ts_ms(record.get("timestamp")) or ingest_ts
+    event_ts = _event_ts_ms(record.get("timestamp")) or _event_ts_ms(record.get("event_ts")) or ingest_ts
     event_dt = datetime.fromtimestamp(event_ts / 1000, tz=CN_TZ)
     known_fields = {
         "symbol", "name", "last_price", "close", "prev_close", "open", "high", "low",
-        "volume", "amount", "change_pct", "timestamp", "market_phase", "price_type",
+        "volume", "amount", "change_pct", "change_amount", "amplitude", "turnover_rate",
+        "timestamp", "event_ts", "ingest_ts", "trade_date", "hour", "source", "raw",
+        "market_phase", "price_type",
         "auction_price", "auction_matched_volume", "auction_unmatched_side",
         "auction_unmatched_volume", "auction_change_pct", "bid1", "ask1", "bid1_vol",
         "ask1_vol", *DEPTH_FIELD_NAMES, *MICROSTRUCTURE_FIELD_NAMES,
@@ -675,6 +1088,10 @@ def _normalize_record(record: dict, *, source: str, ingest_ts: int) -> dict | No
         "low": _float_or_none(record.get("low")),
         "volume": _float_or_none(record.get("volume")),
         "amount": _float_or_none(record.get("amount")),
+        "change_pct": _float_or_none(record.get("change_pct")),
+        "change_amount": _float_or_none(record.get("change_amount")),
+        "amplitude": _float_or_none(record.get("amplitude")),
+        "turnover_rate": _float_or_none(record.get("turnover_rate")),
         "bid1": bid1_price,
         "ask1": ask1_price,
         "bid1_vol": _float_or_none(record.get("bid1_vol")),

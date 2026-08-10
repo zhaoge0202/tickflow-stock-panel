@@ -230,7 +230,6 @@ class QuoteService:
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
-
     # ================================================================
     # 生命周期
     # ================================================================
@@ -969,8 +968,8 @@ class QuoteService:
         实时数据源明确为 tdxapi 时写入。
 
         全市场最新价走 MySQL quote_latest (每 symbol 一行热缓存);
-        本地 quote_ticks 只保留自选/持仓/监控标的的短序列, 避免全市场
-        秒级落盘把磁盘和内存打满。
+        本地 quote_ticks 也落全市场事实层, 支撑动能气泡盘中/盘后回放。
+        为避免 Python 内存堆满, 只有关注标的进入 _series 短序列。
         """
         if not self._repo or not records:
             return
@@ -985,36 +984,21 @@ class QuoteService:
             from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
             quote_snapshot_ingestor.submit(records)
 
-            # 本地 quote_ticks: 仅关注标的
-            focused = self._filter_quote_tick_records(records)
-            if not focused:
-                return
+            # 本地 quote_ticks: 全市场落盘; 关注标的才保留内存短序列。
+            focus_symbols = self._quote_tick_focus_symbols()
             quote_tick_store.append_many(
                 self._repo.store.data_dir,
-                focused,
+                records,
                 source="tdxapi",
+                series_symbols=focus_symbols,
             )
         except Exception as e:
             logger.warning("quote_ticks 追加失败: %s", e)
 
-    def _filter_quote_tick_records(self, records: list[dict]) -> list[dict]:
-        """收窄本地 quote_ticks 写入范围: 自选 + 持仓 + 规则监控指定标的 + 核心指数。"""
-        wanted = self._quote_tick_focus_symbols()
-        if not wanted:
-            return []
-        out: list[dict] = []
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            symbol = str(record.get("symbol") or "").strip().upper()
-            if symbol and symbol in wanted:
-                out.append(record)
-        return out
-
     def _quote_tick_focus_symbols(self) -> set[str]:
-        """本地秒级事实层关注的 symbol 集合。
+        """本地秒级事实层内存短序列关注的 symbol 集合。
 
-        全市场最新价已由 MySQL quote_latest 承担; 这里只给决策台/回放留短序列。
+        全市场回放事实落在 parquet; 这里只给决策台/详情页留有界短序列。
         """
         symbols: set[str] = set()
         # 核心指数始终保留 (看板/决策台常用)

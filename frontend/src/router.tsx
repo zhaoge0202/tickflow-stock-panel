@@ -19,6 +19,7 @@ const Decision = lazy(() => import('./pages/Decision').then(m => ({ default: m.D
 const Trading = lazy(() => import('./pages/Trading').then(m => ({ default: m.Trading })))
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail').then(m => ({ default: m.AnalysisDetail })))
+const SectorFlow = lazy(() => import('./pages/SectorFlow').then(m => ({ default: m.SectorFlow })))
 const ConceptAnalysis = lazy(() => import('./pages/ConceptAnalysis').then(m => ({ default: m.ConceptAnalysis })))
 const IndustryAnalysis = lazy(() => import('./pages/IndustryAnalysis').then(m => ({ default: m.IndustryAnalysis })))
 const StockAnalysis = lazy(() => import('./pages/StockAnalysis').then(m => ({ default: m.StockAnalysis })))
@@ -73,6 +74,7 @@ export const router = createBrowserRouter([
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
       { path: 'analysis/:menuId', element: <AnalysisDetail /> },
+      { path: 'sector-flow', element: <SectorFlow /> },
       { path: 'concept-analysis', element: <ConceptAnalysis /> },
       { path: 'industry-analysis', element: <IndustryAnalysis /> },
       { path: 'stock-analysis', element: <StockAnalysis /> },
