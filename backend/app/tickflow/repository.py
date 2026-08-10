@@ -355,12 +355,20 @@ class KlineRepository:
     def execute_all(self, sql: str, params: list | None = None) -> list[tuple]:
         """线程安全的 SELECT → fetchall。DuckDB 单 connection 非线程安全，所有读路径须走此方法。"""
         with self._lock:
-            return self.db.execute(sql, params or []).fetchall()
+            cursor = self.db.cursor()
+            try:
+                return cursor.execute(sql, params or []).fetchall()
+            finally:
+                cursor.close()
 
     def execute_one(self, sql: str, params: list | None = None) -> tuple | None:
         """线程安全的 SELECT → fetchone。"""
         with self._lock:
-            return self.db.execute(sql, params or []).fetchone()
+            cursor = self.db.cursor()
+            try:
+                return cursor.execute(sql, params or []).fetchone()
+            finally:
+                cursor.close()
 
     # ================================================================
     # Polars 缓存管理

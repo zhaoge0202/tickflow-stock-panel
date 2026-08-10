@@ -1056,7 +1056,7 @@ async def sync_minute_single(request: Request, body: dict):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days)
+        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 

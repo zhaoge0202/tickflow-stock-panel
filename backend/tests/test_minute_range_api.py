@@ -95,7 +95,7 @@ def test_sync_minute_single_uses_requested_days(monkeypatch):
     ))
 
     assert result["rows"] == 2400
-    sync.assert_called_once_with(["600000.SH"], repo, capset, days=10)
+    sync.assert_called_once_with(["600000.SH"], repo, capset, days=10, force_full_days=True)
     refresh.assert_called_once_with(repo, "kline_minute")
 
 

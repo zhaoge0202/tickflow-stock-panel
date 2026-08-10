@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2 } from 'lucide-react'
@@ -11,6 +11,8 @@ import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
+import { buildMonitorPriceLines } from '@/lib/price-alerts'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
@@ -39,6 +41,11 @@ const PRESETS: { label: string; months: number }[] = [
 ]
 
 type PreviewView = 'daily' | 'intraday'
+interface PriceAlertDraft {
+  id: number
+  targetPrice: number
+  currentPrice: number
+}
 const INTRADAY_DAY_OPTIONS = [1, 5, 10, 20] as const
 
 function loadIntradayDays(): number {
@@ -60,6 +67,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const [intradayDays, setIntradayDays] = useState(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
+  const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
@@ -69,6 +77,15 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     queryFn: api.watchlistList,
     enabled: !!symbol,
   })
+  const monitorRules = useQuery({
+    queryKey: QK.monitorRules,
+    queryFn: api.monitorRulesList,
+    enabled: !!symbol,
+  })
+  const monitorPriceLines = useMemo(
+    () => symbol ? buildMonitorPriceLines(monitorRules.data?.rules ?? [], symbol) : [],
+    [monitorRules.data?.rules, symbol],
+  )
   const inWatchlist = (watchlist.data?.symbols ?? []).some((s: any) => s.symbol === symbol)
 
   const toggleWatchlist = useMutation({
@@ -91,14 +108,15 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   useEffect(() => {
     if (!symbol) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !priceAlertDraft) onClose()
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [symbol, onClose])
+  }, [symbol, onClose, priceAlertDraft])
 
   useEffect(() => {
     if (symbol) setView('daily')
+    setPriceAlertDraft(null)
   }, [symbol])
 
   // 焦点股票注册: SSE quotes_updated 推送时精准 invalidate 当前股票日K,
@@ -133,6 +151,10 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const selectIntradayDays = (days: number) => {
     setIntradayDays(days)
     storage.stockPreviewIntradayDays.set(days)
+  }
+
+  const openPriceAlert = (targetPrice: number, currentPrice: number) => {
+    setPriceAlertDraft({ id: Date.now(), targetPrice, currentPrice })
   }
 
   return (
@@ -379,14 +401,25 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   height={420}
                   showIntraday
                   dateRange={dateRange}
+                  priceLines={monitorPriceLines}
+                  onPriceDoubleClick={openPriceAlert}
                 />
               ) : (
+                <>
+                <StockPanel
+                  symbol={symbol}
+                  dateRange={dateRange}
+                  infoBarOnly
+                />
                 <StockMultiDayIntradayChart
                   symbol={symbol}
                   days={intradayDays}
                   height={480}
                   refetchIntervalMs={intradayRefetchMs}
+                  priceLines={monitorPriceLines}
+                  onPriceDoubleClick={openPriceAlert}
                 />
+                </>
               )}
             </div>
 
@@ -419,6 +452,16 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
             </AnimatePresence>
           </motion.div>
         </div>
+      )}
+      {symbol && priceAlertDraft && (
+        <PriceAlertDialog
+          key={`${symbol}-${priceAlertDraft.id}`}
+          symbol={symbol}
+          name={name ?? ''}
+          initialTarget={priceAlertDraft.targetPrice}
+          initialCurrentPrice={priceAlertDraft.currentPrice}
+          onClose={() => setPriceAlertDraft(null)}
+        />
       )}
     </AnimatePresence>
   )

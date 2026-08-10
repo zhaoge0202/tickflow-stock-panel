@@ -18,6 +18,8 @@ const COLORS = {
 interface Props {
   sessions: MinuteKlineSession[]
   height?: number
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
+  priceLines?: { value: number; label?: string; color?: string }[]
 }
 
 interface InfoPoint {
@@ -132,10 +134,18 @@ function buildModel(sessions: MinuteKlineSession[]) {
   }
 }
 
-export function EChartsMultiDayIntraday({ sessions, height = 420 }: Props) {
+export function EChartsMultiDayIntraday({
+  sessions,
+  height = 420,
+  onPriceDoubleClick,
+  priceLines = [],
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
+  const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
+  onPriceDoubleClickRef.current = onPriceDoubleClick
   const model = useMemo(() => buildModel(sessions), [sessions])
   const modelRef = useRef(model)
   modelRef.current = model
@@ -169,10 +179,33 @@ export function EChartsMultiDayIntraday({ sessions, height = 420 }: Props) {
         if (point) setInfo(point)
       })
       chart.on('globalout', () => setInfo(modelRef.current.latest))
+
+      const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
+        const pixel: [number, number] = [event.offsetX, event.offsetY]
+        if (!chart!.containPixel({ gridIndex: 0 }, pixel)) return
+        const coordinate = chart!.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, pixel)
+        const price = Array.isArray(coordinate) ? Number(coordinate[1]) : NaN
+        const currentPrice = modelRef.current.latest?.row.close
+        if (
+          Number.isFinite(price)
+          && price > 0
+          && typeof currentPrice === 'number'
+          && Number.isFinite(currentPrice)
+          && currentPrice > 0
+        ) {
+          onPriceDoubleClickRef.current?.(price, currentPrice)
+        }
+      }
+      priceDoubleClickHandlerRef.current = handlePriceDoubleClick
+      chart.getZr().on('dblclick', handlePriceDoubleClick)
     }
 
-    const minPrice = model.priceValues.length > 0 ? Math.min(...model.priceValues) : 0
-    const maxPrice = model.priceValues.length > 0 ? Math.max(...model.priceValues) : 1
+    const monitoredPrices = priceLines
+      .map(line => line.value)
+      .filter(value => Number.isFinite(value) && value > 0)
+    const allPriceValues = [...model.priceValues, ...monitoredPrices]
+    const minPrice = allPriceValues.length > 0 ? Math.min(...allPriceValues) : 0
+    const maxPrice = allPriceValues.length > 0 ? Math.max(...allPriceValues) : 1
     const padding = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.002)
     const totalLength = model.categories.length
     const priceSeries: any[] = model.dayRanges.map(({ start, session, values }) => {
@@ -198,11 +231,31 @@ export function EChartsMultiDayIntraday({ sessions, height = 420 }: Props) {
       lineStyle: { color: theme.grid, width: 1 },
       label: { show: false },
     }))
-    if (priceSeries.length > 0 && boundaryData.length > 0) {
+    const monitorLineData = priceLines.flatMap(line => {
+      if (!Number.isFinite(line.value) || line.value <= 0) return []
+      return [{
+        yAxis: line.value,
+        lineStyle: { color: line.color ?? theme.text, type: 'dashed', width: 1, opacity: 0.92 },
+        label: {
+          show: !!line.label,
+          formatter: line.label ?? '',
+          position: 'insideEndTop',
+          color: line.color ?? theme.text,
+          backgroundColor: theme.tooltipBg,
+          borderRadius: 4,
+          padding: [2, 6],
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+        },
+      }]
+    })
+    const markLineData = [...boundaryData, ...monitorLineData]
+    if (priceSeries.length > 0 && markLineData.length > 0) {
       priceSeries[0].markLine = {
         symbol: 'none',
         silent: true,
-        data: boundaryData,
+        animation: false,
+        data: markLineData,
       }
     }
     const averageSeries: any[] = model.dayRanges.map(({ start, session, averages }) => {
@@ -243,8 +296,8 @@ export function EChartsMultiDayIntraday({ sessions, height = 420 }: Props) {
       },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
-        { left: 58, right: 18, top: 16, bottom: '28%' },
-        { left: 58, right: 18, top: '76%', bottom: 22 },
+        { left: 58, right: 18, top: 16, bottom: '34%' },
+        { left: 58, right: 18, top: '69%', bottom: 22 },
       ],
       xAxis: [
         {
@@ -329,11 +382,14 @@ export function EChartsMultiDayIntraday({ sessions, height = 420 }: Props) {
       ],
     }
     chart.setOption(option, true)
-  }, [height, model, theme])
+  }, [height, model, priceLines, theme])
 
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
     chartRef.current?.off('globalout')
+    if (priceDoubleClickHandlerRef.current) {
+      chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
+    }
     resizeObserverRef.current?.disconnect()
     chartRef.current?.dispose()
     chartRef.current = null

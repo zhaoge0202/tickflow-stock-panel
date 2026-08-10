@@ -30,6 +30,7 @@ interface Props {
   showMarkerToggle?: boolean
   /** 加监控回调 (传入后信息条显示 RadioTower 图标) */
   onMonitor?: () => void
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
   /** 自选操作（传入后信息条显示 Star 图标） */
   inWatchlist?: boolean
   onAddToWatchlist?: (groupId: string | null) => void
@@ -37,6 +38,8 @@ interface Props {
   watchlistPending?: boolean
   /** 分时图自动刷新间隔(ms)。undefined = 不轮询。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
+  /** 只渲染信息条, 隐藏图表 (用于分时 tab 共享信息条) */
+  infoBarOnly?: boolean
 }
 
 export { getDefaultRange }
@@ -54,11 +57,13 @@ export function StockPanel({
   showLimitMarkers = true,
   showMarkerToggle = true,
   onMonitor,
+  onPriceDoubleClick,
   inWatchlist,
   onAddToWatchlist,
   onRemoveFromWatchlist,
   watchlistPending,
   refetchIntervalMs,
+  infoBarOnly = false,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -144,6 +149,7 @@ export function StockPanel({
         watchlistPending={watchlistPending}
       />
 
+      {infoBarOnly ? null : (
       <div className="flex gap-3 items-start">
         <StockDailyKChart
           symbol={symbol}
@@ -157,6 +163,7 @@ export function StockPanel({
           showMarkerToggle={showMarkerToggle}
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
+          onPriceDoubleClick={onPriceDoubleClick}
           onDataChange={setDailyResult}
           visibleBars={showIntraday ? 40 : 60}
           extColumns={extColumns}
@@ -178,11 +185,15 @@ export function StockPanel({
               height={height}
               prevClose={prevClose}
               onPriceHover={setLinkedPrice}
+              onPriceDoubleClick={onPriceDoubleClick}
+              currentPrice={rows[rows.length - 1]?.close}
+              priceLines={priceLines}
               refetchIntervalMs={refetchIntervalMs}
             />
           </div>
         )}
       </div>
+      )}
     </div>
   )
 }

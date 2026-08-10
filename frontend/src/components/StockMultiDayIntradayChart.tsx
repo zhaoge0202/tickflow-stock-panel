@@ -1,8 +1,9 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import { api, type MinuteKlineSession } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { toast } from '@/components/Toast'
 import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
 
 interface Props {
@@ -10,6 +11,8 @@ interface Props {
   days: number
   height?: number
   refetchIntervalMs?: number
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
+  priceLines?: { value: number; label?: string; color?: string }[]
 }
 
 function errorMessage(error: unknown): string {
@@ -21,12 +24,16 @@ export function StockMultiDayIntradayChart({
   days,
   height = 420,
   refetchIntervalMs,
+  onPriceDoubleClick,
+  priceLines,
 }: Props) {
   const queryClient = useQueryClient()
   const history = useQuery({
     queryKey: QK.klineMinuteRange(symbol, days),
     queryFn: () => api.klineMinuteRange(symbol, days),
     enabled: !!symbol,
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === symbol ? previous : undefined,
   })
   const latest = useQuery({
     queryKey: QK.klineMinute(symbol, ''),
@@ -63,14 +70,37 @@ export function StockMultiDayIntradayChart({
         queryClient.invalidateQueries({ queryKey: ['kline-minute', symbol] }),
       ])
     },
+    onError: (e: Error) => {
+      const msg = e.message || ''
+      if (msg.includes('403') || msg.includes('Pro')) {
+        toast('分钟K数据需要 Pro+ 权限', 'error')
+      } else {
+        toast(`补齐数据失败: ${msg}`, 'error')
+      }
+    },
   })
 
   const loading = sessions.length === 0 && (history.isLoading || latest.isLoading)
   const queryError = sessions.length === 0 ? history.error ?? latest.error : null
   const isIndex = history.data?.asset_type === 'index' || latest.data?.asset_type === 'index'
   const missingDays = Math.max(0, days - sessions.length)
-  const showCoverage = sessions.length > 0 && missingDays > 0 && !isIndex
-  const chartHeight = Math.max(260, height - (showCoverage ? 32 : 0))
+  const showCoverage = !history.isPlaceholderData && sessions.length > 0 && missingDays > 0 && !isIndex
+
+  // 自动补齐: 数据不足且非指数时, 自动触发同步
+  // 用 ref 记录已触发的 symbol:days, 避免重复
+  const autoSyncRef = useRef<string | null>(null)
+  useEffect(() => {
+    // 后端没运行时 history 会 error, 此时 missingDays 计算无意义, 跳过
+    if (history.error || history.isPlaceholderData || loading || isIndex || sessions.length >= days) return
+    if (syncMinute.isPending) return
+
+    const key = `${symbol}:${days}`
+    if (autoSyncRef.current === key) return  // 本组合已触发过
+    autoSyncRef.current = key
+    syncMinute.mutate()
+  }, [symbol, days, sessions.length, loading, isIndex, history.error, history.isPlaceholderData, syncMinute.isPending])
+
+  const chartHeight = Math.max(260, height - (showCoverage || syncMinute.isPending ? 32 : 0))
 
   if (loading) {
     return (
@@ -127,23 +157,39 @@ export function StockMultiDayIntradayChart({
 
   return (
     <div style={{ height }}>
-      {showCoverage && (
+      {(showCoverage || (syncMinute.isPending && !isIndex)) && (
         <div className="flex h-8 items-center justify-between gap-3 border-b border-border/60 bg-elevated/40 px-3 text-[11px]">
-          <span className="truncate text-muted">当前有 {sessions.length} 个交易日数据，目标 {days} 日</span>
-          <button
-            type="button"
-            disabled={syncMinute.isPending}
-            onClick={() => syncMinute.mutate()}
-            className="inline-flex shrink-0 items-center gap-1 text-accent hover:text-accent/80 disabled:opacity-60"
-          >
-            {syncMinute.isPending
-              ? <Loader2 className="h-3 w-3 animate-spin" />
-              : <Download className="h-3 w-3" />}
-            补齐数据
-          </button>
+          {syncMinute.isPending ? (
+            <span className="truncate text-accent flex items-center gap-1.5">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              正在补齐最近 {days} 日分时数据…
+            </span>
+          ) : syncMinute.isError ? (
+            <span className="truncate text-muted">当前 {sessions.length} 日，目标 {days} 日 — 补齐失败</span>
+          ) : (
+            <span className="truncate text-muted">当前 {sessions.length} 个交易日数据，目标 {days} 日</span>
+          )}
+          {!syncMinute.isPending && (
+            <button
+              type="button"
+              onClick={() => {
+                autoSyncRef.current = `${symbol}:${days}`
+                syncMinute.mutate()
+              }}
+              className="inline-flex shrink-0 items-center gap-1 text-accent hover:text-accent/80"
+            >
+              <Download className="h-3 w-3" />
+              重试补齐
+            </button>
+          )}
         </div>
       )}
-      <EChartsMultiDayIntraday sessions={sessions} height={chartHeight} />
+      <EChartsMultiDayIntraday
+        sessions={sessions}
+        height={chartHeight}
+        onPriceDoubleClick={onPriceDoubleClick}
+        priceLines={priceLines}
+      />
       {syncMinute.isError && (
         <div className="px-3 pt-1 text-center text-[11px] text-danger">{errorMessage(syncMinute.error)}</div>
       )}

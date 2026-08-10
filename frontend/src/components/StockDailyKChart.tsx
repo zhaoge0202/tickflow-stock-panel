@@ -50,6 +50,7 @@ interface Props {
   visibleBars?: number
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
   onDataChange?: (result: StockDailyKChartResult) => void
   /** 扩展数据列参数（逗号分隔 config_id.field_name），透传给 klineDaily 接口 */
   extColumns?: string
@@ -132,6 +133,7 @@ export function StockDailyKChart({
   visibleBars = 60,
   linkedPrice,
   onDateClick,
+  onPriceDoubleClick,
   onDataChange,
   extColumns,
 }: Props) {
@@ -279,6 +281,7 @@ export function StockDailyKChart({
           symbol={symbol}
           linkedPrice={linkedPrice}
           onDateClick={onDateClick}
+          onPriceDoubleClick={onPriceDoubleClick}
           visibleBars={visibleBars}
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
