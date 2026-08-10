@@ -1,6 +1,15 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
+
+type SetOptionOptions = {
+  notMerge?: boolean
+  lazyUpdate?: boolean
+  silent?: boolean
+  replaceMerge?: string | string[]
+}
+
+const DEFAULT_SET_OPTION_OPTIONS: SetOptionOptions = { notMerge: true }
 
 /**
  * ECharts 实例管理 Hook — 自动初始化/resize/销毁。
@@ -12,11 +21,13 @@ import type { ECharts, EChartsOption } from 'echarts'
 export function useECharts(
   option: EChartsOption | null,
   deps: any[] = [],
-  containerRef?: React.RefObject<HTMLDivElement>,
+  containerRef?: RefObject<HTMLDivElement>,
+  setOptionOptions?: SetOptionOptions,
 ) {
   const ownRef = useRef<HTMLDivElement>(null)
   const chartRef = containerRef ?? ownRef
   const instanceRef = useRef<ECharts | null>(null)
+  const optionOptions = setOptionOptions ?? DEFAULT_SET_OPTION_OPTIONS
 
   // 初始化 / 销毁
   useEffect(() => {
@@ -35,8 +46,8 @@ export function useECharts(
   // 更新 option
   useEffect(() => {
     if (!instanceRef.current || !option) return
-    instanceRef.current.setOption(option, { notMerge: true })
-  }, [option, ...deps])
+    instanceRef.current.setOption(option, optionOptions)
+  }, [option, optionOptions, ...deps])
 
   return chartRef
 }

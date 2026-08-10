@@ -160,6 +160,79 @@ def test_quote_tick_store_writes_when_late_numeric_columns_appear(tmp_path):
     assert latest[0]["bid_depth_amount"] == 319_108_120.0
 
 
+def test_append_many_keeps_full_market_on_disk_but_limits_series(tmp_path):
+    rows = [
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.0,
+            "prev_close": 9.8,
+            "change_pct": 0.0204,
+            "timestamp": _ms(9, 30, 0),
+        },
+        {
+            "symbol": "300750.SZ",
+            "last_price": 319.1,
+            "prev_close": 318.0,
+            "change_pct": 0.00345,
+            "timestamp": _ms(9, 30, 1),
+        },
+    ]
+
+    quote_tick_store.append_many(
+        tmp_path,
+        rows,
+        source="tdxapi",
+        force_flush=True,
+        series_symbols={"002491.SZ"},
+    )
+
+    key = str(tmp_path)
+    assert set(quote_tick_store._latest[key]) == {"002491.SZ", "300750.SZ"}
+    assert set(quote_tick_store._series[key]) == {"002491.SZ"}
+    assert quote_tick_store._latest[key]["300750.SZ"]["change_pct"] == 0.00345
+
+    _clear_hot_rows(tmp_path)
+    disk_rows = quote_tick_store.read_all_ticks(tmp_path, target_date=TRADE_DATE)
+    assert {row["symbol"] for row in disk_rows} == {"002491.SZ", "300750.SZ"}
+    assert {row["symbol"] for row in quote_tick_store.snapshot_as_of(tmp_path, target_date=TRADE_DATE)[0]} == {
+        "002491.SZ",
+        "300750.SZ",
+    }
+
+
+def test_event_timestamps_and_snapshot_as_of_use_full_partition(tmp_path):
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "002491.SZ", "last_price": 10.0, "timestamp": _ms(9, 30)},
+            {"symbol": "002491.SZ", "last_price": 10.5, "timestamp": _ms(9, 32)},
+            {"symbol": "300750.SZ", "last_price": 319.0, "timestamp": _ms(9, 31)},
+            {"symbol": "300750.SZ", "last_price": 320.0, "timestamp": _ms(9, 33)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+        series_symbols=set(),
+    )
+    _clear_hot_rows(tmp_path)
+
+    assert quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE) == [
+        _ms(9, 30),
+        _ms(9, 31),
+        _ms(9, 32),
+        _ms(9, 33),
+    ]
+
+    rows, actual_ts = quote_tick_store.snapshot_as_of(
+        tmp_path,
+        target_date=TRADE_DATE,
+        as_of_ts=_ms(9, 32),
+    )
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert actual_ts == _ms(9, 32)
+    assert by_symbol["002491.SZ"]["last_price"] == 10.5
+    assert by_symbol["300750.SZ"]["last_price"] == 319.0
+
+
 def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, monkeypatch):
     quote_tick_store.append_many(tmp_path, [
         {

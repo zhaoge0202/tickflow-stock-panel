@@ -455,39 +455,533 @@ def get_cached_result(
     }
 
 
-@router.get("/market-snapshot")
-def market_snapshot(request: Request):
-    """最新全市场轻量行情快照，供板块/概念聚合分析使用。"""
+_MARKET_SNAPSHOT_COLS = [
+    "symbol", "name", "close", "change_pct", "amount", "volume",
+    "turnover_rate", "vol_ratio_5d", "total_shares", "float_shares",
+    "market_cap", "float_market_cap", "consecutive_limit_ups",
+]
+
+
+def _list_enriched_dates(data_dir, *, limit: int = 60) -> list[str]:
+    """列出本地 kline_daily_enriched 可用交易日 (新→旧)。"""
+    from pathlib import Path
+
+    base = Path(data_dir) / "kline_daily_enriched"
+    if not base.exists():
+        return []
+    dates: list[str] = []
+    for p in base.glob("date=*"):
+        if not p.is_dir():
+            continue
+        part = p / "part.parquet"
+        if not part.exists():
+            continue
+        ds = p.name.split("=", 1)[-1]
+        try:
+            date.fromisoformat(ds)
+        except ValueError:
+            continue
+        dates.append(ds)
+    dates.sort(reverse=True)
+    return dates[: max(1, int(limit))]
+
+
+def _snapshot_rows_from_df(df):
     import polars as pl
 
-    repo = request.app.state.repo
-    svc = ScreenerService(repo)
-    as_of = svc.latest_date()
-    if not as_of:
-        return {"as_of": None, "rows": []}
-
-    df = svc._load_enriched_for_date(as_of)
-    if df.is_empty():
-        return {"as_of": str(as_of), "rows": []}
-
-    if "close" in df.columns and "total_shares" in df.columns and "market_cap" not in df.columns:
-        df = df.with_columns((pl.col("close") * pl.col("total_shares")).alias("market_cap"))
-    if "close" in df.columns and "float_shares" in df.columns and "float_market_cap" not in df.columns:
-        df = df.with_columns((pl.col("close") * pl.col("float_shares")).alias("float_market_cap"))
-
-    cols = [
-        "symbol", "name", "close", "change_pct", "amount", "volume",
-        "turnover_rate", "vol_ratio_5d", "total_shares", "float_shares",
-        "market_cap", "float_market_cap", "consecutive_limit_ups",
-    ]
-    df = df.select([c for c in cols if c in df.columns])
-    rows = df.to_dicts()
+    if df is None or df.is_empty():
+        return []
+    if "close" in df.columns and "total_shares" in df.columns:
+        market_cap = pl.col("close") * pl.col("total_shares")
+        if "market_cap" in df.columns:
+            market_cap = pl.coalesce([market_cap, pl.col("market_cap")])
+        df = df.with_columns(market_cap.alias("market_cap"))
+    if "close" in df.columns and "float_shares" in df.columns:
+        float_market_cap = pl.col("close") * pl.col("float_shares")
+        if "float_market_cap" in df.columns:
+            float_market_cap = pl.coalesce([float_market_cap, pl.col("float_market_cap")])
+        df = df.with_columns(float_market_cap.alias("float_market_cap"))
+    # 若缺 change_pct, 尽量从 close/prev_close 推
+    if "change_pct" not in df.columns and "close" in df.columns and "prev_close" in df.columns:
+        df = df.with_columns(
+            (pl.col("close") / pl.col("prev_close") - 1).alias("change_pct")
+        )
+    cols = [c for c in _MARKET_SNAPSHOT_COLS if c in df.columns]
+    rows = df.select(cols).to_dicts()
     for r in rows:
         for k, v in list(r.items()):
             if isinstance(v, float) and not math.isfinite(v):
                 r[k] = None
+    return rows
 
-    return {"as_of": str(as_of), "rows": rows}
+
+def _overlay_snapshot_rows(base_df, overlay_rows: list[dict]):
+    """用盘中 tick 子集覆盖全市场基础快照, 未命中标的保持基础快照。
+
+    quote_ticks 在生产上可能是稀疏增量；直接把它当全市场快照会导致板块气泡清空。
+    """
+    import polars as pl
+
+    if base_df is None or base_df.is_empty() or not overlay_rows:
+        return base_df
+    if "symbol" not in base_df.columns:
+        return base_df
+    try:
+        overlay = pl.DataFrame(overlay_rows)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("snapshot overlay frame failed: %s", e)
+        return base_df
+    if overlay.is_empty() or "symbol" not in overlay.columns:
+        return base_df
+
+    overlay = overlay.unique(subset=["symbol"], keep="last")
+    base_cols = set(base_df.columns)
+    overlay_cols = [c for c in overlay.columns if c != "symbol"]
+    joined = base_df.join(
+        overlay.select(["symbol", *overlay_cols]),
+        on="symbol",
+        how="left",
+        suffix="_tick",
+    )
+    exprs = []
+    drop_cols: list[str] = []
+    for col in overlay_cols:
+        if col not in base_cols:
+            continue
+        tick_col = f"{col}_tick"
+        if tick_col not in joined.columns:
+            continue
+        exprs.append(pl.coalesce([pl.col(tick_col), pl.col(col)]).alias(col))
+        drop_cols.append(tick_col)
+    if exprs:
+        joined = joined.with_columns(exprs)
+    if drop_cols:
+        joined = joined.drop(drop_cols)
+    return joined
+
+
+def _intraday_snapshot_from_quote_ticks(
+    data_dir,
+    trade_date: date,
+    *,
+    as_of_ts: int | None = None,
+):
+    """从 quote_ticks 取截止 as_of_ts 的每标的最后一笔, 构造成 market-snapshot 行。
+
+    用于盘中/收盘后回放「今天已过时间点」。无 quote_ticks 时返回空。
+    snapshot_as_of 会同时读取热缓存和磁盘分区, 不能先按目录存在性短路。
+    """
+    from pathlib import Path
+
+    import polars as pl
+
+    from app.services import quote_tick_store
+
+    try:
+        rows, actual_ts = quote_tick_store.snapshot_as_of(
+            Path(data_dir),
+            target_date=trade_date,
+            as_of_ts=as_of_ts,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("intraday snapshot read failed: %s", e)
+        return [], None
+
+    if not rows:
+        return [], None
+
+    try:
+        df = pl.DataFrame(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("intraday snapshot frame failed: %s", e)
+        return [], None
+
+    if df.is_empty() or "symbol" not in df.columns or "event_ts" not in df.columns:
+        return [], None
+
+    close_col = "last_price" if "last_price" in df.columns else ("close" if "close" in df.columns else None)
+    exprs = [pl.col("symbol")]
+    if close_col:
+        exprs.append(pl.col(close_col).alias("close"))
+    if "change_pct" in df.columns:
+        exprs.append(pl.col("change_pct"))
+    elif close_col and "prev_close" in df.columns:
+        exprs.append((pl.col(close_col) / pl.col("prev_close") - 1).alias("change_pct"))
+    for c in ("name", "amount", "volume", "prev_close", "open", "high", "low"):
+        if c in df.columns:
+            exprs.append(pl.col(c))
+    out = df.select(exprs)
+
+    try:
+        inst_path = Path(data_dir) / "instruments" / "instruments.parquet"
+        if inst_path.exists():
+            inst = pl.read_parquet(inst_path)
+            inst_cols = [c for c in ("symbol", "name", "total_shares", "float_shares") if c in inst.columns]
+            if "symbol" in inst_cols:
+                joined = out.join(
+                    inst.select(inst_cols).unique(subset=["symbol"], keep="last"),
+                    on="symbol",
+                    how="left",
+                )
+                if "name" in out.columns and "name_right" in joined.columns:
+                    joined = joined.with_columns(
+                        pl.coalesce([pl.col("name"), pl.col("name_right")]).alias("name")
+                    ).drop("name_right")
+                elif "name" not in out.columns and "name" in joined.columns:
+                    pass
+                out = joined
+    except Exception as e:  # noqa: BLE001
+        logger.debug("intraday snapshot join instruments failed: %s", e)
+
+    return _snapshot_rows_from_df(out), actual_ts
+
+
+def _market_replay_min_symbols(data_dir) -> int:
+    """估算全市场回放至少应覆盖的股票数；无维表时不启用覆盖度门槛。"""
+    from pathlib import Path
+
+    import polars as pl
+
+    inst_path = Path(data_dir) / "instruments" / "instruments.parquet"
+    if not inst_path.exists():
+        return 0
+    try:
+        inst = pl.read_parquet(inst_path, columns=["symbol"])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("market replay instrument count skipped: %s", e)
+        return 0
+    count = inst["symbol"].drop_nulls().n_unique() if "symbol" in inst.columns else 0
+    if count <= 0:
+        return 0
+    return max(20, min(1000, int(count * 0.5)))
+
+
+def _timeline_needs_backfill(timeline: dict, data_dir, target: date) -> bool:
+    if not timeline.get("has_ticks"):
+        return True
+    min_symbols = _market_replay_min_symbols(data_dir)
+    if min_symbols <= 0:
+        return False
+    return int(timeline.get("symbol_count") or 0) < min_symbols
+
+
+def _cn_today_safe() -> date:
+    try:
+        from app.market_time import cn_today
+
+        return cn_today()
+    except Exception:  # noqa: BLE001
+        return date.today()
+
+
+def _try_fetch_today_quotes(request: Request, *, reason: str) -> bool:
+    quote_service = getattr(request.app.state, "quote_service", None)
+    if quote_service is None:
+        return False
+    try:
+        quote_service._fetch_quotes()  # noqa: SLF001
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("%s realtime quote fetch failed: %s", reason, e)
+        return False
+
+
+def _is_realtime_collection_target(target: date) -> bool:
+    if target != _cn_today_safe():
+        return False
+    try:
+        from app.market_time import trading_minutes_elapsed
+
+        return trading_minutes_elapsed() < 240
+    except Exception:  # noqa: BLE001
+        now = datetime.now()
+        return now.hour < 15 or (now.hour == 15 and now.minute < 1)
+
+
+def _enqueue_quote_tick_backfill(
+    request: Request,
+    data_dir,
+    target: date,
+    *,
+    reason: str,
+    force: bool = False,
+    min_symbols: int | None = None,
+) -> dict:
+    from pathlib import Path
+
+    from app.services.quote_tick_backfill import quote_tick_backfill_service
+
+    return quote_tick_backfill_service.enqueue(
+        Path(data_dir),
+        target,
+        repo=getattr(request.app.state, "repo", None),
+        reason=reason,
+        force=force,
+        min_symbols=min_symbols,
+    )
+
+
+def _ensure_market_replay_ticks(
+    request: Request,
+    data_dir,
+    target: date,
+    *,
+    step_seconds: int = 60,
+) -> dict:
+    """确保目标日有板块回放帧；历史缺失时触发补数据。"""
+    from pathlib import Path
+
+    from app.services import quote_tick_store
+
+    data_path = Path(data_dir)
+    timeline = quote_tick_store.timeline_points(
+        data_path,
+        target_date=target,
+        step_seconds=step_seconds,
+    )
+    min_symbols = _market_replay_min_symbols(data_path)
+    if _is_realtime_collection_target(target):
+        needs_backfill = _timeline_needs_backfill(timeline, data_path, target)
+        if needs_backfill and _try_fetch_today_quotes(request, reason="market replay"):
+            timeline = quote_tick_store.timeline_points(
+                data_path,
+                target_date=target,
+                step_seconds=step_seconds,
+            )
+            needs_backfill = _timeline_needs_backfill(timeline, data_path, target)
+        queued = None
+        if needs_backfill:
+            queued = _enqueue_quote_tick_backfill(
+                request,
+                data_path,
+                target,
+                reason="today_sparse_quote_ticks" if timeline.get("has_ticks") else "today_missing_quote_ticks",
+                force=True,
+                min_symbols=min_symbols,
+            )
+        return {
+            "status": (
+                "ready"
+                if not needs_backfill
+                else "partial_ticks"
+                if timeline.get("has_ticks")
+                else "missing_today_ticks"
+            ),
+            "timeline": timeline,
+            "backfill": queued,
+        }
+
+    if not _timeline_needs_backfill(timeline, data_path, target):
+        return {"status": "ready", "timeline": timeline, "backfill": None}
+
+    backfill = quote_tick_store.materialize_from_minute(data_path, target_date=target)
+    if backfill.get("status") in {"materialized", "exists"}:
+        timeline = quote_tick_store.timeline_points(
+            data_path,
+            target_date=target,
+            step_seconds=step_seconds,
+        )
+        if not _timeline_needs_backfill(timeline, data_path, target):
+            return {"status": backfill.get("status"), "timeline": timeline, "backfill": backfill}
+
+    queued = _enqueue_quote_tick_backfill(
+        request,
+        data_path,
+        target,
+        reason="timeline_sparse_quote_ticks" if timeline.get("has_ticks") else "timeline_missing_quote_ticks",
+        force=True,
+        min_symbols=min_symbols,
+    )
+
+    if timeline.get("has_ticks"):
+        return {"status": "partial_ticks", "timeline": timeline, "backfill": queued}
+    return {"status": queued.get("status") or backfill.get("status") or "missing_ticks", "timeline": timeline, "backfill": queued}
+
+
+@router.get("/market-dates")
+def market_dates(request: Request, limit: int = Query(60, ge=1, le=250)):
+    """返回本地可用的行情快照交易日列表 (新→旧), 供板块动能页日期选择。"""
+    repo = request.app.state.repo
+    dates = _list_enriched_dates(repo.store.data_dir, limit=limit)
+    latest = dates[0] if dates else None
+    return {"dates": dates, "latest": latest, "count": len(dates)}
+
+
+@router.get("/market-snapshot")
+def market_snapshot(
+    request: Request,
+    as_of: Optional[str] = Query(None, description="交易日 YYYY-MM-DD; 默认最新 enriched 日"),
+    as_of_ts: Optional[int] = Query(
+        None,
+        description="盘中/回放截止时间 (ms epoch)。当目标日期存在 quote_ticks 时生效",
+    ),
+):
+    """全市场轻量行情快照，供板块/概念聚合与动能气泡使用。
+
+    - 默认: 最新 enriched 日收盘快照
+    - as_of=历史日: 该日 enriched 收盘快照
+    - as_of + as_of_ts: 优先从目标日 quote_ticks 回放到该时刻; 无 ticks 则退回日快照
+    """
+    import polars as pl
+
+    repo = request.app.state.repo
+    svc = ScreenerService(repo)
+    data_dir = repo.store.data_dir
+
+    # 解析目标日
+    target: date | None = None
+    if as_of:
+        try:
+            target = date.fromisoformat(str(as_of)[:10])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"invalid as_of: {as_of}") from e
+    else:
+        target = svc.latest_date()
+    if not target:
+        return {
+            "as_of": None,
+            "as_of_ts": None,
+            "mode": "empty",
+            "rows": [],
+            "available_dates": _list_enriched_dates(data_dir, limit=60),
+        }
+
+    mode = "eod"
+    actual_ts: int | None = None
+    rows: list[dict] = []
+    intraday_rows: list[dict] = []
+    replay_status: str | None = None
+    replay: dict | None = None
+
+    # 盘中/历史回放: 只要目标日有 quote_ticks, 就按 as_of_ts 取该时点最后一笔。
+    if as_of_ts is not None:
+        replay = _ensure_market_replay_ticks(request, data_dir, target)
+        replay_status = str(replay.get("status") or "")
+        intraday_rows, actual_ts = _intraday_snapshot_from_quote_ticks(
+            data_dir, target, as_of_ts=int(as_of_ts),
+        )
+        if intraday_rows:
+            mode = "intraday_partial" if replay_status == "partial_ticks" else "intraday"
+        else:
+            # 无 ticks → 退回日快照
+            mode = "eod_fallback"
+
+    df = svc._load_enriched_for_date(target)
+    # 若 enriched 缺 change_pct, 用前一日 close 补
+    if not df.is_empty() and "change_pct" not in df.columns and "close" in df.columns:
+        try:
+            # 找前一可用 enriched 日
+            dates = _list_enriched_dates(data_dir, limit=30)
+            prev = None
+            for ds in dates:
+                d = date.fromisoformat(ds)
+                if d < target:
+                    prev = d
+                    break
+            if prev is not None:
+                prev_path = data_dir / "kline_daily" / f"date={prev.isoformat()}" / "part.parquet"
+                if prev_path.exists():
+                    prev_df = pl.read_parquet(prev_path).select(
+                        ["symbol", pl.col("close").alias("prev_close")]
+                    )
+                    df = df.join(prev_df, on="symbol", how="left").with_columns(
+                        (pl.col("close") / pl.col("prev_close") - 1).alias("change_pct")
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("market_snapshot prev_close fill failed: %s", e)
+    # JOIN name if missing
+    if not df.is_empty() and "name" not in df.columns:
+        try:
+            inst = repo.get_instruments_asset("stock")
+            if inst is not None and not inst.is_empty():
+                cols = [c for c in ("symbol", "name", "total_shares", "float_shares") if c in inst.columns]
+                df = df.join(inst.select(cols).unique(subset=["symbol"], keep="last"), on="symbol", how="left")
+        except Exception:  # noqa: BLE001
+            pass
+    if intraday_rows:
+        df = _overlay_snapshot_rows(df, intraday_rows)
+    rows = _snapshot_rows_from_df(df)
+    if not rows and intraday_rows:
+        rows = intraday_rows
+    if mode == "eod" and as_of_ts is None:
+        mode = "eod"
+
+    return {
+        "as_of": str(target),
+        "as_of_ts": actual_ts if mode.startswith("intraday") else as_of_ts,
+        "mode": mode,
+        "replay_status": replay_status,
+        "rows": rows,
+        "count": len(rows),
+        "available_dates": _list_enriched_dates(data_dir, limit=60),
+        "backfill": replay.get("backfill") if replay is not None else None,
+    }
+
+
+@router.get("/market-intraday-timeline")
+def market_intraday_timeline(
+    request: Request,
+    as_of: Optional[str] = Query(None, description="交易日 YYYY-MM-DD, 默认今天"),
+    step_seconds: int = Query(60, ge=30, le=600, description="时间轴采样步长(秒)"),
+):
+    """返回某日 quote_ticks 可用的回放时间点列表 (ms)。
+
+    用于动能页拖动条: 盘中显示「已过时间」, 收盘后可全日回放。
+    无 quote_ticks 时返回空 points。
+    """
+    repo = request.app.state.repo
+    data_dir = repo.store.data_dir
+    today = _cn_today_safe()
+
+    if as_of:
+        try:
+            target = date.fromisoformat(str(as_of)[:10])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"invalid as_of: {as_of}") from e
+    else:
+        target = today
+
+    try:
+        replay = _ensure_market_replay_ticks(request, data_dir, target, step_seconds=step_seconds)
+        timeline = replay.get("timeline") or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("timeline replay ensure failed: %s", e)
+        return {
+            "as_of": str(target),
+            "points": [],
+            "start_ts": None,
+            "end_ts": None,
+            "has_ticks": False,
+            "error": str(e),
+        }
+
+    if not timeline.get("has_ticks"):
+        backfill = replay.get("backfill") if isinstance(replay, dict) else None
+        return {
+            "as_of": str(target),
+            "points": [],
+            "start_ts": None,
+            "end_ts": None,
+            "has_ticks": False,
+            "step_seconds": step_seconds,
+            "backfill_status": replay.get("status") if isinstance(replay, dict) else "missing_ticks",
+            "backfill": backfill,
+            "message": "该日期没有盘中 tick，也没有本地分钟K可补" if (backfill or {}).get("status") == "missing_minute" else "该日期暂无盘中回放点",
+        }
+
+    return {
+        "as_of": str(target),
+        "points": timeline.get("points") or [],
+        "start_ts": timeline.get("start_ts"),
+        "end_ts": timeline.get("end_ts"),
+        "step_seconds": step_seconds,
+        "has_ticks": True,
+        "count": timeline.get("count") or len(timeline.get("points") or []),
+        "symbol_count": timeline.get("symbol_count") or 0,
+        "sources": timeline.get("sources") or [],
+        "backfill_status": replay.get("status"),
+        "backfill": replay.get("backfill"),
+    }
 
 
 @router.post("/run_all")

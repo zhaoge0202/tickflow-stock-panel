@@ -250,10 +250,19 @@ def test_prime_quotes_waits_for_enriched_warmup(monkeypatch, tmp_path):
 def test_tdxapi_records_are_submitted_to_mysql_snapshot_writer(monkeypatch, tmp_path):
     from app.services import preferences, quote_snapshot_ingest, quote_tick_store
 
-    records = [{"symbol": "002491.SZ", "timestamp": 1_783_485_000_000, "last_price": 10.2}]
+    records = [
+        {"symbol": "002491.SZ", "timestamp": 1_783_485_000_000, "last_price": 10.2},
+        {"symbol": "300750.SZ", "timestamp": 1_783_485_000_000, "last_price": 320.0},
+    ]
     captured = {}
     monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
-    monkeypatch.setattr(quote_tick_store, "append_many", lambda *args, **kwargs: {})
+
+    def capture_append(data_dir, rows, **kwargs):
+        captured["append"] = {"data_dir": data_dir, "rows": rows, "kwargs": kwargs}
+        return {}
+
+    monkeypatch.setattr(quote_tick_store, "append_many", capture_append)
+    monkeypatch.setattr(QuoteService, "_quote_tick_focus_symbols", lambda self: {"002491.SZ"})
 
     def capture_submit(rows):
         captured["rows"] = rows
@@ -270,3 +279,50 @@ def test_tdxapi_records_are_submitted_to_mysql_snapshot_writer(monkeypatch, tmp_
     qs._append_quote_ticks_if_tdxapi(records)
 
     assert captured["rows"] is records
+    assert captured["append"]["data_dir"] == tmp_path
+    assert captured["append"]["rows"] is records
+    assert captured["append"]["kwargs"] == {"source": "tdxapi", "series_symbols": {"002491.SZ"}}
+
+
+def test_tdxapi_market_frame_persists_all_records_every_fetch(monkeypatch, tmp_path):
+    from app.services import preferences, quote_snapshot_ingest, quote_tick_store
+
+    calls = []
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(
+        quote_snapshot_ingest.quote_snapshot_ingestor,
+        "submit",
+        lambda rows: True,
+    )
+
+    def capture_append(data_dir, rows, **kwargs):
+        calls.append({"data_dir": data_dir, "rows": rows, "kwargs": kwargs})
+        return {}
+
+    monkeypatch.setattr(quote_tick_store, "append_many", capture_append)
+
+    qs = QuoteService()
+    qs.set_repo(_Repo(tmp_path))
+    monkeypatch.setattr(qs, "_quote_tick_focus_symbols", lambda: {"002491.SZ"})
+
+    first_batch = [
+        {"symbol": "002491.SZ", "timestamp": 1_783_485_000_000, "last_price": 10.2},
+        {"symbol": "300750.SZ", "timestamp": 1_783_485_000_000, "last_price": 320.0},
+    ]
+    second_batch = [
+        {"symbol": "002491.SZ", "timestamp": 1_783_485_030_000, "last_price": 10.3},
+        {"symbol": "300750.SZ", "timestamp": 1_783_485_030_000, "last_price": 321.0},
+    ]
+    third_batch = [
+        {"symbol": "002491.SZ", "timestamp": 1_783_485_060_000, "last_price": 10.4},
+        {"symbol": "300750.SZ", "timestamp": 1_783_485_060_000, "last_price": 322.0},
+    ]
+
+    qs._append_quote_ticks_if_tdxapi(first_batch)
+    qs._append_quote_ticks_if_tdxapi(second_batch)
+    qs._append_quote_ticks_if_tdxapi(third_batch)
+
+    assert len(calls) == 3
+    assert [len(c["rows"]) for c in calls] == [2, 2, 2]
+    assert all(c["kwargs"].get("source") == "tdxapi" for c in calls)
+    assert all(c["kwargs"].get("series_symbols") == {"002491.SZ"} for c in calls)

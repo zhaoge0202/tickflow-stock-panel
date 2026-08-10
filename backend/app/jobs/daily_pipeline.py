@@ -967,7 +967,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
-    # 盘后: 清理过期 quote_ticks 分区 (默认保留 3 天; 全市场最新价已在 MySQL)
+    # 盘后: 清理过期 quote_ticks 分区 (默认保留 30 天; 更早日期可按需补回放帧)
     def _cleanup_quote_ticks():
         from app.services import quote_tick_store
 

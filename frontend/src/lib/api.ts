@@ -388,6 +388,65 @@ export interface MarketSnapshotRow {
   [key: string]: any
 }
 
+export type MarketSnapshotMode = 'intraday' | 'eod' | 'eod_fallback' | 'empty' | string
+
+export interface MarketSnapshotResponse {
+  as_of: string | null
+  as_of_ts?: number | null
+  mode?: MarketSnapshotMode
+  replay_status?: string | null
+  rows: MarketSnapshotRow[]
+  count?: number
+  available_dates?: string[]
+  backfill?: QuoteTickBackfillStatus | null
+}
+
+export interface MarketDatesResponse {
+  dates: string[]
+  latest: string | null
+  count: number
+}
+
+export interface MarketIntradayTimelineResponse {
+  as_of: string
+  points: number[]
+  start_ts: number | null
+  end_ts: number | null
+  step_seconds?: number
+  has_ticks: boolean
+  count?: number
+  symbol_count?: number
+  sources?: string[]
+  backfill_status?: string | null
+  backfill?: QuoteTickBackfillStatus | null
+  message?: string
+  error?: string
+}
+
+export interface QuoteTickBackfillStatus {
+  status?: string
+  date?: string
+  reason?: string
+  source?: string
+  rows?: number
+  symbols?: number
+  min_symbols?: number
+  hours?: number
+  points?: number
+  error?: string | null
+  queued_at?: string
+  started_at?: string
+  finished_at?: string
+  elapsed_seconds?: number
+  coalesced?: boolean
+  progress?: {
+    current?: number
+    total?: number
+    symbols_done?: number
+    symbols_total?: number
+  }
+}
+
 export interface OverviewDimensionRankItem {
   name: string
   count: number
@@ -1954,8 +2013,24 @@ export const api = {
         : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
 
-  marketSnapshot: () =>
-    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
+  marketDates: (limit = 120) =>
+    request<MarketDatesResponse>(`/api/screener/market-dates?limit=${limit}`),
+
+  marketSnapshot: (opts?: { asOf?: string | null; asOfTs?: number | null }) => {
+    const params = new URLSearchParams()
+    if (opts?.asOf) params.set('as_of', opts.asOf)
+    if (opts?.asOfTs != null) params.set('as_of_ts', String(opts.asOfTs))
+    const suffix = params.toString()
+    return request<MarketSnapshotResponse>(`/api/screener/market-snapshot${suffix ? `?${suffix}` : ''}`)
+  },
+
+  marketIntradayTimeline: (opts?: { asOf?: string | null; stepSeconds?: number }) => {
+    const params = new URLSearchParams()
+    if (opts?.asOf) params.set('as_of', opts.asOf)
+    if (opts?.stepSeconds) params.set('step_seconds', String(opts.stepSeconds))
+    const suffix = params.toString()
+    return request<MarketIntradayTimelineResponse>(`/api/screener/market-intraday-timeline${suffix ? `?${suffix}` : ''}`)
+  },
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序

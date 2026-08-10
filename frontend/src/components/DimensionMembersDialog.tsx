@@ -97,8 +97,8 @@ function DimensionMembersDialogContent({ target, onClose, onStockClick }: Omit<P
   })
 
   const marketQuery = useQuery({
-    queryKey: QK.marketSnapshot,
-    queryFn: api.marketSnapshot,
+    queryKey: QK.marketSnapshot(),
+    queryFn: () => api.marketSnapshot(),
     enabled: (membersQuery.data?.rows.length ?? 0) > 0,
     staleTime: 60_000,
   })
