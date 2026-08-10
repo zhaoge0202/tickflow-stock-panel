@@ -293,7 +293,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           实时行情需要 Free 及以上档位。None 档可使用 free-api 获取历史日K（当日数据需盘后1-2小时），但不能调用付费服务器实时接口。
         </p>
         <a
-          href="/settings?tab=account"
+          href="/settings?tab=data-sources"
           className="inline-flex items-center gap-2 px-5 py-2.5 rounded-btn
                      bg-accent text-white text-sm font-medium
                      hover:bg-accent/90 transition-colors"

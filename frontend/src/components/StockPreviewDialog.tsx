@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
@@ -58,6 +60,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const [intradayDays, setIntradayDays] = useState(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
+  const [maximized, setMaximized] = useState(false)
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
 
@@ -152,7 +155,10 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 8 }}
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-[92vw] max-w-[1100px] max-h-[95vh] rounded-card border border-border bg-base shadow-2xl overflow-hidden flex flex-col"
+            className={cn(
+              'relative rounded-card border border-border bg-base shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-smooth',
+              maximized ? 'w-screen h-screen max-w-none max-h-none' : 'w-[92vw] max-w-[1100px] max-h-[95vh]',
+            )}
           >
             {/* 顶栏 */}
             <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5 shrink-0">
@@ -169,88 +175,49 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 {name && <span className="truncate text-xs text-muted">{name}</span>}
               </div>
 
-              <button
-                onClick={onClose}
-                className="shrink-0 rounded-btn p-1 text-secondary transition-colors hover:bg-elevated hover:text-foreground"
-                aria-label="关闭个股详情"
-                title="关闭"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-y border-border px-4 py-2 sm:px-5">
-              <div role="tablist" aria-label="图表视图" className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={view === 'daily'}
-                  onClick={() => setView('daily')}
-                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
-                    view === 'daily' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                  }`}
-                >
-                  <LineChart className="h-3 w-3" />
-                  日 K
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={view === 'intraday'}
-                  onClick={() => setView('intraday')}
-                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
-                    view === 'intraday' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
-                  }`}
-                >
-                  <Clock className="h-3 w-3" />
-                  分时
-                </button>
-              </div>
-
-              <div className="flex max-w-full min-w-0 items-center gap-1.5 overflow-x-auto">
+              <div className="flex shrink-0 items-center gap-1">
+                {/* 区间选择 — 随视图切换 */}
                 {view === 'daily' ? (
-                  <>
-                {/* 日期范围快捷 */}
-                {PRESETS.map(p => {
-                  const now = new Date()
-                  const s = new Date(now)
-                  s.setMonth(s.getMonth() - p.months)
-                  const expected = s.toISOString().slice(0, 10)
-                  const isActive = dateRange.start === expected
-                  return (
-                    <button
-                      key={p.label}
-                      onClick={() => {
-                        const end = new Date().toISOString().slice(0, 10)
-                        const ns = new Date()
-                        ns.setMonth(ns.getMonth() - p.months)
-                        setDateRange({ start: ns.toISOString().slice(0, 10), end })
-                      }}
-                      className={`h-6 px-1.5 rounded text-[11px] transition-colors cursor-pointer
-                        ${isActive
-                          ? 'bg-accent/20 text-accent font-medium border border-accent/30'
-                          : 'text-muted hover:text-foreground hover:bg-elevated border border-transparent'
-                        }`}
-                    >
-                      {p.label}
-                    </button>
-                  )
-                })}
-                <DatePicker
-                  value={dateRange.start}
-                  onChange={(v) => setDateRange(prev => ({ ...prev, start: v }))}
-                  max={dateRange.end}
-                />
-                <span className="text-muted/40 text-[10px]">~</span>
-                <DatePicker
-                  value={dateRange.end}
-                  onChange={(v) => setDateRange(prev => ({ ...prev, end: v }))}
-                  min={dateRange.start}
-                />
-                  </>
+                  <div className="flex items-center gap-1">
+                    {PRESETS.map(p => {
+                      const now = new Date()
+                      const s = new Date(now)
+                      s.setMonth(s.getMonth() - p.months)
+                      const expected = s.toISOString().slice(0, 10)
+                      const isActive = dateRange.start === expected
+                      return (
+                        <button
+                          key={p.label}
+                          onClick={() => {
+                            const end = new Date().toISOString().slice(0, 10)
+                            const ns = new Date()
+                            ns.setMonth(ns.getMonth() - p.months)
+                            setDateRange({ start: ns.toISOString().slice(0, 10), end })
+                          }}
+                          className={`h-6 px-1.5 rounded text-[11px] transition-colors cursor-pointer
+                            ${isActive
+                              ? 'bg-accent/20 text-accent font-medium border border-accent/30'
+                              : 'text-muted hover:text-foreground hover:bg-elevated border border-transparent'
+                            }`}
+                        >
+                          {p.label}
+                        </button>
+                      )
+                    })}
+                    <DatePicker
+                      value={dateRange.start}
+                      onChange={(v) => setDateRange(prev => ({ ...prev, start: v }))}
+                      max={dateRange.end}
+                    />
+                    <span className="text-muted/40 text-[10px]">~</span>
+                    <DatePicker
+                      value={dateRange.end}
+                      onChange={(v) => setDateRange(prev => ({ ...prev, end: v }))}
+                      min={dateRange.start}
+                    />
+                  </div>
                 ) : (
-                  <>
-                    <span className="shrink-0 text-[10px] text-muted">区间</span>
+                  <div className="flex items-center gap-1">
                     <div className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5" aria-label="分时周期">
                       {INTRADAY_DAY_OPTIONS.map(days => (
                         <button
@@ -268,18 +235,97 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                         </button>
                       ))}
                     </div>
-                  </>
+                  </div>
                 )}
 
                 <span className="mx-0.5 h-4 w-px shrink-0 bg-border" />
 
+                {/* 日K / 分时 切换 */}
+                <div role="tablist" aria-label="图表视图" className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={view === 'daily'}
+                    onClick={() => setView('daily')}
+                    className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
+                      view === 'daily' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                    }`}
+                  >
+                    <LineChart className="h-3 w-3" />
+                    日 K
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={view === 'intraday'}
+                    onClick={() => setView('intraday')}
+                    className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
+                      view === 'intraday' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                    }`}
+                  >
+                    <Clock className="h-3 w-3" />
+                    分时
+                  </button>
+                </div>
+
+                <span className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+
+                {/* 自选 */}
+                {inWatchlist ? (
+                  <button
+                    type="button"
+                    onClick={() => toggleWatchlist.mutate({ action: 'remove' })}
+                    disabled={toggleWatchlist.isPending}
+                    className="rounded-btn p-1.5 text-[#FACC15] transition-colors cursor-pointer hover:bg-elevated disabled:opacity-50"
+                    title="移出自选"
+                    aria-label={`将 ${symbol} 移出自选`}
+                  >
+                    <Star className="h-4 w-4" />
+                  </button>
+                ) : (
+                  <WatchlistAddMenu
+                    onSelect={groupId => toggleWatchlist.mutate({ action: 'add', groupId })}
+                    disabled={toggleWatchlist.isPending}
+                    triggerClassName="rounded-btn p-1.5 text-muted transition-colors cursor-pointer hover:bg-elevated hover:text-foreground disabled:opacity-50"
+                    ariaLabel={`将 ${symbol} 加入自选`}
+                  >
+                    <Star className="h-4 w-4" />
+                  </WatchlistAddMenu>
+                )}
+                {/* 加监控 */}
+                <button
+                  onClick={() => setShowMonitorEditor(true)}
+                  className="p-1.5 rounded-btn text-amber-400 hover:bg-amber-400/10 transition-colors cursor-pointer"
+                  title="加监控"
+                >
+                  <RadioTower className="h-4 w-4" />
+                </button>
+
                 {/* 刷新 */}
                 <button
                   onClick={handleRefresh}
-                  className="p-1 rounded-btn text-secondary hover:text-foreground hover:bg-elevated transition-colors"
+                  className="p-1.5 rounded-btn text-secondary hover:text-foreground hover:bg-elevated transition-colors"
                   title="刷新"
                 >
-                  <RefreshCw className="h-3.5 w-3.5" />
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+
+                {/* 放大 / 缩小 */}
+                <button
+                  onClick={() => setMaximized(v => !v)}
+                  className="p-1.5 rounded-btn text-secondary hover:text-foreground hover:bg-elevated transition-colors"
+                  title={maximized ? '缩小' : '放大'}
+                >
+                  {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </button>
+
+                <button
+                  onClick={onClose}
+                  className="shrink-0 rounded-btn p-1.5 text-secondary transition-colors hover:bg-elevated hover:text-foreground"
+                  aria-label="关闭个股详情"
+                  title="关闭"
+                >
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -331,13 +377,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 <StockPanel
                   symbol={symbol}
                   height={420}
-                  showIntraday={false}
+                  showIntraday
                   dateRange={dateRange}
-                  onMonitor={() => setShowMonitorEditor(true)}
-                  inWatchlist={inWatchlist}
-                  onAddToWatchlist={groupId => toggleWatchlist.mutate({ action: 'add', groupId })}
-                  onRemoveFromWatchlist={() => toggleWatchlist.mutate({ action: 'remove' })}
-                  watchlistPending={toggleWatchlist.isPending}
                 />
               ) : (
                 <StockMultiDayIntradayChart

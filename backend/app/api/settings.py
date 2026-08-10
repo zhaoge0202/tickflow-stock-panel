@@ -405,6 +405,7 @@ def get_preferences() -> dict:
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
+        "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
@@ -774,6 +775,18 @@ def update_indices_nav_pinned(req: IndicesNavPinnedPrefs) -> dict:
     from app.services import preferences
     preferences.save({"indices_nav_pinned": req.indices_nav_pinned})
     return {"indices_nav_pinned": req.indices_nav_pinned}
+
+
+class WatchlistGroupsInNavPrefs(BaseModel):
+    watchlist_groups_in_nav: bool
+
+
+@router.put("/preferences/watchlist-groups-in-nav")
+def update_watchlist_groups_in_nav(req: WatchlistGroupsInNavPrefs) -> dict:
+    """保存自选分组是否显示在侧边栏开关。"""
+    from app.services import preferences
+    preferences.save({"watchlist_groups_in_nav": req.watchlist_groups_in_nav})
+    return {"watchlist_groups_in_nav": req.watchlist_groups_in_nav}
 
 
 class RealtimeMonitorConfigIn(BaseModel):

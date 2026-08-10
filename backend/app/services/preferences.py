@@ -49,6 +49,11 @@ def get_indices_nav_pinned() -> bool:
     return load().get("indices_nav_pinned", True)
 
 
+def get_watchlist_groups_in_nav() -> bool:
+    """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
+    return load().get("watchlist_groups_in_nav", False)
+
+
 def get_realtime_quote_interval() -> float:
     return load().get("realtime_quote_interval", 6.0)
 

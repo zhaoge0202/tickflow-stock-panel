@@ -1,6 +1,10 @@
 import { useRef, useState } from 'react'
-import { Check, FolderCog, FolderInput, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import { Check, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
 import { Modal } from '@/components/Modal'
+import { api } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
+import { usePreferences } from '@/lib/useSharedQueries'
 import type { WatchlistGroup, WatchlistGroupColor } from '@/lib/api'
 import {
   DEFAULT_WATCHLIST_GROUP_COLOR,
@@ -19,6 +23,7 @@ interface GroupBarProps {
   onCreate: (name: string, color: WatchlistGroupColor) => Promise<void>
   onRename: (groupId: string, name: string, color: WatchlistGroupColor) => Promise<void>
   onDelete: (groupId: string) => Promise<void>
+  onClearGroup?: (groupId: string) => Promise<void>
 }
 
 export function WatchlistGroupBar({
@@ -30,8 +35,10 @@ export function WatchlistGroupBar({
   onCreate,
   onRename,
   onDelete,
+  onClearGroup,
 }: GroupBarProps) {
   const [managerOpen, setManagerOpen] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
   const tabs = [
     { id: 'all', name: '全部', count: total, color: null },
     { id: 'ungrouped', name: '未分组', count: counts.ungrouped ?? 0, color: null },
@@ -80,7 +87,49 @@ export function WatchlistGroupBar({
         >
           <FolderCog className="h-4 w-4" />
         </button>
+        {/* 清空当前分组 — 仅选中具体分组时显示 */}
+        {onClearGroup && selected !== 'all' && selected !== 'ungrouped' && (
+          <button
+            type="button"
+            onClick={() => setConfirmClear(true)}
+            className="inline-flex w-8 shrink-0 items-center justify-center text-muted hover:text-warning"
+            title="清空当前分组"
+            aria-label="清空当前分组"
+          >
+            <Eraser className="h-4 w-4" />
+          </button>
+        )}
       </div>
+
+      {/* 清空分组确认弹窗 */}
+      {confirmClear && selected !== 'all' && selected !== 'ungrouped' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setConfirmClear(false)}
+          />
+          <div className="relative w-[90vw] max-w-[380px] rounded-card border border-border bg-base shadow-2xl p-6">
+            <h3 className="text-sm font-medium text-foreground mb-2">清空分组</h3>
+            <p className="text-xs text-secondary mb-5">
+              确认清空「{tabs.find(t => t.id === selected)?.name}」分组? 分组内所有股票将转为未分组(不从自选中删除)。
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setConfirmClear(false)}
+                className="px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:bg-elevated/80 text-sm transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { setConfirmClear(false); void onClearGroup?.(selected) }}
+                className="px-3 py-1.5 rounded-btn bg-warning/15 text-warning hover:bg-warning/25 text-sm font-medium transition-colors"
+              >
+                确认清空
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {managerOpen && (
         <GroupManagerDialog
@@ -137,7 +186,7 @@ function GroupManagerDialog({
   onCreate,
   onRename,
   onDelete,
-}: Omit<GroupBarProps, 'selected' | 'total' | 'onSelect'> & { onClose: () => void }) {
+}: Omit<GroupBarProps, 'selected' | 'total' | 'onSelect' | 'onClearGroup'> & { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [newName, setNewName] = useState('')
   const [newColor, setNewColor] = useState<WatchlistGroupColor>(DEFAULT_WATCHLIST_GROUP_COLOR)
@@ -147,6 +196,21 @@ function GroupManagerDialog({
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+
+  // 「显示在侧边栏」偏好开关
+  const qc = useQueryClient()
+  const prefs = usePreferences()
+  const groupsInNav = prefs.data?.watchlist_groups_in_nav ?? false
+  const [navTogglePending, setNavTogglePending] = useState(false)
+  const toggleGroupsInNav = async (enabled: boolean) => {
+    setNavTogglePending(true)
+    try {
+      await api.updateWatchlistGroupsInNav(enabled)
+      await qc.invalidateQueries({ queryKey: QK.preferences })
+    } finally {
+      setNavTogglePending(false)
+    }
+  }
 
   const validate = (name: string) => {
     const value = name.trim()
@@ -207,6 +271,27 @@ function GroupManagerDialog({
         </div>
         <button type="button" onClick={onClose} className="h-8 w-8 inline-flex items-center justify-center text-muted hover:text-foreground" aria-label="关闭">
           <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* 显示在侧边栏 开关 */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-foreground">显示在侧边栏</div>
+          <div className="mt-0.5 text-[10px] text-muted">开启后可在左侧菜单展开分组子菜单</div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void toggleGroupsInNav(!groupsInNav)}
+          disabled={navTogglePending}
+          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 disabled:opacity-50 ${
+            groupsInNav ? 'bg-accent' : 'bg-elevated'
+          }`}
+          title={groupsInNav ? '已开启 — 点击关闭' : '已关闭 — 点击开启'}
+        >
+          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ${
+            groupsInNav ? 'translate-x-[18px]' : 'translate-x-0.5'
+          }`} />
         </button>
       </div>
 

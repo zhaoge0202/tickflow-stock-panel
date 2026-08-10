@@ -7,6 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
+import { TickFlowKeyConfig } from './Keys'
 
 const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
@@ -431,51 +432,56 @@ function PluginDetail({ plugin, isActive, onSwitch, switching }: {
 
 function TickFlowDetail({ active, onSwitch, switching }: { active: boolean; onSwitch: () => void; switching: boolean }) {
   return (
-    <section className="rounded-card border border-border bg-surface p-6">
-      <div className="flex items-start gap-4 mb-5">
-        <div className="h-11 w-11 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
-          <Database className="h-5 w-5 text-accent" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
-            <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">内置默认</span>
-            {active && (
-              <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
-                <Check className="h-2.5 w-2.5" /> 当前使用
-              </span>
-            )}
+    <div className="space-y-5">
+      <section className="rounded-card border border-border bg-surface p-6">
+        <div className="flex items-start gap-4 mb-5">
+          <div className="h-11 w-11 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
+            <Database className="h-5 w-5 text-accent" />
           </div>
-          <p className="text-xs text-secondary mt-1.5 leading-relaxed">
-            项目默认数据源。日K、除权因子、实时行情、分钟K均由 TickFlow 提供,无需额外配置。
-          </p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
-        {[
-          { label: '日K', desc: '历史 + 实时覆写' },
-          { label: '除权因子', desc: 'Starter+ 能力' },
-          { label: '实时行情', desc: '全市场快照' },
-          { label: '分钟K', desc: 'Pro+ 能力' },
-        ].map(f => (
-          <div key={f.label} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5">
-            <div className="text-xs font-medium text-foreground">{f.label}</div>
-            <div className="text-[10px] text-muted mt-0.5">{f.desc}</div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
+              <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">内置默认</span>
+              {active && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
+                  <Check className="h-2.5 w-2.5" /> 当前使用
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-secondary mt-1.5 leading-relaxed">
+              项目默认数据源。日K、除权因子、实时行情、分钟K均由 TickFlow 提供,无需额外配置。
+            </p>
           </div>
-        ))}
-      </div>
+        </div>
 
-      {!active && (
-        <button
-          onClick={onSwitch}
-          disabled={switching}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-btn bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-        >
-          <Zap className="h-3.5 w-3.5" />
-          切换为当前数据源
-        </button>
-      )}
-    </section>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
+          {[
+            { label: '日K', desc: '历史 + 实时覆写' },
+            { label: '除权因子', desc: 'Starter+ 能力' },
+            { label: '实时行情', desc: '全市场快照' },
+            { label: '分钟K', desc: 'Pro+ 能力' },
+          ].map(f => (
+            <div key={f.label} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5">
+              <div className="text-xs font-medium text-foreground">{f.label}</div>
+              <div className="text-[10px] text-muted mt-0.5">{f.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        {!active && (
+          <button
+            onClick={onSwitch}
+            disabled={switching}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-btn bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            切换为当前数据源
+          </button>
+        )}
+      </section>
+
+      {/* TickFlow API Key 配置 + 订阅档位 + 可用功能 (原 account tab 内容) */}
+      <TickFlowKeyConfig />
+    </div>
   )
 }

@@ -125,6 +125,16 @@ def delete_group(group_id: str, request: Request):
     return {"groups": groups, "symbols": _with_names(rows, request)}
 
 
+@router.post("/groups/{group_id}/clear")
+def clear_group(group_id: str, request: Request):
+    """清空分组成员:把该分组内所有股票转为未分组,保留分组定义。"""
+    try:
+        rows = watchlist.clear_group(group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选分组不存在") from e
+    return {"symbols": _with_names(rows, request)}
+
+
 @router.get("/ocr-status")
 def ocr_status():
     """当前 OCR 引擎是否可用（前端可据此提示安装依赖）。"""

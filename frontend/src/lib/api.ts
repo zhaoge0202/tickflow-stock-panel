@@ -1023,6 +1023,7 @@ export interface WecomBotStatus {
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
+  watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
@@ -1235,6 +1236,11 @@ export const api = {
     request<{ indices_nav_pinned: boolean }>('/api/settings/preferences/indices-nav-pinned', {
       method: 'PUT',
       body: JSON.stringify({ indices_nav_pinned: pinned }),
+    }),
+  updateWatchlistGroupsInNav: (enabled: boolean) =>
+    request<{ watchlist_groups_in_nav: boolean }>('/api/settings/preferences/watchlist-groups-in-nav', {
+      method: 'PUT',
+      body: JSON.stringify({ watchlist_groups_in_nav: enabled }),
     }),
   quoteStatus: () =>
     request<{
@@ -1573,6 +1579,11 @@ export const api = {
       `/api/watchlist/groups/${encodeURIComponent(groupId)}`,
       { method: 'DELETE' },
     ),
+  watchlistGroupClear: (groupId: string) =>
+    request<{ symbols: WatchlistEntry[] }>(
+      `/api/watchlist/groups/${encodeURIComponent(groupId)}/clear`,
+      { method: 'POST' },
+    ),
   watchlistSetGroup: (symbol: string, groupId: string | null) =>
     request<{ symbols: WatchlistEntry[] }>(
       `/api/watchlist/${encodeURIComponent(symbol)}/group`,
@@ -1869,6 +1880,7 @@ export const api = {
     url: string; method?: string; headers?: Record<string, string>; body?: string;
     response_path?: string; field_map?: Record<string, string>;
     schedule_minutes?: number; enabled?: boolean;
+    time_window_start?: string | null; time_window_end?: string | null;
   }) =>
     request<{ status: string; pull: PullConfig }>(
       `/api/ext-data/${id}/pull`,
@@ -2540,6 +2552,8 @@ export interface PullConfig {
   last_message?: string | null
   last_rows?: number | null
   next_run?: string | null
+  time_window_start?: string | null
+  time_window_end?: string | null
 }
 
 export interface ExtDataDetectUrlRequest {

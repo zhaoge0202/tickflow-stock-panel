@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { X } from 'lucide-react'
 import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
@@ -61,6 +62,7 @@ export function StockPanel({
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [intradayDismissed, setIntradayDismissed] = useState(false)
   const [dailyResult, setDailyResult] = useState<StockDailyKChartResult | null>(null)
   // 信息条指标配置提升到此层：同时供 StockInfoBar 渲染与 StockDailyKChart 请求 ext 数据
   const [fields, setFields] = useState<ColumnConfig[]>(loadInfoFields)
@@ -86,6 +88,7 @@ export function StockPanel({
 
   const handleDateClick = useCallback((date: string) => {
     setSelectedDate(date)
+    setIntradayDismissed(false)
     onSelectDate?.(date)
   }, [onSelectDate])
 
@@ -159,16 +162,25 @@ export function StockPanel({
           extColumns={extColumns}
         />
 
-        {showIntraday && selectedDate && (
-          <StockIntradayChart
-            symbol={symbol}
-            date={selectedDate}
-            height={height}
-            prevClose={prevClose}
-            onPriceHover={setLinkedPrice}
-            className="flex-1 min-w-0 border-l border-border pl-3"
-            refetchIntervalMs={refetchIntervalMs}
-          />
+        {showIntraday && selectedDate && !intradayDismissed && (
+          <div className="relative flex-1 min-w-0 border-l border-border pl-3">
+            <button
+              onClick={() => setIntradayDismissed(true)}
+              className="absolute -left-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full border border-border bg-surface text-muted shadow-sm transition-colors hover:text-foreground hover:bg-elevated"
+              title="收起分时图"
+              aria-label="收起分时图"
+            >
+              <X className="h-3 w-3" />
+            </button>
+            <StockIntradayChart
+              symbol={symbol}
+              date={selectedDate}
+              height={height}
+              prevClose={prevClose}
+              onPriceHover={setLinkedPrice}
+              refetchIntervalMs={refetchIntervalMs}
+            />
+          </div>
         )}
       </div>
     </div>

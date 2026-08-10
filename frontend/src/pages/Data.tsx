@@ -660,7 +660,7 @@ export function Data() {
             <span className="text-secondary leading-relaxed">
               当前为 None 档,将使用免费数据源获取历史日K(无需注册)。
               配置 API Key 可解锁实时行情监控等扩展能力,前往
-              <Link to="/settings?tab=account" className="mx-0.5 font-medium text-accent hover:underline">
+              <Link to="/settings?tab=data-sources" className="mx-0.5 font-medium text-accent hover:underline">
                 配置
               </Link>
               。

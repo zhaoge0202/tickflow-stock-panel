@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -617,7 +618,14 @@ export function Watchlist() {
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
-  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>('all')
+  const [searchParams] = useSearchParams()
+  const initialGroup = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
+  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>(initialGroup)
+  // URL ?group= 变化时同步选中分组 (侧边栏二级菜单切换分组时触发)
+  useEffect(() => {
+    const g = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
+    setSelectedGroup(g)
+  }, [searchParams])
   const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
   const [ocrInstallHint, setOcrInstallHint] = useState('')
   const columnsLoaded = useRef(false)
@@ -868,6 +876,11 @@ export function Watchlist() {
       qc.setQueryData(QK.watchlist, { symbols: data.symbols })
       if (selectedGroup === groupId) setSelectedGroup('all')
     },
+  })
+
+  const clearGroup = useMutation({
+    mutationFn: (groupId: string) => api.watchlistGroupClear(groupId),
+    onSuccess: data => qc.setQueryData(QK.watchlist, data),
   })
 
   const assignGroup = useMutation({
@@ -1229,6 +1242,7 @@ export function Watchlist() {
         onCreate={(name, color) => createGroup.mutateAsync({ name, color }).then(() => undefined)}
         onRename={(groupId, name, color) => renameGroup.mutateAsync({ groupId, name, color }).then(() => undefined)}
         onDelete={groupId => deleteGroup.mutateAsync(groupId).then(() => undefined)}
+        onClearGroup={groupId => clearGroup.mutateAsync(groupId).then(() => undefined)}
       />
 
       {/* 筛选栏 */}
@@ -1431,7 +1445,7 @@ export function Watchlist() {
                           ) : null}
                           {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
-                        {/* 删除入口：默认减号图标，二次确认时替换为确定按钮 */}
+                        {/* 删除入口：从分组移除 + 从自选移除(二次确认) + 移到顶部 */}
                         <div className="ml-auto pl-1 shrink-0">
                           {confirmRemove === r.symbol ? (
                             <div className="flex items-center gap-1">
@@ -1457,11 +1471,22 @@ export function Watchlist() {
                                 disabled={assignGroup.isPending}
                                 onChange={handleGroupChange}
                               />
+                              {r.group_id && (
+                                <button
+                                  onClick={() => handleGroupChange(r.symbol, null)}
+                                  disabled={assignGroup.isPending}
+                                  className="p-0.5 text-muted hover:text-warning transition-colors duration-150 ease-smooth disabled:opacity-50"
+                                  aria-label="从分组移除"
+                                  title="从分组移除"
+                                >
+                                  <FolderMinus className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => setConfirmRemove(r.symbol)}
                                 className="p-0.5 text-muted hover:text-danger transition-colors duration-150 ease-smooth"
                                 aria-label="移除"
-                                title="移除"
+                                title="从自选移除"
                               >
                                 <Minus className="h-3.5 w-3.5" />
                               </button>

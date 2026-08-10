@@ -281,6 +281,22 @@ def set_group(symbol: str, group_id: str | None) -> list[dict]:
         return df.to_dicts()
 
 
+def clear_group(group_id: str) -> list[dict]:
+    """清空分组成员:把该分组内所有条目 group_id 置 null(变未分组),保留分组定义。"""
+    with _LOCK:
+        groups = _read_groups()
+        if not any(group["id"] == group_id for group in groups):
+            raise KeyError(group_id)
+        df = _read_entries().with_columns(
+            pl.when(pl.col("group_id") == group_id)
+            .then(None)
+            .otherwise(pl.col("group_id"))
+            .alias("group_id")
+        )
+        _write_entries(df)
+        return df.to_dicts()
+
+
 def fetch_quotes(symbols: list[str], capset: CapabilitySet, timeout_s: float = 8.0) -> list[dict]:
     """拉取实时行情。
 

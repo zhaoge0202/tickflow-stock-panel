@@ -112,3 +112,42 @@ def test_historical_groups_default_to_sky(monkeypatch, tmp_path):
         {"id": "legacy", "name": "旧分组", "color": "sky"},
         {"id": "invalid", "name": "未知颜色", "color": "sky"},
     ]
+
+
+def test_clear_group_moves_members_to_ungrouped(monkeypatch, tmp_path):
+    """清空分组:成员变未分组,分组定义保留。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, group = watchlist.create_group("芯片")
+    watchlist.add("600000.SH", group_id=group["id"])
+    watchlist.add("000001.SZ", group_id=group["id"])
+    watchlist.add("300750.SZ")  # 不在任何分组
+
+    rows = watchlist.clear_group(group["id"])
+    # 3 只都还在,group_id 全部为 None
+    assert len(rows) == 3
+    assert all(r["group_id"] is None for r in rows)
+    # 分组定义仍在
+    assert any(g["id"] == group["id"] for g in watchlist.list_groups())
+
+    # 清空不存在的分组 → KeyError
+    with pytest.raises(KeyError):
+        watchlist.clear_group("missing")
+
+
+def test_clear_group_api(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    request = _request()
+    created = watchlist_api.create_group(
+        watchlist_api.GroupNameRequest(name="中线", color="teal")
+    )
+    group_id = created["group"]["id"]
+    watchlist.add("600000.SH", group_id=group_id)
+    watchlist.add("000001.SZ", group_id=group_id)
+
+    result = watchlist_api.clear_group(group_id, request)
+    assert all(s["group_id"] is None for s in result["symbols"])
+
+    # 不存在的分组 → 404
+    with pytest.raises(HTTPException) as exc:
+        watchlist_api.clear_group("missing", request)
+    assert exc.value.status_code == 404
