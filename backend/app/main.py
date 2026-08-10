@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import alert_outcomes, alerts, analysis, auth as auth_api, backtest, data, decision, ext_data, financials, indices, intraday, kline, manual_positions, market_breadth, market_recap, monitor_rules, overview, pipeline, quote_ticks, replay, rps, screener, settings as settings_api, signal_frame, signals, stock_analysis, strategy, trade_ticks, watchlist
+from app.api import alert_outcomes, alerts, analysis, auth as auth_api, backtest, data, decision, ext_data, financials, indices, intraday, kline, manual_positions, market_breadth, market_recap, monitor_rules, overview, pipeline, quote_ticks, regime, replay, rps, screener, settings as settings_api, signal_frame, signals, stock_analysis, strategy, trade_ticks, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -168,6 +168,7 @@ async def lifespan(app: FastAPI):
 
     # 策略引擎
     from app.strategy.engine import StrategyEngine
+    from app.strategy import config as strategy_config
     from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
 
@@ -177,9 +178,11 @@ async def lifespan(app: FastAPI):
         Path(__file__).resolve().parent / "strategy" / "builtin",
         store.data_dir / "strategies" / "custom",
         store.data_dir / "strategies" / "ai",
+        store.data_dir / "strategies" / "composite",
     ]
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
+        override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
@@ -267,10 +270,13 @@ async def lifespan(app: FastAPI):
     from app.strategy.monitor import MonitorRuleEngine
     from app.strategy import monitor_rules as mr_store
     from app.services import preferences
+    from app.services.sector_monitor import SectorMonitorService
     monitor_engine = MonitorRuleEngine()
+    sector_monitor_service = SectorMonitorService(repo)
     monitor_engine.set_strategy_engine(strategy_engine)
     monitor_engine.set_data_dir(store.data_dir)
-    # 复用 ScreenerService 的按需历史加载和单份短 TTL 缓存，
+    monitor_engine.set_sector_monitor_service(sector_monitor_service)
+    # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
     # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑选股 → 盘中触发通知。
     monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
     # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (读 kline_etf_enriched)。
@@ -294,6 +300,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("monitor engine load failed: %s", e)
     app.state.monitor_engine = monitor_engine
+    app.state.sector_monitor_service = sector_monitor_service
 
     yield
 
@@ -401,6 +408,7 @@ app.include_router(backtest.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
+app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(data.router)
