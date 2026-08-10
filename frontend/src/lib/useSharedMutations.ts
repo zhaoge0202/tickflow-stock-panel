@@ -29,11 +29,17 @@ export function useUpdateQuoteInterval() {
   })
 }
 
-/** 批量添加自选 — Screener / Intraday / 截图导入 共用 */
+interface WatchlistBatchAddInput {
+  symbols: string[]
+  groupId?: string | null
+}
+
+/** 批量添加自选 — Screener / 截图导入共用 */
 export function useWatchlistBatchAdd() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (symbols: string[]) => api.watchlistBatchAdd(symbols),
+    mutationFn: ({ symbols, groupId }: WatchlistBatchAddInput) =>
+      api.watchlistBatchAdd(symbols, '', groupId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
       // 前缀匹配: 实际 key 为 ['watchlist-enriched', extColumnsParam],

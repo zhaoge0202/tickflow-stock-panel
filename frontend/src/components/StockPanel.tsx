@@ -29,9 +29,11 @@ interface Props {
   showMarkerToggle?: boolean
   /** 加监控回调 (传入后信息条显示 RadioTower 图标) */
   onMonitor?: () => void
-  /** 加自选 (传入后信息条显示 Star 图标) */
+  /** 自选操作（传入后信息条显示 Star 图标） */
   inWatchlist?: boolean
-  onToggleWatchlist?: () => void
+  onAddToWatchlist?: (groupId: string | null) => void
+  onRemoveFromWatchlist?: () => void
+  watchlistPending?: boolean
   /** 分时图自动刷新间隔(ms)。undefined = 不轮询。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
 }
@@ -52,7 +54,9 @@ export function StockPanel({
   showMarkerToggle = true,
   onMonitor,
   inWatchlist,
-  onToggleWatchlist,
+  onAddToWatchlist,
+  onRemoveFromWatchlist,
+  watchlistPending,
   refetchIntervalMs,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
@@ -132,7 +136,9 @@ export function StockPanel({
         financialMetrics={financialMetrics}
         onMonitor={onMonitor}
         inWatchlist={inWatchlist}
-        onToggleWatchlist={onToggleWatchlist}
+        onAddToWatchlist={onAddToWatchlist}
+        onRemoveFromWatchlist={onRemoveFromWatchlist}
+        watchlistPending={watchlistPending}
       />
 
       <div className="flex gap-3 items-start">

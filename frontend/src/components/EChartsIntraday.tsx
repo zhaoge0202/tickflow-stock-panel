@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
+import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
@@ -26,26 +27,6 @@ interface Props {
   showAvgLine?: boolean
 }
 
-function fmtTime(dt: string): string {
-  const match = dt.match(/(\d{2}):(\d{2})/)
-  if (!match) return dt.slice(11, 16)
-  const h = (parseInt(match[1]) + 8) % 24
-  return `${String(h).padStart(2, '0')}:${match[2]}`
-}
-
-function computeAvgPrice(data: MinuteKlineRow[]): number[] {
-  // 分时均线 = 累计成交额 / 累计成交量(手→股)
-  const result: number[] = []
-  let sumAmt = 0
-  let sumVol = 0
-  for (const d of data) {
-    sumAmt += d.amount
-    sumVol += d.volume * 100
-    result.push(sumVol > 0 ? sumAmt / sumVol : d.close)
-  }
-  return result
-}
-
 function fmtAmt(v: number): string {
   if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}亿`
   if (v >= 10_000) return `${(v / 10_000).toFixed(0)}万`
@@ -55,29 +36,6 @@ function fmtAmt(v: number): string {
 function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
-
-/** 生成全天分时时间刻度 9:30 ~ 11:30, 13:00 ~ 15:00, 每分钟一个点 (共242个) */
-function generateFullDayTimes(): string[] {
-  const times: string[] = []
-  // 上午 9:30 ~ 11:30 (121 分钟)
-  for (let h = 9; h <= 11; h++) {
-    const startM = h === 9 ? 30 : 0
-    const endM = h === 11 ? 30 : 59
-    for (let m = startM; m <= endM; m++) {
-      times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-    }
-  }
-  // 下午 13:00 ~ 15:00 (121 分钟)
-  for (let h = 13; h <= 15; h++) {
-    const endM = h === 15 ? 0 : 59
-    for (let m = 0; m <= endM; m++) {
-      times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-    }
-  }
-  return times
-}
-
-const FULL_DAY_TIMES = generateFullDayTimes()
 
 /** 计算实际涨跌停价 (四舍五入到2位小数) 和实际涨跌停幅度 */
 function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
@@ -112,7 +70,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
-    const timeKey = fmtTime(data[i].datetime)
+    const timeKey = formatMinuteTime(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
     if (idx !== undefined) {
       closes[idx] = data[i].close
@@ -414,7 +372,7 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
-  const avgPrices = useMemo(() => computeAvgPrice(data), [data])
+  const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
 
   // 分时线颜色：基于最新价 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -480,7 +438,7 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
       const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
       const mapping = new Map<number, number>()
       for (let i = 0; i < data.length; i++) {
-        const timeKey = fmtTime(data[i].datetime)
+        const timeKey = formatMinuteTime(data[i].datetime)
         const fullDayIdx = timeIndexMap.get(timeKey)
         if (fullDayIdx !== undefined) {
           mapping.set(fullDayIdx, i)

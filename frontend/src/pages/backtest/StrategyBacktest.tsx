@@ -29,6 +29,7 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
+import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -774,6 +775,15 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     queryFn: () => api.watchlistList(),
     staleTime: 30_000,
   })
+  const watchlistEntries = watchlist.data?.symbols ?? []
+  const watchlistCounts = useMemo(() => {
+    const counts: Record<string, number> = { ungrouped: 0 }
+    for (const entry of watchlistEntries) {
+      const groupId = entry.group_id ?? 'ungrouped'
+      counts[groupId] = (counts[groupId] ?? 0) + 1
+    }
+    return counts
+  }, [watchlistEntries])
 
   useEffect(() => {
     if (results.length === 0) return
@@ -802,9 +812,11 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     setOpen(false)
   }
   const removeSymbol = (symbol: string) => setSymbols(symbols.filter(s => s !== symbol))
-  // 一键导入自选: 合并去重, 顺带回填股票名
-  const importFromWatchlist = () => {
-    const entries = watchlist.data?.symbols ?? []
+  // 按分组导入自选: 合并去重, 顺带回填股票名
+  const importFromWatchlist = (groupId: string | null) => {
+    const entries = groupId === 'all'
+      ? watchlistEntries
+      : watchlistEntries.filter(entry => (entry.group_id ?? null) === groupId)
     if (entries.length === 0) return
     setSymbolNames(prev => {
       const next = { ...prev }
@@ -813,7 +825,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     })
     setSymbols([...symbols, ...entries.map(e => e.symbol)])
   }
-  const watchlistCount = watchlist.data?.symbols?.length ?? 0
+  const watchlistCount = watchlistEntries.length
 
   return (
     <div className="space-y-2" ref={ref}>
@@ -861,16 +873,22 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
           <span className={`whitespace-nowrap text-[11px] font-medium ${symbols.length === 0 ? 'text-amber-400' : 'text-accent'}`}>
             {symbols.length === 0 ? '全市场' : `共 ${symbols.length} 只`}
           </span>
-          <button
-            type="button"
-            onClick={importFromWatchlist}
+          <WatchlistGroupMenu
+            onSelect={importFromWatchlist}
             disabled={watchlist.isLoading || watchlistCount === 0}
-            className="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            title="把自选列表的个股加入回测范围"
+            includeAll
+            counts={watchlistCounts}
+            total={watchlistCount}
+            disableEmpty
+            menuLabel="导入自选分组"
+            align="right"
+            triggerClassName="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            title="选择自选分组并加入回测范围"
+            ariaLabel="从自选分组导入回测范围"
           >
             <ListPlus className="h-3 w-3" />
             {watchlist.isLoading ? '加载…' : watchlistCount === 0 ? '自选空' : `导入自选(${watchlistCount})`}
-          </button>
+          </WatchlistGroupMenu>
           <button
             type="button"
             onClick={() => setSymbols([])}

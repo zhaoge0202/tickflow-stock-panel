@@ -14,6 +14,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useStrategyPool } from '@/lib/useStrategyPool'
 import { StrategyCard, CardSize, loadCardSize, cardWrapCls } from '@/components/screener/StrategyCard'
 import { ScreenerTable } from '@/components/screener/ScreenerTable'
@@ -509,8 +510,17 @@ export function Screener() {
 
   // 单只股票加入/移出自选
   const toggleWatchlist = useMutation({
-    mutationFn: ({ symbol, inList }: { symbol: string; inList: boolean }) =>
-      inList ? api.watchlistRemove(symbol) : api.watchlistAdd(symbol),
+    mutationFn: ({
+      symbol,
+      action,
+      groupId,
+    }: {
+      symbol: string
+      action: 'add' | 'remove'
+      groupId?: string | null
+    }) => action === 'remove'
+      ? api.watchlistRemove(symbol)
+      : api.watchlistAdd(symbol, '', groupId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
@@ -567,10 +577,10 @@ export function Screener() {
     }
   }
 
-  const handleBatchAdd = () => {
+  const handleBatchAdd = (groupId: string | null) => {
     if (!displayRows.length) return
     const symbols = displayRows.map((r: any) => r.symbol)
-    batchAdd.mutate(symbols, {
+    batchAdd.mutate({ symbols, groupId }, {
       onSuccess: (data) => {
         setBatchMsg(`已添加 ${data.added} 只到自选`)
         setTimeout(() => setBatchMsg(''), 3000)
@@ -815,16 +825,19 @@ export function Screener() {
                     </div>
                   )}
                   {displayRows.length > 0 && (
-                    <button
-                      onClick={handleBatchAdd}
+                    <WatchlistAddMenu
+                      onSelect={handleBatchAdd}
                       disabled={batchAdd.isPending}
-                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-btn
+                      align="right"
+                      title="批量加自选"
+                      ariaLabel="批量加入自选"
+                      triggerClassName="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-btn
                         border border-accent/40 bg-accent/10 text-accent text-xs font-medium
                         hover:bg-accent/20 disabled:opacity-50 transition-colors duration-150 cursor-pointer"
                     >
                       <Star className="h-3 w-3" />
                       {batchAdd.isPending ? '添加中…' : '批量加自选'}
-                    </button>
+                    </WatchlistAddMenu>
                   )}
                   <button
                     onClick={() => setCustomizerOpen(true)}
@@ -895,7 +908,8 @@ export function Screener() {
                     activeStrategy={activeStrategy}
                     watchlistSet={watchlistSet}
                     onPreview={(symbol, name) => { setPreviewSymbol(symbol); setPreviewName(name) }}
-                    onToggleWatchlist={(symbol, inList) => toggleWatchlist.mutate({ symbol, inList })}
+                    onAddToWatchlist={(symbol, groupId) => toggleWatchlist.mutate({ symbol, action: 'add', groupId })}
+                    onRemoveFromWatchlist={symbol => toggleWatchlist.mutate({ symbol, action: 'remove' })}
                     watchlistPending={toggleWatchlist.isPending}
                     klineData={klineData}
                     dailyKChartVisible={dailyKChartVisible}

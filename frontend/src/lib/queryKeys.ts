@@ -23,6 +23,7 @@ export const QK = {
 
   // Watchlist
   watchlist:            ['watchlist'] as const,
+  watchlistGroups:      ['watchlist-groups'] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
   watchlistKlineBatch:  (symbols: string) => ['watchlist-kline-batch', symbols] as const,
@@ -61,6 +62,8 @@ export const QK = {
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
+  klineMinuteRange:     (symbol: string, days: number) =>
+                             ['kline-minute-range', symbol, days] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

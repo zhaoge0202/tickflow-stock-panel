@@ -200,6 +200,12 @@ export interface MinuteKlineRow {
   amount: number
 }
 
+export interface MinuteKlineSession {
+  date: string
+  prev_close: number | null
+  rows: MinuteKlineRow[]
+}
+
 export interface PriceLimitInfo {
   rate: number
   limit_up: number | null
@@ -233,6 +239,27 @@ export interface WatchlistEntry {
   added_at: string
   note?: string
   name?: string | null
+  group_id?: string | null
+}
+
+export type WatchlistGroupColor =
+  | 'sky'
+  | 'blue'
+  | 'indigo'
+  | 'violet'
+  | 'fuchsia'
+  | 'rose'
+  | 'orange'
+  | 'amber'
+  | 'lime'
+  | 'emerald'
+  | 'teal'
+  | 'cyan'
+
+export interface WatchlistGroup {
+  id: string
+  name: string
+  color: WatchlistGroupColor
 }
 
 export interface WatchlistImportCandidate {
@@ -1398,8 +1425,20 @@ export const api = {
       source?: 'local' | 'live' | 'none'
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
+      prev_close?: number | null
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
+    ),
+  klineMinuteRange: (symbol: string, days = 10) =>
+    request<{
+      symbol: string
+      name?: string
+      asset_type: 'stock' | 'etf' | 'index'
+      requested_days: number
+      sessions: MinuteKlineSession[]
+      source: 'local' | 'none'
+    }>(
+      `/api/kline/minute-range?symbol=${encodeURIComponent(symbol)}&days=${days}`,
     ),
   indexList: () => request<{ results: IndexInstrument[]; count: number }>('/api/index/list'),
   indexSearch: (q: string, limit = 20) =>
@@ -1446,10 +1485,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
     }),
-  syncMinuteSingle: (symbol: string) =>
+  syncMinuteSingle: (symbol: string, days?: number) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
-      body: JSON.stringify({ symbol }),
+      body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
     }),
   clearMinute: () =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
@@ -1472,16 +1511,38 @@ export const api = {
     }),
 
   watchlistList: () => request<{ symbols: WatchlistEntry[] }>('/api/watchlist'),
-  watchlistAdd: (symbol: string, note = '') =>
+  watchlistAdd: (symbol: string, note = '', groupId?: string | null) =>
     request<{ symbols: WatchlistEntry[] }>('/api/watchlist', {
       method: 'POST',
-      body: JSON.stringify({ symbol, note }),
+      body: JSON.stringify({ symbol, note, group_id: groupId ?? null }),
     }),
-  watchlistBatchAdd: (symbols: string[], note = '') =>
+  watchlistBatchAdd: (symbols: string[], note = '', groupId?: string | null) =>
     request<{ symbols: WatchlistEntry[]; added: number }>('/api/watchlist/batch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, note }),
+      body: JSON.stringify({ symbols, note, group_id: groupId ?? null }),
     }),
+  watchlistGroups: () =>
+    request<{ groups: WatchlistGroup[] }>('/api/watchlist/groups'),
+  watchlistGroupCreate: (name: string, color: WatchlistGroupColor) =>
+    request<{ groups: WatchlistGroup[]; group: WatchlistGroup }>('/api/watchlist/groups', {
+      method: 'POST',
+      body: JSON.stringify({ name, color }),
+    }),
+  watchlistGroupRename: (groupId: string, name: string, color: WatchlistGroupColor) =>
+    request<{ groups: WatchlistGroup[] }>(
+      `/api/watchlist/groups/${encodeURIComponent(groupId)}`,
+      { method: 'PUT', body: JSON.stringify({ name, color }) },
+    ),
+  watchlistGroupDelete: (groupId: string) =>
+    request<{ groups: WatchlistGroup[]; symbols: WatchlistEntry[] }>(
+      `/api/watchlist/groups/${encodeURIComponent(groupId)}`,
+      { method: 'DELETE' },
+    ),
+  watchlistSetGroup: (symbol: string, groupId: string | null) =>
+    request<{ symbols: WatchlistEntry[] }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/group`,
+      { method: 'PUT', body: JSON.stringify({ group_id: groupId }) },
+    ),
   watchlistOcrStatus: () =>
     request<{ provider: string; available: boolean }>('/api/watchlist/ocr-status'),
   watchlistImportImage: (file: File, signal?: AbortSignal, quiet = false) => {

@@ -268,6 +268,47 @@ def _get_price_limit_info(
     return info
 
 
+def _get_previous_closes(
+    repo,
+    symbol: str,
+    trade_dates: list[date],
+    asset_type: str,
+) -> dict[date, float | None]:
+    """Return the previous trading day's adjusted close for each session."""
+    if not trade_dates:
+        return {}
+    start = min(trade_dates) - timedelta(days=45)
+    end = max(trade_dates)
+    try:
+        daily = repo.get_daily_asset(
+            asset_type,
+            symbol,
+            start,
+            end,
+            columns=["date", "close"],
+        ).sort("date")
+    except Exception:
+        daily = None
+    if daily is None or daily.is_empty():
+        return {trade_date: None for trade_date in trade_dates}
+
+    closes: list[tuple[date, float]] = []
+    for daily_date, close in daily.select(["date", "close"]).iter_rows():
+        if close is None:
+            continue
+        numeric = float(close)
+        if math.isfinite(numeric) and numeric > 0:
+            closes.append((daily_date, numeric))
+
+    result: dict[date, float | None] = {}
+    for trade_date in trade_dates:
+        result[trade_date] = next(
+            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
+            None,
+        )
+    return result
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -679,6 +720,73 @@ def get_minute_batch(request: Request, body: dict):
     return {"data": result}
 
 
+@router.get("/minute-range")
+def get_minute_range(
+    request: Request,
+    symbol: str = Query(..., description="标的代码"),
+    days: int = Query(10, ge=1, le=20, description="最近交易日数量"),
+):
+    """读取单只标的最近 N 个已落库交易日的分钟 K。"""
+    import polars as pl
+
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
+    base_response = {
+        "symbol": symbol,
+        "name": stock_info.get("name"),
+        "asset_type": asset_type,
+        "requested_days": days,
+    }
+
+    # 指数分钟 K 不落本地仓库, 最新分时仍由 /api/index/minute 实时读取。
+    if asset_type == "index":
+        return {**base_response, "sessions": [], "source": "none"}
+
+    end = cn_today()
+    start = end - timedelta(days=days * 3 + 20)
+    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    if minute.is_empty() or "datetime" not in minute.columns:
+        return {**base_response, "sessions": [], "source": "none"}
+
+    minute = minute.with_columns(
+        pl.col("datetime").dt.date().alias("_trade_date"),
+    )
+    trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
+    previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    row_columns = [
+        column
+        for column in (
+            "datetime", "open", "high", "low", "close", "volume", "amount"
+        )
+        if column in minute.columns
+    ]
+    sessions = []
+    for trade_date in trade_dates:
+        rows = (
+            minute.filter(pl.col("_trade_date") == trade_date)
+            .sort("datetime")
+            .select(row_columns)
+            .to_dicts()
+        )
+        if rows:
+            sessions.append({
+                "date": trade_date.isoformat(),
+                "prev_close": previous_closes.get(trade_date),
+                "rows": rows,
+            })
+
+    return {
+        **base_response,
+        "sessions": sessions,
+        "source": "local" if sessions else "none",
+    }
+
+
 @router.get("/minute")
 def get_minute(
     request: Request,
@@ -721,13 +829,20 @@ def get_minute(
         price_limit = _get_price_limit_info(
             repo, symbol, trade_date, asset_type, stock_name,
         )
+        prev_close = _get_previous_closes(
+            repo, symbol, [trade_date], asset_type,
+        ).get(trade_date)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
+    prev_close = _get_previous_closes(
+        repo, symbol, [trade_date], asset_type,
+    ).get(trade_date)
     price_limit = _get_price_limit_info(
         repo, symbol, trade_date, asset_type, stock_name,
     )
@@ -758,6 +873,7 @@ def get_minute(
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
@@ -768,6 +884,7 @@ def get_minute(
         "source": "live" if not live_df.is_empty() else "none",
         "asset_type": asset_type,
         "price_limit": price_limit,
+        "prev_close": prev_close,
     }
 
 
@@ -909,12 +1026,20 @@ async def sync_minute_single(request: Request, body: dict):
     body: { "symbol": "000001.SZ" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
     """
+    import asyncio
+
     from app.services.preferences import get_minute_sync_days
-    from app.tickflow.capabilities import Cap
 
     symbol = body.get("symbol", "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol 不能为空")
+
+    requested_days = body.get("days")
+    if requested_days is not None:
+        if isinstance(requested_days, bool) or not isinstance(requested_days, int):
+            raise HTTPException(status_code=400, detail="days 必须是整数")
+        if requested_days < 1 or requested_days > 30:
+            raise HTTPException(status_code=400, detail="days 必须在 1 到 30 之间")
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
@@ -927,7 +1052,7 @@ async def sync_minute_single(request: Request, body: dict):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    days = get_minute_sync_days()
+    days = requested_days if requested_days is not None else get_minute_sync_days()
     loop = asyncio.get_event_loop()
 
     def _run():

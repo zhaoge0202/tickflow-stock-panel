@@ -2,8 +2,8 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen } from 'lucide-react'
+import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
@@ -16,6 +16,12 @@ import {
   type DimensionMembersTarget,
 } from '@/components/DimensionMembersDialog'
 import { WatchlistImportDialog } from '@/components/WatchlistImportDialog'
+import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
+import {
+  WatchlistGroupBar,
+  WatchlistGroupPicker,
+  type WatchlistGroupFilter,
+} from '@/components/WatchlistGroups'
 import { getOcrInstallHint } from '@/lib/ocrInstallHint'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
@@ -212,10 +218,14 @@ function StockSearchBox({
   onPreview,
   existingSymbols,
   onAdd,
+  preferredGroupId,
+  addPending,
 }: {
   onPreview: (symbol: string, name: string) => void
   existingSymbols: string[]
-  onAdd: (symbol: string) => void
+  onAdd: (symbol: string, groupId: string | null) => void
+  preferredGroupId: string | null
+  addPending: boolean
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -234,6 +244,7 @@ function StockSearchBox({
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
+      if (e.target instanceof Element && e.target.closest('[data-watchlist-group-menu]')) return
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false)
       }
@@ -319,19 +330,26 @@ function StockSearchBox({
                       )
                     })()}
                   </button>
-                  <button
-                    type="button"
-                    onClick={e => { e.stopPropagation(); onAdd(r.symbol) }}
-                    disabled={inWatchlist}
-                    className={`shrink-0 p-1 rounded transition-colors ${
-                      inWatchlist
-                        ? 'text-accent bg-accent/10 cursor-default'
-                        : 'text-muted hover:text-accent hover:bg-accent/10'
-                    }`}
-                    title={inWatchlist ? '已加自选' : '加入自选'}
-                  >
-                    {inWatchlist ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-                  </button>
+                  {inWatchlist ? (
+                    <button
+                      type="button"
+                      disabled
+                      className="shrink-0 rounded p-1 text-accent bg-accent/10 cursor-default"
+                      title="已加自选"
+                      aria-label="已加自选"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                    </button>
+                  ) : (
+                    <WatchlistAddMenu
+                      onSelect={groupId => onAdd(r.symbol, groupId)}
+                      preferredGroupId={preferredGroupId}
+                      disabled={addPending}
+                      triggerClassName="shrink-0 rounded p-1 text-muted transition-colors hover:bg-accent/10 hover:text-accent disabled:opacity-50"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </WatchlistAddMenu>
+                  )}
                 </div>
               )
             })}
@@ -402,6 +420,9 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand,
   onDimensionClick,
   isMonitored,
+  groups,
+  onGroupChange,
+  groupChangePending,
 }: {
   r: any
   candleRows: KlineRow[]
@@ -416,6 +437,9 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand: (key: string) => void
   onDimensionClick: (target: DimensionMembersTarget) => void
   isMonitored?: boolean
+  groups: WatchlistGroup[]
+  onGroupChange: (symbol: string, groupId: string | null) => void
+  groupChangePending: boolean
 }) {
   const board = boardTag(r.symbol)
   const price = r.rt_price ?? r.close
@@ -444,7 +468,7 @@ const StockCard = React.memo(function StockCard({
       {/* 左侧彩色指示条 */}
       <div className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-lg ${barColor}`} />
 
-      {/* 删除按钮 / 确认区 */}
+      {/* 分组与删除入口 */}
       <div className="absolute top-1.5 right-1.5 z-10">
         {isConfirming ? (
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -459,20 +483,29 @@ const StockCard = React.memo(function StockCard({
             </button>
           </div>
         ) : (
-          <button
-            onClick={e => { e.stopPropagation(); onRequestRemove(r.symbol) }}
-            className="opacity-0 group-hover:opacity-100 text-muted hover:text-danger transition-all duration-150 p-0.5 rounded hover:bg-elevated"
-            aria-label="移除"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
+            <WatchlistGroupPicker
+              groups={groups}
+              groupId={r.group_id}
+              symbol={r.symbol}
+              disabled={groupChangePending}
+              onChange={onGroupChange}
+            />
+            <button
+              onClick={() => onRequestRemove(r.symbol)}
+              className="opacity-0 group-hover:opacity-100 text-muted hover:text-danger transition-all duration-150 p-0.5 rounded hover:bg-elevated"
+              aria-label="移除"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         )}
       </div>
 
       {/* 卡片内容 */}
       <div className="pl-4 pr-2.5 pt-2.5 pb-0">
         {/* 第一行: 代码 + 名称 + 板块标识 */}
-        <div className="flex items-center gap-1.5 min-w-0 mb-2">
+        <div className="flex items-center gap-1.5 min-w-0 mb-2 pr-8">
           <span className="shrink-0 font-mono text-foreground text-xs tracking-wide">
             {r.symbol}
           </span>
@@ -584,6 +617,7 @@ export function Watchlist() {
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>('all')
   const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
   const [ocrInstallHint, setOcrInstallHint] = useState('')
   const columnsLoaded = useRef(false)
@@ -696,6 +730,26 @@ export function Watchlist() {
     queryFn: api.watchlistList,
   })
 
+  const groupList = useQuery({
+    queryKey: QK.watchlistGroups,
+    queryFn: api.watchlistGroups,
+  })
+  const groups = groupList.data?.groups ?? []
+  const activeGroupId = selectedGroup === 'all' || selectedGroup === 'ungrouped'
+    ? null
+    : selectedGroup
+
+  useEffect(() => {
+    if (
+      selectedGroup !== 'all'
+      && selectedGroup !== 'ungrouped'
+      && groupList.isSuccess
+      && !groups.some(group => group.id === selectedGroup)
+    ) {
+      setSelectedGroup('all')
+    }
+  }, [groupList.isSuccess, groups, selectedGroup])
+
   // enriched 数据 — 传入 ext_columns 参数
   const enriched = useQuery({
     queryKey: QK.watchlistEnriched(extColumnsParam),
@@ -743,7 +797,8 @@ export function Watchlist() {
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
   const addMutation = useMutation({
-    mutationFn: (sym: string) => api.watchlistAdd(sym),
+    mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string | null }) =>
+      api.watchlistAdd(symbol, '', groupId),
     onSuccess: (data) => {
       qc.setQueryData(QK.watchlist, data)
       qc.invalidateQueries({ queryKey: QK.watchlist })
@@ -791,6 +846,36 @@ export function Watchlist() {
     },
   })
 
+  const createGroup = useMutation({
+    mutationFn: ({ name, color }: { name: string; color: WatchlistGroupColor }) =>
+      api.watchlistGroupCreate(name, color),
+    onSuccess: data => {
+      qc.setQueryData(QK.watchlistGroups, { groups: data.groups })
+      setSelectedGroup(data.group.id)
+    },
+  })
+
+  const renameGroup = useMutation({
+    mutationFn: ({ groupId, name, color }: { groupId: string; name: string; color: WatchlistGroupColor }) =>
+      api.watchlistGroupRename(groupId, name, color),
+    onSuccess: data => qc.setQueryData(QK.watchlistGroups, data),
+  })
+
+  const deleteGroup = useMutation({
+    mutationFn: (groupId: string) => api.watchlistGroupDelete(groupId),
+    onSuccess: (data, groupId) => {
+      qc.setQueryData(QK.watchlistGroups, { groups: data.groups })
+      qc.setQueryData(QK.watchlist, { symbols: data.symbols })
+      if (selectedGroup === groupId) setSelectedGroup('all')
+    },
+  })
+
+  const assignGroup = useMutation({
+    mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string | null }) =>
+      api.watchlistSetGroup(symbol, groupId),
+    onSuccess: data => qc.setQueryData(QK.watchlist, data),
+  })
+
   // 二次确认状态
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
@@ -804,9 +889,35 @@ export function Watchlist() {
   }, [remove])
   const handleCardCancelRemove = useCallback(() => setConfirmRemove(null), [])
   const handleCardRequestRemove = useCallback((sym: string) => setConfirmRemove(sym), [])
+  const handleGroupChange = useCallback((symbol: string, groupId: string | null) => {
+    assignGroup.mutate({ symbol, groupId })
+  }, [assignGroup])
 
-  const allSymbols = list.data?.symbols?.map(s => s.symbol) ?? []
+  const listEntries = list.data?.symbols ?? []
+  const allSymbols = listEntries.map(s => s.symbol)
   const rows = enriched.data?.rows ?? []
+  const groupBySymbol = useMemo(
+    () => new Map(listEntries.map(entry => [entry.symbol, entry.group_id ?? null])),
+    [listEntries],
+  )
+  const groupCounts = useMemo(() => {
+    const counts: Record<string, number> = { ungrouped: 0 }
+    for (const entry of listEntries) {
+      const groupId = entry.group_id ?? 'ungrouped'
+      counts[groupId] = (counts[groupId] ?? 0) + 1
+    }
+    return counts
+  }, [listEntries])
+  const rowsInSelectedGroup = useMemo(() => {
+    const rowsWithGroup = rows.map(row => ({ ...row, group_id: groupBySymbol.get(row.symbol) ?? null }))
+    if (selectedGroup === 'all') return rowsWithGroup
+    if (selectedGroup === 'ungrouped') return rowsWithGroup.filter(row => row.group_id == null)
+    return rowsWithGroup.filter(row => row.group_id === selectedGroup)
+  }, [groupBySymbol, rows, selectedGroup])
+  const activeGroup = activeGroupId
+    ? groups.find(group => group.id === activeGroupId)
+    : undefined
+  const watchlistContentLoading = list.isLoading || (allSymbols.length > 0 && enriched.isLoading)
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
   // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
@@ -885,7 +996,7 @@ export function Watchlist() {
   // 筛选 + 排序
   const filteredRows = useMemo(() => {
     // 板块筛选（全选时跳过）
-    let result = rows
+    let result = rowsInSelectedGroup
     if (boardFilter.size > 0 && boardFilter.size < BOARDS.length) {
       result = result.filter(r => {
         // 非股票 (指数/ETF) 无板块语义, 不受板块筛选影响 (顺带修复 ETF 行被误过滤)
@@ -914,7 +1025,7 @@ export function Watchlist() {
       })
     }
     return result
-  }, [rows, filters, columns, boardFilter])
+  }, [rowsInSelectedGroup, filters, columns, boardFilter])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
   const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
@@ -961,8 +1072,8 @@ export function Watchlist() {
   )
 
   // "被筛选条件隐藏" 的个股数: 后端返回的行数 vs 经过前端筛选后的行数.
-  // rows.length 是后端实际返回 (含 pending 行), 减去 sortedRows (筛选后) 才是真正的筛选隐藏.
-  const hiddenCount = Math.max(0, rows.length - sortedRows.length)
+  // 分组切换不计入筛选隐藏，只比较当前分组内的数据。
+  const hiddenCount = Math.max(0, rowsInSelectedGroup.length - sortedRows.length)
 
   const renderStockCard = (r: any) => (
     <StockCard
@@ -980,6 +1091,9 @@ export function Watchlist() {
       onToggleExpand={handleToggleExpand}
       onDimensionClick={setDimensionTarget}
       isMonitored={monitoredSymbols.has(r.symbol)}
+      groups={groups}
+      onGroupChange={handleGroupChange}
+      groupChangePending={assignGroup.isPending}
     />
   )
 
@@ -993,7 +1107,7 @@ export function Watchlist() {
             <span className="inline-flex items-baseline gap-0.5 px-2 py-0.5 rounded-md bg-elevated/70 text-[11px]">
               <span className="font-mono font-semibold text-secondary tabular-nums">{sortedRows.length}</span>
               <span className="text-muted/50">/</span>
-              <span className="font-mono text-muted tabular-nums">{allSymbols.length}</span>
+              <span className="font-mono text-muted tabular-nums">{rowsInSelectedGroup.length}</span>
               <span className="text-muted/60 ml-0.5">只</span>
             </span>
             {/* 数据未就绪提示: 自选了但 enriched 缓存未覆盖 (新股/冷门/新用户未同步), 指标全为 null */}
@@ -1045,7 +1159,9 @@ export function Watchlist() {
             <StockSearchBox
               onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
               existingSymbols={allSymbols as string[]}
-              onAdd={(sym) => addMutation.mutate(sym)}
+              onAdd={(symbol, groupId) => addMutation.mutate({ symbol, groupId })}
+              preferredGroupId={activeGroupId}
+              addPending={addMutation.isPending}
             />
             <button
               onClick={() => {
@@ -1102,6 +1218,17 @@ export function Watchlist() {
             )}
           </div>
         }
+      />
+
+      <WatchlistGroupBar
+        groups={groups}
+        counts={groupCounts}
+        selected={selectedGroup}
+        total={allSymbols.length}
+        onSelect={setSelectedGroup}
+        onCreate={(name, color) => createGroup.mutateAsync({ name, color }).then(() => undefined)}
+        onRename={(groupId, name, color) => renameGroup.mutateAsync({ groupId, name, color }).then(() => undefined)}
+        onDelete={groupId => deleteGroup.mutateAsync(groupId).then(() => undefined)}
       />
 
       {/* 筛选栏 */}
@@ -1180,14 +1307,23 @@ export function Watchlist() {
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="px-5 py-3">
           {/* 列表 */}
-          {list.isLoading && <div className="text-sm text-muted">加载中…</div>}
-          {list.isError && <div className="text-sm text-danger">读取自选失败</div>}
-
-          {allSymbols.length === 0 ? (
+          {watchlistContentLoading ? (
+            <div className="text-sm text-muted">加载中…</div>
+          ) : list.isError ? (
+            <div className="text-sm text-danger">读取自选失败</div>
+          ) : enriched.isError ? (
+            <div className="text-sm text-danger">读取自选行情失败</div>
+          ) : allSymbols.length === 0 ? (
             <EmptyState
               icon={Star}
               title="自选股为空"
               hint="点击右上角搜索添加标的，或点击图片图标从券商自选截图批量导入。"
+            />
+          ) : rowsInSelectedGroup.length === 0 ? (
+            <EmptyState
+              icon={FolderOpen}
+              title="该分组暂无标的"
+              hint="使用右上角搜索添加，或通过股票旁的分组按钮移入当前分组。"
             />
           ) : viewMode === 'table' ? (
             <StockDataTable
@@ -1314,6 +1450,13 @@ export function Watchlist() {
                             </div>
                           ) : (
                             <div className="flex items-center gap-1">
+                              <WatchlistGroupPicker
+                                groups={groups}
+                                groupId={r.group_id}
+                                symbol={r.symbol}
+                                disabled={assignGroup.isPending}
+                                onChange={handleGroupChange}
+                              />
                               <button
                                 onClick={() => setConfirmRemove(r.symbol)}
                                 className="p-0.5 text-muted hover:text-danger transition-colors duration-150 ease-smooth"
@@ -1513,7 +1656,13 @@ export function Watchlist() {
         }}
       />
 
-      <WatchlistImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
+      <WatchlistImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        groupId={activeGroupId}
+        groupName={activeGroup?.name}
+        groupColor={activeGroup?.color}
+      />
     </div>
   )
 }
