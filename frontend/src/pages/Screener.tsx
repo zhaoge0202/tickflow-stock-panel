@@ -36,6 +36,7 @@ import {
 } from '@/lib/screener-columns'
 
 const AUCTION_GATE_MINUTES = 9 * 60 + 25
+const AUCTION_PREWARM_MINUTES = 9 * 60 + 24
 const AUCTION_CLOSE_MINUTES = 9 * 60 + 30
 const AUCTION_CONFIRM_GRACE_MINUTES = 9 * 60 + 35
 const CN_TZ = 'Asia/Shanghai'
@@ -252,12 +253,13 @@ export function Screener() {
       && !!asOf
       && asOf === dataStatus.data?.enriched?.latest_date
       && visiblePool.length > 0
-      && auctionNowMinutes >= AUCTION_GATE_MINUTES
+      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES
       && auctionNowMinutes < AUCTION_CONFIRM_GRACE_MINUTES,
     staleTime: 0,
     refetchInterval: () => {
       const nowMinutes = getCnNowMinutes()
-      if (nowMinutes < AUCTION_GATE_MINUTES) return false
+      if (nowMinutes < AUCTION_PREWARM_MINUTES) return false
+      if (nowMinutes < AUCTION_GATE_MINUTES) return 5_000
       if (nowMinutes < AUCTION_CLOSE_MINUTES) return 1_000
       if (nowMinutes < AUCTION_CONFIRM_GRACE_MINUTES) return 5_000
       return false
@@ -271,6 +273,7 @@ export function Screener() {
     && auctionDynamicPayload?.mode === 'auction_dynamic'
     && auctionDynamicPayload?.as_of === asOf
     && auctionDynamicPayload?.trade_date === auctionTradeDate
+    && auctionNowMinutes >= AUCTION_GATE_MINUTES
     && !!auctionDynamicFrame
   )
   const auctionDynamicDisplayResults = useMemo<Record<string, any> | null>(() => {
