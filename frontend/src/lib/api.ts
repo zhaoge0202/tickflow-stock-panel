@@ -398,6 +398,58 @@ export interface ScreenerAuctionConfirmationResponse {
   results: Record<string, ScreenerAuctionConfirmationResult>
 }
 
+export interface AuctionReplayStrategyResult {
+  strategy: string
+  as_of: string
+  dynamic_as_of?: string
+  trade_date: string
+  base_total: number
+  candidate_total?: number
+  final_total?: number
+  total: number
+  confirmed_total: number
+  auction_covered_total: number
+  trade_covered_total: number
+  pending_auction_total: number
+  pending_trade_total: number
+  rows: any[]
+  dual_rows?: any[]
+  candidates?: any[]
+  elapsed_ms?: number
+  run_meta?: Record<string, any>
+  [key: string]: any
+}
+
+export interface AuctionReplayFrame {
+  as_of_ts: number | null
+  as_of_time: string | null
+  phase: string
+  auction_snapshot_time?: string | null
+  trade_snapshot_time?: string | null
+  auction_symbols?: number
+  trade_symbols?: number
+  snapshot_symbols?: number
+  elapsed_ms?: number
+  results: Record<string, AuctionReplayStrategyResult>
+  final_symbols?: Record<string, string[]>
+  [key: string]: any
+}
+
+export interface AuctionReplayResponse {
+  status: string
+  mode: string
+  as_of: string | null
+  trade_date: string | null
+  strategy_as_of?: string | null
+  updated_at: number | null
+  frame: AuctionReplayFrame | null
+  final_frame: AuctionReplayFrame | null
+  frames: AuctionReplayFrame[]
+  data_quality?: Record<string, any>
+  frame_mode?: string
+  [key: string]: any
+}
+
 export interface MarketSnapshotRow {
   symbol: string
   name?: string | null
@@ -2055,6 +2107,32 @@ export const api = {
         strategy_ids: strategyIds ?? null,
         ext_columns: extColumns || null,
         asset_type: assetType,
+      }),
+    }),
+  auctionReplay: (opts: {
+    asOf?: string | null
+    tradeDate?: string | null
+    strategyIds?: string[]
+    asOfTs?: number | null
+    mode?: 'cache_replay' | 'recompute'
+    includeFrames?: boolean
+    includeCandidates?: boolean
+    maxFrames?: number
+    assetType?: 'stock' | 'etf'
+  }) =>
+    request<AuctionReplayResponse>('/api/replay/auction', {
+      method: 'POST',
+      body: JSON.stringify({
+        as_of: opts.asOf ?? null,
+        trade_date: opts.tradeDate ?? null,
+        strategy_ids: opts.strategyIds ?? null,
+        as_of_ts: opts.asOfTs ?? null,
+        mode: opts.mode ?? 'cache_replay',
+        include_frames: opts.includeFrames ?? false,
+        include_candidates: opts.includeCandidates ?? true,
+        max_frames: opts.maxFrames ?? 1,
+        asset_type: opts.assetType ?? 'stock',
+        timeframe: '1d',
       }),
     }),
 

@@ -39,6 +39,8 @@ export const QK = {
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
   screenerAuctionConfirmation: (asOf?: string, tradeDate?: string, strategyIds?: string, ext?: string) =>
     ['screener-auction-confirmation', asOf ?? '', tradeDate ?? '', strategyIds ?? '', ext ?? ''] as const,
+  screenerAuctionReplay: (asOf?: string, tradeDate?: string, strategyIds?: string, asOfTs?: number | 'live', mode?: string) =>
+    ['screener-auction-replay', asOf ?? '', tradeDate ?? '', strategyIds ?? '', asOfTs ?? 'live', mode ?? 'cache_replay'] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       (asOf?: string | null, asOfTs?: number | 'live' | null) =>
                            ['market-snapshot', asOf ?? 'latest', asOfTs ?? 'latest'] as const,
