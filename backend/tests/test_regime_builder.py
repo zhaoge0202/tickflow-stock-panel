@@ -13,6 +13,7 @@ import time
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.services import regime_builder
 
@@ -312,14 +313,32 @@ def test_build_regime_mask_none_when_no_filter():
     assert StrategyBacktestService._build_regime_mask(("2026-01-01",), None, None) is None
 
 
-def test_build_regime_mask_none_when_no_data(tmp_path):
-    """无 regime 历史数据 → 返回 None(不阻断回测)。"""
+def test_build_regime_mask_fails_when_no_data(tmp_path):
+    """启用过滤但无 regime 历史数据时必须阻止回测。"""
     from app.backtest.strategy import StrategyBacktestService
 
-    mask = StrategyBacktestService._build_regime_mask(
-        ("2026-01-01", "2026-01-02"), {"states": ["strong"]}, tmp_path,
-    )
-    assert mask is None
+    with pytest.raises(ValueError, match="市场环境数据为空"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02"), {"states": ["strong"]}, tmp_path,
+        )
+
+
+def test_build_regime_mask_fails_when_required_t1_date_is_missing(tmp_path):
+    """正式区间内任一入场日缺少 T-1 环境时必须阻止回测。"""
+    from app.backtest.strategy import StrategyBacktestService
+
+    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+        "date": [date(2026, 1, 1)],
+        "state": ["strong"],
+        "score": [85],
+    }))
+
+    with pytest.raises(ValueError, match="缺少前一交易日环境"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02", "2026-01-03"),
+            {"states": ["strong"]},
+            tmp_path,
+        )
 
 
 def test_build_regime_mask_first_day_allowed(tmp_path):
@@ -336,4 +355,3 @@ def test_build_regime_mask_first_day_allowed(tmp_path):
     )
     # 1/1 首日 → True; 1/2 由 1/1(weak) → False
     assert mask.tolist() == [True, False]
-

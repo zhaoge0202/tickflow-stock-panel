@@ -947,8 +947,8 @@ export function StrategyBacktest() {
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
   // 市场环境过滤(空=不过滤)
-  const [regimeStates, setRegimeStates] = useState<string[]>([])
-  const [regimeMinScore, setRegimeMinScore] = useState<number | ''>('')
+  const [regimeStates, setRegimeStates] = useState<string[]>(saved?.regimeStates ?? [])
+  const [regimeMinScore, setRegimeMinScore] = useState<number | ''>(saved?.regimeMinScore ?? '')
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1097,6 +1097,8 @@ export function StrategyBacktest() {
         mode: simMode,
         holdingDays,
         minuteFill: highGranularity,
+        regimeStates,
+        regimeMinScore,
         params: strategyParams,
         overrides,
         strategyConfigSignature: strategyDetail.data
@@ -1373,6 +1375,18 @@ export function StrategyBacktest() {
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
   const resultTradeDays = result?.equity_curve?.length ?? 0
+  const resultRegimeFilter = result?.config?.regime_filter as {
+    states?: string[]
+    min_score?: number
+  } | null | undefined
+  const resultRegimeSummary = resultRegimeFilter
+    ? [
+        resultRegimeFilter.states?.length
+          ? resultRegimeFilter.states.map(state => REGIME_STATE_LABELS[state as keyof typeof REGIME_STATE_LABELS] ?? state).join('/')
+          : null,
+        resultRegimeFilter.min_score != null ? `最低 ${resultRegimeFilter.min_score} 分` : null,
+      ].filter(Boolean).join(' · ')
+    : ''
   const selectionStats = result?.stats?.selection as Record<string, number | boolean> | undefined
   const selectionStages = selectionStats
     ? [
@@ -1925,6 +1939,12 @@ export function StrategyBacktest() {
             <div className="flex items-center gap-3">
               <span className="text-sm font-medium text-foreground">{result.strategy_info?.name ?? '策略'}</span>
               <span className="text-[10px] px-1 py-px rounded border border-accent/30 bg-accent/10 text-accent">全量模拟</span>
+              {resultRegimeSummary && (
+                <span className="inline-flex items-center gap-1 rounded border border-accent/25 bg-accent/10 px-1.5 py-px text-[10px] text-accent">
+                  <Gauge className="h-2.5 w-2.5" />
+                  环境 {resultRegimeSummary}
+                </span>
+              )}
               <span className="text-[10px] text-secondary">持有 {result.config?.holding_days ?? 5} 天</span>
               <span className="ml-auto text-[11px] text-muted font-mono">
                 {String(result.config?.start).slice(0,10)} ~ {String(result.config?.end).slice(0,10)}
@@ -1993,6 +2013,12 @@ export function StrategyBacktest() {
                   {result.strategy_info.source && (
                     <span className={`text-[9px] px-1 py-px rounded border ${BADGE_CLS_MAP[result.strategy_info.source] ?? ''}`}>
                       {SRC_MAP[result.strategy_info.source] ?? ''}
+                    </span>
+                  )}
+                  {resultRegimeSummary && (
+                    <span className="inline-flex items-center gap-1 rounded border border-accent/25 bg-accent/10 px-1.5 py-px text-[9px] text-accent">
+                      <Gauge className="h-2.5 w-2.5" />
+                      环境 {resultRegimeSummary}
                     </span>
                   )}
                 </div>

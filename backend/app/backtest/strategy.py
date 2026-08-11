@@ -600,6 +600,7 @@ class StrategyBacktestService:
             config.holding_days,
             config.minute_fill,
             json.dumps(config.overrides or {}, sort_keys=True, ensure_ascii=False, default=str),
+            json.dumps(config.regime_filter or {}, sort_keys=True, ensure_ascii=False, default=str),
         )
 
     def _resolve_composite_feature_plan(
@@ -854,6 +855,8 @@ class StrategyBacktestService:
         _rm = self._build_regime_mask(
             market_data.timestamp_labels, first.regime_filter,
             getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+            required_start=first.start,
+            required_end=first.end,
         )
         if _rm is not None:
             entry_time_mask = entry_time_mask & _rm
@@ -1139,10 +1142,15 @@ class StrategyBacktestService:
                 config.end,
             )
             # 市场环境过滤(强制 T-1): 只叠加 entry, 不影响 exit
-            _rm = self._build_regime_mask(
-                market_data.timestamp_labels, config.regime_filter,
-                getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
-            )
+            try:
+                _rm = self._build_regime_mask(
+                    market_data.timestamp_labels, config.regime_filter,
+                    getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                    required_start=config.start,
+                    required_end=config.end,
+                )
+            except ValueError as e:
+                return _err(str(e))
             if _rm is not None:
                 entry_time_mask = entry_time_mask & _rm
             exit_time_mask = self._matrix_date_range_mask(
@@ -1238,10 +1246,15 @@ class StrategyBacktestService:
                     config.start,
                     config.end,
                 )
-                _rm = self._build_regime_mask(
-                    market_data.timestamp_labels, config.regime_filter,
-                    getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
-                )
+                try:
+                    _rm = self._build_regime_mask(
+                        market_data.timestamp_labels, config.regime_filter,
+                        getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                        required_start=config.start,
+                        required_end=config.end,
+                    )
+                except ValueError as e:
+                    return _err(str(e))
                 if _rm is not None:
                     entry_time_mask = entry_time_mask & _rm
                 exit_time_mask = self._matrix_date_range_mask(
@@ -1348,6 +1361,27 @@ class StrategyBacktestService:
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
             entry_mask = entry_mask & formal_range
+            if config.regime_filter:
+                date_values = panel.get_column("date").unique().sort().to_list()
+                date_labels = tuple(str(value)[:10] for value in date_values)
+                try:
+                    regime_time_mask = self._build_regime_mask(
+                        date_labels,
+                        config.regime_filter,
+                        getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                        required_start=config.start,
+                        required_end=config.end,
+                    )
+                except ValueError as e:
+                    return _err(str(e))
+                if regime_time_mask is not None:
+                    allowed_dates = [
+                        value for value, allowed in zip(date_values, regime_time_mask, strict=True)
+                        if allowed
+                    ]
+                    regime_row_mask = panel.get_column("date").is_in(allowed_dates).fill_null(False)
+                    formal_candidate_mask = formal_candidate_mask & regime_row_mask
+                    entry_mask = entry_mask & regime_row_mask
             raw_exit_mask = self._build_signal_mask(panel, exit_signals, "_exit")
             exit_range = self._date_range_mask(panel, config.start, load_end) if config.mode == "full" else formal_range
             exit_mask = raw_exit_mask & exit_range
@@ -1649,25 +1683,31 @@ class StrategyBacktestService:
         timestamp_labels: tuple[str, ...],
         regime_filter: dict | None,
         data_dir: Path | None,
+        *,
+        required_start: date | None = None,
+        required_end: date | None = None,
     ) -> np.ndarray | None:
         """构造逐日 regime mask。强制 T-1 防未来函数: regime[T-1] 决定 entry[T]。
 
         timestamp_labels[i] 的入场资格 = 它的"前一交易日"的 regime 是否满足条件。
         "前一交易日"用 timestamp_labels 自身的顺序确定(回测时间轴上的前一天)。
         边界: 首日无前一日环境 → 默认允许(不阻断)。
-        regime_filter 为 None 或无 regime 数据时返回 None(不过滤)。
+        regime_filter 为 None 时返回 None(不过滤)。启用过滤后缺少正式区间所需的
+        环境数据则 fail-closed, 避免界面显示已过滤但实际静默放行。
         """
-        if not regime_filter or data_dir is None:
+        if not regime_filter:
             return None
         allowed_states = set(regime_filter.get("states") or [])
         min_score = regime_filter.get("min_score")
         if not allowed_states and min_score is None:
             return None
+        if data_dir is None:
+            raise ValueError("市场环境过滤不可用: 未找到环境数据目录")
 
         from app.services import regime_builder
         regime_df = regime_builder.load_regime_history(data_dir)
         if regime_df.is_empty():
-            return None
+            raise ValueError("市场环境数据为空, 请先在数据页完成市场环境计算后再回测")
 
         # 构建 date(ISO) → (state, score) 映射
         regime_map: dict[str, tuple[str, int]] = {}
@@ -1680,11 +1720,21 @@ class StrategyBacktestService:
         # 对每个 label, 找它的前一交易日的 regime(timestamp_labels 顺序里的前一天)
         n = len(timestamp_labels)
         mask = np.ones(n, dtype=bool)  # 默认允许
+        required_start_text = str(required_start) if required_start is not None else None
+        required_end_text = str(required_end) if required_end is not None else None
+        missing_dates: list[str] = []
         for i in range(1, n):
+            current_label = timestamp_labels[i][:10]
             prev_label = timestamp_labels[i - 1][:10]
             entry = regime_map.get(prev_label)
             if entry is None:
-                continue  # 无前一日环境数据 → 允许(不阻断)
+                required = (
+                    (required_start_text is None or current_label >= required_start_text)
+                    and (required_end_text is None or current_label <= required_end_text)
+                )
+                if required:
+                    missing_dates.append(prev_label)
+                continue
             state, score = entry
             ok = True
             if allowed_states and state not in allowed_states:
@@ -1692,6 +1742,13 @@ class StrategyBacktestService:
             if min_score is not None and score < min_score:
                 ok = False
             mask[i] = ok
+        if missing_dates:
+            first_missing = missing_dates[0]
+            suffix = f" 等 {len(missing_dates)} 天" if len(missing_dates) > 1 else ""
+            raise ValueError(
+                f"市场环境数据覆盖不完整: 缺少前一交易日环境 {first_missing}{suffix}, "
+                "请先补算对应区间"
+            )
         return mask
 
     def _build_candidate_filter_mask(
@@ -1975,6 +2032,7 @@ class StrategyBacktestService:
             "mode": c.mode,
             "holding_days": c.holding_days,
             "minute_fill": c.minute_fill,
+            "regime_filter": c.regime_filter,
         }
 
     @staticmethod

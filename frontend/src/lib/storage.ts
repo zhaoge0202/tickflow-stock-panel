@@ -113,6 +113,8 @@ export const storage = {
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
+    regimeStates?: string[]
+    regimeMinScore?: number | ''
     params?: Record<string, any>
     overrides?: Record<string, any>
     strategyConfigSignature?: string
