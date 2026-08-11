@@ -35,7 +35,12 @@ export const SIGNAL_FIELDS: [string, string, SignalType][] = [
 
 /** 从一行数据中提取已命中的信号列表 */
 export function getSignals(r: Record<string, any>): Signal[] {
-  return SIGNAL_FIELDS.filter(([key]) => r[key]).map(([, label, type]) => ({ label, type }))
+  const signals = SIGNAL_FIELDS.filter(([key]) => r[key]).map(([, label, type]) => ({ label, type }))
+  const auctionStatus = r.auction_replay_status ?? r.auction_confirmation_status
+  if (auctionStatus === 'confirmed') signals.unshift({ label: '竞价已确认', type: 'bull' })
+  else if (auctionStatus === 'pending_trade') signals.unshift({ label: '待开盘快照', type: 'neutral' })
+  else if (auctionStatus === 'pending_auction') signals.unshift({ label: '待竞价', type: 'neutral' })
+  return signals
 }
 
 /** 信号类型 → tailwind 颜色类 */
