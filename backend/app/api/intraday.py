@@ -3,7 +3,7 @@
 盘中选股相关端点已迁移至策略页面，此处仅保留全局行情基础设施。
 SSE 推送四种事件 (使用标准 SSE event 字段):
   - quotes_updated: 行情数据刷新，前端 invalidate 对应 query
-  - strategy_results_updated: 策略监控已写入最新结果，前端刷新策略个股列表
+  - strategy_results_updated: 策略结果缓存已更新，前端刷新策略个股列表
   - strategy_alert: 策略监控/告警触发，前端弹通知
   - depth_updated: 五档盘口修正完成，前端刷新连板梯队/看板封单数据
 """

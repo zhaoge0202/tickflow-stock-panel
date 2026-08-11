@@ -35,6 +35,27 @@ import {
   type ColumnConfig,
 } from '@/lib/screener-columns'
 
+const AUCTION_GATE_MINUTES = 9 * 60 + 25
+const AUCTION_CLOSE_MINUTES = 9 * 60 + 30
+const AUCTION_CONFIRM_GRACE_MINUTES = 9 * 60 + 35
+const CN_TZ = 'Asia/Shanghai'
+
+function getCnNowMinutes(now = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: CN_TZ,
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now)
+  const hour = Number(parts.find(p => p.type === 'hour')?.value ?? '0')
+  const minute = Number(parts.find(p => p.type === 'minute')?.value ?? '0')
+  return hour * 60 + minute
+}
+
+function getCnTodayIso(now = new Date()): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: CN_TZ }).format(now)
+}
+
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
@@ -121,6 +142,7 @@ export function Screener() {
 
   const { data: prefs } = usePreferences()
   const screenerAutoRun = prefs?.screener_auto_run ?? true
+  const dataStatus = useDataStatus({ staleTime: 0 })
 
   const strategies = useQuery({
     queryKey: QK.screenerStrategies('all'),
@@ -148,8 +170,6 @@ export function Screener() {
       && !!activeStrategy
       && summaryQuery.data?.results[activeStrategy]?.as_of === asOf,
   })
-
-  const dataStatus = useDataStatus({ staleTime: 0 })
 
   // 默认日期 = enriched 最新日期（始终跟随最新）
   useEffect(() => {
@@ -189,6 +209,31 @@ export function Screener() {
     [strategyPresets],
   )
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
+  const auctionTradeDate = useMemo(() => getCnTodayIso(), [])
+  const auctionStrategyIdsKey = useMemo(() => visiblePool.join(','), [visiblePool])
+  const auctionConfirmationQuery = useQuery({
+    queryKey: QK.screenerAuctionConfirmation(asOf, auctionTradeDate, auctionStrategyIdsKey, extColumnsParam || undefined),
+    queryFn: () => api.screenerAuctionConfirmation(
+      asOf,
+      auctionTradeDate,
+      visiblePool,
+      extColumnsParam || undefined,
+      assetType,
+    ),
+    enabled: assetType === 'stock'
+      && !!asOf
+      && asOf === dataStatus.data?.enriched?.latest_date
+      && visiblePool.length > 0,
+    staleTime: 0,
+    refetchInterval: () => {
+      const nowMinutes = getCnNowMinutes()
+      if (nowMinutes < AUCTION_GATE_MINUTES) return 5_000
+      if (nowMinutes < AUCTION_CLOSE_MINUTES) return 3_000
+      if (nowMinutes < AUCTION_CONFIRM_GRACE_MINUTES) return 10_000
+      return false
+    },
+    refetchIntervalInBackground: true,
+  })
 
   // 策略列表加载后,自动清除池中失效的自定义策略(如本地开发残留的、
   // 当前后端已不存在的策略 ID),避免"策略池"对话框持续显示失效项。
@@ -216,6 +261,7 @@ export function Screener() {
       api.screenerRunAll(
         date,
         strategyIds ?? visiblePool,
+        extColumnsParam || undefined,
         assetType,
       ),
     onSuccess: (data) => {
@@ -226,6 +272,7 @@ export function Screener() {
       }
       setHitCounts(prev => ({ ...prev, ...counts }))
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
     },
   })
 
@@ -279,6 +326,34 @@ export function Screener() {
     }
   }, [singleCachedQuery.data, showAll, activeStrategy, asOf])
 
+  useEffect(() => {
+    if (showAll || !activeStrategy) return
+    const confirmed = auctionConfirmationQuery.data
+    if (!confirmed || confirmed.gate_status !== 'confirmed' || confirmed.as_of !== asOf || confirmed.trade_date !== auctionTradeDate) return
+    const next = confirmed.results[activeStrategy]
+    if (!next) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      if (!base) {
+        return {
+          as_of: confirmed.as_of ?? asOf ?? '',
+          strategy: activeStrategy,
+          rows: next.rows,
+          total: next.total,
+          elapsed_ms: 0,
+        }
+      }
+      if (base.total === next.total && base.rows === next.rows) return base
+      return {
+        ...base,
+        rows: next.rows,
+        total: next.total,
+      }
+    })
+  }, [auctionConfirmationQuery.data, auctionTradeDate, showAll, activeStrategy, asOf, singleCachedQuery.data?.result])
+
   const effectiveResults = useMemo(() => {
     if (fullCachedQuery.data?.as_of !== asOf) return null
     const entries = Object.entries(fullCachedQuery.data.results)
@@ -286,11 +361,35 @@ export function Screener() {
     return Object.fromEntries(entries)
   }, [fullCachedQuery.data, asOf])
 
+  const auctionConfirmationPayload = auctionConfirmationQuery.data
+  const auctionConfirmationReady = auctionConfirmationPayload?.gate_status === 'confirmed'
+  const auctionConfirmationActive = (
+    assetType === 'stock'
+    && auctionConfirmationReady
+    && auctionConfirmationPayload?.as_of === asOf
+    && auctionConfirmationPayload?.trade_date === auctionTradeDate
+  )
+  const displayHitCounts = useMemo(() => {
+    if (!auctionConfirmationActive || !auctionConfirmationPayload) return hitCounts
+    const next = { ...hitCounts }
+    for (const [sid, item] of Object.entries(auctionConfirmationPayload.results)) {
+      if (item.as_of === asOf) next[sid] = item.total
+    }
+    return next
+  }, [auctionConfirmationActive, auctionConfirmationPayload, hitCounts, asOf])
+  const displayAllResults = useMemo(() => {
+    if (!showAll) return effectiveResults
+    if (!auctionConfirmationActive || !auctionConfirmationPayload) return effectiveResults
+    const entries = Object.entries(auctionConfirmationPayload.results)
+      .filter(([, item]) => item.as_of === asOf)
+    return Object.fromEntries(entries)
+  }, [showAll, effectiveResults, auctionConfirmationActive, auctionConfirmationPayload, asOf])
+
   // symbol → 所属策略列表。单策略接口同时返回轻量归属映射，保留策略列原有展示。
   const symbolStrategyMap = useMemo(() => {
     const map = new Map<string, string[]>()
     if (showAll) {
-      for (const [sid, r] of Object.entries(effectiveResults ?? {})) {
+      for (const [sid, r] of Object.entries(displayAllResults ?? {})) {
         for (const row of r.rows) {
           const arr = map.get(row.symbol)
           if (arr) arr.push(sid)
@@ -308,14 +407,14 @@ export function Screener() {
       }
     }
     return map
-  }, [showAll, effectiveResults, singleCachedQuery.data, activeStrategy, result])
+  }, [showAll, displayAllResults, singleCachedQuery.data, activeStrategy, result])
 
   // "全部" 模式: 合并所有策略的去重个股
   const allRows = useMemo(() => {
-    if (!effectiveResults) return []
+    if (!displayAllResults) return []
     const seen = new Set<string>()
     const merged: any[] = []
-    for (const r of Object.values(effectiveResults)) {
+    for (const r of Object.values(displayAllResults)) {
       for (const row of r.rows) {
         if (!seen.has(row.symbol)) {
           seen.add(row.symbol)
@@ -324,17 +423,18 @@ export function Screener() {
       }
     }
     return merged
-  }, [effectiveResults])
+  }, [displayAllResults])
 
   // 计算当前策略的失效行: 今日曾命中但当前已不命中。
   const expiredRows = useMemo(() => {
+    if (auctionConfirmationActive) return []
     const everRows = singleCachedQuery.data?.today_ever_rows
     if (!everRows || !result || result.as_of !== asOf) return []
     const currentSymbols = new Set(result.rows.map((row: any) => row.symbol))
     return Object.entries(everRows)
       .filter(([symbol]) => !currentSymbols.has(symbol))
       .map(([, row]) => ({ ...row, _expired: true }))
-  }, [singleCachedQuery.data, result, asOf])
+  }, [auctionConfirmationActive, singleCachedQuery.data, result, asOf])
 
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
@@ -466,6 +566,7 @@ export function Screener() {
       setHitCounts(prev => ({ ...prev, [vars.id]: data.total }))
       // 单策略重跑后刷新摘要和当前按需明细，避免参数保存后回退到旧缓存。
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
     },
   })
 
@@ -522,6 +623,7 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       if (asOf) requestRunAll({ date: asOf })
     },
   })
@@ -723,8 +825,8 @@ export function Screener() {
                   description={s.description}
                   source={s.source}
                   active={activeStrategy === s.id}
-                  count={hitCounts[id]}
-                  expiredCount={expiredCounts[id]}
+                  count={displayHitCounts[id] ?? hitCounts[id]}
+                  expiredCount={auctionConfirmationActive ? 0 : (expiredCounts[id] ?? 0)}
                   loading={runAll.isPending}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
@@ -768,9 +870,18 @@ export function Screener() {
                   <span className="text-[11px] text-muted font-normal">
                     · {visiblePool.length} 策略
                     {!showAll && visiblePool.length > 0 && (
-                      <> · 共 {visiblePool.reduce((sum, id) => sum + (hitCounts[id] ?? 0), 0)} 只</>
+                      <> · 共 {visiblePool.reduce((sum, id) => sum + (displayHitCounts[id] ?? hitCounts[id] ?? 0), 0)} 只</>
                     )}
                   </span>
+                  {auctionConfirmationQuery.data && (
+                    <span className="text-[11px] text-secondary">
+                      · 竞价确认 {auctionConfirmationQuery.data.gate_status === 'confirmed'
+                        ? `${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.total ?? 0), 0)} / ${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.base_total ?? 0), 0)}`
+                        : auctionConfirmationQuery.data.gate_status === 'pending_gate'
+                          ? '等待 09:25'
+                          : '等待开盘快照'}
+                    </span>
+                  )}
                   {runAll.isPending && (
                     <span className="text-[11px] text-muted animate-pulse">扫描中…</span>
                   )}
@@ -880,10 +991,30 @@ export function Screener() {
               {displayRows.length === 0 ? (
                 <EmptyState
                   icon={ScanSearch}
-                  title={filterActive(filter) ? '筛选后无命中' : '今日无命中'}
-                  hint={filterActive(filter)
-                    ? '当前筛选条件过严, 试试放宽或重置筛选。'
-                    : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
+                  title={
+                    auctionConfirmationQuery.data?.gate_status === 'pending_gate'
+                      ? '等待 09:25 竞价确认'
+                      : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                        ? '等待开盘快照'
+                        : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
+                          ? '筛选后无命中'
+                          : auctionConfirmationActive
+                            ? '竞价确认后无命中'
+                            : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
+                  }
+                  hint={
+                    auctionConfirmationQuery.data?.gate_status === 'pending_gate'
+                      ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
+                      : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                        ? '竞价快照已到，正在等 09:25 之后的 trade 快照。'
+                        : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
+                          ? '当前筛选条件过严, 试试放宽或重置筛选。'
+                          : auctionConfirmationActive
+                            ? '候选已做竞价 / 开盘确认，但没有保留下来的结果。'
+                            : (filterActive(filter)
+                              ? '当前筛选条件过严, 试试放宽或重置筛选。'
+                              : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。')
+                  }
                 />
               ) : (
                 <>

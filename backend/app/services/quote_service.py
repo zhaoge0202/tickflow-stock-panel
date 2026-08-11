@@ -393,7 +393,7 @@ class QuoteService:
             sub.notify_quote()
 
     def notify_strategy_results_updated(self) -> None:
-        """策略监控完成实时结果更新后调用，仅刷新策略页结果缓存。"""
+        """策略结果缓存更新后调用，仅刷新策略页结果缓存。"""
         for sub in self._snapshot_subscribers():
             sub.notify_strategy_results()
 
@@ -545,6 +545,39 @@ class QuoteService:
         self._fetch_quotes()
         return self.status()
 
+    def refresh_auction_confirmation(
+        self,
+        *,
+        strategy_ids: list[str] | None = None,
+        force: bool = False,
+    ) -> dict:
+        """按当前策略缓存计算竞价/开盘确认结果。"""
+        if not self._repo or not getattr(self._repo, "store", None):
+            return {"status": "skipped", "reason": "repo_unavailable"}
+
+        data_dir = getattr(self._repo.store, "data_dir", None)
+        if data_dir is None:
+            return {"status": "skipped", "reason": "data_dir_unavailable"}
+
+        try:
+            from app.services import auction_confirmation, strategy_cache
+
+            cached = strategy_cache.read_cache(data_dir)
+            if not cached:
+                return {"status": "skipped", "reason": "empty_strategy_cache"}
+
+            confirmed = auction_confirmation.confirm_cached_strategy_results(
+                data_dir,
+                cached,
+                as_of=None,
+                trade_date=None,
+                strategy_ids=strategy_ids,
+            )
+            return confirmed
+        except Exception as e:  # noqa: BLE001
+            logger.warning("竞价确认刷新失败: %s", e)
+            return {"status": "error", "reason": str(e)}
+
     def _prime_quotes_once(self) -> None:
         """启动/启用时主动抓取一次最新行情, 避免盘后启动只回退到昨日缓存。"""
         if self._repo is not None and getattr(self._repo, "enriched_warming", False):
@@ -616,7 +649,8 @@ class QuoteService:
                 self._fetch_watchlist_quotes()
             else:
                 self._fetch_full_market_quotes()
-            return self._fetched_at > before
+            updated = self._fetched_at > before
+        return updated
 
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""
@@ -1488,6 +1522,68 @@ class QuoteService:
                     ev[out_col] = vmap.get(str(sym))
         except Exception as e:  # noqa: BLE001
             logger.debug("告警 ext 富化失败 (不影响推送): %s", e)
+
+    def _inject_intraday_signals(self, enriched_today: pl.DataFrame, engine, asset_type: str) -> pl.DataFrame:
+        """为使用分时穿越信号的监控规则注入当轮布尔信号列。"""
+        if enriched_today.is_empty() or engine is None:
+            return enriched_today
+        symbol_provider = getattr(engine, "intraday_signal_symbols", None)
+        if not callable(symbol_provider):
+            return enriched_today
+
+        try:
+            raw_symbols = symbol_provider(asset_type) or set()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("分时信号标的解析失败 (监控规则安全降级): %s", e)
+            return enriched_today
+
+        symbols = {
+            str(symbol).strip().upper()
+            for symbol in raw_symbols
+            if str(symbol).strip()
+        }
+        if not symbols:
+            return enriched_today
+
+        try:
+            from app.services.kline_sync import fetch_intraday_monitor_batch
+            from app.strategy.intraday_signals import IntradaySignalEvaluator
+
+            evaluator = getattr(self, "_intraday_signal_evaluator", None)
+            if evaluator is None:
+                evaluator = IntradaySignalEvaluator()
+                self._intraday_signal_evaluator = evaluator
+
+            prev_close: dict[str, float] = {}
+            if "symbol" in enriched_today.columns and "prev_close" in enriched_today.columns:
+                for row in enriched_today.select(["symbol", "prev_close"]).iter_rows(named=True):
+                    symbol = str(row.get("symbol") or "").strip().upper()
+                    if not symbol:
+                        continue
+                    try:
+                        prev_close[symbol] = float(row.get("prev_close"))
+                    except (TypeError, ValueError):
+                        continue
+
+            now = cn_now()
+            capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+            minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
+            signals = evaluator.evaluate(
+                minute_df,
+                symbols=symbols,
+                prev_close=prev_close,
+                asset_type=asset_type,
+                now=now,
+            )
+            return evaluator.inject(enriched_today, signals)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("分时信号注入失败 (监控规则安全降级): %s", e)
+            try:
+                from app.strategy.intraday_signals import IntradaySignalEvaluator
+
+                return IntradaySignalEvaluator.inject(enriched_today, [])
+            except Exception:  # noqa: BLE001
+                return enriched_today
 
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
         """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。

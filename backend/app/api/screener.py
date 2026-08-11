@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache
+from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
@@ -41,6 +42,14 @@ class PresetRequest(BaseModel):
     ext_columns: Optional[str] = None
     asset_type: str = "stock"
     timeframe: str = "1d"
+
+
+class AuctionConfirmRequest(BaseModel):
+    as_of: Optional[date] = None
+    trade_date: Optional[date] = None
+    strategy_ids: Optional[list[str]] = None
+    ext_columns: Optional[str] = None
+    asset_type: str = "stock"
 
 
 def _safe(result_dict: dict) -> dict:
@@ -316,6 +325,40 @@ def run_preset(req: PresetRequest, request: Request):
     _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
     return _result_with_ext(safe_data, ext_values)
+
+
+@router.post("/auction-confirmation")
+def auction_confirmation(req: AuctionConfirmRequest, request: Request):
+    """把盘后策略缓存和竞价 / 开盘快照拼成确认后的选股结果。"""
+    data_dir = request.app.state.repo.store.data_dir
+    cached = _cached_with_realtime(request)
+
+    as_of = req.as_of
+    if as_of is None:
+        cached_as_of = cached.get("as_of")
+        if cached_as_of:
+            try:
+                as_of = date.fromisoformat(str(cached_as_of))
+            except ValueError:
+                as_of = None
+
+    confirmed = confirm_cached_strategy_results(
+        data_dir,
+        cached,
+        as_of=as_of,
+        trade_date=req.trade_date,
+        strategy_ids=req.strategy_ids,
+    )
+    ext_values = _load_ext_value_maps(request.app.state.repo, req.ext_columns)
+    results = {}
+    for sid, payload in (confirmed.get("results") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        rows = _rows_with_ext(payload.get("rows") or [], ext_values)
+        results[sid] = {**payload, "rows": rows}
+
+    confirmed = {**confirmed, "results": results}
+    return confirmed
 
 
 def _cached_with_realtime(request: Request) -> dict:

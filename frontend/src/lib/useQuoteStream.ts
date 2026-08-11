@@ -162,8 +162,9 @@ export function useQuoteStream(
       })
 
       es.addEventListener('strategy_results_updated', () => {
-        // 策略监控完成后只刷新策略结果缓存，不扩散到其他行情页面。
+        // 策略结果和竞价确认共用候选池，确认查询也要随策略结果更新失效。
         qc.invalidateQueries({ queryKey: ['screener-cached'] })
+        qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       })
 
       es.addEventListener('depth_updated', () => {
