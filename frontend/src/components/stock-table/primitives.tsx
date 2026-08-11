@@ -141,6 +141,29 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
           )}
         </td>
       )
+    // 竞价确认
+    case 'auction_event_time':
+      return <td key={col.id} className={numCls}>{r.auction_event_time ?? '—'}</td>
+    case 'auction_price':
+      return <td key={col.id} className={numCls}>{r.auction_price != null ? fmtPrice(r.auction_price) : '—'}</td>
+    case 'auction_change_pct':
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.auction_change_pct)}`}>{fmtPct(r.auction_change_pct)}</td>
+    case 'auction_matched_volume':
+      return <td key={col.id} className={numCls}>{fmtBigNum(r.auction_matched_volume)}</td>
+    case 'auction_pressure_score':
+      return <td key={col.id} className={numCls}>{r.auction_pressure_score != null ? fmtPrice(r.auction_pressure_score, 2) : '—'}</td>
+    case 'open_confirm_time':
+      return <td key={col.id} className={numCls}>{r.open_confirm_time ?? '—'}</td>
+    case 'open_confirm_price':
+      return <td key={col.id} className={numCls}>{r.open_confirm_price != null ? fmtPrice(r.open_confirm_price) : '—'}</td>
+    case 'open_confirm_change_pct':
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.open_confirm_change_pct)}`}>{fmtPct(r.open_confirm_change_pct)}</td>
+    case 'open_confirm_volume':
+      return <td key={col.id} className={numCls}>{fmtBigNum(r.open_confirm_volume)}</td>
+    case 'open_confirm_amount':
+      return <td key={col.id} className={`${numCls} text-secondary`}>{fmtBigNum(r.open_confirm_amount)}</td>
+    case 'open_confirm_vs_auction_pct':
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.open_confirm_vs_auction_pct)}`}>{fmtPct(r.open_confirm_vs_auction_pct)}</td>
     // 财务指标（后端 enriched 未返回时显示 —）
     case 'eps':           return <td key={col.id} className={numCls}>{r.eps != null ? fmtPrice(r.eps) : '—'}</td>
     case 'bps':           return <td key={col.id} className={numCls}>{r.bps != null ? fmtPrice(r.bps) : '—'}</td>

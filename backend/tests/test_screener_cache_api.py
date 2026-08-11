@@ -93,3 +93,50 @@ def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_members
     assert payload["result"]["rows"] == [{"symbol": "000001.SZ", "concept.concept": "银行"}]
     assert payload["today_ever_rows"]["000002.SZ"]["concept.concept"] == "科技"
     assert payload["strategy_ids_by_symbol"] == {"000001.SZ": ["strategy_a", "strategy_b"]}
+
+
+def test_auction_confirmation_applies_ext_columns(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        screener_api,
+        "confirm_cached_strategy_results",
+        lambda *_args, **_kwargs: {
+            "as_of": "2026-08-10",
+            "trade_date": "2026-08-11",
+            "gate_status": "confirmed",
+            "updated_at": 1,
+            "results": {
+                "strategy_a": {
+                    "strategy": "strategy_a",
+                    "as_of": "2026-08-10",
+                    "trade_date": "2026-08-11",
+                    "base_total": 1,
+                    "total": 1,
+                    "confirmed_total": 1,
+                    "auction_covered_total": 1,
+                    "trade_covered_total": 1,
+                    "pending_auction_total": 0,
+                    "pending_trade_total": 0,
+                    "rows": [{"symbol": "000001.SZ"}],
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        screener_api,
+        "_load_ext_value_maps",
+        lambda *_args, **_kwargs: {"auction.confirm": {"000001.SZ": "已确认"}},
+    )
+
+    payload = screener_api.auction_confirmation(
+        screener_api.AuctionConfirmRequest(
+            as_of=None,
+            trade_date=None,
+            strategy_ids=["strategy_a"],
+            ext_columns="auction.confirm",
+            asset_type="stock",
+        ),
+        _request(tmp_path),
+    )
+
+    assert payload["gate_status"] == "confirmed"
+    assert payload["results"]["strategy_a"]["rows"] == [{"symbol": "000001.SZ", "auction.confirm": "已确认"}]

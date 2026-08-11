@@ -370,6 +370,34 @@ export interface ScreenerResult {
   elapsed_ms: number
 }
 
+export interface ScreenerAuctionConfirmationResult {
+  strategy: string
+  as_of: string
+  trade_date: string
+  base_total: number
+  total: number
+  confirmed_total: number
+  auction_covered_total: number
+  trade_covered_total: number
+  pending_auction_total: number
+  pending_trade_total: number
+  rows: any[]
+  [key: string]: any
+}
+
+export interface ScreenerAuctionConfirmationResponse {
+  as_of: string | null
+  cache_as_of?: string | null
+  trade_date: string | null
+  gate_status: 'pending_gate' | 'awaiting_trade' | 'confirmed' | 'empty_candidates' | 'no_cache' | 'stale_as_of'
+  updated_at: number | null
+  auction_window?: { start: string; end: string }
+  confirm_window?: { start: string; end: string }
+  auction_rows_total?: number
+  trade_rows_total?: number
+  results: Record<string, ScreenerAuctionConfirmationResult>
+}
+
 export interface MarketSnapshotRow {
   symbol: string
   name?: string | null
@@ -2012,6 +2040,23 @@ export const api = {
         ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
         : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
+  screenerAuctionConfirmation: (
+    asOf?: string,
+    tradeDate?: string,
+    strategyIds?: string[],
+    extColumns?: string,
+    assetType: 'stock' | 'etf' = 'stock',
+  ) =>
+    request<ScreenerAuctionConfirmationResponse>('/api/screener/auction-confirmation', {
+      method: 'POST',
+      body: JSON.stringify({
+        as_of: asOf ?? null,
+        trade_date: tradeDate ?? null,
+        strategy_ids: strategyIds ?? null,
+        ext_columns: extColumns || null,
+        asset_type: assetType,
+      }),
+    }),
 
   marketDates: (limit = 120) =>
     request<MarketDatesResponse>(`/api/screener/market-dates?limit=${limit}`),

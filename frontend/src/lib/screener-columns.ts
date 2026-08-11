@@ -68,6 +68,18 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   // 连板
   { id: 'builtin:limit_ups', source: { type: 'builtin', key: 'limit_ups' }, label: '连板', visible: true, align: 'center' },
   { id: 'builtin:limit_downs', source: { type: 'builtin', key: 'limit_downs' }, label: '连跌', visible: false, align: 'center' },
+  // 竞价确认
+  { id: 'builtin:auction_event_time', source: { type: 'builtin', key: 'auction_event_time' }, label: '竞价时刻', visible: false, align: 'center' },
+  { id: 'builtin:auction_price', source: { type: 'builtin', key: 'auction_price' }, label: '竞价价', visible: false, align: 'right' },
+  { id: 'builtin:auction_change_pct', source: { type: 'builtin', key: 'auction_change_pct' }, label: '竞价涨跌', visible: false, align: 'right' },
+  { id: 'builtin:auction_matched_volume', source: { type: 'builtin', key: 'auction_matched_volume' }, label: '竞价量', visible: false, align: 'right' },
+  { id: 'builtin:auction_pressure_score', source: { type: 'builtin', key: 'auction_pressure_score' }, label: '竞价压力', visible: false, align: 'right' },
+  { id: 'builtin:open_confirm_time', source: { type: 'builtin', key: 'open_confirm_time' }, label: '确认时刻', visible: false, align: 'center' },
+  { id: 'builtin:open_confirm_price', source: { type: 'builtin', key: 'open_confirm_price' }, label: '确认价', visible: false, align: 'right' },
+  { id: 'builtin:open_confirm_change_pct', source: { type: 'builtin', key: 'open_confirm_change_pct' }, label: '确认涨跌', visible: false, align: 'right' },
+  { id: 'builtin:open_confirm_volume', source: { type: 'builtin', key: 'open_confirm_volume' }, label: '确认量', visible: false, align: 'right' },
+  { id: 'builtin:open_confirm_amount', source: { type: 'builtin', key: 'open_confirm_amount' }, label: '确认额', visible: false, align: 'right' },
+  { id: 'builtin:open_confirm_vs_auction_pct', source: { type: 'builtin', key: 'open_confirm_vs_auction_pct' }, label: '开盘相对竞价', visible: false, align: 'right' },
   // 信号 & 图表
   { id: 'builtin:signals', source: { type: 'builtin', key: 'signals' }, label: '信号', visible: true, align: 'left' },
   { id: 'builtin:candle', source: { type: 'builtin', key: 'candle' }, label: '日k', visible: false, align: 'center' },
@@ -96,6 +108,7 @@ export const SCREENER_COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'limit', label: '连板', icon: '🔥', keys: ['limit_ups', 'limit_downs'] },
   { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'candle', 'intraday'] },
   { id: 'finance', label: '财务', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'revenue_yoy', 'net_income_yoy', 'debt_ratio'] },
+  { id: 'auction', label: '竞价', icon: '⏱️', keys: ['auction_event_time', 'auction_price', 'auction_change_pct', 'auction_matched_volume', 'auction_pressure_score', 'open_confirm_time', 'open_confirm_price', 'open_confirm_change_pct', 'open_confirm_volume', 'open_confirm_amount', 'open_confirm_vs_auction_pct'] },
 ]
 
 export async function saveScreenerColumnConfig(columns: ColumnConfig[]): Promise<void> {
