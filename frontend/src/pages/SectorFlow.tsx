@@ -657,6 +657,13 @@ export function SectorFlow() {
     ? settings.asOfTs ?? snapshotQuery.data?.as_of_ts ?? selectedPointIndex
     : null
 
+  useEffect(() => {
+    if (viewMode === 'bubble' || timeMode !== 'replay' || replayStartTs == null || !points.length) return
+    const currentTs = settings.asOfTs ?? points[selectedPointIndex] ?? points[0]
+    if (currentTs == null || currentTs >= replayStartTs) return
+    patchSettings({ asOfTs: replayStartTs }, { persist: false })
+  }, [viewMode, timeMode, replayStartTs, settings.asOfTs, selectedPointIndex, points])
+
   const startPlayback = () => {
     if (!canReplay) return
     const shouldRestart =
