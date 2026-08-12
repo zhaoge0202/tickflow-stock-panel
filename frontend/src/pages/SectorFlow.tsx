@@ -6,6 +6,7 @@ import {
   CalendarDays,
   ChartScatter,
   Clock3,
+  LineChart,
   Layers3,
   Landmark,
   Pause,
@@ -18,6 +19,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { SectorFlowBubbles, type SectorFlowItem } from '@/components/SectorFlowBubbles'
+import { SectorFlowTrendChart } from '@/components/SectorFlowTrendChart'
 import { api, type ExtDataConfig, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -33,6 +35,7 @@ const LIVE_MARKET_PHASES = new Set(['preopen', 'morning', 'morning_final', 'pre_
 
 type SectorKind = 'concept' | 'industry'
 type TimeMode = 'live' | 'replay' | 'eod'
+type ViewMode = 'bubble' | 'strength' | 'main_flow'
 type SortMode = 'heat' | 'avgPct' | 'amount' | 'down' | 'count'
 
 interface SectorFlowSettings {
@@ -42,6 +45,7 @@ interface SectorFlowSettings {
   date?: string
   asOfTs?: number | null
   timeMode?: TimeMode
+  viewMode?: ViewMode
   maxItems?: number
   sortMode?: SortMode
 }
@@ -92,7 +96,12 @@ const KIND_META: Record<SectorKind, {
 }
 
 function loadSettings(): SectorFlowSettings {
-  return storage.sectorFlowConfig.get({}) as SectorFlowSettings
+  const saved = storage.sectorFlowConfig.get({}) as SectorFlowSettings
+  const today = cnToday()
+  if (saved.date && saved.date !== today) {
+    return { ...saved, date: today, timeMode: 'live', asOfTs: null }
+  }
+  return saved
 }
 
 function saveSettings(next: SectorFlowSettings) {
@@ -295,6 +304,7 @@ export function SectorFlow() {
   const [search, setSearch] = useState('')
   const [isPlaying, setIsPlaying] = useState(false)
   const [lastGoodStats, setLastGoodStats] = useState<LastGoodStats | null>(null)
+  const [selectedSeriesKeys, setSelectedSeriesKeys] = useState<string[]>([])
   const queryClient = useQueryClient()
   const quoteStatus = useQuoteStatus()
 
@@ -317,6 +327,7 @@ export function SectorFlow() {
     isLiveMarketPhase,
   )
   const timeMode = settings.timeMode ?? (canLive && isSelectedToday ? 'live' : 'eod')
+  const viewMode = settings.viewMode ?? 'strength'
   const sortMode = settings.sortMode ?? 'heat'
   const maxItems = settings.maxItems ?? 64
 
@@ -389,6 +400,32 @@ export function SectorFlow() {
       return isSelectedToday || status === 'queued' || status === 'running' ? 30_000 : false
     },
   })
+
+  const seriesMetric = viewMode === 'main_flow' ? 'main_flow' : 'strength'
+  const seriesDate = selectedDate || today
+  const seriesQuery = useQuery({
+    queryKey: QK.sectorFlowSeries(kind, seriesMetric, seriesDate, TIMELINE_STEP_SECONDS, kind === 'industry' ? fieldConfig.hierarchyLevel ?? 2 : null),
+    queryFn: () => api.sectorFlowSeries({
+      kind,
+      metric: seriesMetric,
+      date: seriesDate,
+      stepSeconds: TIMELINE_STEP_SECONDS,
+      limit: 48,
+      level: kind === 'industry' ? fieldConfig.hierarchyLevel ?? 2 : null,
+    }),
+    enabled: viewMode !== 'bubble' && !!seriesDate,
+    staleTime: isSelectedToday ? 12_000 : 60_000,
+    refetchInterval: viewMode !== 'bubble' && isSelectedToday ? 20_000 : false,
+    placeholderData: previous => previous,
+  })
+
+  const realtimeDisabledReason = !quoteStatus.data
+    ? '正在检查实时行情状态'
+    : quoteStatus.data.enabled === false || quoteStatus.data.running === false
+      ? '实时行情轮询未开启，请到设置中开启'
+      : !canLive
+        ? '当前不在实时行情窗口'
+        : null
 
   const points = timelineQuery.data?.points ?? []
   const hasTimeline = points.length > 0
@@ -505,6 +542,20 @@ export function SectorFlow() {
     })
   }, [stats, statsContextKey, snapshotQuery.data?.count, snapshotQuery.data?.rows.length])
 
+  useEffect(() => {
+    if (viewMode === 'bubble') return
+    const sectors = seriesQuery.data?.sectors ?? []
+    if (!sectors.length) {
+      setSelectedSeriesKeys([])
+      return
+    }
+    setSelectedSeriesKeys(prev => {
+      const available = new Set(sectors.map(item => item.key))
+      const kept = prev.filter(key => available.has(key))
+      return kept.length ? kept : sectors.slice(0, 8).map(item => item.key)
+    })
+  }, [viewMode, seriesQuery.data?.sectors])
+
   const snapshotRowCount = snapshotQuery.data?.rows.length ?? 0
   const backfillStatus = timelineQuery.data?.backfill?.status ?? timelineQuery.data?.backfill_status ?? ''
   const usingLastGoodStats =
@@ -582,8 +633,23 @@ export function SectorFlow() {
     rowsQuery.refetch()
     snapshotQuery.refetch()
     timelineQuery.refetch()
+    seriesQuery.refetch()
     marketDatesQuery.refetch()
   }
+
+  const toggleSeriesKey = (key: string) => {
+    setSelectedSeriesKeys(prev => (
+      prev.includes(key)
+        ? prev.filter(item => item !== key)
+        : [...prev, key].slice(-10)
+    ))
+  }
+
+  const pageTitle = viewMode === 'main_flow'
+    ? '板块资金'
+    : viewMode === 'strength'
+      ? '板块强度'
+      : '动能气泡'
 
   if (configsQuery.isLoading) {
     return <div className="flex h-full items-center justify-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>
@@ -593,17 +659,17 @@ export function SectorFlow() {
     <>
       <div className="min-w-[960px]">
         <PageHeader
-          title="动能气泡"
-          subtitle={`${meta.label} · ${displayDate} ${displayTime} · ${displayStats.length} 个板块`}
+          title={pageTitle}
+          subtitle={`${meta.label} · ${displayDate} ${displayTime} · ${viewMode === 'bubble' ? displayStats.length : seriesQuery.data?.sectors.length ?? 0} 个板块`}
           right={
             <div className="flex items-center gap-1">
               <button
                 onClick={refreshAll}
-                disabled={rowsQuery.isFetching || snapshotQuery.isFetching || timelineQuery.isFetching}
+                disabled={rowsQuery.isFetching || snapshotQuery.isFetching || timelineQuery.isFetching || seriesQuery.isFetching}
                 className="p-1.5 text-muted hover:bg-surface disabled:opacity-50"
                 title="刷新"
               >
-                <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || snapshotQuery.isFetching || timelineQuery.isFetching) && 'animate-spin')} />
+                <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || snapshotQuery.isFetching || timelineQuery.isFetching || seriesQuery.isFetching) && 'animate-spin')} />
               </button>
               <button
                 onClick={() => setShowConfig(true)}
@@ -620,6 +686,29 @@ export function SectorFlow() {
           <div className="mx-auto max-w-[1440px] space-y-4">
           <section className="rounded-lg border border-border bg-surface/80 px-4 py-3">
             <div className="flex flex-wrap items-center gap-3">
+              <div className="inline-flex rounded-md border border-border bg-elevated/70 p-0.5">
+                {([
+                  { key: 'bubble', label: '动能气泡', icon: ChartScatter },
+                  { key: 'strength', label: '板块强度', icon: LineChart },
+                  { key: 'main_flow', label: '主力流入', icon: Activity },
+                ] as const).map(item => {
+                  const Icon = item.icon
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => patchSettings({ viewMode: item.key })}
+                      className={cn(
+                        'inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs transition-colors',
+                        viewMode === item.key ? 'bg-accent text-white' : 'text-secondary hover:bg-surface hover:text-foreground',
+                      )}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {item.label}
+                    </button>
+                  )
+                })}
+              </div>
+
               <div className="inline-flex rounded-md border border-border bg-elevated/70 p-0.5">
                 {(['concept', 'industry'] as SectorKind[]).map(k => {
                   const Icon = KIND_META[k].icon
@@ -663,15 +752,15 @@ export function SectorFlow() {
               <div className="inline-flex rounded-md border border-border bg-elevated/70 p-0.5">
                 <button
                   onClick={() => {
-                    patchSettings({ date: today, timeMode: 'live', asOfTs: null })
+                    patchSettings({ date: today, timeMode: canLive ? 'live' : 'eod', asOfTs: null })
                     setIsPlaying(false)
                   }}
-                  disabled={!canLive}
+                  disabled={!quoteStatus.data}
                   className={cn(
                     'inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40',
                     timeMode === 'live' && isSelectedToday ? 'bg-bull text-white' : 'text-secondary hover:bg-surface hover:text-foreground',
                   )}
-                  title={canLive ? '切换到今日实时行情' : '当前不在实时行情窗口'}
+                  title={canLive ? '切换到今日实时行情' : realtimeDisabledReason ?? '正在检查实时行情状态'}
                 >
                   <Activity className="h-3.5 w-3.5" />
                   实时
@@ -774,6 +863,9 @@ export function SectorFlow() {
 
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted">
               <span>{replayRangeText}</span>
+              {!isSelectedToday && (
+                <span className="text-amber-500">当前是历史日期 {selectedDate}，不是实时行情</span>
+              )}
               {replayDataText && (
                 <span className={cn(
                   ['partial_ticks', 'missing_minute', 'missing_today_ticks'].includes(timelineQuery.data?.backfill_status ?? '')
@@ -787,7 +879,7 @@ export function SectorFlow() {
                 <span className="text-bear">当前时间点没有 tick 快照，已回退到收盘数据</span>
               )}
               {timeMode === 'live' && !canLive && (
-                <span className="text-bear">当前不在实时行情窗口</span>
+                <span className="text-bear">{realtimeDisabledReason}</span>
               )}
               {usingLastGoodStats && (
                 <span className="text-bull">当前帧暂未返回有效行情，沿用上一帧气泡</span>
@@ -812,6 +904,19 @@ export function SectorFlow() {
             />
           ) : !activeConfig ? (
             <EmptyState icon={ModeIcon} title={`暂无${meta.label}数据源`} hint={`请先在扩展数据中配置${meta.label}分类数据`} />
+          ) : viewMode !== 'bubble' ? (
+            <SectorFlowTrendChart
+              data={seriesQuery.data}
+              metric={seriesMetric}
+              selectedKeys={selectedSeriesKeys}
+              onToggle={toggleSeriesKey}
+              onSelectAll={setSelectedSeriesKeys}
+              isLoading={seriesQuery.isLoading}
+              isFetching={seriesQuery.isFetching}
+              error={(seriesQuery.error as Error | null) ?? null}
+              onRefresh={() => seriesQuery.refetch()}
+              search={search}
+            />
           ) : displayStats.length > 0 ? (
             <>
               <SectorFlowBubbles

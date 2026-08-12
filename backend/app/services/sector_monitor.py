@@ -69,6 +69,16 @@ class SectorMonitorService:
         self._ensure_catalog()
         return {kind: [dict(item) for item in self._catalog[kind]] for kind in self._catalog}
 
+    def members_for_targets(self, target_keys: list[str] | None = None) -> dict[str, set[str]]:
+        """返回板块目标对应的成员标的集合。"""
+        self._ensure_catalog()
+        wanted = {str(key) for key in target_keys or [] if str(key)}
+        return {
+            key: set(members)
+            for key, members in self._members_by_key.items()
+            if not wanted or key in wanted
+        }
+
     def missing_target_keys(self, targets: list[dict]) -> list[str]:
         self._ensure_catalog()
         return [str(target.get("key") or "") for target in targets if target.get("key") not in self._targets_by_key]

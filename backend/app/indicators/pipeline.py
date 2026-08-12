@@ -60,11 +60,14 @@ def invalidate_custom_signals() -> None:
     _custom_signal_exprs = None
 
 
-# enriched parquet 仅存储的列 (14 列)
+# enriched parquet 仅存储的列
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
     "volume", "amount",
+    "auction_result_price",                   # 09:25 开盘竞价最终成交价, 非竞价过程
+    "auction_result_volume",                  # 09:25 最终成交量
+    "auction_result_amount",                  # 09:25 最终成交额
     "raw_close", "raw_high", "raw_low",       # 不复权原始价
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
@@ -88,6 +91,9 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "close":                   "前复权收盘价",
     "volume":                  "成交量",
     "amount":                  "成交额",
+    "auction_result_price":    "09:25开盘竞价最终成交价",
+    "auction_result_volume":   "09:25开盘竞价最终成交量",
+    "auction_result_amount":   "09:25开盘竞价最终成交额",
     "raw_close":               "原始收盘价(未复权)",
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",

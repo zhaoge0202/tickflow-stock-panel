@@ -900,6 +900,15 @@ def _dynamic_snapshot_rows(
         actual_amount = _snapshot_amount(source, raw_close, actual_volume)
         projected_volume = actual_volume * projection_factor
         projected_amount = actual_amount * projection_factor
+        auction_result_price = _snapshot_price(auction_row) if auction_row is not None else None
+        auction_result_volume = _snapshot_volume(auction_row) if auction_row is not None else None
+        auction_result_amount = (
+            _snapshot_amount(auction_row, auction_result_price, auction_result_volume)
+            if auction_row is not None
+            and auction_result_price is not None
+            and auction_result_volume is not None
+            else None
+        )
         adj_factor = _adj_factor(base)
         close = raw_close * adj_factor
         prev_close = _prev_close(base, source, adj_factor)
@@ -921,6 +930,13 @@ def _dynamic_snapshot_rows(
             "raw_close": raw_close,
             "raw_high": raw_high,
             "raw_low": raw_low,
+            "auction_result_price": (
+                auction_result_price * adj_factor
+                if auction_result_price is not None
+                else None
+            ),
+            "auction_result_volume": auction_result_volume,
+            "auction_result_amount": auction_result_amount,
             "prev_close": prev_close,
             "change_pct": (close / prev_close - 1.0) if prev_close not in (None, 0) else None,
             "change_amount": (close - prev_close) if prev_close is not None else None,

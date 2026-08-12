@@ -23,7 +23,7 @@ from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
 
-_DATASETS = ("daily", "minute", "realtime", "trade_ticks", "financial")
+_DATASETS = ("daily", "minute", "realtime", "trade_ticks", "auction_result", "financial")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
 _KLINE_BATCH = 8
@@ -131,7 +131,7 @@ class TDXAPIProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType = "stock",  # noqa: ARG002
+        asset_type: AssetType = "stock",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
         if not symbols:
@@ -164,7 +164,7 @@ class TDXAPIProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType = "stock",  # noqa: ARG002 — TDX 分钟接口不按资产类型分流
+        asset_type: AssetType = "stock",  # TDX 分钟接口不按资产类型分流
         freq: str = "1m",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
@@ -360,12 +360,51 @@ class TDXAPIProvider:
             return rows[-limit:]
         return rows
 
+    def get_auction_results(
+        self,
+        symbols: list[str] | str,
+        trade_date: date | datetime | str,
+        *,
+        include_today: bool = False,
+    ) -> list[dict]:
+        """从历史分笔成交中筛出 09:25 开盘竞价结果。
+
+        这是竞价最终成交结果, 不是 09:15-09:25 的竞价过程明细。竞价过程仍
+        依赖盘前实时 quote_ticks / 后续 0x056A 采集。
+        """
+        target_date = _required_history_date(trade_date)
+        target_symbols = [symbols] if isinstance(symbols, str) else list(symbols or [])
+        rows: list[dict] = []
+        for symbol in target_symbols:
+            app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+            try:
+                ticks = self.get_trade_history_full(
+                    app_symbol,
+                    start_date=target_date,
+                    end_date=target_date,
+                    include_today=include_today or target_date == _cn_today(),
+                    limit=None,
+                )
+            except Exception as e:
+                if len(target_symbols) <= 1:
+                    raise
+                logger.warning("tdx-api auction result 拉取失败(%s/%s): %s", app_symbol, target_date, e)
+                continue
+
+            for tick in ticks:
+                row = _auction_result_from_trade_tick(tick, target_date)
+                if row is not None:
+                    rows.append(row)
+
+        rows.sort(key=lambda row: (str(row.get("symbol") or ""), int(row.get("trade_index") or 0)))
+        return rows
+
     # ---- financial ----
     def get_financials(
         self,
         table: str,
         symbols: list[str],
-        latest_only: bool = True,  # noqa: ARG002 — TDX 只有当前快照, 无历史序列
+        latest_only: bool = True,  # TDX 只有当前快照, 无历史序列
     ) -> pl.DataFrame:
         """拉取通达信财务/基本面快照。
 
@@ -585,6 +624,15 @@ class TDXAPIProvider:
             return {
                 "provider": self.name,
                 "dataset": "trade_ticks",
+                "rows": len(rows),
+                "columns": list(rows[0].keys()) if rows else [],
+                "preview": rows[:5],
+            }
+        if dataset == "auction_result":
+            rows = self.get_auction_results(symbols[:1], _cn_today(), include_today=True)
+            return {
+                "provider": self.name,
+                "dataset": "auction_result",
                 "rows": len(rows),
                 "columns": list(rows[0].keys()) if rows else [],
                 "preview": rows[:5],
@@ -1121,6 +1169,17 @@ def _history_date_arg(value: date | datetime | str) -> str:
     return normalized
 
 
+def _required_history_date(value: date | datetime | str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    parsed = _yyyymmdd_date(value)
+    if parsed is None:
+        raise ValueError("trade_date 必须是 YYYYMMDD 或 YYYY-MM-DD")
+    return parsed
+
+
 def _cn_today() -> date:
     return datetime.now(_CN_TZ).date()
 
@@ -1221,6 +1280,8 @@ def _minute_type(freq: str) -> str:
 
 
 def _parse_tdx_time(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(_CN_TZ).replace(tzinfo=None) if value.tzinfo else value
     if value is None:
         return None
     text = str(value).strip()
@@ -1308,6 +1369,35 @@ def _trade_side(raw_status: int | None) -> tuple[str, str]:
     if raw_status == 2:
         return "neutral", "中性"
     return "unknown", "未知"
+
+
+def _auction_result_from_trade_tick(row: dict, target_date: date) -> dict | None:
+    dt = _parse_tdx_time(row.get("datetime"))
+    if dt is None or dt.date() != target_date or dt.hour != 9 or dt.minute != 25:
+        return None
+    price = _float_or_none(row.get("price"))
+    volume = _float_or_none(row.get("volume"))
+    amount = _float_or_none(row.get("amount"))
+    if price is None or volume is None:
+        return None
+    if amount is None:
+        amount = price * volume * 100.0
+    return {
+        "symbol": str(row.get("symbol") or "").upper(),
+        "trade_date": target_date,
+        "auction_time": "09:25",
+        "auction_datetime": dt,
+        "price": price,
+        "volume": volume,
+        "amount": amount,
+        "order_count": _int_or_none(row.get("order_count")),
+        "trade_index": _int_or_none(row.get("seq_in_day")),
+        "side": row.get("side"),
+        "side_label": row.get("side_label"),
+        "raw_status": _int_or_none(row.get("raw_status")),
+        "source": "tdxapi_auction_result_history",
+        "source_trade_tick": row.get("source"),
+    }
 
 
 def _server_time_ms(value) -> int | None:

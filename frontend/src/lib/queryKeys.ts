@@ -39,6 +39,8 @@ export const QK = {
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
   screenerAuctionConfirmation: (asOf?: string, tradeDate?: string, strategyIds?: string, ext?: string) =>
     ['screener-auction-confirmation', asOf ?? '', tradeDate ?? '', strategyIds ?? '', ext ?? ''] as const,
+  screenerPreselect: (asOf?: string, tradeDate?: string, strategyIds?: string, limitPerStrategy?: number, ext?: string) =>
+    ['screener-preselect', asOf ?? '', tradeDate ?? '', strategyIds ?? '', limitPerStrategy ?? 5, ext ?? ''] as const,
   screenerAuctionReplay: (asOf?: string, tradeDate?: string, strategyIds?: string, asOfTs?: number | 'live', mode?: string) =>
     ['screener-auction-replay', asOf ?? '', tradeDate ?? '', strategyIds ?? '', asOfTs ?? 'live', mode ?? 'cache_replay'] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
@@ -47,6 +49,8 @@ export const QK = {
   marketDates:          (limit?: number) => ['market-dates', limit ?? 120] as const,
   marketIntradayTimeline: (asOf?: string | null, stepSeconds?: number) =>
                            ['market-intraday-timeline', asOf ?? 'today', stepSeconds ?? 60] as const,
+  sectorFlowSeries: (kind: 'concept' | 'industry', metric: 'strength' | 'main_flow', asOf?: string | null, stepSeconds?: number, level?: number | null) =>
+                           ['sector-flow-series', kind, metric, asOf ?? 'today', stepSeconds ?? 60, level ?? 'all'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
 
   // Backtest

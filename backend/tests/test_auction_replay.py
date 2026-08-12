@@ -143,6 +143,9 @@ def _history_frame() -> pl.DataFrame:
         "raw_close": [10.0, 8.0],
         "raw_high": [10.2, 8.1],
         "raw_low": [9.9, 7.9],
+        "auction_result_price": [99.0, 88.0],
+        "auction_result_volume": [1.0, 1.0],
+        "auction_result_amount": [99.0, 88.0],
     })
 
 
@@ -434,6 +437,8 @@ def test_auction_dynamic_recomputes_after_trade_snapshot(monkeypatch, tmp_path):
     assert after_result["final_total"] == 1
     assert after_result["dual_rows"][0]["symbol"] == "000001.SZ"
     assert after_result["rows"][0]["symbol"] == "000001.SZ"
+    assert after_result["rows"][0]["auction_result_price"] == 10.0
+    assert after_result["rows"][0]["auction_result_volume"] == 1000
     assert after_result["rows"][0]["auction_event_time"] == "09:24:30"
     assert after_result["rows"][0]["open_confirm_time"] == "09:25:03"
     assert after_result["rows"][0]["amount"] > after_result["rows"][0]["open_confirm_amount"]

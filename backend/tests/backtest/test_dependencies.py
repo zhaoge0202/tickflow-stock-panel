@@ -110,7 +110,7 @@ def test_history_strategy_required_features_avoids_fallback():
 def test_matrix_native_resolves_raw_fields_and_protocol_warmup_without_indicators():
     class NativeStrategy:
         def required_fields(self):
-            return frozenset({"open", "high", "low", "close", "volume"})
+            return frozenset({"open", "high", "low", "close", "volume", "auction_result_price"})
 
         def required_warmup_bars(self, params):
             return 120
@@ -135,6 +135,6 @@ def test_matrix_native_resolves_raw_fields_and_protocol_warmup_without_indicator
 
     assert plan.execution_backend == "matrix_native"
     assert plan.indicator_columns == frozenset()
-    assert {"open", "high", "low", "close", "volume", "amount"} <= set(plan.base_columns)
+    assert {"open", "high", "low", "close", "volume", "amount", "auction_result_price"} <= set(plan.base_columns)
     assert plan.warmup_bars == 120
     assert plan.full_feature_fallback is False
