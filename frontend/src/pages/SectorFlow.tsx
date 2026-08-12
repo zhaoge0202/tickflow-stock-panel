@@ -20,7 +20,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { SectorFlowBubbles, type SectorFlowItem } from '@/components/SectorFlowBubbles'
 import { SectorFlowTrendChart } from '@/components/SectorFlowTrendChart'
-import { api, type ExtDataConfig, type MarketSnapshotRow } from '@/lib/api'
+import { api, type ExtDataConfig, type MarketSnapshotRow, type SectorFlowSeriesItem, type SectorFlowSeriesResponse } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
@@ -289,6 +289,46 @@ function sortStats(mode: SortMode) {
         return b.heatScore - a.heatScore
     }
   }
+}
+
+function sectorSeriesValues(item: SectorFlowSeriesItem, metric: 'strength' | 'main_flow') {
+  return metric === 'main_flow' ? item.flow_values : item.strength_values
+}
+
+function firstPlayableSeriesTs(
+  data: SectorFlowSeriesResponse | undefined,
+  selectedKeys: string[],
+  metric: 'strength' | 'main_flow',
+) {
+  if (!data?.points.length || !data.sectors.length) return null
+  const selected = selectedKeys.length
+    ? data.sectors.filter(item => selectedKeys.includes(item.key))
+    : data.sectors.slice(0, 8)
+  if (!selected.length) return null
+  const readyTarget = Math.min(2, selected.length)
+  let firstNonNull: number | null = null
+  for (let pointIndex = 0; pointIndex < data.points.length; pointIndex += 1) {
+    let readyLines = 0
+    for (const item of selected) {
+      const values = sectorSeriesValues(item, metric)
+      let nonNullCount = 0
+      for (let i = 0; i <= pointIndex && i < values.length; i += 1) {
+        if (values[i] != null) nonNullCount += 1
+      }
+      if (nonNullCount > 0 && firstNonNull == null) {
+        firstNonNull = data.points[pointIndex]
+      }
+      if (nonNullCount >= 2) readyLines += 1
+    }
+    if (readyLines >= readyTarget) return data.points[pointIndex]
+  }
+  return firstNonNull
+}
+
+function firstPointAtOrAfter(points: number[], target: number | null) {
+  if (!points.length) return null
+  if (target == null) return points[0]
+  return points.find(point => point >= target) ?? points[points.length - 1]
 }
 
 function modeLabel(mode: TimeMode, snapshotMode?: string) {
@@ -606,16 +646,26 @@ export function SectorFlow() {
   const marketCountText = usingLastGoodStats
     ? `${lastGoodStats?.marketCount ?? 0} 只`
     : `${snapshotQuery.data?.count ?? snapshotQuery.data?.rows.length ?? 0} 只`
+  const seriesPlaybackStartTs = useMemo(
+    () => firstPlayableSeriesTs(seriesQuery.data, selectedSeriesKeys, seriesMetric),
+    [seriesQuery.data, selectedSeriesKeys, seriesMetric],
+  )
+  const replayStartTs = viewMode === 'bubble'
+    ? firstPointAtOrAfter(points, points[0] ?? null)
+    : firstPointAtOrAfter(points, seriesPlaybackStartTs)
   const bubbleFrameKey = timeMode === 'replay'
     ? settings.asOfTs ?? snapshotQuery.data?.as_of_ts ?? selectedPointIndex
     : null
 
   const startPlayback = () => {
     if (!canReplay) return
-    const shouldRestart = timeMode !== 'replay' || selectedPointIndex >= points.length - 1
+    const shouldRestart =
+      timeMode !== 'replay' ||
+      selectedPointIndex >= points.length - 1 ||
+      (viewMode !== 'bubble' && replayStartTs != null && (settings.asOfTs ?? 0) < replayStartTs)
     patchSettings({
       timeMode: 'replay',
-      asOfTs: shouldRestart ? points[0] : settings.asOfTs ?? points[selectedPointIndex] ?? points[0],
+      asOfTs: shouldRestart ? replayStartTs : settings.asOfTs ?? points[selectedPointIndex] ?? replayStartTs,
     })
     setIsPlaying(true)
   }
@@ -875,6 +925,9 @@ export function SectorFlow() {
                   {replayDataText}
                 </span>
               )}
+              {viewMode !== 'bubble' && seriesPlaybackStartTs && points[0] && seriesPlaybackStartTs > points[0] && (
+                <span className="text-amber-500">当前选中板块从 {formatTs(seriesPlaybackStartTs)} 起有有效曲线</span>
+              )}
               {timeMode === 'replay' && snapshotQuery.data?.mode === 'eod_fallback' && (
                 <span className="text-bear">当前时间点没有 tick 快照，已回退到收盘数据</span>
               )}
@@ -916,8 +969,8 @@ export function SectorFlow() {
               error={(seriesQuery.error as Error | null) ?? null}
               onRefresh={() => seriesQuery.refetch()}
               search={search}
-              playbackActive={isPlaying && timeMode === 'replay'}
-              playbackIndex={isPlaying || timeMode === 'replay' ? selectedPointIndex : null}
+              playbackActive={timeMode === 'replay'}
+              playbackTs={timeMode === 'replay' ? settings.asOfTs ?? points[selectedPointIndex] ?? null : null}
             />
           ) : displayStats.length > 0 ? (
             <>
