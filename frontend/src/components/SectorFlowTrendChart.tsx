@@ -24,7 +24,7 @@ type Props = {
   onRefresh: () => void
   search?: string
   playbackActive?: boolean
-  playbackIndex?: number | null
+  playbackTs?: number | null
 }
 
 function fmtTime(ts: number) {
@@ -155,7 +155,7 @@ export function SectorFlowTrendChart({
   onRefresh,
   search = '',
   playbackActive = false,
-  playbackIndex = null,
+  playbackTs = null,
 }: Props) {
   const chartEl = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -170,23 +170,24 @@ export function SectorFlowTrendChart({
     return allSectors.filter(item => chosen.has(item.key))
   }, [allSectors, selectedKeys])
   const visibleData = useMemo(() => {
-    if (playbackIndex == null || playbackIndex < 0) return data
-    const end = Math.min(playbackIndex + 1, data?.points.length ?? 0)
-    if (!data || end <= 0 || end >= data.points.length) return data
+    if (playbackTs == null) return data
+    const endIndex = data?.points.findLastIndex(point => point <= playbackTs) ?? -1
+    const count = endIndex + 1
+    if (!data || count <= 0 || count >= data.points.length) return data
     return {
       ...data,
-      points: data.points.slice(0, end),
+      points: data.points.slice(0, count),
       sectors: data.sectors.map(item => ({
         ...item,
-        flow_values: item.flow_values.slice(0, end),
-        strength_values: item.strength_values.slice(0, end),
+        flow_values: item.flow_values.slice(0, count),
+        strength_values: item.strength_values.slice(0, count),
       })),
       index: {
         ...data.index,
-        values: data.index.values.slice(0, end),
+        values: data.index.values.slice(0, count),
       },
     }
-  }, [data, playbackIndex])
+  }, [data, playbackTs])
   const visibleSelected = useMemo(() => {
     const chosen = new Set(selectedKeys)
     return visibleData?.sectors.filter(item => chosen.has(item.key)) ?? []
