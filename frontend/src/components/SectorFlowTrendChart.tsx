@@ -23,6 +23,8 @@ type Props = {
   error: Error | null
   onRefresh: () => void
   search?: string
+  playbackActive?: boolean
+  playbackIndex?: number | null
 }
 
 function fmtTime(ts: number) {
@@ -152,6 +154,8 @@ export function SectorFlowTrendChart({
   error,
   onRefresh,
   search = '',
+  playbackActive = false,
+  playbackIndex = null,
 }: Props) {
   const chartEl = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -165,18 +169,40 @@ export function SectorFlowTrendChart({
     const chosen = new Set(selectedKeys)
     return allSectors.filter(item => chosen.has(item.key))
   }, [allSectors, selectedKeys])
+  const visibleData = useMemo(() => {
+    if (playbackIndex == null || playbackIndex < 0) return data
+    const end = Math.min(playbackIndex + 1, data?.points.length ?? 0)
+    if (!data || end <= 0 || end >= data.points.length) return data
+    return {
+      ...data,
+      points: data.points.slice(0, end),
+      sectors: data.sectors.map(item => ({
+        ...item,
+        flow_values: item.flow_values.slice(0, end),
+        strength_values: item.strength_values.slice(0, end),
+      })),
+      index: {
+        ...data.index,
+        values: data.index.values.slice(0, end),
+      },
+    }
+  }, [data, playbackIndex])
+  const visibleSelected = useMemo(() => {
+    const chosen = new Set(selectedKeys)
+    return visibleData?.sectors.filter(item => chosen.has(item.key)) ?? []
+  }, [selectedKeys, visibleData])
 
   useEffect(() => {
     const el = chartEl.current
-    if (!data || !el) return
+    if (!visibleData || !el) return
     const chart = chartRef.current ?? echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
-    chart.setOption(buildOption(data, metric, selected, ct), true)
+    chart.setOption(buildOption(visibleData, metric, visibleSelected, ct), true)
     const resize = () => chart.resize()
     const observer = new ResizeObserver(resize)
     observer.observe(el)
     return () => observer.disconnect()
-  }, [data, metric, selected, ct])
+  }, [visibleData, metric, visibleSelected, ct])
 
   useEffect(() => () => {
     chartRef.current?.dispose()
@@ -250,6 +276,11 @@ export function SectorFlowTrendChart({
           <div className="flex items-center gap-3">
             <span>{metric === 'main_flow' ? '累计净流入曲线' : '板块强度曲线'}</span>
             <span className="text-secondary">虚线：上证指数涨跌幅</span>
+            {playbackActive && visibleData && visibleData.points.length > 0 && (
+              <span className="text-accent">
+                回放 {fmtTime(visibleData.points[visibleData.points.length - 1])}
+              </span>
+            )}
             {data.data_quality.is_proxy && <span className="text-amber-500">当前为估算值 · 非正式主力净流入</span>}
           </div>
           <button onClick={onRefresh} disabled={isFetching} className="p-1 text-muted hover:text-foreground disabled:opacity-50" title="刷新">
