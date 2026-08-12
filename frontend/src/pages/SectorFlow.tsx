@@ -916,6 +916,8 @@ export function SectorFlow() {
               error={(seriesQuery.error as Error | null) ?? null}
               onRefresh={() => seriesQuery.refetch()}
               search={search}
+              playbackActive={isPlaying && timeMode === 'replay'}
+              playbackIndex={isPlaying || timeMode === 'replay' ? selectedPointIndex : null}
             />
           ) : displayStats.length > 0 ? (
             <>
