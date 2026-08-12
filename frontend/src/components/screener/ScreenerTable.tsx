@@ -26,6 +26,8 @@ interface ScreenerTableProps {
   rows: any[]
   columns: ColumnConfig[]
   strategyIdToName: Record<string, string>
+  /** 当前策略标签的上下文状态，例如盘后预选。 */
+  strategyLabelSuffix?: string
   symbolStrategyMap: Map<string, string[]>
   activeStrategy: string | null
   watchlistSet: Set<string>
@@ -146,7 +148,7 @@ function renderExtValue(
 }
 
 export function ScreenerTable({
-  rows, columns, strategyIdToName, symbolStrategyMap, activeStrategy,
+  rows, columns, strategyIdToName, strategyLabelSuffix, symbolStrategyMap, activeStrategy,
   watchlistSet, onPreview, onToggleWatchlist, watchlistPending, klineData = {},
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
@@ -266,7 +268,10 @@ export function ScreenerTable({
       }
       case 'strategies': {
         const strats = symbolStrategyMap.get(r.symbol) ?? (activeStrategy ? [activeStrategy] : [])
-        const tags = strats.map(sid => strategyIdToName[sid] ?? sid)
+        const tags = strats.map(sid => {
+          const name = strategyIdToName[sid] ?? sid
+          return strategyLabelSuffix ? `${name} · ${strategyLabelSuffix}` : name
+        })
         const cellKey = `${r.symbol}::${col.id}`
         const expanded = expandedCells.has(cellKey)
         return (

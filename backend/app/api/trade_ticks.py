@@ -68,6 +68,37 @@ def list_trade_ticks(
         raise HTTPException(status_code=502, detail=f"TDX 逐笔成交拉取失败: {e}") from e
 
 
+@router.get("/auction-result")
+def get_auction_result(
+    symbol: Annotated[str, Query(description="标的代码, 如 000001.SZ")],
+    trade_date: Annotated[dt.date, Query(alias="date", description="交易日期")],
+):
+    """查询指定交易日 09:25 开盘竞价结果。
+
+    数据来自 TDX 历史分笔成交的 09:25 行, 不是竞价过程明细。
+    """
+    symbol = symbol.strip().upper()
+    provider = TDXAPIProvider()
+    try:
+        rows = provider.get_auction_results([symbol], trade_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"TDX 竞价结果拉取失败: {e}") from e
+    finally:
+        provider.close()
+    rows = sorted(rows, key=lambda row: int(row.get("trade_index") or 0))
+    return {
+        "symbol": symbol,
+        "date": trade_date.isoformat(),
+        "source": "tdxapi",
+        "kind": "opening_auction_result",
+        "time": "09:25",
+        "process_available": False,
+        "process_note": "本接口只返回 09:25 最终成交结果; 竞价过程仍依赖实时采集。",
+        "count": len(rows),
+        "rows": rows,
+    }
+
+
 @router.post("/persist")
 def persist_trade_ticks(req: PersistReq):
     return trade_tick_ingestor.enqueue(req.symbol, req.date, force=req.force)

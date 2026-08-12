@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
@@ -55,6 +55,28 @@ function getCnNowMinutes(now = new Date()): number {
 
 function getCnTodayIso(now = new Date()): string {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: CN_TZ }).format(now)
+}
+
+function nextBusinessDateIso(dateIso: string): string {
+  const [year, month, day] = dateIso.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day + 1))
+  while (date.getUTCDay() === 0 || date.getUTCDay() === 6) {
+    date.setUTCDate(date.getUTCDate() + 1)
+  }
+  return date.toISOString().slice(0, 10)
+}
+
+function isBusinessDateIso(dateIso: string): boolean {
+  const [year, month, day] = dateIso.split('-').map(Number)
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+  return weekday !== 0 && weekday !== 6
+}
+
+function resolveAuctionTradeDate(asOf: string, now = new Date()): string {
+  const today = getCnTodayIso(now)
+  if (!asOf || asOf < today) return isBusinessDateIso(today) ? today : nextBusinessDateIso(today)
+  if (asOf > today || getCnNowMinutes(now) >= 15 * 60) return nextBusinessDateIso(asOf)
+  return today
 }
 
 export function Screener() {
@@ -210,8 +232,24 @@ export function Screener() {
     [strategyPresets],
   )
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
-  const auctionTradeDate = useMemo(() => getCnTodayIso(), [])
+  const auctionTradeDate = resolveAuctionTradeDate(asOf)
   const auctionStrategyIdsKey = useMemo(() => visiblePool.join(','), [visiblePool])
+  const isLatestStockDate = assetType === 'stock'
+    && !!asOf
+    && asOf === dataStatus.data?.enriched?.latest_date
+  const preselectQuery = useQuery({
+    queryKey: QK.screenerPreselect(asOf, auctionTradeDate, auctionStrategyIdsKey, 5, extColumnsParam || undefined),
+    queryFn: () => api.screenerPreselect(
+      asOf,
+      auctionTradeDate,
+      visiblePool,
+      5,
+      extColumnsParam || undefined,
+      assetType,
+    ),
+    enabled: isLatestStockDate && visiblePool.length > 0,
+    staleTime: 60_000,
+  })
   const auctionConfirmationQuery = useQuery({
     queryKey: QK.screenerAuctionConfirmation(asOf, auctionTradeDate, auctionStrategyIdsKey, extColumnsParam || undefined),
     queryFn: () => api.screenerAuctionConfirmation(
@@ -221,10 +259,7 @@ export function Screener() {
       extColumnsParam || undefined,
       assetType,
     ),
-    enabled: assetType === 'stock'
-      && !!asOf
-      && asOf === dataStatus.data?.enriched?.latest_date
-      && visiblePool.length > 0,
+    enabled: isLatestStockDate && visiblePool.length > 0,
     staleTime: 0,
     refetchInterval: () => {
       const nowMinutes = getCnNowMinutes()
@@ -236,6 +271,7 @@ export function Screener() {
     refetchIntervalInBackground: true,
   })
   const auctionNowMinutes = getCnNowMinutes()
+  const auctionIsToday = auctionTradeDate === getCnTodayIso()
   const auctionDynamicQuery = useQuery({
     queryKey: QK.screenerAuctionReplay(asOf, auctionTradeDate, auctionStrategyIdsKey, 'live', 'recompute'),
     queryFn: () => api.auctionReplay({
@@ -249,12 +285,10 @@ export function Screener() {
       maxFrames: 1,
       assetType,
     }),
-    enabled: assetType === 'stock'
-      && !!asOf
-      && asOf === dataStatus.data?.enriched?.latest_date
+    enabled: isLatestStockDate
       && visiblePool.length > 0
-      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES
-      && auctionNowMinutes < AUCTION_CONFIRM_GRACE_MINUTES,
+      && auctionIsToday
+      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES,
     staleTime: 0,
     refetchInterval: () => {
       const nowMinutes = getCnNowMinutes()
@@ -278,19 +312,27 @@ export function Screener() {
   )
   const auctionDynamicDisplayResults = useMemo<Record<string, any> | null>(() => {
     if (!auctionDynamicActive || !auctionDynamicFrame) return null
+    const finalized = auctionDynamicPayload?.status === 'ready'
     const entries = Object.entries(auctionDynamicFrame.results)
       .filter(([, item]) => item.as_of === asOf)
       .map(([sid, item]) => {
-        const rows = item.candidates ?? item.dual_rows ?? item.rows ?? []
+        const rows = finalized
+          ? item.rows ?? []
+          : item.candidates ?? item.dual_rows ?? item.rows ?? []
         return [sid, {
           ...item,
           as_of: asOf,
           rows,
-          total: item.candidate_total ?? item.base_total ?? item.total ?? rows.length,
+          total: finalized
+            ? item.final_total ?? item.confirmed_total ?? item.total ?? rows.length
+            : item.candidate_total ?? item.base_total ?? item.total ?? rows.length,
         }]
       })
     return Object.fromEntries(entries)
-  }, [auctionDynamicActive, auctionDynamicFrame, asOf])
+  }, [auctionDynamicActive, auctionDynamicFrame, auctionDynamicPayload?.status, asOf])
+  const auctionDynamicHasResults = !!auctionDynamicDisplayResults
+    && Object.values(auctionDynamicDisplayResults).some(item => item.total > 0)
+  const auctionDynamicFinalReady = auctionDynamicActive && auctionDynamicPayload?.status === 'ready'
 
   // 策略列表加载后,自动清除池中失效的自定义策略(如本地开发残留的、
   // 当前后端已不存在的策略 ID),避免"策略池"对话框持续显示失效项。
@@ -331,6 +373,7 @@ export function Screener() {
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
     },
   })
 
@@ -414,6 +457,9 @@ export function Screener() {
 
   useEffect(() => {
     if (showAll || !activeStrategy || !auctionDynamicActive || !auctionDynamicFrame) return
+    if (!auctionDynamicHasResults && !auctionDynamicFinalReady) return
+    const confirmed = auctionConfirmationQuery.data
+    if (confirmed?.gate_status === 'confirmed' && confirmed.as_of === asOf && confirmed.trade_date === auctionTradeDate) return
     const next = auctionDynamicFrame.results[activeStrategy]
     if (!next) return
     const rows = next.candidates ?? next.dual_rows ?? next.rows ?? []
@@ -434,7 +480,11 @@ export function Screener() {
     })
   }, [
     auctionDynamicActive,
+    auctionDynamicHasResults,
+    auctionDynamicFinalReady,
     auctionDynamicFrame,
+    auctionConfirmationQuery.data,
+    auctionTradeDate,
     showAll,
     activeStrategy,
     asOf,
@@ -464,29 +514,101 @@ export function Screener() {
       return acc
     }, { final: 0, candidates: 0 })
   }, [auctionDynamicActive, auctionDynamicFrame])
+  const strictPoolTotal = useMemo(() => {
+    if (!cacheCoversPool) return null
+    return visiblePool.reduce((sum, id) => sum + (summaryQuery.data?.results[id]?.total ?? 0), 0)
+  }, [cacheCoversPool, visiblePool, summaryQuery.data])
+  const preselectPayload = preselectQuery.data
+  const preselectResults = useMemo<Record<string, any> | null>(() => {
+    if (
+      !preselectPayload
+      || preselectPayload.mode !== 'preselect'
+      || preselectPayload.as_of !== asOf
+      || preselectPayload.trade_date !== auctionTradeDate
+    ) return null
+    const entries = Object.entries(preselectPayload.results)
+      .filter(([, item]) => item.as_of === asOf)
+      .map(([sid, item]) => [sid, {
+        ...item,
+        rows: item.rows ?? [],
+        total: item.preselect_total ?? item.total ?? item.rows?.length ?? 0,
+      }])
+    return Object.fromEntries(entries)
+  }, [preselectPayload, asOf, auctionTradeDate])
+  const preselectTotal = useMemo(() => {
+    if (!preselectResults) return 0
+    return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
+  }, [preselectResults])
+  const preselectActive = (
+    assetType === 'stock'
+    && strictPoolTotal === 0
+    && !auctionConfirmationActive
+    && !!preselectResults
+  )
+  const displayMode: 'confirmed' | 'dynamic' | 'preselect' | 'cached' = auctionConfirmationActive
+    ? 'confirmed'
+    : auctionDynamicFinalReady || (auctionDynamicActive && auctionDynamicHasResults)
+      ? 'dynamic'
+      : preselectActive
+        ? 'preselect'
+        : 'cached'
   const displayHitCounts = useMemo(() => {
-    if (auctionDynamicActive && auctionDynamicDisplayResults) {
+    if (displayMode === 'confirmed' && auctionConfirmationPayload) {
+      const next = { ...hitCounts }
+      for (const [sid, item] of Object.entries(auctionConfirmationPayload.results)) {
+        if (item.as_of === asOf) next[sid] = item.total
+      }
+      return next
+    }
+    if (displayMode === 'dynamic' && auctionDynamicDisplayResults) {
       const next = { ...hitCounts }
       for (const [sid, item] of Object.entries(auctionDynamicDisplayResults)) {
         if (item.as_of === asOf) next[sid] = item.total
       }
       return next
     }
-    if (!auctionConfirmationActive || !auctionConfirmationPayload) return hitCounts
+    if (displayMode !== 'preselect' || !preselectResults) return hitCounts
     const next = { ...hitCounts }
-    for (const [sid, item] of Object.entries(auctionConfirmationPayload.results)) {
+    for (const [sid, item] of Object.entries(preselectResults)) {
       if (item.as_of === asOf) next[sid] = item.total
     }
     return next
-  }, [auctionDynamicActive, auctionDynamicDisplayResults, auctionConfirmationActive, auctionConfirmationPayload, hitCounts, asOf])
+  }, [displayMode, auctionConfirmationPayload, auctionDynamicDisplayResults, preselectResults, hitCounts, asOf])
   const displayAllResults = useMemo<Record<string, any> | null>(() => {
     if (!showAll) return effectiveResults
-    if (auctionDynamicActive && auctionDynamicDisplayResults) return auctionDynamicDisplayResults
+    if (displayMode === 'confirmed' && auctionConfirmationPayload) {
+      const entries = Object.entries(auctionConfirmationPayload.results)
+        .filter(([, item]) => item.as_of === asOf)
+      return Object.fromEntries(entries)
+    }
+    if (displayMode === 'dynamic' && auctionDynamicDisplayResults) return auctionDynamicDisplayResults
+    if (displayMode === 'preselect' && preselectResults) return preselectResults
     if (!auctionConfirmationActive || !auctionConfirmationPayload) return effectiveResults
     const entries = Object.entries(auctionConfirmationPayload.results)
       .filter(([, item]) => item.as_of === asOf)
     return Object.fromEntries(entries)
-  }, [showAll, effectiveResults, auctionDynamicActive, auctionDynamicDisplayResults, auctionConfirmationActive, auctionConfirmationPayload, asOf])
+  }, [showAll, effectiveResults, displayMode, auctionConfirmationPayload, auctionDynamicDisplayResults, preselectResults, auctionConfirmationActive, asOf])
+
+  useEffect(() => {
+    if (showAll || !activeStrategy || displayMode !== 'preselect' || !preselectResults) return
+    const next = preselectResults[activeStrategy]
+    if (!next) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      return {
+        ...(base ?? {
+          as_of: asOf,
+          strategy: activeStrategy,
+          elapsed_ms: 0,
+        }),
+        rows: next.rows ?? [],
+        total: next.total ?? next.preselect_total ?? next.rows?.length ?? 0,
+        elapsed_ms: base?.elapsed_ms ?? 0,
+      }
+    })
+  }, [showAll, activeStrategy, displayMode, preselectResults, asOf, singleCachedQuery.data?.result])
 
   // symbol → 所属策略列表。单策略接口同时返回轻量归属映射，保留策略列原有展示。
   const symbolStrategyMap = useMemo(() => {
@@ -530,15 +652,14 @@ export function Screener() {
 
   // 计算当前策略的失效行: 今日曾命中但当前已不命中。
   const expiredRows = useMemo(() => {
-    if (auctionDynamicActive) return []
-    if (auctionConfirmationActive) return []
+    if (displayMode !== 'cached') return []
     const everRows = singleCachedQuery.data?.today_ever_rows
     if (!everRows || !result || result.as_of !== asOf) return []
     const currentSymbols = new Set(result.rows.map((row: any) => row.symbol))
     return Object.entries(everRows)
       .filter(([symbol]) => !currentSymbols.has(symbol))
       .map(([, row]) => ({ ...row, _expired: true }))
-  }, [auctionDynamicActive, auctionConfirmationActive, singleCachedQuery.data, result, asOf])
+  }, [displayMode, singleCachedQuery.data, result, asOf])
 
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
@@ -672,6 +793,7 @@ export function Screener() {
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
     },
   })
 
@@ -730,6 +852,7 @@ export function Screener() {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
       if (asOf) requestRunAll({ date: asOf })
     },
   })
@@ -790,6 +913,17 @@ export function Screener() {
     })
   }
 
+  const resultPanelVisible = showAll
+    ? allRows.length > 0 || displayMode !== 'cached'
+    : !!result
+  const resultLabel = displayMode === 'preselect'
+    ? '盘后预选'
+    : displayMode === 'confirmed'
+      ? '竞价确认'
+      : displayMode === 'dynamic'
+        ? '动态竞价'
+        : '命中'
+  const auctionWaitingHint = `已生成盘后预选，等待 ${auctionTradeDate} 09:25 竞价确认`
 
   return (
     <>
@@ -932,7 +1066,8 @@ export function Screener() {
                   source={s.source}
                   active={activeStrategy === s.id}
                   count={displayHitCounts[id] ?? hitCounts[id]}
-                  expiredCount={auctionConfirmationActive ? 0 : (expiredCounts[id] ?? 0)}
+                  countLabel={displayMode === 'preselect' ? '预选' : undefined}
+                  expiredCount={displayMode !== 'cached' ? 0 : (expiredCounts[id] ?? 0)}
                   loading={runAll.isPending}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
@@ -955,7 +1090,7 @@ export function Screener() {
             </div>
           )}
 
-          {(showAll ? allRows.length > 0 : !!result) && (
+          {resultPanelVisible && (
             <motion.div
               key={showAll ? `all-${asOf}` : `${result!.as_of}-${result!.strategy}`}
               initial={{ opacity: 0, y: 8 }}
@@ -963,13 +1098,24 @@ export function Screener() {
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="space-y-3"
             >
+              {displayMode === 'preselect' && preselectTotal > 0 && (
+                <div className="flex items-start gap-2 rounded-btn border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs text-amber-200">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+                  <div>
+                    <div className="font-medium">当前显示的是盘后预选，不是正式双刃合命中</div>
+                    <div className="mt-0.5 text-[11px] text-amber-200/70">
+                      这些结果仅供次交易日 09:25 前观察，正式结果会在竞价确认后单独切换。
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium text-foreground flex items-center gap-2">
                   {!showAll && activeStrategy && (
                     <span className="text-secondary">{strategyIdToName[activeStrategy] ?? ''}</span>
                   )}
                   <TrendingUp className="h-4 w-4 text-accent" />
-                  {showAll ? '全部' : ''}命中 <span className="text-accent num">{displayRows.length}</span> 只
+                  {showAll ? '全部' : ''}{resultLabel} <span className="text-accent num">{displayRows.length}</span> 只
                   {filterActive(filter) && displayRows.length !== (showAll ? allRows.length : result!.total) && (
                     <span className="text-muted text-xs">/ {showAll ? allRows.length : result!.total}</span>
                   )}
@@ -979,10 +1125,14 @@ export function Screener() {
                       <> · 共 {visiblePool.reduce((sum, id) => sum + (displayHitCounts[id] ?? hitCounts[id] ?? 0), 0)} 只</>
                     )}
                   </span>
-                  {auctionDynamicActive ? (
+                  {displayMode === 'dynamic' ? (
                     <span className="text-[11px] text-secondary">
-                      · 动态竞价 最终 {auctionDynamicTotals.final} / 双刃合 {auctionDynamicTotals.candidates}
+                      · 动态竞价 {auctionDynamicTotals.final} / 双刃合 {auctionDynamicTotals.candidates}
                       {auctionDynamicFrame?.as_of_time ? ` · ${auctionDynamicFrame.as_of_time}` : ''}
+                    </span>
+                  ) : displayMode === 'preselect' ? (
+                    <span className="text-[11px] text-secondary">
+                      · 预选 {preselectTotal} · 等待 {auctionTradeDate} 09:25 竞价确认
                     </span>
                   ) : auctionConfirmationQuery.data && (
                     <span className="text-[11px] text-secondary">
@@ -990,7 +1140,7 @@ export function Screener() {
                         ? `${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.total ?? 0), 0)} / ${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.base_total ?? 0), 0)}`
                         : auctionConfirmationQuery.data.gate_status === 'pending_gate'
                           ? '等待 09:25'
-                          : '等待开盘快照'}
+                          : `等待 ${auctionTradeDate} 09:25 竞价确认`}
                     </span>
                   )}
                   {runAll.isPending && (
@@ -1103,14 +1253,18 @@ export function Screener() {
                 <EmptyState
                   icon={ScanSearch}
                   title={
-                    auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
-                      ? '等待开盘快照'
+                    displayMode === 'preselect' && preselectTotal > 0
+                      ? auctionWaitingHint
+                      : displayMode === 'preselect'
+                        ? '今日无预选'
+                    : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
+                      ? `等待 ${auctionTradeDate} 09:25 竞价确认`
                       : auctionDynamicActive
                         ? '动态竞价暂无命中'
                         : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
-                      ? '等待 09:25 竞价确认'
+                      ? `等待 ${auctionTradeDate} 09:25 竞价确认`
                       : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
-                        ? '等待开盘快照'
+                        ? `等待 ${auctionTradeDate} 09:25 竞价确认`
                         : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
                           ? '筛选后无命中'
                           : auctionConfirmationActive
@@ -1118,14 +1272,18 @@ export function Screener() {
                             : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
                   }
                   hint={
-                    auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
-                      ? '双刃合已按竞价快照重跑，09:25 后有 trade 快照会自动更新最终结果。'
+                    displayMode === 'preselect' && preselectTotal > 0
+                      ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
+                      : displayMode === 'preselect'
+                        ? '严格策略和盘后放宽预选都没有候选，可等盘后管道完成后重载。'
+                    : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
+                      ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
                       : auctionDynamicActive
                         ? '当前秒的双刃合动态候选和竞价确认条件都没有留下结果。'
                         : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
                       ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
                       : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
-                        ? '竞价快照已到，正在等 09:25 之后的 trade 快照。'
+                        ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
                         : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
                           ? '当前筛选条件过严, 试试放宽或重置筛选。'
                           : auctionConfirmationActive
@@ -1141,6 +1299,7 @@ export function Screener() {
                     rows={displayRows}
                     columns={columns}
                     strategyIdToName={strategyIdToName}
+                    strategyLabelSuffix={displayMode === 'preselect' ? '盘后预选' : undefined}
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
                     watchlistSet={watchlistSet}

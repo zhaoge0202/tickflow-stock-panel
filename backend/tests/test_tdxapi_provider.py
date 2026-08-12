@@ -567,6 +567,61 @@ def test_get_trade_history_full_normalizes_lowercase_rows(monkeypatch):
     assert rows[1]["side"] == "neutral"
 
 
+def test_get_auction_results_filters_0925_from_history_trades(monkeypatch):
+    def fake_history(kwargs):
+        assert kwargs["params"] == {
+            "code": "sz002491",
+            "start_date": "20260707",
+            "end_date": "20260707",
+        }
+        return {
+            "code": "002491",
+            "count": 3,
+            "list": [
+                {
+                    "time": "2026-07-07T09:24:00+08:00",
+                    "price": 10.4,
+                    "volume": 20,
+                    "status": 1,
+                    "number": 2,
+                },
+                {
+                    "time": "2026-07-07T09:25:00+08:00",
+                    "price": 10.46,
+                    "volume": 5586,
+                    "status": 2,
+                    "number": 269,
+                },
+                {
+                    "time": "2026-07-07T09:30:00+08:00",
+                    "price": 10.5,
+                    "volume": 100,
+                    "status": 0,
+                    "number": 8,
+                },
+            ],
+        }
+
+    _patch_request(monkeypatch, {
+        ("GET", "/api/trade-history/full"): fake_history,
+    })
+
+    rows = TDXAPIProvider().get_auction_results(["002491.SZ"], dt.date(2026, 7, 7))
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "002491.SZ"
+    assert rows[0]["trade_date"] == dt.date(2026, 7, 7)
+    assert rows[0]["auction_time"] == "09:25"
+    assert rows[0]["auction_datetime"] == dt.datetime(2026, 7, 7, 9, 25)
+    assert rows[0]["price"] == 10.46
+    assert rows[0]["volume"] == 5586
+    assert rows[0]["amount"] == 10.46 * 5586 * 100
+    assert rows[0]["order_count"] == 269
+    assert rows[0]["trade_index"] == 2
+    assert rows[0]["source"] == "tdxapi_auction_result_history"
+    assert rows[0]["source_trade_tick"] == "tdxapi_trade_history_minute_precision"
+
+
 def test_get_daily_continues_when_one_symbol_fails(monkeypatch):
     def fake(self, method, path, **kwargs):
         code = kwargs["params"]["code"]
@@ -817,6 +872,7 @@ def test_plugin_discovered_in_loader():
     assert "minute" in plugins["tdxapi"]["datasets"]
     assert "realtime" in plugins["tdxapi"]["datasets"]
     assert "trade_ticks" in plugins["tdxapi"]["datasets"]
+    assert "auction_result" in plugins["tdxapi"]["datasets"]
     assert "financial" in plugins["tdxapi"]["datasets"]
     assert cs.is_builtin("tdxapi")
 
@@ -835,6 +891,7 @@ def test_plugin_registered_when_available(monkeypatch):
     assert cs.provider_has_dataset("tdxapi", "minute")
     assert cs.provider_has_dataset("tdxapi", "realtime")
     assert cs.provider_has_dataset("tdxapi", "trade_ticks")
+    assert cs.provider_has_dataset("tdxapi", "auction_result")
     assert cs.provider_has_dataset("tdxapi", "financial")
 
 

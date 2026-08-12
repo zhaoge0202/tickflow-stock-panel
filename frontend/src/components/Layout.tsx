@@ -53,7 +53,7 @@ import {
   X,
   Target,
   WifiOff,
-  CircleDotDashed,
+  LineChart,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -82,7 +82,7 @@ const nav = [
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
-  { to: '/sector-flow', label: '动能气泡', icon: CircleDotDashed },
+  { to: '/sector-flow', label: '板块强度', icon: LineChart },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
   { to: '/financials', label: '财务分析', icon: FileText },

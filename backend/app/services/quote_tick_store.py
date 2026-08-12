@@ -371,6 +371,48 @@ def read_all_ticks(
     return rows
 
 
+def read_sampled_ticks(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    symbols: list[str] | None = None,
+    step_seconds: int = 60,
+    max_files: int | None = None,
+) -> list[dict]:
+    """按固定时间粒度读取某天 tick 序列。
+
+    面向板块曲线这类多标的聚合场景：读取阶段先把同一 symbol 在同一
+    时间桶内压成最后一条，避免把全天全市场原始 tick 全部物化成 Python dict。
+    """
+    target_date = target_date or cn_today()
+    wanted = {str(s).strip().upper() for s in symbols or [] if str(s).strip()}
+    ds = target_date.isoformat()
+    base = data_dir / "quote_ticks" / f"date={ds}"
+    disk_rows: list[dict] = []
+    if base.exists():
+        paths = (
+            _recent_partition_paths(base, max_files=max_files)
+            if max_files is not None
+            else sorted(base.rglob("*.parquet"))
+        )
+        disk_rows = _read_sampled_parquet_paths(
+            paths,
+            base,
+            symbols=wanted or None,
+            step_seconds=step_seconds,
+        )
+
+    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    if wanted:
+        hot_rows = [
+            row for row in hot_rows
+            if str(row.get("symbol", "")).upper() in wanted
+        ]
+    rows = _sample_tick_rows(disk_rows + hot_rows, step_seconds=step_seconds)
+    rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("symbol") or "", r.get("ingest_ts") or 0))
+    return rows
+
+
 def event_timestamps(
     data_dir: Path,
     *,
@@ -1020,6 +1062,92 @@ def _read_parquet_paths(
     except Exception as e:
         logger.warning("quote_ticks 合并失败(%s): %s", base, e)
         return []
+
+
+def _read_sampled_parquet_paths(
+    paths: list[Path],
+    base: Path,
+    *,
+    symbols: set[str] | None = None,
+    step_seconds: int = 60,
+) -> list[dict]:
+    if not paths:
+        return []
+    wanted = sorted(symbols or set())
+    step_ms = max(30, int(step_seconds or 60)) * 1000
+    keep = [
+        "symbol", "event_ts", "ingest_ts", "last_price", "prev_close", "change_pct", "amount",
+        "outside_volume", "inside_volume", "active_net_volume", "source",
+    ]
+    try:
+        frame = scan_parquet_compat(
+            [str(path) for path in paths],
+            schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+            hive_partitioning=False,
+            cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+        )
+        schema_names = set(frame.collect_schema().names())
+        if not {"symbol", "event_ts"}.issubset(schema_names):
+            return []
+        for column in keep:
+            if column not in schema_names:
+                dtype = pl.Utf8 if column in {"symbol", "source"} else pl.Float64
+                frame = frame.with_columns(pl.lit(None, dtype=dtype).alias(column))
+        frame = (
+            frame.select(keep)
+            .filter(pl.col("symbol").is_not_null() & pl.col("event_ts").is_not_null())
+            .with_columns([
+                pl.col("symbol").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("symbol"),
+                pl.col("event_ts").cast(pl.Int64, strict=False).alias("event_ts"),
+                pl.col("ingest_ts").cast(pl.Int64, strict=False).alias("ingest_ts"),
+            ])
+            .filter(pl.col("symbol") != "")
+        )
+        if wanted:
+            frame = frame.filter(pl.col("symbol").is_in(wanted))
+        sampled = (
+            frame
+            .with_columns((pl.col("event_ts") // step_ms * step_ms).alias("_bucket_ts"))
+            .sort(["symbol", "_bucket_ts", "event_ts", "ingest_ts"])
+            .unique(subset=["symbol", "_bucket_ts"], keep="last")
+            .with_columns(pl.col("_bucket_ts").alias("event_ts"))
+            .drop("_bucket_ts")
+            .collect(engine="streaming")
+        )
+        return [_json_safe(row) for row in sampled.iter_rows(named=True)]
+    except Exception as e:
+        logger.warning("quote_ticks 采样读取失败(%s): %s", base, e)
+        return []
+
+
+def _sample_tick_rows(rows: list[dict], *, step_seconds: int = 60) -> list[dict]:
+    if not rows:
+        return []
+    step_ms = max(30, int(step_seconds or 60)) * 1000
+    latest: dict[tuple[str, int], dict] = {}
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        event_ts = row.get("event_ts")
+        if not symbol or event_ts is None:
+            continue
+        try:
+            ts = int(event_ts)
+        except (TypeError, ValueError):
+            continue
+        bucket = ts // step_ms * step_ms
+        key = (symbol, bucket)
+        prev = latest.get(key)
+        rank = (ts, int(row.get("ingest_ts") or 0))
+        prev_rank = (
+            int(prev.get("event_ts") or 0),
+            int(prev.get("ingest_ts") or 0),
+        ) if prev is not None else None
+        if prev is None or rank >= prev_rank:
+            item = dict(row)
+            item["symbol"] = symbol
+            item["event_ts"] = bucket
+            latest[key] = item
+    return list(latest.values())
 
 
 def _mysql_latest(

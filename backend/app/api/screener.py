@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache
+from app.services.auction_preselect import build_preselect_payload
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
@@ -50,6 +51,16 @@ class AuctionConfirmRequest(BaseModel):
     strategy_ids: Optional[list[str]] = None
     ext_columns: Optional[str] = None
     asset_type: str = "stock"
+
+
+class PreselectRequest(BaseModel):
+    as_of: date | None = None
+    trade_date: date | None = None
+    strategy_ids: list[str] | None = None
+    limit_per_strategy: int = 5
+    ext_columns: str | None = None
+    asset_type: str = "stock"
+    timeframe: str = "1d"
 
 
 def _safe(result_dict: dict) -> dict:
@@ -359,6 +370,39 @@ def auction_confirmation(req: AuctionConfirmRequest, request: Request):
 
     confirmed = {**confirmed, "results": results}
     return confirmed
+
+
+@router.post("/preselect")
+def preselect(req: PreselectRequest, request: Request):
+    """按盘后结果给出次交易日竞价前的主板预选池。"""
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="策略引擎未初始化")
+
+    try:
+        preselect_payload = build_preselect_payload(
+            request.app.state.repo,
+            engine,
+            as_of=req.as_of,
+            trade_date=req.trade_date,
+            strategy_ids=req.strategy_ids,
+            limit_per_strategy=req.limit_per_strategy,
+            asset_type=req.asset_type,
+            timeframe=req.timeframe,
+        )
+    except ValueError as exc:
+        status_code = 404 if "unknown strategy" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    ext_values = _load_ext_value_maps(request.app.state.repo, req.ext_columns)
+    results = {}
+    for sid, item in (preselect_payload.get("results") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        rows = _rows_with_ext(item.get("rows") or [], ext_values)
+        results[sid] = {**item, "rows": rows}
+
+    return {**preselect_payload, "results": results}
 
 
 def _cached_with_realtime(request: Request) -> dict:

@@ -307,6 +307,76 @@ def test_direct_parquet_matrix_reports_actionable_error_when_enriched_is_empty(t
         )
 
 
+def test_direct_parquet_matrix_allows_missing_optional_auction_result_fields(tmp_path):
+    market_root = tmp_path / "kline_daily_enriched"
+    day = date(2024, 1, 2)
+    partition = market_root / f"date={day.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [day],
+        "open": [10.0],
+        "high": [10.2],
+        "low": [9.8],
+        "close": [10.1],
+        "volume": [1_000.0],
+    }).write_parquet(partition / "part.parquet")
+
+    market = load_market_data_matrix_from_parquet(
+        market_root,
+        day,
+        day,
+        field_columns={"auction_result_price", "auction_result_volume", "auction_result_amount"},
+    )
+
+    assert set(market.fields) == {
+        "auction_result_amount",
+        "auction_result_price",
+        "auction_result_volume",
+    }
+    assert np.isnan(market.field("auction_result_price")).all()
+    assert np.isnan(market.field("auction_result_volume")).all()
+    assert np.isnan(market.field("auction_result_amount")).all()
+
+
+def test_direct_parquet_matrix_filters_invalid_duplicate_daily_rows(tmp_path):
+    market_root = tmp_path / "kline_daily_enriched"
+    day = date(2024, 1, 2)
+    partition = market_root / f"date={day.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "000001.SZ",
+            "date": day,
+            "open": 10.0,
+            "high": 10.2,
+            "low": 9.8,
+            "close": 10.1,
+            "volume": 1_000.0,
+        },
+        {
+            "symbol": "000001.SZ",
+            "date": day,
+            "open": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "close": 0.0,
+            "volume": 0.0,
+        },
+    ]).write_parquet(partition / "part.parquet")
+
+    market = load_market_data_matrix_from_parquet(
+        market_root,
+        day,
+        day,
+        field_columns=set(),
+    )
+
+    assert market.symbols == ("000001.SZ",)
+    assert market.open.tolist() == [[10.0]]
+    assert market.close.tolist() == [[pytest.approx(10.1)]]
+
+
 def test_direct_parquet_matrix_matches_panel_builder_and_reuses_mmap(tmp_path):
     market_root = tmp_path / "kline_daily_enriched"
     days = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
@@ -610,9 +680,11 @@ def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     del first
     gc.collect()
     assert second.close[0, 0] == pytest.approx(11.0)
-    assert len(list(cache_root.glob("v4-*"))) == 1
+    matrix_cache_glob = f"v{matrix_module._DIRECT_MATRIX_LOADER_VERSION}-*"
+    axis_cache_glob = f".axes-v{matrix_module._MATRIX_AXIS_INDEX_VERSION}-*.json"
+    assert len(list(cache_root.glob(matrix_cache_glob))) == 1
     assert list(cache_root.glob(".*.tmp")) == []
-    assert len(list(cache_root.glob(".axes-v1-*.json"))) == 1
+    assert len(list(cache_root.glob(axis_cache_glob))) == 1
 
 
 def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tmp_path):
@@ -663,7 +735,8 @@ def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tm
     assert changed.cache_path != first.cache_path
     del first, repeated
     gc.collect()
-    assert len(list(cache_root.glob("v4-*"))) == 1
+    matrix_cache_glob = f"v{matrix_module._DIRECT_MATRIX_LOADER_VERSION}-*"
+    assert len(list(cache_root.glob(matrix_cache_glob))) == 1
 
 
 def test_registered_builtin_matrix_strategies_share_one_cache_profile():

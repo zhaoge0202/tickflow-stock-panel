@@ -6,6 +6,6 @@ display_name: "tdx-api（通达信代理池）"
 runtime: none
 entry: app.plugins.tdxapi.provider:TDXAPIProvider
 check: app.plugins.tdxapi.provider:availability
-datasets: [daily, minute, realtime, trade_ticks, financial]
-description: "通过本地 tdx-api sidecar 接入通达信行情，支持 SOCKS5 代理池。覆盖日K、分钟K、实时行情、逐笔成交和通达信财务快照(含 shares 最新股本, 供历史换手率回填)；除权因子暂不声明，避免把通达信仿射复权误映射为比例因子。"
+datasets: [daily, minute, realtime, trade_ticks, auction_result, financial]
+description: "通过本地 tdx-api sidecar 接入通达信行情，支持 SOCKS5 代理池。覆盖日K、分钟K、实时行情、逐笔成交、09:25 开盘竞价结果和通达信财务快照(含 shares 最新股本, 供历史换手率回填)；除权因子暂不声明，避免把通达信仿射复权误映射为比例因子。"
 install_hint: "先启动 tdx-api sidecar，并设置 TDX_API_BASE_URL（默认 http://127.0.0.1:8080）"
