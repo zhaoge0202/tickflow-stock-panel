@@ -325,12 +325,6 @@ function firstPlayableSeriesTs(
   return firstNonNull
 }
 
-function firstPointAtOrAfter(points: number[], target: number | null) {
-  if (!points.length) return null
-  if (target == null) return points[0]
-  return points.find(point => point >= target) ?? points[points.length - 1]
-}
-
 function modeLabel(mode: TimeMode, snapshotMode?: string) {
   if (mode === 'live') return snapshotMode === 'eod_fallback' ? '实时回退' : '实时'
   if (mode === 'replay') return snapshotMode?.startsWith('intraday') ? '盘中回放' : '回放回退'
@@ -650,26 +644,16 @@ export function SectorFlow() {
     () => firstPlayableSeriesTs(seriesQuery.data, selectedSeriesKeys, seriesMetric),
     [seriesQuery.data, selectedSeriesKeys, seriesMetric],
   )
-  const replayStartTs = viewMode === 'bubble'
-    ? firstPointAtOrAfter(points, points[0] ?? null)
-    : firstPointAtOrAfter(points, seriesPlaybackStartTs)
+  const replayStartTs = points[0] ?? null
   const bubbleFrameKey = timeMode === 'replay'
     ? settings.asOfTs ?? snapshotQuery.data?.as_of_ts ?? selectedPointIndex
     : null
-
-  useEffect(() => {
-    if (viewMode === 'bubble' || timeMode !== 'replay' || replayStartTs == null || !points.length) return
-    const currentTs = settings.asOfTs ?? points[selectedPointIndex] ?? points[0]
-    if (currentTs == null || currentTs >= replayStartTs) return
-    patchSettings({ asOfTs: replayStartTs }, { persist: false })
-  }, [viewMode, timeMode, replayStartTs, settings.asOfTs, selectedPointIndex, points])
 
   const startPlayback = () => {
     if (!canReplay) return
     const shouldRestart =
       timeMode !== 'replay' ||
-      selectedPointIndex >= points.length - 1 ||
-      (viewMode !== 'bubble' && replayStartTs != null && (settings.asOfTs ?? 0) < replayStartTs)
+      selectedPointIndex >= points.length - 1
     patchSettings({
       timeMode: 'replay',
       asOfTs: shouldRestart ? replayStartTs : settings.asOfTs ?? points[selectedPointIndex] ?? replayStartTs,
