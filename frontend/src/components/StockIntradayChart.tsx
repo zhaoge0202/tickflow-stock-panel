@@ -12,6 +12,9 @@ interface Props {
   prevClose?: number
   className?: string
   onPriceHover?: (price: number | null) => void
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
+  currentPrice?: number
+  priceLines?: { value: number; label?: string; color?: string }[]
   /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
 }
@@ -31,6 +34,9 @@ export function StockIntradayChart({
   prevClose,
   className,
   onPriceHover,
+  onPriceDoubleClick,
+  currentPrice,
+  priceLines,
   refetchIntervalMs,
 }: Props) {
   const qc = useQueryClient()
@@ -148,6 +154,9 @@ export function StockIntradayChart({
           date={date}
           priceLimit={minute.data?.price_limit ?? undefined}
           onPriceHover={onPriceHover}
+          onPriceDoubleClick={onPriceDoubleClick}
+          currentPrice={currentPrice}
+          priceLines={priceLines}
         />
       )}
     </div>

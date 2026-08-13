@@ -29,6 +29,7 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
+import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -774,6 +775,15 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     queryFn: () => api.watchlistList(),
     staleTime: 30_000,
   })
+  const watchlistEntries = watchlist.data?.symbols ?? []
+  const watchlistCounts = useMemo(() => {
+    const counts: Record<string, number> = { ungrouped: 0 }
+    for (const entry of watchlistEntries) {
+      const groupId = entry.group_id ?? 'ungrouped'
+      counts[groupId] = (counts[groupId] ?? 0) + 1
+    }
+    return counts
+  }, [watchlistEntries])
 
   useEffect(() => {
     if (results.length === 0) return
@@ -802,9 +812,11 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     setOpen(false)
   }
   const removeSymbol = (symbol: string) => setSymbols(symbols.filter(s => s !== symbol))
-  // 一键导入自选: 合并去重, 顺带回填股票名
-  const importFromWatchlist = () => {
-    const entries = watchlist.data?.symbols ?? []
+  // 按分组导入自选: 合并去重, 顺带回填股票名
+  const importFromWatchlist = (groupId: string | null) => {
+    const entries = groupId === 'all'
+      ? watchlistEntries
+      : watchlistEntries.filter(entry => (entry.group_id ?? null) === groupId)
     if (entries.length === 0) return
     setSymbolNames(prev => {
       const next = { ...prev }
@@ -813,7 +825,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     })
     setSymbols([...symbols, ...entries.map(e => e.symbol)])
   }
-  const watchlistCount = watchlist.data?.symbols?.length ?? 0
+  const watchlistCount = watchlistEntries.length
 
   return (
     <div className="space-y-2" ref={ref}>
@@ -861,16 +873,22 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
           <span className={`whitespace-nowrap text-[11px] font-medium ${symbols.length === 0 ? 'text-amber-400' : 'text-accent'}`}>
             {symbols.length === 0 ? '全市场' : `共 ${symbols.length} 只`}
           </span>
-          <button
-            type="button"
-            onClick={importFromWatchlist}
+          <WatchlistGroupMenu
+            onSelect={importFromWatchlist}
             disabled={watchlist.isLoading || watchlistCount === 0}
-            className="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            title="把自选列表的个股加入回测范围"
+            includeAll
+            counts={watchlistCounts}
+            total={watchlistCount}
+            disableEmpty
+            menuLabel="导入自选分组"
+            align="right"
+            triggerClassName="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            title="选择自选分组并加入回测范围"
+            ariaLabel="从自选分组导入回测范围"
           >
             <ListPlus className="h-3 w-3" />
             {watchlist.isLoading ? '加载…' : watchlistCount === 0 ? '自选空' : `导入自选(${watchlistCount})`}
-          </button>
+          </WatchlistGroupMenu>
           <button
             type="button"
             onClick={() => setSymbols([])}
@@ -929,8 +947,8 @@ export function StrategyBacktest() {
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
   // 市场环境过滤(空=不过滤)
-  const [regimeStates, setRegimeStates] = useState<string[]>([])
-  const [regimeMinScore, setRegimeMinScore] = useState<number | ''>('')
+  const [regimeStates, setRegimeStates] = useState<string[]>(saved?.regimeStates ?? [])
+  const [regimeMinScore, setRegimeMinScore] = useState<number | ''>(saved?.regimeMinScore ?? '')
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1079,6 +1097,8 @@ export function StrategyBacktest() {
         mode: simMode,
         holdingDays,
         minuteFill: highGranularity,
+        regimeStates,
+        regimeMinScore,
         params: strategyParams,
         overrides,
         strategyConfigSignature: strategyDetail.data
@@ -1355,6 +1375,18 @@ export function StrategyBacktest() {
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
   const resultTradeDays = result?.equity_curve?.length ?? 0
+  const resultRegimeFilter = result?.config?.regime_filter as {
+    states?: string[]
+    min_score?: number
+  } | null | undefined
+  const resultRegimeSummary = resultRegimeFilter
+    ? [
+        resultRegimeFilter.states?.length
+          ? resultRegimeFilter.states.map(state => REGIME_STATE_LABELS[state as keyof typeof REGIME_STATE_LABELS] ?? state).join('/')
+          : null,
+        resultRegimeFilter.min_score != null ? `最低 ${resultRegimeFilter.min_score} 分` : null,
+      ].filter(Boolean).join(' · ')
+    : ''
   const selectionStats = result?.stats?.selection as Record<string, number | boolean> | undefined
   const selectionStages = selectionStats
     ? [
@@ -1907,6 +1939,12 @@ export function StrategyBacktest() {
             <div className="flex items-center gap-3">
               <span className="text-sm font-medium text-foreground">{result.strategy_info?.name ?? '策略'}</span>
               <span className="text-[10px] px-1 py-px rounded border border-accent/30 bg-accent/10 text-accent">全量模拟</span>
+              {resultRegimeSummary && (
+                <span className="inline-flex items-center gap-1 rounded border border-accent/25 bg-accent/10 px-1.5 py-px text-[10px] text-accent">
+                  <Gauge className="h-2.5 w-2.5" />
+                  环境 {resultRegimeSummary}
+                </span>
+              )}
               <span className="text-[10px] text-secondary">持有 {result.config?.holding_days ?? 5} 天</span>
               <span className="ml-auto text-[11px] text-muted font-mono">
                 {String(result.config?.start).slice(0,10)} ~ {String(result.config?.end).slice(0,10)}
@@ -1975,6 +2013,12 @@ export function StrategyBacktest() {
                   {result.strategy_info.source && (
                     <span className={`text-[9px] px-1 py-px rounded border ${BADGE_CLS_MAP[result.strategy_info.source] ?? ''}`}>
                       {SRC_MAP[result.strategy_info.source] ?? ''}
+                    </span>
+                  )}
+                  {resultRegimeSummary && (
+                    <span className="inline-flex items-center gap-1 rounded border border-accent/25 bg-accent/10 px-1.5 py-px text-[9px] text-accent">
+                      <Gauge className="h-2.5 w-2.5" />
+                      环境 {resultRegimeSummary}
                     </span>
                   )}
                 </div>

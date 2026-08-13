@@ -1,4 +1,6 @@
 """指数资产路由 — repository 层测试。"""
+import os
+
 import polars as pl
 import pytest
 
@@ -45,6 +47,25 @@ def test_name_map_stock_beats_index(repo):
 
 
 import datetime as _dt
+
+
+def test_execute_one_releases_parquet_file(repo):
+    minute_dir = repo.store.data_dir / "kline_minute" / "date=2026-07-23"
+    minute_dir.mkdir(parents=True, exist_ok=True)
+    part = minute_dir / "part.parquet"
+    replacement = minute_dir / "part.parquet.tmp"
+    minute = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [_dt.datetime(2026, 7, 23, 9, 30)],
+        "close": [10.0],
+    })
+    minute.write_parquet(part)
+    repo.rebuild_views()
+
+    assert repo.execute_one("SELECT max(datetime) FROM kline_minute")[0] == _dt.datetime(2026, 7, 23, 9, 30)
+
+    minute.write_parquet(replacement)
+    os.replace(replacement, part)
 
 
 def _write_index_enriched(repo, dates_rows):
