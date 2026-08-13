@@ -18,6 +18,7 @@ from app.config import settings
 from app.services.trade_tick_mysql import MySQLConfig, parse_mysql_url
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+MAX_EVENT_FUTURE_SKEW_MS = 5 * 60 * 1000
 logger = logging.getLogger(__name__)
 
 CREATE_TABLE_SQL = """
@@ -37,18 +38,24 @@ CREATE TABLE IF NOT EXISTS quote_latest (
 
 
 # MySQL 按从左到右计算更新表达式，因此 event_ts 必须最后赋值，前面的条件才能和旧值比较。
-UPSERT_SQL = """
+# 如果库里已有“事件时间明显晚于写入时间”的脏快照，允许新快照覆盖它，避免
+# 未来时间卡住 PRIMARY KEY(symbol) 的后续正常更新。
+_UPSERT_REPLACE_CONDITION = (
+    "event_ts > UNIX_TIMESTAMP(ingested_at) * 1000 + "
+    f"{MAX_EVENT_FUTURE_SKEW_MS} OR VALUES(event_ts) >= event_ts"
+)
+UPSERT_SQL = f"""
 INSERT INTO quote_latest (
   symbol, trade_date, event_ts, source, payload, ingested_at
 ) VALUES (
   %(symbol)s, %(trade_date)s, %(event_ts)s, %(source)s, %(payload)s, %(ingested_at)s
 )
 ON DUPLICATE KEY UPDATE
-  trade_date = IF(VALUES(event_ts) >= event_ts, VALUES(trade_date), trade_date),
-  source = IF(VALUES(event_ts) >= event_ts, VALUES(source), source),
-  payload = IF(VALUES(event_ts) >= event_ts, VALUES(payload), payload),
-  ingested_at = IF(VALUES(event_ts) >= event_ts, VALUES(ingested_at), ingested_at),
-  event_ts = GREATEST(event_ts, VALUES(event_ts));
+  trade_date = IF({_UPSERT_REPLACE_CONDITION}, VALUES(trade_date), trade_date),
+  source = IF({_UPSERT_REPLACE_CONDITION}, VALUES(source), source),
+  payload = IF({_UPSERT_REPLACE_CONDITION}, VALUES(payload), payload),
+  ingested_at = IF({_UPSERT_REPLACE_CONDITION}, VALUES(ingested_at), ingested_at),
+  event_ts = IF({_UPSERT_REPLACE_CONDITION}, VALUES(event_ts), event_ts);
 """.strip()
 
 
@@ -189,6 +196,8 @@ class QuoteSnapshotMySQLStore:
         if trade_date is not None:
             conditions.append("trade_date = %s")
             params.append(_date(trade_date))
+        conditions.append("event_ts <= UNIX_TIMESTAMP(ingested_at) * 1000 + %s")
+        params.append(MAX_EVENT_FUTURE_SKEW_MS)
 
         where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
@@ -210,6 +219,9 @@ def _to_mysql_row(record: dict[str, Any]) -> dict[str, Any]:
     )
     if event_ts is None:
         raise ValueError(f"行情快照缺少有效 event_ts: {symbol}")
+    ingested_at = datetime.now(CN_TZ).replace(tzinfo=None)
+    if not _event_time_plausible(event_ts, ingested_at):
+        raise ValueError(f"行情快照 event_ts 明显晚于写入时间: {symbol}")
 
     trade_day = (
         _date(record["trade_date"])
@@ -238,7 +250,7 @@ def _to_mysql_row(record: dict[str, Any]) -> dict[str, Any]:
             sort_keys=True,
             allow_nan=False,
         ),
-        "ingested_at": datetime.now(),
+        "ingested_at": ingested_at,
     }
 
 
@@ -289,6 +301,20 @@ def _event_ts_ms(value: Any) -> int | None:
     if abs(numeric) < 10_000_000_000:
         numeric *= 1000
     return int(numeric)
+
+
+def _event_time_plausible(event_ts: int, ingested_at: datetime | None = None) -> bool:
+    ingest_ms = _datetime_ms(ingested_at) if ingested_at is not None else _now_ms()
+    return int(event_ts) <= ingest_ms + MAX_EVENT_FUTURE_SKEW_MS
+
+
+def _datetime_ms(value: datetime) -> int:
+    dt_value = value if value.tzinfo else value.replace(tzinfo=CN_TZ)
+    return int(dt_value.timestamp() * 1000)
+
+
+def _now_ms() -> int:
+    return int(datetime.now(CN_TZ).timestamp() * 1000)
 
 
 def _date(value: Any) -> date:

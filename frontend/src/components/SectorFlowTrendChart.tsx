@@ -283,6 +283,14 @@ export function SectorFlowTrendChart({
               </span>
             )}
             {data.data_quality.is_proxy && <span className="text-amber-500">当前为估算值 · 非正式主力净流入</span>}
+            {data.data_quality.status === 'incomplete' && (
+              <span className="text-red-500">历史快照不完整，不可用于资金流判断</span>
+            )}
+            {data.data_quality.max_gap_seconds != null && data.data_quality.max_gap_seconds > 125 && (
+              <span className="text-amber-500">
+                数据存在 {Math.round(data.data_quality.max_gap_seconds / 60)} 分钟断档，曲线已断开
+              </span>
+            )}
           </div>
           <button onClick={onRefresh} disabled={isFetching} className="p-1 text-muted hover:text-foreground disabled:opacity-50" title="刷新">
             <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} />
@@ -295,6 +303,9 @@ export function SectorFlowTrendChart({
               {item.name} · {sourceLabel(item)} · 覆盖 {Math.round(item.coverage_ratio * 100)}%
             </span>
           ))}
+          {data.data_quality.point_coverage_ratio != null && (
+            <span>快照完整度 {Math.round(data.data_quality.point_coverage_ratio * 100)}%</span>
+          )}
         </div>
       </div>
     </section>

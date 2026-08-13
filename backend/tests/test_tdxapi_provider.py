@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 
 import polars as pl
 import pytest
@@ -169,6 +171,34 @@ def test_get_realtime_batches_and_maps_quote(monkeypatch):
     assert abs(rows[0]["change_pct"] - (0.5 / 12.0)) < 1e-12
 
 
+def test_get_realtime_fetches_batches_concurrently_and_keeps_order(monkeypatch):
+    monkeypatch.setattr(tp, "_QUOTE_BATCH", 2)
+    monkeypatch.setattr(tp, "_realtime_workers", lambda: 3)
+    provider = TDXAPIProvider()
+    monkeypatch.setattr(provider, "get_instruments", lambda _asset_type: [])
+
+    running = 0
+    max_running = 0
+    lock = threading.Lock()
+
+    def fake_fetch(chunk, _name_map):
+        nonlocal running, max_running
+        with lock:
+            running += 1
+            max_running = max(max_running, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+        return [{"symbol": symbol} for symbol in chunk]
+
+    monkeypatch.setattr(provider, "_fetch_realtime_chunk", fake_fetch)
+
+    rows = provider.get_realtime(symbols=["A", "B", "C", "D", "E"])
+
+    assert max_running > 1
+    assert [row["symbol"] for row in rows] == ["A", "B", "C", "D", "E"]
+
+
 def test_get_realtime_maps_depth_and_activity_fields(monkeypatch):
     def fake_codes(kwargs):
         return {"codes": [{"code": "002491", "name": "通鼎互联", "exchange": "sz"}]}
@@ -291,6 +321,43 @@ def test_get_realtime_retries_batch_without_missing_code(monkeypatch):
         ["sz159881", "sh510660"],
     ]
     assert [row["symbol"] for row in rows] == ["159881.SZ", "510660.SH"]
+
+
+def test_get_realtime_caches_missing_quote_code(monkeypatch):
+    quote_calls = []
+
+    def fake(self, method, path, **kwargs):
+        if path == "/api/codes":
+            return {"codes": []}
+        codes = kwargs["json"]["codes"]
+        quote_calls.append(codes)
+        if "sh510143" in codes:
+            raise RuntimeError("获取行情失败: 未查询到代码[sh510143]相关信息")
+        return [
+            {
+                "Exchange": 0 if code.startswith("sz") else 1,
+                "Code": code[2:],
+                "K": {"Last": 1000, "Open": 1000, "High": 1010, "Low": 990, "Close": 1005},
+                "TotalHand": 10,
+                "Amount": 100000,
+                "ServerTime": "1730617200",
+            }
+            for code in codes
+        ]
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+    provider = TDXAPIProvider()
+
+    first = provider.get_realtime(symbols=["159881.SZ", "510143.SH", "510660.SH"])
+    second = provider.get_realtime(symbols=["159881.SZ", "510143.SH", "510660.SH"])
+
+    assert [row["symbol"] for row in first] == ["159881.SZ", "510660.SH"]
+    assert [row["symbol"] for row in second] == ["159881.SZ", "510660.SH"]
+    assert quote_calls == [
+        ["sz159881", "sh510143", "sh510660"],
+        ["sz159881", "sh510660"],
+        ["sz159881", "sh510660"],
+    ]
 
 
 def test_server_time_parses_tdx_hhmmss_milliseconds():
@@ -845,6 +912,38 @@ def test_server_time_decodes_tdx_compact_time(monkeypatch):
     assert decoded.hour == 15
     assert decoded.minute == 32
     assert decoded.second == 55
+
+
+def test_server_time_moves_future_compact_time_to_previous_weekday(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 7, 9, 0, 26, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    ts = tp._server_time_ms("15329240")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.date() == dt.date(2026, 7, 8)
+    assert decoded.hour == 15
+    assert decoded.minute == 32
+
+
+def test_server_time_moves_weekend_compact_time_to_previous_weekday(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 7, 11, 10, 0, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    ts = tp._server_time_ms("9300000")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.date() == dt.date(2026, 7, 10)
+    assert decoded.hour == 9
+    assert decoded.minute == 30
 
 
 def test_server_time_keeps_unix_seconds():
