@@ -23,6 +23,7 @@ export const QK = {
 
   // Watchlist
   watchlist:            ['watchlist'] as const,
+  watchlistGroups:      ['watchlist-groups'] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
   watchlistKlineBatch:  (symbols: string) => ['watchlist-kline-batch', symbols] as const,
@@ -78,6 +79,8 @@ export const QK = {
   tradeTickPersistStatus: (symbol: string, date: string) =>
                              ['trade-tick-persist-status', symbol, date] as const,
   tradeTickMysqlStatus: ['trade-tick-mysql-status'] as const,
+  klineMinuteRange:     (symbol: string, days: number) =>
+                             ['kline-minute-range', symbol, days] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
                            ['index-daily', symbol, start, end] as const,
   indexMinute:          (symbol: string, date: string) =>

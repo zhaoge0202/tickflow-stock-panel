@@ -5,6 +5,12 @@ import { ArrowDown, ArrowUp, Bell, Check, ExternalLink, Loader2, Trash2, X } fro
 import { toast } from '@/components/Toast'
 import { LEVEL_GROUPS } from './AnalysisKChart'
 import { api, genRuleId, type MonitorRule, type PriceLevel } from '@/lib/api'
+import {
+  buildPriceAlertMessage,
+  inferPriceAlertDirection,
+  parsePointPriceAlert,
+  type PriceAlertDirection,
+} from '@/lib/price-alerts'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
@@ -13,9 +19,9 @@ interface Props {
   symbol: string
   name: string
   onClose: () => void
+  initialTarget?: number
+  initialCurrentPrice?: number | null
 }
-
-type AlertDirection = 'up' | 'down'
 
 const COOLDOWNS = [
   { value: 600, label: '10 分钟' },
@@ -24,19 +30,17 @@ const COOLDOWNS = [
   { value: 86400, label: '当日一次' },
 ]
 
-function pointCondition(rule: MonitorRule) {
-  if (rule.type !== 'price' || rule.conditions.length !== 1) return null
-  const condition = rule.conditions[0]
-  if (condition.field !== 'close' || !['>=', '<='].includes(condition.op)) return null
-  if (typeof condition.value !== 'number') return null
-  return condition
-}
-
 function levelGroupLabel(level: PriceLevel) {
   return LEVEL_GROUPS.find(group => group.key === level.type)?.label ?? level.type
 }
 
-export function PriceAlertDialog({ symbol, name, onClose }: Props) {
+export function PriceAlertDialog({
+  symbol,
+  name,
+  onClose,
+  initialTarget,
+  initialCurrentPrice,
+}: Props) {
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
   const { data: prefs } = usePreferences()
@@ -46,17 +50,28 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
     staleTime: 60_000,
   })
   const rulesQuery = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
+  const initialTargetValue = initialTarget != null && Number.isFinite(initialTarget) && initialTarget > 0
+    ? Math.round(initialTarget * 100) / 100
+    : null
+  const initialDirection = initialTargetValue == null
+    ? 'up'
+    : inferPriceAlertDirection(initialTargetValue, initialCurrentPrice)
   const [tab, setTab] = useState<'create' | 'existing'>('create')
-  const [direction, setDirection] = useState<AlertDirection>('up')
-  const [target, setTarget] = useState('')
+  const [direction, setDirection] = useState<PriceAlertDirection>(initialDirection)
+  const [target, setTarget] = useState(initialTargetValue?.toFixed(2) ?? '')
   const [selectedLabel, setSelectedLabel] = useState('')
   const [cooldown, setCooldown] = useState(3600)
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState(initialTargetValue == null
+    ? ''
+    : buildPriceAlertMessage(name, symbol, initialDirection, initialTargetValue))
+  const [messageEdited, setMessageEdited] = useState(false)
   const [channels, setChannels] = useState<string[]>([])
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const channelsInitialized = useRef(false)
 
-  const currentPrice = levelsQuery.data?.close ?? null
+  const currentPrice = initialCurrentPrice != null && Number.isFinite(initialCurrentPrice) && initialCurrentPrice > 0
+    ? initialCurrentPrice
+    : levelsQuery.data?.close ?? null
   const recommended = useMemo(() => {
     if (currentPrice == null) return { above: [] as PriceLevel[], below: [] as PriceLevel[] }
     const seen = new Set<string>()
@@ -103,24 +118,23 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
   }, [onClose])
 
   const pointRules = useMemo(
-    () => (rulesQuery.data?.rules ?? []).filter(rule =>
-      rule.scope === 'symbols'
-      && rule.symbols.length === 1
-      && rule.symbols[0] === symbol
-      && pointCondition(rule),
-    ),
+    () => (rulesQuery.data?.rules ?? []).filter(rule => parsePointPriceAlert(rule, symbol)),
     [rulesQuery.data?.rules, symbol],
   )
 
   const targetValue = Number(target)
   const targetValid = Number.isFinite(targetValue) && targetValue > 0
+  useEffect(() => {
+    if (initialTargetValue == null || messageEdited || !targetValid) return
+    setMessage(buildPriceAlertMessage(name, symbol, direction, targetValue))
+  }, [direction, initialTargetValue, messageEdited, name, symbol, targetValid, targetValue])
+
   const alreadyReached = targetValid && currentPrice != null && (
     direction === 'up' ? currentPrice >= targetValue : currentPrice <= targetValue
   )
   const duplicate = targetValid && pointRules.some(rule => {
-    const condition = pointCondition(rule)!
-    return condition.op === (direction === 'up' ? '>=' : '<=')
-      && Math.abs((condition.value ?? 0) - targetValue) < 0.005
+    const alert = parsePointPriceAlert(rule, symbol)!
+    return alert.direction === direction && Math.abs(alert.target - targetValue) < 0.005
   })
 
   const save = useMutation({
@@ -171,7 +185,7 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
 
   const selectLevel = (level: PriceLevel) => {
     setTarget(level.value.toFixed(2))
-    setDirection(currentPrice != null && level.value < currentPrice ? 'down' : 'up')
+    setDirection(inferPriceAlertDirection(level.value, currentPrice))
     setSelectedLabel(level.label)
   }
 
@@ -179,9 +193,14 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
     setTarget(value)
     setSelectedLabel('')
     const parsed = Number(value)
-    if (currentPrice != null && Number.isFinite(parsed)) {
-      setDirection(parsed < currentPrice ? 'down' : 'up')
+    if (Number.isFinite(parsed)) {
+      setDirection(inferPriceAlertDirection(parsed, currentPrice))
     }
+  }
+
+  const updateMessage = (value: string) => {
+    setMessage(value)
+    setMessageEdited(true)
   }
 
   const toggleChannel = (channel: string) => {
@@ -298,7 +317,7 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
               </label>
               <label className="space-y-1.5">
                 <span className="text-[11px] text-muted">自定义提示</span>
-                <input value={message} onChange={event => setMessage(event.target.value)} placeholder="留空使用默认内容" className="h-9 w-full rounded-md border border-border bg-base px-3 text-xs text-foreground placeholder:text-muted/50 focus:outline-none" />
+                <input value={message} onChange={event => updateMessage(event.target.value)} placeholder="留空使用默认内容" className="h-9 w-full rounded-md border border-border bg-base px-3 text-xs text-foreground placeholder:text-muted/50 focus:outline-none" />
               </label>
             </div>
 
@@ -340,8 +359,8 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
             ) : (
               <div className="divide-y divide-border/50 border-y border-border/50">
                 {pointRules.map(rule => {
-                  const condition = pointCondition(rule)!
-                  const isUp = condition.op === '>='
+                  const alert = parsePointPriceAlert(rule, symbol)!
+                  const isUp = alert.direction === 'up'
                   return (
                     <div key={rule.id} className={`flex items-center gap-3 px-2 py-3 ${rule.enabled ? '' : 'opacity-55'}`}>
                       <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md ${isUp ? 'bg-bull/10 text-bull' : 'bg-bear/10 text-bear'}`}>
@@ -349,7 +368,7 @@ export function PriceAlertDialog({ symbol, name, onClose }: Props) {
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-xs text-foreground">{rule.name}</span>
-                        <span className="mt-0.5 block font-mono text-[10px] text-muted">{isUp ? '涨至' : '跌至'} {condition.value!.toFixed(2)} · {COOLDOWNS.find(item => item.value === rule.cooldown_seconds)?.label ?? `${rule.cooldown_seconds} 秒`}</span>
+                        <span className="mt-0.5 block font-mono text-[10px] text-muted">{isUp ? '涨至' : '跌至'} {alert.target.toFixed(2)} · {COOLDOWNS.find(item => item.value === rule.cooldown_seconds)?.label ?? `${rule.cooldown_seconds} 秒`}</span>
                       </span>
                       <button role="switch" aria-checked={rule.enabled} onClick={() => toggle.mutate(rule)} disabled={toggle.isPending} className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${rule.enabled ? 'bg-sky-500' : 'bg-elevated'}`} title={rule.enabled ? '停用' : '启用'}>
                         <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${rule.enabled ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />

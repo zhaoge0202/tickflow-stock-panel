@@ -20,6 +20,21 @@ from app.services.ext_data import (
 logger = logging.getLogger(__name__)
 
 
+def _in_time_window(start: str | None, end: str | None) -> bool:
+    """检查当前本地时间是否在每日时间窗口内。
+
+    start/end 为 "HH:MM" 格式。两者都为 None 时不限制(返回 True)。
+    支持跨午夜窗口(如 22:00-02:00)。
+    """
+    if not start or not end:
+        return True
+    now = datetime.now().strftime("%H:%M")
+    if start <= end:
+        return start <= now < end
+    # 跨午夜: 如 22:00-02:00
+    return now >= start or now < end
+
+
 # ---------------------------------------------------------------------------
 # 响应解析
 # ---------------------------------------------------------------------------
@@ -252,6 +267,17 @@ class PullScheduler:
                 if not fresh or not fresh.pull or not fresh.pull.enabled:
                     break
                 pull = fresh.pull
+
+                # 时间窗口检查: 不在窗口内则跳过本次拉取
+                if not _in_time_window(pull.time_window_start, pull.time_window_end):
+                    fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
+                    fresh.pull.last_status = "skipped"
+                    fresh.pull.last_message = "不在拉取时间窗口内"
+                    store.upsert(fresh)
+                    logger.info("PullScheduler: %s skipped (outside time window)", config.id)
+                    interval = max(pull.schedule_minutes * 60, 60)
+                    await asyncio.sleep(interval)
+                    continue
 
                 # 先执行一次 (启用即拉取, 让用户立刻看到生效)
                 try:

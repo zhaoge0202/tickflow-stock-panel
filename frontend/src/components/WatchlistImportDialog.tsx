@@ -2,13 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ImagePlus, Loader2, Upload, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
-import { api, type WatchlistImportCandidate } from '@/lib/api'
+import { api, type WatchlistGroupColor, type WatchlistImportCandidate } from '@/lib/api'
 import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
 import { getOcrInstallHint } from '@/lib/ocrInstallHint'
+import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 
 interface Props {
   open: boolean
   onClose: () => void
+  groupId?: string | null
+  groupName?: string
+  groupColor?: WatchlistGroupColor
 }
 
 /** 一次最多排队识别的图片数，避免误选大量文件拖垮小内存机器。 */
@@ -47,7 +51,7 @@ export function mergeImportCandidates(
   return [...byCode.values()]
 }
 
-export function WatchlistImportDialog({ open, onClose }: Props) {
+export function WatchlistImportDialog({ open, onClose, groupId, groupName, groupColor }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const genRef = useRef(0)
@@ -227,7 +231,7 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       return
     }
     try {
-      const data = await batchAdd.mutateAsync(symbols)
+      const data = await batchAdd.mutateAsync({ symbols, groupId })
       toast(`已添加 ${data.added} 只自选`, 'success')
       onClose()
     } catch {
@@ -244,6 +248,7 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
       : progress
         ? '识别中…'
         : null
+  const selectedGroupColor = resolveWatchlistGroupColor(groupColor)
 
   return (
     <Modal
@@ -256,12 +261,20 @@ export function WatchlistImportDialog({ open, onClose }: Props) {
           <h2 id="watchlist-import-title" className="text-sm font-semibold text-foreground">
             从截图导入自选
           </h2>
-          <p className="text-[11px] text-muted mt-0.5">
-            {ocrBlocked
-              ? 'OCR 引擎不可用'
-              : '可多选截图，将逐张识别并合并结果后确认添加'}
-            {provider ? ` · ${provider}` : ''}
-          </p>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+            <p className="text-[11px] text-muted">
+              {ocrBlocked
+                ? 'OCR 引擎不可用'
+                : '可多选截图，将逐张识别并合并结果后确认添加'}
+              {provider ? ` · ${provider}` : ''}
+            </p>
+            {groupName && (
+              <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${selectedGroupColor.text} ${selectedGroupColor.border} ${selectedGroupColor.background}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${selectedGroupColor.dot}`} />
+                {groupName}
+              </span>
+            )}
+          </div>
         </div>
         <button
           type="button"

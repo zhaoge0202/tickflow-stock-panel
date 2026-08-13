@@ -49,6 +49,11 @@ def get_indices_nav_pinned() -> bool:
     return load().get("indices_nav_pinned", True)
 
 
+def get_watchlist_groups_in_nav() -> bool:
+    """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
+    return load().get("watchlist_groups_in_nav", False)
+
+
 def get_realtime_quote_interval() -> float:
     return load().get("realtime_quote_interval", 6.0)
 
@@ -186,6 +191,32 @@ def get_minute_sync_segment_days() -> int:
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
 _ALLOWED_DATA_PROVIDERS = {"tickflow"}
+DATA_SOURCE_JOB_TIMEOUT_MIN_S = 60
+
+
+def get_data_source_job_timeout_s() -> int:
+    """返回普通数据后台任务的卡死判定时间(秒)。"""
+    from app.services.pipeline_jobs import DEFAULT_JOB_TIMEOUT_S
+    raw = load().get("data_source_job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        timeout_s = DEFAULT_JOB_TIMEOUT_S
+    return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
+
+
+def get_data_source_long_job_timeout_s() -> int:
+    """返回分钟 K 全市场等长任务的卡死判定时间(秒)。"""
+    from app.services.pipeline_jobs import LONG_JOB_TIMEOUT_S
+    raw = load().get(
+        "data_source_long_job_timeout_s",
+        LONG_JOB_TIMEOUT_S,
+    )
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        timeout_s = LONG_JOB_TIMEOUT_S
+    return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
 
 
 def _allowed_data_providers() -> set[str]:

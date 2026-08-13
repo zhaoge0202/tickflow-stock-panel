@@ -332,6 +332,7 @@ interface Props {
   symbol?: string
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
   /** 默认可见蜡烛根数, 默认 60 */
   visibleBars?: number
   /** 已激活的子图 key 列表 (含 vol, 按点击顺序) */
@@ -551,6 +552,24 @@ function buildOption(
   const series: any[] = []
   const xAxisIndices: number[] = []
 
+  const priceLineValues = (priceLines ?? [])
+    .map(line => line.value)
+    .filter(value => Number.isFinite(value) && value > 0)
+  const axisMin = priceLineValues.length > 0
+    ? ({ min, max }: { min: number; max: number }) => {
+        const nextMin = Math.min(min, ...priceLineValues)
+        const nextMax = Math.max(max, ...priceLineValues)
+        return nextMin - Math.max((nextMax - nextMin) * 0.03, nextMax * 0.001)
+      }
+    : undefined
+  const axisMax = priceLineValues.length > 0
+    ? ({ min, max }: { min: number; max: number }) => {
+        const nextMin = Math.min(min, ...priceLineValues)
+        const nextMax = Math.max(max, ...priceLineValues)
+        return nextMax + Math.max((nextMax - nextMin) * 0.03, nextMax * 0.001)
+      }
+    : undefined
+
   // ===== grid 0: K线主图 =====
   grids.push({ left, right, top: topPad, height: candleAvail })
   xAxes.push({
@@ -562,6 +581,8 @@ function buildOption(
   })
   yAxes.push({
     scale: true,
+    min: axisMin,
+    max: axisMax,
     // 上下各留 3% 边距: 防止最高/最低点的蜡烛贴边, 涨停/炸板标签被遮挡
     boundaryGap: [0.03, 0.03],
     splitArea: { show: false },
@@ -791,6 +812,7 @@ export function EChartsCandlestick({
   symbol: _symbol,
   linkedPrice,
   onDateClick,
+  onPriceDoubleClick,
   visibleBars = 60,
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
@@ -801,6 +823,8 @@ export function EChartsCandlestick({
   dataRef.current = data
   const onDateClickRef = useRef(onDateClick)
   onDateClickRef.current = onDateClick
+  const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
+  onPriceDoubleClickRef.current = onPriceDoubleClick
   // 主题: buildOption/信息栏内部通过 CT() 动态取调色板, 这里只负责切换时触发重建
   const theme = useTheme()
 
@@ -982,6 +1006,18 @@ export function EChartsCandlestick({
       }
     })
 
+    const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
+      const pixel: [number, number] = [event.offsetX, event.offsetY]
+      if (!chart.containPixel({ gridIndex: 0 }, pixel)) return
+      const coordinate = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, pixel)
+      const price = Array.isArray(coordinate) ? Number(coordinate[1]) : NaN
+      const currentPrice = dataRef.current[dataRef.current.length - 1]?.close
+      if (Number.isFinite(price) && price > 0 && Number.isFinite(currentPrice) && currentPrice > 0) {
+        onPriceDoubleClickRef.current?.(price, currentPrice)
+      }
+    }
+    chart.getZr().on('dblclick', handlePriceDoubleClick)
+
     // dataZoom → 只更新 ref，不触发 React re-render
     // compact 变化时需要增量更新 markPoint
     chart.on('dataZoom', () => {
@@ -1007,6 +1043,7 @@ export function EChartsCandlestick({
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
+      chart.getZr().off('dblclick', handlePriceDoubleClick)
       ro.disconnect()
       chart.dispose()
       chartRef.current = null

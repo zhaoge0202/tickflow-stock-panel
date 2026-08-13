@@ -12,6 +12,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 from __future__ import annotations
 
 from datetime import date, datetime
+from threading import Lock
 from unittest.mock import MagicMock
 
 import httpx
@@ -409,6 +410,38 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     assert written == expected_df.height
     assert written > 0
     get_client_spy.assert_not_called()
+
+
+def test_sync_and_persist_minute_holds_repository_write_lock(monkeypatch, tmp_path):
+    expected_df = _mock_minute_df()
+    mock_provider = MagicMock()
+    mock_provider.get_minute.return_value = expected_df
+    _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
+
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
+
+    write_lock = Lock()
+
+    def assert_locked(df, minute_dir):
+        assert not write_lock.acquire(blocking=False)
+        return df.height
+
+    monkeypatch.setattr(kline_sync, "_write_minute_partition", assert_locked)
+
+    mock_repo = MagicMock()
+    mock_repo.store.data_dir = tmp_path
+    mock_repo.db.execute = MagicMock()
+    mock_repo._write_lock = write_lock
+
+    written = kline_sync.sync_and_persist_minute(
+        ["600519.SH"], mock_repo, MagicMock(),
+    )
+
+    assert written == expected_df.height
 
 
 # ---------- 测试 13: get_provider 异常时 fall through TickFlow (Issue 2) ----------

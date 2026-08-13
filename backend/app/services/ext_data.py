@@ -39,7 +39,7 @@ class PullConfig:
         "url", "method", "headers", "body", "response_path",
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
-        "next_run",
+        "next_run", "time_window_start", "time_window_end",
     )
 
     def __init__(
@@ -57,6 +57,8 @@ class PullConfig:
         last_message: str | None = None,
         last_rows: int | None = None,
         next_run: str | None = None,
+        time_window_start: str | None = None,
+        time_window_end: str | None = None,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -71,6 +73,8 @@ class PullConfig:
         self.last_message = last_message
         self.last_rows = last_rows
         self.next_run = next_run            # 下次预计运行 (ISO, 调度器写入)
+        self.time_window_start = time_window_start  # 每日拉取窗口起始 "HH:MM", None=不限
+        self.time_window_end = time_window_end      # 每日拉取窗口结束 "HH:MM", None=不限
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +91,8 @@ class PullConfig:
             "last_message": self.last_message,
             "last_rows": self.last_rows,
             "next_run": self.next_run,
+            "time_window_start": self.time_window_start,
+            "time_window_end": self.time_window_end,
         }
 
     @classmethod
@@ -107,6 +113,8 @@ class PullConfig:
             last_message=d.get("last_message"),
             last_rows=d.get("last_rows"),
             next_run=d.get("next_run"),
+            time_window_start=d.get("time_window_start"),
+            time_window_end=d.get("time_window_end"),
         )
 
 

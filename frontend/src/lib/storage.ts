@@ -36,6 +36,9 @@ export const storage = {
   /** 个股日K成交量对比设置 */
   stockVolumeCompare:   kv<{ enabled: boolean; days: number }>('stock_volume_compare'),
 
+  /** 个股详情多日分时周期 */
+  stockPreviewIntradayDays: kv<number>('stock_preview_intraday_days'),
+
   /** 策略结果列表列配置 */
   screenerResultColumns: kv<unknown[]>('screener_result_columns'),
 
@@ -110,6 +113,8 @@ export const storage = {
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
+    regimeStates?: string[]
+    regimeMinScore?: number | ''
     params?: Record<string, any>
     overrides?: Record<string, any>
     strategyConfigSignature?: string

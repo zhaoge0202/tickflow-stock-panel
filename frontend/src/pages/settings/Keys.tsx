@@ -21,9 +21,9 @@ import { useCapabilities, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
 import { CAP_LABELS, tierTextStyle, tierStyle, tierBaseName, ALL_TIERS, TierTag } from '@/lib/capability-labels'
 
-// ===== 导出为 Panel 组件 (由 Settings.tsx 嵌入) =====
+// ===== TickFlow Key 配置主体 (可嵌入 DataSources 的 TickFlow 详情区) =====
 
-export function SettingsKeysPanel() {
+export function TickFlowKeyConfig() {
   const qc = useQueryClient()
 
   const settings = useSettings()
