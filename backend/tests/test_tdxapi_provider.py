@@ -946,6 +946,58 @@ def test_server_time_moves_weekend_compact_time_to_previous_weekday(monkeypatch)
     assert decoded.minute == 30
 
 
+def test_server_time_decodes_lagging_hour_overflow_minutes(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 8, 13, 14, 4, 31, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    # 部分 TDX 服务器小时字段滞后, 分钟溢出到 60 以上:
+    # 13645520 = 13 时 + 64.552 分 = 14:04:33, 而不是 13:38。
+    ts = tp._server_time_ms("13645520")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.date() == dt.date(2026, 8, 13)
+    assert decoded.hour == 14
+    assert decoded.minute == 4
+
+
+def test_server_time_overflow_minutes_beats_hhmmss_collision(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 8, 13, 10, 49, 30, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    # 10096170 既可读作 10 时 09.617 分, 也可读作 9 时 + 109.617 分 = 10:49:37。
+    # 实时行情应取贴近当前时间的解释。
+    ts = tp._server_time_ms("10096170")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.hour == 10
+    assert decoded.minute == 49
+
+
+def test_server_time_overflow_minutes_midnight_rolls_previous_weekday(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 8, 13, 0, 26, 54, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+
+    # 凌晨拿到的收盘快照 (14 时 + 87.4 分 = 15:27) 应归上一交易日, 不能落成当天未来时间。
+    ts = tp._server_time_ms("14874000")
+    decoded = dt.datetime.fromtimestamp(ts / 1000, tz=tp._CN_TZ)
+
+    assert decoded.date() == dt.date(2026, 8, 12)
+    assert decoded.hour == 15
+    assert decoded.minute == 27
+
+
 def test_server_time_keeps_unix_seconds():
     assert tp._server_time_ms("1730617200") == 1730617200 * 1000
 
