@@ -15,6 +15,11 @@ from app import __version__
 from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
+from app.extensions.loader import (
+    configure_backend_extensions,
+    current_extension_context,
+    start_backend_extensions,
+)
 from app.jobs import daily_pipeline
 from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
@@ -31,7 +36,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
-        "TickFlow Stock Panel v%s starting (mode=%s)",
+        "Tick Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
@@ -246,6 +251,13 @@ async def lifespan(app: FastAPI):
     app.state.monitor_engine = monitor_engine
     app.state.sector_monitor_service = sector_monitor_service
 
+    # 源码内二次开发启动钩子: 仅暴露稳定只读上下文, 单个扩展失败不影响核心启动。
+    extension_registry = app.state.extension_registry
+    start_backend_extensions(
+        current_extension_context(data_dir=store.data_dir, repository=repo),
+        extension_registry,
+    )
+
     yield
 
     if app.state.scheduler:
@@ -269,7 +281,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="TickFlow Stock Panel",
+    title="Tick Stock Panel",
     version=__version__,
     description="A 股选股 + 回测面板 — TickFlow 适配",
     lifespan=lifespan,
@@ -356,6 +368,11 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
+
+# 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。
+extension_registry, extension_load_errors = configure_backend_extensions(app)
+app.state.extension_registry = extension_registry
+app.state.extension_load_errors = extension_load_errors
 
 
 # 能力门控异常 → 403(而非默认 500)

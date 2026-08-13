@@ -28,7 +28,6 @@ def _make_strategy(
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=10,
-        alerts=[],
         filter_fn=None,
         filter_history_fn=None,
         lookback_days=60,
@@ -43,6 +42,7 @@ def test_no_overrides_returns_default_signals():
         exit_signals=["signal_ma20_breakdown"],
     )
     detail = _strategy_detail(s, overrides=None)
+    assert "alerts" not in detail
     assert detail["entry_signals"] == ["signal_ma20_breakout", "signal_n_day_high"]
     assert detail["exit_signals"] == ["signal_ma20_breakdown"]
 

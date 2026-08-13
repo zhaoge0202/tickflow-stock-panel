@@ -24,7 +24,6 @@ def _strategy(**kwargs) -> StrategyDef:
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        alerts=[],
         filter_fn=lambda df, params: pl.lit(True),
         filter_history_fn=None,
         lookback_days=1,

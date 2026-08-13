@@ -54,7 +54,6 @@ ENTRY_SIGNALS = ["signal_ma20_breakout"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 30
-ALERTS = []
 
 
 class LowVolatilityLeaderMatrixStrategy:

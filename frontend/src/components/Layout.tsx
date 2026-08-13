@@ -58,6 +58,8 @@ import { cn } from '@/lib/cn'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
+import { ExtensionSlot } from '@/extensions/ExtensionSlot'
+import { getFrontendExtensionNavigation } from '@/extensions/registry'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
@@ -76,7 +78,7 @@ const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
-  { to: '/backtest',   label: '回测',   icon: History },
+  { to: '/backtest',   label: '回测', icon: History },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
@@ -140,7 +142,7 @@ function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; i
   if (items.length === 0) return null
   const quoteBySymbol = new Map((rows ?? []).map(q => [q.symbol, q]))
   return (
-    <div className="mt-2 grid grid-cols-2 gap-1.5">
+    <div className="mt-2 grid grid-cols-2 gap-1.5 border-t border-border/60 pt-2">
       {items.map(item => {
         const q = quoteBySymbol.get(item.symbol)
         const value = q?.last_price ?? q?.close
@@ -332,8 +334,22 @@ export function Layout() {
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
   // 侧边栏收起状态 — 持久化到 localStorage
   const [navCollapsed, setNavCollapsed] = useState(() => {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) return true
     try { return localStorage.getItem('tf-nav-collapsed') === '1' } catch { return false }
   })
+  useEffect(() => {
+    const compact = window.matchMedia('(max-width: 767px)')
+    const syncSidebarWithViewport = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) {
+        setNavCollapsed(true)
+        return
+      }
+      try { setNavCollapsed(localStorage.getItem('tf-nav-collapsed') === '1') } catch {}
+    }
+    syncSidebarWithViewport(compact)
+    compact.addEventListener('change', syncSidebarWithViewport)
+    return () => compact.removeEventListener('change', syncSidebarWithViewport)
+  }, [])
   const toggleNavCollapsed = () => {
     setNavCollapsed(prev => {
       const next = !prev
@@ -372,6 +388,34 @@ export function Layout() {
   const realtimeProviderName = realtimeProvider && realtimeProvider !== 'tickflow'
     ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
     : null
+  const realtimeToggleDisabled = toggleQuote.isPending || isPaused
+  const realtimeActive = realtimeEnabled && isRunning && isTrading
+  const realtimeStatusLabel = toggleQuote.isPending
+    ? '正在更新'
+    : isPaused
+      ? '同步期间暂停'
+      : realtimeActive
+        ? '运行中'
+        : realtimeEnabled
+          ? (isTrading ? '正在连接' : '等待交易时段')
+          : '已关闭'
+  const realtimeStatusClass = realtimeActive
+    ? 'text-accent'
+    : realtimeEnabled || isPaused
+      ? 'text-warning/80'
+      : 'text-muted'
+  const realtimeIndicatorClass = realtimeActive
+    ? 'bg-accent animate-pulse'
+    : realtimeEnabled || isPaused
+      ? 'bg-warning/70'
+      : 'bg-muted'
+  const realtimeToggleTitle = isPaused
+    ? '数据同步运行中，实时行情已临时暂停'
+    : toggleQuote.isPending
+      ? '正在更新实时行情设置'
+      : realtimeEnabled
+        ? '关闭实时行情'
+        : '开启实时行情'
 
   // 当前主数据源 (用于侧边栏数据源状态卡)
   const activeProvider = prefs?.daily_data_provider || 'tickflow'
@@ -399,8 +443,14 @@ export function Layout() {
   const analysisNav: NavItem[] = (analysisMenus?.items ?? [])
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
+  const extensionNav: NavItem[] = getFrontendExtensionNavigation().map(item => ({
+    to: item.route.path,
+    label: item.label,
+    icon: item.icon,
+    badge: item.badge,
+  }))
 
-  const allNav: NavItem[] = [...nav, ...analysisNav]
+  const allNav: NavItem[] = [...nav, ...analysisNav, ...extensionNav]
   const savedOrder = prefs?.nav_order ?? []
 
   const navItems = savedOrder.length > 0
@@ -478,13 +528,14 @@ export function Layout() {
 
           {/* 状态卡 — 收起时隐藏 */}
           {!navCollapsed && (
-            <div className="mt-2.5 space-y-0.5">
+            <div className="mt-2.5 border-t border-border/60 pt-1">
               <TierBadge
                 label={caps?.label ?? ''}
                 hasKey={settingsState?.mode !== 'none'}
                 providerName={activeProviderName}
                 isTickflow={!isCustomActive}
               />
+              <div className="mx-2 border-t border-border/45" aria-hidden="true" />
               <AIConfigBadge
                 configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
                 model={settingsState?.ai_model}
@@ -608,6 +659,11 @@ export function Layout() {
               </div>
             )
           })}
+          <ExtensionSlot
+            name="layout.navigation.extra"
+            context={{ collapsed: navCollapsed, pathname: location.pathname }}
+            compact
+          />
         </nav>
 
         {/* 全局行情开关 — 收起时只显示状态指示点 */}
@@ -615,15 +671,13 @@ export function Layout() {
           <div className="border-t border-border px-2 py-2.5 shrink-0 flex justify-center">
             <button
               onClick={() => handleToggle(!realtimeEnabled)}
-              disabled={toggleQuote.isPending || isPaused}
-              title={realtimeEnabled ? (isRunning && isTrading ? '行情运行中 · 点击关闭' : '实时行情已开启') : '实时行情已关闭 · 点击开启'}
-              className="flex items-center justify-center rounded-btn p-1.5 transition-colors hover:bg-elevated/70"
+              disabled={realtimeToggleDisabled}
+              aria-label={realtimeToggleTitle}
+              aria-busy={toggleQuote.isPending}
+              title={realtimeToggleTitle}
+              className="flex items-center justify-center rounded-btn p-1.5 transition-colors hover:bg-elevated/70 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <span className={`inline-block h-2 w-2 rounded-full ${
-                realtimeEnabled && isRunning && isTrading
-                  ? 'bg-accent animate-pulse'
-                  : realtimeEnabled ? 'bg-warning/60' : 'bg-muted'
-              }`} />
+              <span className={`inline-block h-2 w-2 rounded-full ${realtimeIndicatorClass}`} />
             </button>
           </div>
         ) : (
@@ -652,67 +706,76 @@ export function Layout() {
             </div>
           ) : (
             /* Starter+ — 开关 + 跳转设置 */
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
-                  realtimeEnabled && isRunning && isTrading
-                    ? 'bg-accent animate-pulse'
-                    : realtimeEnabled
-                      ? 'bg-warning/60'
-                      : 'bg-muted'
-                }`} />
-                <span className="text-xs text-secondary truncate">
-                  实时行情 · {realtimeProviderName || realtimeModeLabel}
-                </span>
+            <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${realtimeIndicatorClass}`} />
+                <div className="min-w-0">
+                  <div className="text-xs font-medium leading-none text-foreground">实时行情</div>
+                  <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] leading-none">
+                    <span className="truncate text-muted">{realtimeProviderName || realtimeModeLabel}</span>
+                    <span className="shrink-0 text-border" aria-hidden="true">·</span>
+                    <span className={`shrink-0 ${realtimeStatusClass}`}>{realtimeStatusLabel}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
                 <button
                   onClick={() => navigate('/settings?tab=monitoring')}
-                  className="text-secondary hover:text-foreground transition-colors shrink-0"
+                  aria-label="打开实时监控设置"
+                  className="flex h-7 w-7 items-center justify-center rounded-btn text-muted transition-colors hover:bg-elevated hover:text-foreground"
                   title="实时监控设置"
                 >
-                  <Settings className="h-3 w-3" />
+                  <Settings className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={realtimeEnabled}
+                  aria-label={realtimeToggleTitle}
+                  aria-busy={toggleQuote.isPending}
+                  onClick={() => handleToggle(!realtimeEnabled)}
+                  disabled={realtimeToggleDisabled}
+                  title={realtimeToggleTitle}
+                  className={cn(
+                    'relative inline-flex h-5 w-9 items-center rounded-full border transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface',
+                    realtimeEnabled
+                      ? 'border-accent/50 bg-accent shadow-[0_0_6px_rgba(59,130,246,0.25)]'
+                      : 'border-border bg-elevated hover:border-muted',
+                    realtimeToggleDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+                  )}
+                >
+                  <span className={cn(
+                    'inline-block h-3.5 w-3.5 rounded-full border border-black/5 bg-white shadow-sm transition-transform duration-200',
+                    realtimeEnabled ? 'translate-x-[18px]' : 'translate-x-0.5',
+                  )} />
                 </button>
               </div>
-              <button
-                onClick={() => handleToggle(!realtimeEnabled)}
-                disabled={toggleQuote.isPending || isPaused}
-                title={isPaused ? '数据同步运行中，实时行情已临时暂停' : undefined}
-                className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                  realtimeEnabled
-                    ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
-                    : 'bg-elevated'
-                } ${toggleQuote.isPending || isPaused ? 'opacity-50' : 'cursor-pointer'}`}
-              >
-                <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                  realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
-                }`} />
-              </button>
             </div>
           )}
 
           {/* 状态提示 */}
-          {realtimeEnabled && (!isNoneTier || realtimeProviderName) && (
-            <div className="mt-1.5 text-[10px] leading-snug space-y-0.5">
-              {isWatchlistMode && !dismissFreeHint && !realtimeProviderName && (
-                <div className="flex items-start gap-1 text-amber-400/80">
-                  <span className="flex-1">监控自选股前 5 只，全市场监控需 Starter+</span>
-                  <button
-                    onClick={() => setDismissFreeHint(true)}
-                    className="text-amber-400/50 hover:text-amber-400 shrink-0 transition-colors"
-                    title="关闭提示"
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
-                </div>
-              )}
-              {isPaused ? (
-                <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
-              ) : isRunning && isTrading ? (
-                <div className="text-accent">行情运行中</div>
-              ) : realtimeEnabled && !isTrading ? (
-                <div className="text-warning/70">非交易时段，将在交易时间自动开启</div>
-              ) : null}
-            </div>
-          )}
+          {realtimeEnabled
+            && (!isNoneTier || realtimeProviderName)
+            && (isPaused || (isWatchlistMode && !dismissFreeHint && !realtimeProviderName))
+            && (
+              <div className="mt-1.5 text-[10px] leading-snug space-y-0.5">
+                {isWatchlistMode && !dismissFreeHint && !realtimeProviderName && (
+                  <div className="flex items-start gap-1 text-amber-400/80">
+                    <span className="flex-1">监控自选股前 5 只，全市场监控需 Starter+</span>
+                    <button
+                      onClick={() => setDismissFreeHint(true)}
+                      className="text-amber-400/50 hover:text-amber-400 shrink-0 transition-colors"
+                      title="关闭提示"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                )}
+                {isPaused && (
+                  <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
+                )}
+              </div>
+            )}
           {showSidebarQuotes && !isWatchlistMode && (!isNoneTier || !!realtimeProviderName) && (
             <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
           )}

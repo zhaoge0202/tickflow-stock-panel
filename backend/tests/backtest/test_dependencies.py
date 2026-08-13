@@ -17,7 +17,6 @@ def _strategy(**overrides) -> StrategyDef:
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        alerts=[],
         filter_fn=lambda df, params: pl.col("rsi_14") < params["rsi_max"],
         filter_history_fn=None,
         lookback_days=20,
@@ -63,6 +62,23 @@ def test_resolver_expands_virtual_scoring_dependencies():
     assert "close" in plan.base_columns
     assert "ma20_bias" not in plan.base_columns
     assert "ma20_bias" not in plan.indicator_columns
+
+
+def test_resolver_honors_full_scoring_replacement():
+    plan = StrategyDependencyResolver().resolve(
+        _strategy(),
+        params={"rsi_max": 30},
+        basic_filter={"enabled": False},
+        entry_signals=[],
+        exit_signals=[],
+        overrides={
+            "scoring": {"amount_ratio_5d": 1.0},
+            "scoring_replace": True,
+        },
+    )
+
+    assert "amount" in plan.base_columns
+    assert "momentum_20d" not in plan.indicator_columns
 
 
 def test_history_strategy_without_required_features_falls_back_to_full(caplog):

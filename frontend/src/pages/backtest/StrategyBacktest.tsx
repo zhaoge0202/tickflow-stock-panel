@@ -1,13 +1,14 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
+  type ScoringDirection,
   REGIME_STATE_LABELS,
   REGIME_STATE_COLORS,
 } from '@/lib/api'
@@ -30,6 +31,8 @@ import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
+import { ScoringEditor } from '@/components/ScoringEditor'
+import { strategyResultCandidate } from './researchCandidates'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -270,6 +273,15 @@ const mergeStrategyParams = (detail: StrategyDetail, values?: Record<string, any
 })
 const normalizeStrategyOverrides = (detail: StrategyDetail, values?: Record<string, any> | null) => {
   const next = { ...(values ?? {}) }
+  const savedScoring = next.scoring && typeof next.scoring === 'object' ? next.scoring : {}
+  next.scoring = next.scoring_replace === true
+    ? { ...savedScoring }
+    : { ...detail.scoring, ...savedScoring }
+  next.scoring_directions = {
+    ...(detail.scoring_directions ?? {}),
+    ...(next.scoring_directions ?? {}),
+  }
+  next.scoring_replace = true
   if (detail.execution_backend === 'matrix_native') {
     // MatrixStrategy.compute_signals() owns entry/exit formulas. Remove both
     // current and legacy persisted column overrides before any request.
@@ -283,6 +295,8 @@ const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverr
   entry_signals: detail.entry_signals.map(toSignalId),
   exit_signals: detail.exit_signals.map(toSignalId),
   scoring: { ...detail.scoring },
+  scoring_directions: { ...(detail.scoring_directions ?? {}) },
+  scoring_replace: true,
   stop_loss: detail.stop_loss,
   take_profit: detail.take_profit,
   trailing_stop: detail.trailing_stop,
@@ -299,6 +313,7 @@ const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringi
   params: detail.params,
   params_defaults: detail.params_defaults,
   scoring: detail.scoring,
+  scoring_directions: detail.scoring_directions,
   entry_signals: detail.entry_signals,
   exit_signals: detail.exit_signals,
   stop_loss: detail.stop_loss,
@@ -662,49 +677,6 @@ function ConfigSection({ title, hint, actions, children }: { title: string; hint
 }
 
 
-const scoringToPct = (values: Record<string, number>) => {
-  const total = Object.values(values).reduce((a, b) => a + Math.max(0, Number(b) || 0), 0)
-  if (total <= 0) return Object.fromEntries(Object.keys(values).map(k => [k, 0])) as Record<string, number>
-  return Object.fromEntries(Object.entries(values).map(([k, v]) => [k, Math.round((Math.max(0, Number(v) || 0) / total) * 100)])) as Record<string, number>
-}
-
-const normalizePctWeights = (values: Record<string, number>) => {
-  const total = Object.values(values).reduce((a, b) => a + Math.max(0, Number(b) || 0), 0)
-  if (total <= 0) return Object.fromEntries(Object.keys(values).map(k => [k, 0])) as Record<string, number>
-  return Object.fromEntries(Object.entries(values).map(([k, v]) => [k, +(Math.max(0, Number(v) || 0) / total).toFixed(4)])) as Record<string, number>
-}
-
-function ScoringWeightRow({ name, weight, pct, editing, onChange }: {
-  name: string
-  weight: number
-  pct: number
-  editing: boolean
-  onChange: (value: number) => void
-}) {
-  const label = FIELD_LABEL[name] ?? name
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-20 shrink-0 truncate text-right text-[11px] text-secondary" title={name}>{label}</span>
-      {editing ? (
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={weight}
-          onChange={e => onChange(Number(e.target.value))}
-          className="h-1 flex-1 cursor-pointer accent-amber-400"
-        />
-      ) : (
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-elevated">
-          <div className="h-full rounded-full bg-amber-400/70 transition-all duration-300" style={{ width: `${Math.min(pct, 100)}%` }} />
-        </div>
-      )}
-      <span className="w-10 text-right font-mono text-[10px] text-muted">{editing ? weight : `${pct}%`}</span>
-    </div>
-  )
-}
-
 function StrategyParamInput({ param, value, onChange }: {
   param: StrategyParamDef
   value: any
@@ -922,6 +894,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
 }
 
 export function StrategyBacktest() {
+  const queryClient = useQueryClient()
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
@@ -963,8 +936,6 @@ export function StrategyBacktest() {
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
   const [settingsTab, setSettingsTab] = useState<AdvancedSettingsTab>('params')
-  const [editingScoring, setEditingScoring] = useState(false)
-  const [scoringDraft, setScoringDraft] = useState<Record<string, number>>({})
   const [strategyParams, setStrategyParams] = useState<Record<string, any>>(saved?.params ?? {})
   const [overrides, setOverrides] = useState<Record<string, any>>(saved?.overrides ?? {})
   // result 不从 localStorage 恢复:它是运行产物(净值/交易),大且易过时,
@@ -982,12 +953,10 @@ export function StrategyBacktest() {
     queryKey: QK.screenerStrategies(assetType),
     queryFn: () => api.screenerStrategies(assetType),
   })
-
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
     strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
   ), [strategyGroup, strategyList])
-
   // 校验 localStorage 里保存的上次选中策略是否仍存在(本地开发残留的自定义策略
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
@@ -1010,6 +979,17 @@ export function StrategyBacktest() {
 
   const backtestTask = useBacktestTask()
   const isPending = backtestTask?.isPending ?? false
+  const saveCandidate = useMutation({
+    mutationFn: () => {
+      if (!result) throw new Error('暂无策略结果')
+      return api.researchCandidateCreate(strategyResultCandidate(result))
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: QK.researchCandidates })
+      toast('已保存到候选方案', 'success')
+    },
+    onError: error => toast(`保存失败 · ${String((error as Error).message || error)}`, 'error'),
+  })
 
   const dataStatus = useDataStatus()
   const backtestDataStatus = assetType === 'etf'
@@ -1309,6 +1289,10 @@ export function StrategyBacktest() {
   }, [exitFill, highGranularity, minuteExitTriggerSupported])
 
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
+  const scoringDirections = useMemo(
+    () => (overrides.scoring_directions ?? {}) as Record<string, ScoringDirection>,
+    [overrides.scoring_directions],
+  )
   const scoreMinValue = overrides.score_min == null ? '' : String(overrides.score_min)
   const scoreMaxValue = overrides.score_max == null ? '' : String(overrides.score_max)
   const stopLossPct = overrides.stop_loss == null ? '' : String(round4(Math.abs(Number(overrides.stop_loss)) * 100))
@@ -1318,10 +1302,6 @@ export function StrategyBacktest() {
   const trailingTakeProfitDrawdownPct = overrides.trailing_take_profit_drawdown == null ? '' : String(round4(Math.abs(Number(overrides.trailing_take_profit_drawdown)) * 100))
   const maxHoldDaysValue = overrides.max_hold_days == null ? '' : String(overrides.max_hold_days)
   const targetPositionPct = Number(maxPositions) > 0 ? Number(maxExposure) / Number(maxPositions) : 0
-
-  useEffect(() => {
-    if (!editingScoring) setScoringDraft(scoringToPct(scoring))
-  }, [scoring, editingScoring])
 
   useEffect(() => {
     if (matrixStrategy && (settingsTab === 'entry' || settingsTab === 'exit')) {
@@ -1334,18 +1314,6 @@ export function StrategyBacktest() {
   }
   const updateBasicFilter = (key: string, value: any) => {
     updateOverride('basic_filter', { ...basicFilter, [key]: value })
-  }
-  const startScoringEdit = () => {
-    setScoringDraft(scoringToPct(scoring))
-    setEditingScoring(true)
-  }
-  const cancelScoringEdit = () => {
-    setScoringDraft(scoringToPct(scoring))
-    setEditingScoring(false)
-  }
-  const saveScoringDraft = () => {
-    updateOverride('scoring', normalizePctWeights(scoringDraft))
-    setEditingScoring(false)
   }
   const scoreFilterSummary = scoreMinValue !== '' && scoreMaxValue !== ''
     ? `评分 ${scoreMinValue}~${scoreMaxValue}`
@@ -1793,32 +1761,45 @@ export function StrategyBacktest() {
               </button>
             ))}
           </div>
-          {simMode === 'full' && (
-            maxHoldDaysValue !== '' ? (
-              <div className="rounded-btn border border-border bg-surface px-2 py-1 text-[11px] text-secondary">
-                策略最长 <span className="font-mono text-foreground">{maxHoldDaysValue}</span> 天
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5 text-[11px] text-secondary">
-                <span>兜底上限</span>
-                <div className="flex rounded-btn border border-border overflow-hidden">
-                  {(['1', '5', '10', '20'] as const).map(d => (
-                    <button
-                      key={d}
-                      onClick={() => setHoldingDays(d)}
-                      className={`px-2 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
-                        holdingDays === d
-                          ? 'bg-accent/10 text-accent'
-                          : 'text-muted hover:text-secondary hover:bg-elevated'
-                      }`}
-                    >
-                      {d}天
-                    </button>
-                  ))}
+          <div className="flex items-center gap-2">
+            {simMode === 'full' && (
+              maxHoldDaysValue !== '' ? (
+                <div className="rounded-btn border border-border bg-surface px-2 py-1 text-[11px] text-secondary">
+                  策略最长 <span className="font-mono text-foreground">{maxHoldDaysValue}</span> 天
                 </div>
-              </div>
-            )
-          )}
+              ) : (
+                <div className="flex items-center gap-1.5 text-[11px] text-secondary">
+                  <span>兜底上限</span>
+                  <div className="flex rounded-btn border border-border overflow-hidden">
+                    {(['1', '5', '10', '20'] as const).map(d => (
+                      <button
+                        key={d}
+                        onClick={() => setHoldingDays(d)}
+                        className={`px-2 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
+                          holdingDays === d
+                            ? 'bg-accent/10 text-accent'
+                            : 'text-muted hover:text-secondary hover:bg-elevated'
+                        }`}
+                      >
+                        {d}天
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            )}
+            {result && !result.error && (
+              <button
+                type="button"
+                onClick={() => saveCandidate.mutate()}
+                disabled={saveCandidate.isPending}
+                className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border bg-surface px-2.5 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+              >
+                <BookmarkPlus className="h-3.5 w-3.5" />
+                {saveCandidate.isPending ? '保存中' : '保存候选'}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 市场环境过滤: 只在指定环境的交易日入场(强制 T-1, 用前一日环境判定) */}
@@ -2575,53 +2556,19 @@ export function StrategyBacktest() {
               )}
 
               {settingsTab === 'scoring' && (
-                <ConfigSection title="评分权重" hint="临时拖动滑块，保存时统一归权">
-                  {Object.entries(scoring).length > 0 ? (() => {
-                    const visibleWeights = editingScoring ? scoringDraft : scoringToPct(scoring)
-                    const total = Object.values(visibleWeights).reduce((a, b) => a + b, 0)
-                    return (
-                      <div className="space-y-3">
-                        <div className="space-y-2">
-                          {Object.keys(scoring).map(key => (
-                            <ScoringWeightRow
-                              key={key}
-                              name={key}
-                              weight={visibleWeights[key] ?? 0}
-                              pct={visibleWeights[key] ?? 0}
-                              editing={editingScoring}
-                              onChange={value => setScoringDraft(prev => ({ ...prev, [key]: Math.max(0, value) }))}
-                            />
-                          ))}
-                        </div>
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/40 pt-2">
-                          <div className="text-[10px] text-muted">
-                            总和 <span className={`font-mono text-xs font-medium ${editingScoring && total !== 100 ? 'text-amber-400' : 'text-emerald-400'}`}>{editingScoring ? total : 100}</span>
-                            <span className="ml-1 text-muted/70">保存时自动归一化计算</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {editingScoring && (
-                              <button
-                                type="button"
-                                onClick={cancelScoringEdit}
-                                className="rounded-btn border border-border bg-base px-2.5 py-1 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-foreground"
-                              >
-                                取消
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={editingScoring ? saveScoringDraft : startScoringEdit}
-                              className="rounded-btn border border-amber-400/40 bg-amber-400/10 px-2.5 py-1 text-[11px] text-amber-400 transition-colors hover:bg-amber-400/15"
-                            >
-                              {editingScoring ? '保存归权' : '调整权重'}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })() : (
-                    <div className="text-xs text-muted">当前策略没有评分权重。</div>
-                  )}
+                <ConfigSection title="评分方案" hint="选择因子、方向与权重，保存时自动归一化">
+                  <ScoringEditor
+                    key={detail.id}
+                    value={scoring}
+                    directions={scoringDirections}
+                    fallbackLabels={FIELD_LABEL}
+                    onChange={(nextScoring, nextDirections) => setOverrides(previous => ({
+                      ...previous,
+                      scoring: nextScoring,
+                      scoring_directions: nextDirections,
+                      scoring_replace: true,
+                    }))}
+                  />
                   <div className="border-t border-border/40 pt-3">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <span className="text-[11px] font-medium text-secondary">评分过滤</span>

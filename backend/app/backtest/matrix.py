@@ -34,6 +34,7 @@ from app.price_limits import (
     numpy_limit_price,
     write_numpy_price_limit_matrix,
 )
+from app.strategy.scoring import SCORING_DIRECTION_LOW
 
 try:
     from numba import njit, prange
@@ -3397,6 +3398,7 @@ class MatrixPipelineConfig:
     scoring: dict[str, float]
     order_by: str | None
     descending: bool
+    scoring_directions: dict[str, str] = field(default_factory=dict)
     asset_mask: np.ndarray | None = None
     protect_strategy_cache: bool = False
 
@@ -3462,6 +3464,7 @@ class MatrixStrategyPipeline:
                 config.order_by,
                 config.descending,
                 fallback=signals.score,
+                directions=config.scoring_directions,
             )
             entry_codes = np.where(entry != 0, signals.entry_signal_code, -1).astype(np.int16)
             exit_codes = np.where(signals.exit != 0, signals.exit_signal_code, -1).astype(np.int16)
@@ -3502,14 +3505,7 @@ def _estimate_pipeline_cache_bytes(
     for name in feature_names:
         if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
             continue
-        if name == "vol_ratio_5d":
-            estimated += 2 * float_bytes
-        elif name == "ma20_bias":
-            estimated += 2 * float_bytes
-        elif name == "change_pct" or (
-            name.startswith("momentum_") and name.endswith("d")
-        ):
-            estimated += float_bytes
+        estimated += 5 * float_bytes
     return estimated
 
 
@@ -3588,6 +3584,7 @@ def build_matrix_score(
     descending: bool,
     *,
     fallback: np.ndarray,
+    directions: Mapping[str, str] | None = None,
 ) -> np.ndarray:
     weights = {name: float(weight) for name, weight in scoring.items() if float(weight) != 0.0}
     total_weight = sum(weights.values())
@@ -3639,6 +3636,8 @@ def build_matrix_score(
                 np.divide(scratch, row_range[:, None], out=scratch, where=mask)
                 np.logical_and(finite, ~varying_rows[:, None], out=mask)
                 scratch[mask] = np.float32(0.5)
+                if (directions or {}).get(name) == SCORING_DIRECTION_LOW:
+                    scratch[finite] = np.float32(1.0) - scratch[finite]
                 scratch *= normalized_weight
                 score[:, start:stop] += scratch
         score *= np.float32(100.0)
@@ -3665,38 +3664,38 @@ def build_matrix_score(
     return result
 
 
+_MATRIX_COMPUTED_FEATURES = frozenset({
+    "prev_close", "change_pct", "change_amount", "amplitude",
+    "boll_upper", "boll_lower", "boll_position", "boll_width",
+    "high_60d", "low_60d", "annual_vol_20d",
+    "macd_dif", "macd_dea", "macd_hist",
+    "macd_dif_pct", "macd_dea_pct", "macd_hist_pct",
+    "kdj_k", "kdj_d", "kdj_j", "atr_14", "atr_pct",
+    "vol_ma5", "vol_ma10", "vol_ratio_5d", "vol_ratio_10d", "vol_trend_5_10",
+    "turnover_ratio_5d", "log_amount", "amount_ratio_5d",
+    "gap_return", "intraday_return", "close_position",
+    "distance_to_high_60d", "distance_from_low_60d",
+})
+
+
 def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
         return market.field(name)
-    close_feature = (
-        name in {
-            "prev_close",
-            "change_pct",
-            "change_amount",
-            "amplitude",
-            "boll_upper",
-            "boll_lower",
-            "high_60d",
-            "low_60d",
-            "annual_vol_20d",
-            "ma20_bias",
-        }
+    supported = (
+        name in _MATRIX_COMPUTED_FEATURES
+        or (name.startswith("ma") and name.endswith("_bias") and name[2:-5].isdigit())
+        or (name.startswith("ema") and name.endswith("_bias") and name[3:-5].isdigit())
         or (name.startswith("ma") and name[2:].isdigit())
+        or (name.startswith("ema") and name[3:].isdigit())
         or (name.startswith("rsi_") and name[4:].isdigit())
-        or (
-            name.startswith("momentum_") and name.endswith("d")
-        )
+        or (name.startswith("momentum_") and name.endswith("d"))
     )
-    if close_feature:
-        source = market.close
-    elif name == "vol_ratio_5d":
-        source = market.volume
-    else:
+    if not supported:
         raise ValueError(f"unsupported matrix feature: {name}")
     with _activate_valid_bar_index(market.valid_bars):
         return _cached_matrix_operation(
             "matrix_feature",
-            (source,),
+            (market.close,),
             {"name": name},
             lambda: _compute_matrix_feature(market, name),
         )
@@ -3729,40 +3728,82 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         except ValueError as exc:
             raise ValueError(f"unsupported matrix feature: {name}") from exc
         return _valid_return_over_bars(market.close, close_valid, bars)
-    if name == "vol_ratio_5d":
+    if name.startswith("ma") and name.endswith("_bias"):
+        period = int(name.removeprefix("ma").removesuffix("_bias"))
+        return _matrix_relative(market.close, valid_rolling_mean(market.close, close_valid, period))
+    if name.startswith("ema") and name.endswith("_bias"):
+        period = int(name.removeprefix("ema").removesuffix("_bias"))
+        return _matrix_relative(market.close, _matrix_ema(market.close, close_valid, period))
+    if name.startswith("ma") and name[2:].isdigit():
+        return valid_rolling_mean(market.close, close_valid, int(name[2:]))
+    if name.startswith("ema") and name[3:].isdigit():
+        return _matrix_ema(market.close, close_valid, int(name[3:]))
+    if name in {"macd_dif", "macd_dea", "macd_hist"}:
+        dif, dea = _matrix_macd(market.close, close_valid)
+        if name == "macd_dif":
+            return dif
+        if name == "macd_dea":
+            return dea
+        return ((dif - dea) * np.float32(2.0)).astype(np.float32, copy=False)
+    if name in {"macd_dif_pct", "macd_dea_pct", "macd_hist_pct"}:
+        source = matrix_feature(market, name.removesuffix("_pct"))
+        return _matrix_ratio(source, market.close)
+    if name in {"vol_ratio_5d", "vol_ratio_10d"}:
+        window = 5 if name == "vol_ratio_5d" else 10
         volume_valid = close_valid & np.isfinite(market.volume)
         previous_volume = valid_shift(market.volume, 1, volume_valid)
         previous_mean = valid_rolling_mean(
             previous_volume,
             np.isfinite(previous_volume),
-            5,
+            window,
         )
+        return _matrix_ratio(market.volume, previous_mean)
+    if name in {"vol_ma5", "vol_ma10"}:
+        window = 5 if name == "vol_ma5" else 10
+        volume_valid = close_valid & np.isfinite(market.volume)
+        return valid_rolling_mean(market.volume, volume_valid, window)
+    if name == "vol_trend_5_10":
+        return _matrix_relative(
+            matrix_feature(market, "vol_ma5"),
+            matrix_feature(market, "vol_ma10"),
+        )
+    if name == "turnover_ratio_5d":
+        turnover = market.field("turnover_rate")
+        valid = close_valid & np.isfinite(turnover)
+        previous = valid_shift(turnover, 1, valid)
+        return _matrix_relative(
+            turnover,
+            valid_rolling_mean(previous, np.isfinite(previous), 5),
+        )
+    if name == "log_amount":
+        amount = market.field("amount")
         out = np.full(market.shape, np.nan, dtype=np.float32)
-        np.divide(
-            market.volume,
-            previous_mean,
-            out=out,
-            where=volume_valid & np.isfinite(previous_mean) & (previous_mean != 0),
-        )
+        valid = close_valid & np.isfinite(amount) & (amount >= 0)
+        np.log(amount + np.float32(1.0), out=out, where=valid)
         return out
-    if name == "ma20_bias":
-        ma20 = valid_rolling_mean(market.close, close_valid, 20)
-        out = np.full(market.shape, np.nan, dtype=np.float32)
-        np.divide(
-            market.close,
-            ma20,
-            out=out,
-            where=close_valid & np.isfinite(ma20) & (ma20 != 0),
+    if name == "amount_ratio_5d":
+        amount = market.field("amount")
+        valid = close_valid & np.isfinite(amount)
+        previous = valid_shift(amount, 1, valid)
+        return _matrix_relative(
+            amount,
+            valid_rolling_mean(previous, np.isfinite(previous), 5),
         )
-        out -= np.float32(1.0)
-        return out
-    if name.startswith("ma") and name[2:].isdigit():
-        return valid_rolling_mean(market.close, close_valid, int(name[2:]))
     if name == "boll_upper" or name == "boll_lower":
         middle = valid_rolling_mean(market.close, close_valid, 20)
         deviation = valid_rolling_std(market.close, close_valid, 20, ddof=1)
         offset = np.float32(2.0) * deviation
         return middle + offset if name == "boll_upper" else middle - offset
+    if name == "boll_position":
+        return _matrix_ratio(
+            market.close - matrix_feature(market, "boll_lower"),
+            matrix_feature(market, "boll_upper") - matrix_feature(market, "boll_lower"),
+        )
+    if name == "boll_width":
+        return _matrix_ratio(
+            matrix_feature(market, "boll_upper") - matrix_feature(market, "boll_lower"),
+            matrix_feature(market, "ma20"),
+        )
     if name == "high_60d":
         return valid_rolling_max(market.close, close_valid, 60)
     if name == "low_60d":
@@ -3775,6 +3816,29 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             20,
             ddof=1,
         ) * np.float32(252 ** 0.5)
+    if name in {"kdj_k", "kdj_d", "kdj_j"}:
+        low_valid = close_valid & np.isfinite(market.low)
+        high_valid = close_valid & np.isfinite(market.high)
+        low_9 = valid_rolling_min(market.low, low_valid, 9)
+        high_9 = valid_rolling_max(market.high, high_valid, 9)
+        rsv = _matrix_ratio(market.close - low_9, high_9 - low_9) * np.float32(100.0)
+        k = valid_ewm_adjust_false(rsv, np.isfinite(rsv), alpha=1.0 / 3.0)
+        if name == "kdj_k":
+            return k
+        d = valid_ewm_adjust_false(k, np.isfinite(k), alpha=1.0 / 3.0)
+        if name == "kdj_d":
+            return d
+        return (np.float32(3.0) * k - np.float32(2.0) * d).astype(np.float32, copy=False)
+    if name in {"atr_14", "atr_pct"}:
+        previous = valid_shift(market.close, 1, close_valid)
+        true_range = np.fmax.reduce([
+            market.high - market.low,
+            np.abs(market.high - previous),
+            np.abs(market.low - previous),
+        ]).astype(np.float32, copy=False)
+        true_range[~close_valid] = np.nan
+        atr = valid_ewm_adjust_false(true_range, np.isfinite(true_range), alpha=1.0 / 14.0)
+        return atr if name == "atr_14" else _matrix_ratio(atr, market.close)
     if name.startswith("rsi_") and name[4:].isdigit():
         window = int(name[4:])
         delta = market.close - valid_shift(market.close, 1, close_valid)
@@ -3798,7 +3862,41 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         np.divide(average_gain, denominator, out=out, where=np.isfinite(denominator))
         out = np.float32(100.0) - np.float32(100.0) / (np.float32(1.0) + out)
         return out
+    if name == "gap_return":
+        return _matrix_relative(market.open, valid_shift(market.close, 1, close_valid))
+    if name == "intraday_return":
+        return _matrix_relative(market.close, market.open)
+    if name == "close_position":
+        return _matrix_ratio(market.close - market.low, market.high - market.low)
+    if name == "distance_to_high_60d":
+        return _matrix_relative(market.close, matrix_feature(market, "high_60d"))
+    if name == "distance_from_low_60d":
+        return _matrix_relative(market.close, matrix_feature(market, "low_60d"))
     raise ValueError(f"unsupported matrix feature: {name}")
+
+
+def _matrix_ema(values: np.ndarray, valid: np.ndarray, period: int) -> np.ndarray:
+    return valid_ewm_adjust_false(values, valid, alpha=2.0 / (period + 1.0))
+
+
+def _matrix_macd(values: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    dif = _matrix_ema(values, valid, 12) - _matrix_ema(values, valid, 26)
+    dif = dif.astype(np.float32, copy=False)
+    dea = valid_ewm_adjust_false(dif, np.isfinite(dif), alpha=2.0 / 10.0)
+    return dif, dea
+
+
+def _matrix_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    out = np.full(numerator.shape, np.nan, dtype=np.float32)
+    valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0)
+    np.divide(numerator, denominator, out=out, where=valid)
+    return out
+
+
+def _matrix_relative(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    out = _matrix_ratio(numerator, denominator)
+    out[np.isfinite(out)] -= np.float32(1.0)
+    return out
 
 
 def apply_time_masks(

@@ -1149,6 +1149,7 @@ class QuoteService:
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
                     if rule_events:
+                        rule_events = self._format_extension_notifications(rule_events)
                         # 落盘到 alerts.jsonl
                         try:
                             from app.services import alert_store
@@ -1206,6 +1207,42 @@ class QuoteService:
 
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
+
+    def _format_extension_notifications(self, events: list[dict]) -> list[dict]:
+        """Apply optional copy formatters after evaluation and before every output channel."""
+        registry = (
+            getattr(self._app_state, "extension_registry", None)
+            if self._app_state is not None
+            else None
+        )
+        if registry is None or not registry.has_notification_formatters:
+            return events
+
+        from app.extensions.contracts import (
+            BACKEND_EXTENSION_API_VERSION,
+            NotificationFormatContext,
+        )
+
+        formatted_events: list[dict] = []
+        for event in events:
+            formatted = dict(event)
+            context = NotificationFormatContext(
+                api_version=BACKEND_EXTENSION_API_VERSION,
+            )
+            for registered in registry.notification_formatters():
+                try:
+                    message = registered.implementation.format_message(dict(formatted), context)
+                    if not isinstance(message, str):
+                        raise TypeError("notification formatter must return str")
+                    formatted["message"] = message
+                except Exception as exc:
+                    logger.warning(
+                        "notification formatter failed %s: %s",
+                        registered.implementation_id,
+                        exc,
+                    )
+            formatted_events.append(formatted)
+        return formatted_events
 
     def _enrich_alerts_ext(self, alerts: list[dict]) -> None:
         """就地给告警事件按 symbol 追加行业/概念 ext 字段。

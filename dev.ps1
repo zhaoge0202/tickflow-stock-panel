@@ -160,7 +160,7 @@ if (-not (Test-Path (Join-Path $BackendDir '.venv')) -or $BackendExtraArgs.Count
         Log-Info 'first run - installing Python deps (1-2 min)...'
     }
     Push-Location $BackendDir
-    try { & uv sync @BackendExtraArgs } finally { Pop-Location }
+    try { & uv sync --frozen @BackendExtraArgs } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Log-Err 'uv sync failed'; exit 1 }
     Log-Ok 'backend deps installed'
 }

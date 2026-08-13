@@ -543,6 +543,7 @@ export interface StrategyDetail {
   params: StrategyParamDef[]
   params_defaults: Record<string, any>
   scoring: Record<string, number>
+  scoring_directions: Record<string, ScoringDirection>
   entry_signals: string[]
   exit_signals: string[]
   minute_exit_trigger_supported_signals: string[]
@@ -553,13 +554,14 @@ export interface StrategyDetail {
   trailing_take_profit_drawdown: number | null
   max_hold_days: number | null
   display_limit?: number
-  alerts: { field: string; op?: string; value?: number; message: string }[]
   order_by: string
   descending: boolean
   limit: number
   // 叠加策略(composite)专属: 子策略列表与合并模式。非 composite 时为 null。
   composite_children?: CompositeChildInfo[] | null
 }
+
+export type ScoringDirection = 'high' | 'low'
 
 export interface StrategyBuildResult {
   code: string
@@ -655,6 +657,8 @@ export interface MonitorRule {
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
   notify_events?: StrategyNotifyEvent[]
+  score_min?: number | null
+  score_max?: number | null
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
   cooldown_seconds: number
@@ -815,6 +819,57 @@ export interface FactorBacktestResult {
   n_symbols: number
   n_dates: number
   error: string | null
+}
+
+export interface FactorBatchItem {
+  factor_name: string
+  label: string
+  group: string
+  ic_mean: number | null
+  ir: number | null
+  ic_win_rate: number | null
+  long_short_return: number | null
+  long_short_max_drawdown: number | null
+  n_symbols: number
+  n_dates: number
+  elapsed_ms: number
+  error: string | null
+}
+
+export interface FactorBatchResult {
+  run_id: string
+  config: Record<string, any>
+  results: FactorBatchItem[]
+  elapsed_ms: number
+  n_symbols: number
+  n_dates: number
+  error: string | null
+}
+
+export type ResearchCandidateKind = 'factor' | 'strategy'
+export type ResearchCandidateStatus = 'pending' | 'validated' | 'rejected'
+
+export interface ResearchCandidate {
+  id: string
+  kind: ResearchCandidateKind
+  name: string
+  source_id: string
+  config: Record<string, unknown>
+  metrics: Record<string, number | string | boolean | null>
+  data_as_of: string | null
+  status: ResearchCandidateStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface ResearchCandidateCreate {
+  kind: ResearchCandidateKind
+  name: string
+  source_id: string
+  config: Record<string, unknown>
+  metrics: Record<string, number | string | boolean | null>
+  data_as_of?: string | null
+  status?: ResearchCandidateStatus
 }
 
 // ===== Strategy Backtest =====
@@ -1748,6 +1803,46 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  factorBatch: (payload: {
+    factor_names: string[]
+    symbols?: string[] | null
+    start?: string | null
+    end?: string | null
+    n_groups?: number
+    rebalance?: 'daily' | 'weekly' | 'monthly'
+    weight?: 'equal' | 'factor_weight'
+    fees_pct?: number
+    slippage_bps?: number
+    asset_type?: 'stock' | 'etf' | 'index'
+  }) =>
+    request<FactorBatchResult>('/api/backtest/factor/batch', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  researchCandidates: () =>
+    request<{ items: ResearchCandidate[] }>('/api/backtest/candidates'),
+
+  researchCandidateCreate: (payload: ResearchCandidateCreate) =>
+    request<ResearchCandidate>('/api/backtest/candidates', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  researchCandidateUpdate: (
+    id: string,
+    payload: { name?: string; status?: ResearchCandidateStatus },
+  ) =>
+    request<ResearchCandidate>(`/api/backtest/candidates/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  researchCandidateDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/backtest/candidates/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
   strategyBacktestRun: (payload: {
     strategy_id: string
     symbols?: string[] | null
@@ -2251,6 +2346,12 @@ export const api = {
   strategySaveConfig: (strategyId: string, overrides: Record<string, any>) =>
     request<{ ok: boolean }>('/api/strategies/config', {
       method: 'POST',
+      body: JSON.stringify({ strategy_id: strategyId, overrides }),
+    }),
+
+  strategyPatchConfig: (strategyId: string, overrides: Record<string, any>) =>
+    request<{ ok: boolean }>('/api/strategies/config', {
+      method: 'PATCH',
       body: JSON.stringify({ strategy_id: strategyId, overrides }),
     }),
 

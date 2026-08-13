@@ -33,7 +33,6 @@ ENTRY_SIGNALS = []
 EXIT_SIGNALS = []
 STOP_LOSS = None
 MAX_HOLD_DAYS = 1
-ALERTS = []
 
 class AlwaysEntry:
     def required_fields(self):

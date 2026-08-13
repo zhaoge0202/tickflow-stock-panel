@@ -5,6 +5,12 @@ import { Onboarding } from './pages/Onboarding'
 import { Auth } from './pages/Auth'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
+import { ExtensionBoundary } from './extensions/ExtensionBoundary'
+import {
+  finalizeFrontendExtensions,
+  getFrontendExtensionLoadErrors,
+  getFrontendExtensionRoutes,
+} from './extensions/registry'
 
 // 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / lightweight-charts /
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
@@ -27,6 +33,41 @@ const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.S
 const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Indices })))
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
+
+const CORE_ROUTE_PATHS = new Set([
+  '/',
+  '/onboarding',
+  '/login',
+  '/overview',
+  '/analysis',
+  '/analysis/:menuId',
+  '/concept-analysis',
+  '/industry-analysis',
+  '/stock-analysis',
+  '/review',
+  '/watchlist',
+  '/screener',
+  '/backtest',
+  '/financials',
+  '/data',
+  '/monitor',
+  '/limit-ladder',
+  '/indices',
+  '/regime',
+  '/branding',
+  '/settings',
+  '/dev',
+  '/settings/keys',
+  '/settings/ai',
+  '/settings/queries',
+])
+
+finalizeFrontendExtensions(CORE_ROUTE_PATHS)
+const frontendExtensionRoutes = getFrontendExtensionRoutes()
+const frontendExtensionErrors = getFrontendExtensionLoadErrors()
+if (frontendExtensionErrors.length > 0) {
+  console.error('部分前端扩展加载失败', frontendExtensionErrors)
+}
 
 // 首次使用守卫 —— 未完成向导则重定向到 /onboarding
 // 只挂在根路由上;/onboarding 本身不被守卫,避免循环重定向。
@@ -92,6 +133,17 @@ export const router = createBrowserRouter([
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
       { path: 'settings/queries', element: <Navigate to="/settings?tab=queries" replace /> },
+      ...frontendExtensionRoutes.map(route => {
+        const ExtensionPage = route.component
+        return {
+          path: route.path.slice(1),
+          element: (
+            <ExtensionBoundary extensionId={route.extensionId}>
+              <ExtensionPage />
+            </ExtensionBoundary>
+          ),
+        }
+      }),
     ],
   },
 ])

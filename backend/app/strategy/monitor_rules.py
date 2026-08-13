@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +133,17 @@ def validate(rule: dict) -> None:
         invalid_events = set(notify_events) - STRATEGY_NOTIFY_EVENTS
         if invalid_events:
             raise ValueError(f"notify_events 包含非法事件: {sorted(invalid_events)}")
+        score_min = rule.get("score_min")
+        score_max = rule.get("score_max")
+        for label, value in (("评分下限", score_min), ("评分上限", score_max)):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+            if value < 0 or value > 100:
+                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+        if score_min is not None and score_max is not None and score_min > score_max:
+            raise ValueError("评分下限不能大于评分上限")
     elif rule.get("type") == "ladder":
         # 连板梯队封单监控: 需 metric + threshold + direction(up/down), 不用 conditions
         if rule.get("metric", "sealed_vol") not in LADDER_METRICS:
@@ -231,6 +243,8 @@ def normalize(rule: dict) -> dict:
     # direction 默认值: ladder/sector 用 "up", 其余用 "entry"
     r.setdefault("direction", "up" if r.get("type") in {"ladder", "sector"} else "entry")
     if r.get("type") == "strategy":
+        r.setdefault("score_min", None)
+        r.setdefault("score_max", None)
         if r.get("notify_events") is None:
             # 兼容统一监控上线后的旧规则: 当时实际行为是同时通知进入和移出。
             r["notify_events"] = ["pool_entry", "pool_exit"]
@@ -238,6 +252,8 @@ def normalize(rule: dict) -> dict:
             r["notify_events"] = list(dict.fromkeys(r["notify_events"]))
     else:
         r.pop("notify_events", None)
+        r.pop("score_min", None)
+        r.pop("score_max", None)
     r.setdefault("conditions", [])
     # ladder 专属默认字段
     r.setdefault("metric", "sealed_vol")

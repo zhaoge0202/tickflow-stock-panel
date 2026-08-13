@@ -42,7 +42,15 @@ from app.indicators.pipeline import (
     get_signal_dependencies,
 )
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
-from app.strategy.scoring import scoring_dependencies, scoring_value_expr
+from app.strategy.scoring import (
+    SCORING_DIRECTION_LOW,
+    effective_scoring,
+    effective_scoring_directions,
+    materialize_scoring_columns,
+    scoring_dependencies,
+    scoring_value_expr,
+    scoring_warmup_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +142,7 @@ class StrategyDependencyResolver:
         }
         required_signals.update({"signal_limit_up", "signal_limit_down"})
 
-        scoring = dict(strategy.meta.get("scoring", {}) or {})
-        scoring.update(overrides.get("scoring") or {})
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         required_features.update(scoring_dependencies(scoring))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
@@ -187,7 +194,7 @@ class StrategyDependencyResolver:
         plan = FeaturePlan(
             required_features=frozenset(required_features),
             required_signals=frozenset(required_signals),
-            warmup_bars=max(60, int(strategy.lookback_days or 1)),
+            warmup_bars=max(60, int(strategy.lookback_days or 1), scoring_warmup_bars(scoring)),
         )
         return ResolvedFeaturePlan(
             base_columns=base_columns,
@@ -218,8 +225,7 @@ class StrategyDependencyResolver:
         required_features = set(strategy.required_features)
         required_features.update(strategy.matrix_strategy.required_fields())
         required_features.update(_basic_filter_dependencies(basic_filter))
-        scoring = dict(strategy.meta.get("scoring", {}) or {})
-        scoring.update(overrides.get("scoring") or {})
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         required_features.update(scoring_dependencies(scoring))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
@@ -229,7 +235,11 @@ class StrategyDependencyResolver:
         base_columns = frozenset(set(base_columns) | set(_LIMIT_BASE_COLUMNS))
         instrument_columns = frozenset(required_features & set(_INSTRUMENT_COLUMNS))
         instrument_columns = frozenset(set(instrument_columns) | {"name"})
-        warmup_bars = max(60, int(strategy.matrix_strategy.required_warmup_bars(params)))
+        warmup_bars = max(
+            60,
+            int(strategy.matrix_strategy.required_warmup_bars(params)),
+            scoring_warmup_bars(scoring),
+        )
         matrix_columns = set(base_columns) | set(instrument_columns) | {
             "signal_limit_up",
             "signal_limit_down",
@@ -662,12 +672,11 @@ class StrategyBacktestService:
             plans.append(child_plan)
             # pipeline 用 composite 统一的 basic_filter; scoring 用子策略自己的
             # (默认 + 用户 override), 因为子策略内部排序影响合并器的排名融合。
-            child_scoring = dict(child_def.meta.get("scoring", {}) or {})
-            if isinstance(child_override.get("scoring"), dict):
-                child_scoring.update(child_override["scoring"])
+            child_scoring = effective_scoring(child_def.meta.get("scoring"), child_override)
             child_pipeline_cfg = MatrixPipelineConfig(
                 basic_filter=basic_filter,
                 scoring=child_scoring,
+                scoring_directions=effective_scoring_directions(child_override),
                 order_by=child_def.meta.get("order_by"),
                 descending=bool(child_def.meta.get("descending", True)),
                 protect_strategy_cache=False,
@@ -1280,12 +1289,12 @@ class StrategyBacktestService:
                     else None
                 )
 
-            scoring = dict(s.meta.get("scoring", {}) or {})
-            scoring.update(overrides.get("scoring") or {})
+            scoring = effective_scoring(s.meta.get("scoring"), overrides)
             try:
                 pipeline_config = MatrixPipelineConfig(
                     basic_filter=basic_filter,
                     scoring=scoring,
+                    scoring_directions=effective_scoring_directions(overrides),
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
                     protect_strategy_cache=prepared is not None,
@@ -2042,12 +2051,11 @@ class StrategyBacktestService:
         overrides: dict | None,
         universe_mask: pl.Series | None = None,
     ) -> pl.DataFrame:
-        scoring = s.meta.get("scoring", {})
-        scoring_overrides = (overrides or {}).get("scoring")
-        if scoring_overrides:
-            scoring = {**scoring, **scoring_overrides}
+        scoring = effective_scoring(s.meta.get("scoring"), overrides)
+        directions = effective_scoring_directions(overrides)
 
-        work = panel
+        work = materialize_scoring_columns(panel, scoring.keys())
+        temporary_scoring_columns = [name for name in scoring if name not in panel.columns and name in work.columns]
         has_universe = universe_mask is not None and len(universe_mask) == len(panel)
         if has_universe:
             work = work.with_columns(universe_mask.rename("_score_universe"))
@@ -2058,18 +2066,23 @@ class StrategyBacktestService:
             return value
 
         def _finish(df: pl.DataFrame) -> pl.DataFrame:
-            return df.drop("_score_universe") if "_score_universe" in df.columns else df
+            temporary = [
+                name
+                for name in ["_score_universe", *temporary_scoring_columns]
+                if name in df.columns
+            ]
+            return df.drop(temporary) if temporary else df
 
         if scoring:
             executable = [
-                (value, weight)
+                (str(col), value, weight)
                 for col, weight in scoring.items()
                 if weight and (value := scoring_value_expr(work.columns, str(col))) is not None
             ]
-            total_weight = sum(weight for _, weight in executable)
+            total_weight = sum(weight for _, _, weight in executable)
             if total_weight > 0:
                 score_parts: list[pl.Expr] = []
-                for score_value, weight in executable:
+                for name, score_value, weight in executable:
                     w = weight / total_weight
                     value = _value_in_universe(score_value)
                     col_min = value.min().over("date")
@@ -2078,6 +2091,8 @@ class StrategyBacktestService:
                     normalized = pl.when(col_range > 0).then(
                         (score_value - col_min) / col_range
                     ).otherwise(pl.lit(0.5))
+                    if directions.get(name) == SCORING_DIRECTION_LOW:
+                        normalized = 1.0 - normalized
                     if has_universe:
                         normalized = pl.when(pl.col("_score_universe")).then(normalized).otherwise(0.0)
                     score_parts.append(normalized * w)

@@ -780,6 +780,11 @@ function RulesList({ rulesQuery, onEdit }: {
                 </div>
               ) : r.type === 'strategy' && r.strategy_id ? (
                 <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
+                  {(r.score_min != null || r.score_max != null) && (
+                    <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-mono text-amber-500 dark:text-amber-300">
+                      评分 {r.score_min ?? 0}–{r.score_max ?? 100}
+                    </span>
+                  )}
                   {(r.notify_events ?? LEGACY_STRATEGY_NOTIFY_EVENTS).map(event => {
                     const option = STRATEGY_NOTIFY_EVENT_OPTIONS.find(item => item.key === event)
                     return option ? (

@@ -90,6 +90,8 @@ class RuleModel(BaseModel):
     strategy_id: str | None = None
     direction: str = "entry"  # entry | exit | both
     notify_events: list[str] | None = None
+    score_min: float | None = None
+    score_max: float | None = None
     conditions: list[ConditionModel] = []
     logic: str = "and"        # and | or
     cooldown_seconds: int = 3600
@@ -317,7 +319,6 @@ def delete_rule(rule_id: str, request: Request):
 # ── 演示数据生成 (仅 Dev 页用) ─────────────────────────
 
 import time as _time
-from datetime import datetime, timezone
 
 
 def _demo_rule(rule_id: str, name: str, rtype: str, scope: str, symbols: list[str],
@@ -614,7 +615,7 @@ def trigger_ladder(request: Request):
     # 1. 落盘到 alerts.jsonl
     try:
         alert_store.append_many(repo.store.data_dir, rule_events)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass  # 落盘失败不阻断推送
 
     # 2. SSE 推送 (入 pending_alerts 队列)

@@ -89,7 +89,7 @@ export function Auth() {
         {/* Logo */}
         <div className="mb-6 flex flex-col items-center gap-2">
           <Logo className="h-10 w-10" />
-          <h1 className="text-lg font-semibold text-foreground">TickFlow Stock Panel</h1>
+          <h1 className="text-lg font-semibold text-foreground">Tick Stock Panel</h1>
         </div>
 
         <div className="rounded-card border border-border bg-surface/90 p-6 shadow-2xl backdrop-blur">

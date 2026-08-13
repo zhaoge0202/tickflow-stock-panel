@@ -15,27 +15,67 @@ import numpy as np
 import polars as pl
 
 from app.backtest.engine import BacktestEngine
+from app.strategy.scoring import (
+    VIRTUAL_SCORING_DEPENDENCIES as DERIVED_FACTOR_DEPENDENCIES,
+)
+from app.strategy.scoring import (
+    materialize_scoring_columns,
+)
 
 logger = logging.getLogger(__name__)
 
-# 可用因子列 (从 ENRICHED_COLUMNS 过滤出数值型指标)
+# 可研究因子目录。保留历史 ID 兼容已有候选方案; 价格尺度相关指标优先提供归一化版本。
 FACTOR_COLUMNS: list[dict] = [
-    {"id": "momentum_5d",  "label": "5日动量",     "group": "动量", "desc": "5日涨跌幅，正值表示上涨趋势"},
-    {"id": "momentum_10d", "label": "10日动量",    "group": "动量", "desc": "10日涨跌幅，中短期趋势指标"},
-    {"id": "momentum_20d", "label": "20日动量",    "group": "动量", "desc": "月度涨跌幅，常用因子"},
-    {"id": "momentum_30d", "label": "30日动量",    "group": "动量", "desc": "30日涨跌幅"},
-    {"id": "momentum_60d", "label": "60日动量",    "group": "动量", "desc": "季度涨跌幅，中期动量"},
-    {"id": "rsi_6",        "label": "RSI(6)",      "group": "超买超卖", "desc": "6日相对强弱指标，敏感度高"},
-    {"id": "rsi_14",       "label": "RSI(14)",     "group": "超买超卖", "desc": "14日相对强弱指标，经典周期"},
-    {"id": "rsi_24",       "label": "RSI(24)",     "group": "超买超卖", "desc": "24日相对强弱指标"},
-    {"id": "annual_vol_20d","label": "20日波动率", "group": "波动率",   "desc": "20日年化波动率"},
-    {"id": "atr_14",       "label": "ATR(14)",     "group": "波动率",   "desc": "14日平均真实波幅"},
-    {"id": "vol_ratio_5d", "label": "量比(5日)",   "group": "量价",     "desc": "当日成交量 / 5日均量"},
-    {"id": "turnover_rate", "label": "换手率",     "group": "量价",     "desc": "当日换手率"},
-    {"id": "macd_hist",    "label": "MACD柱",      "group": "趋势",     "desc": "MACD柱状图值"},
-    {"id": "kdj_k",        "label": "KDJ-K",       "group": "趋势",     "desc": "KDJ指标K值"},
-    {"id": "change_pct",   "label": "日涨跌幅",    "group": "基础",     "desc": "当日涨跌幅"},
-    {"id": "amplitude",    "label": "日振幅",      "group": "基础",     "desc": "当日振幅 (最高-最低)/昨收"},
+    {"id": "momentum_5d", "label": "5日动量", "group": "动量", "desc": "5个交易日累计收益率"},
+    {"id": "momentum_10d", "label": "10日动量", "group": "动量", "desc": "10个交易日累计收益率"},
+    {"id": "momentum_20d", "label": "20日动量", "group": "动量", "desc": "20个交易日累计收益率"},
+    {"id": "momentum_30d", "label": "30日动量", "group": "动量", "desc": "30个交易日累计收益率"},
+    {"id": "momentum_60d", "label": "60日动量", "group": "动量", "desc": "60个交易日累计收益率"},
+    {"id": "change_pct", "label": "日涨跌幅", "group": "动量", "desc": "当日收盘相对前收盘的收益率"},
+
+    {"id": "ma5_bias", "label": "MA5乖离", "group": "均线偏离", "desc": "收盘价 / MA5 - 1"},
+    {"id": "ma10_bias", "label": "MA10乖离", "group": "均线偏离", "desc": "收盘价 / MA10 - 1"},
+    {"id": "ma20_bias", "label": "MA20乖离", "group": "均线偏离", "desc": "收盘价 / MA20 - 1"},
+    {"id": "ma30_bias", "label": "MA30乖离", "group": "均线偏离", "desc": "收盘价 / MA30 - 1"},
+    {"id": "ma60_bias", "label": "MA60乖离", "group": "均线偏离", "desc": "收盘价 / MA60 - 1"},
+    {"id": "ema5_bias", "label": "EMA5乖离", "group": "均线偏离", "desc": "收盘价 / EMA5 - 1"},
+    {"id": "ema10_bias", "label": "EMA10乖离", "group": "均线偏离", "desc": "收盘价 / EMA10 - 1"},
+    {"id": "ema20_bias", "label": "EMA20乖离", "group": "均线偏离", "desc": "收盘价 / EMA20 - 1"},
+    {"id": "ema30_bias", "label": "EMA30乖离", "group": "均线偏离", "desc": "收盘价 / EMA30 - 1"},
+    {"id": "ema60_bias", "label": "EMA60乖离", "group": "均线偏离", "desc": "收盘价 / EMA60 - 1"},
+
+    {"id": "rsi_6", "label": "RSI(6)", "group": "超买超卖", "desc": "6日相对强弱指标"},
+    {"id": "rsi_14", "label": "RSI(14)", "group": "超买超卖", "desc": "14日相对强弱指标"},
+    {"id": "rsi_24", "label": "RSI(24)", "group": "超买超卖", "desc": "24日相对强弱指标"},
+
+    {"id": "macd_hist", "label": "MACD柱(原值)", "group": "趋势", "desc": "兼容历史研究; 跨股票比较建议优先使用MACD柱强度"},
+    {"id": "macd_dif_pct", "label": "MACD DIF强度", "group": "趋势", "desc": "MACD DIF / 收盘价"},
+    {"id": "macd_dea_pct", "label": "MACD DEA强度", "group": "趋势", "desc": "MACD DEA / 收盘价"},
+    {"id": "macd_hist_pct", "label": "MACD柱强度", "group": "趋势", "desc": "MACD柱 / 收盘价, 消除股价尺度影响"},
+    {"id": "kdj_k", "label": "KDJ-K", "group": "趋势", "desc": "KDJ指标K值"},
+    {"id": "kdj_d", "label": "KDJ-D", "group": "趋势", "desc": "KDJ指标D值"},
+    {"id": "kdj_j", "label": "KDJ-J", "group": "趋势", "desc": "KDJ指标J值"},
+    {"id": "boll_position", "label": "布林位置", "group": "趋势", "desc": "收盘价在布林带下轨到上轨之间的位置"},
+
+    {"id": "annual_vol_20d", "label": "20日波动率", "group": "波动率", "desc": "20日收益率年化标准差"},
+    {"id": "atr_14", "label": "ATR(14)原值", "group": "波动率", "desc": "兼容历史研究; 跨股票比较建议优先使用ATR相对波动"},
+    {"id": "atr_pct", "label": "ATR相对波动", "group": "波动率", "desc": "ATR(14) / 收盘价"},
+    {"id": "amplitude", "label": "日振幅", "group": "波动率", "desc": "当日高低价差 / 前收盘价"},
+    {"id": "boll_width", "label": "布林带宽", "group": "波动率", "desc": "布林带上下轨宽度 / MA20"},
+
+    {"id": "vol_ratio_5d", "label": "5日量比", "group": "量价", "desc": "当日成交量 / 前5日平均成交量"},
+    {"id": "vol_ratio_10d", "label": "10日量比", "group": "量价", "desc": "当日成交量 / 前10日平均成交量"},
+    {"id": "vol_trend_5_10", "label": "成交量趋势", "group": "量价", "desc": "5日平均成交量 / 10日平均成交量 - 1"},
+    {"id": "turnover_rate", "label": "换手率", "group": "量价", "desc": "使用历史时点流通股本计算的当日换手率"},
+    {"id": "turnover_ratio_5d", "label": "换手率放大", "group": "量价", "desc": "当日换手率 / 前5日平均换手率 - 1"},
+    {"id": "log_amount", "label": "成交额对数", "group": "量价", "desc": "ln(成交额 + 1), 降低极端规模影响"},
+    {"id": "amount_ratio_5d", "label": "成交额放大", "group": "量价", "desc": "当日成交额 / 前5日平均成交额 - 1"},
+
+    {"id": "gap_return", "label": "开盘跳空", "group": "价格位置", "desc": "开盘价 / 前收盘价 - 1"},
+    {"id": "intraday_return", "label": "日内收益", "group": "价格位置", "desc": "收盘价 / 开盘价 - 1"},
+    {"id": "close_position", "label": "收盘位置", "group": "价格位置", "desc": "收盘价在当日最低价到最高价之间的位置"},
+    {"id": "distance_to_high_60d", "label": "距60日高点", "group": "价格位置", "desc": "收盘价 / 60日最高收盘价 - 1"},
+    {"id": "distance_from_low_60d", "label": "距60日低点", "group": "价格位置", "desc": "收盘价 / 60日最低收盘价 - 1"},
 ]
 
 FACTOR_WARMUP_DAYS = 120
@@ -89,6 +129,47 @@ class FactorResult:
     error: str | None = None
 
 
+@dataclass
+class FactorBatchConfig:
+    factor_names: list[str]
+    symbols: list[str] | None
+    start: date
+    end: date
+    n_groups: int = 5
+    rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
+    weight: Literal["equal", "factor_weight"] = "equal"
+    fees_pct: float = 0.0002
+    slippage_bps: float = 5.0
+    asset_type: str = "stock"
+
+
+@dataclass
+class FactorBatchItem:
+    factor_name: str
+    label: str
+    group: str
+    ic_mean: float | None = None
+    ir: float | None = None
+    ic_win_rate: float | None = None
+    long_short_return: float | None = None
+    long_short_max_drawdown: float | None = None
+    n_symbols: int = 0
+    n_dates: int = 0
+    elapsed_ms: float = 0.0
+    error: str | None = None
+
+
+@dataclass
+class FactorBatchResult:
+    run_id: str
+    config: dict
+    results: list[FactorBatchItem] = field(default_factory=list)
+    elapsed_ms: float = 0.0
+    n_symbols: int = 0
+    n_dates: int = 0
+    error: str | None = None
+
+
 class FactorBacktestService:
     def __init__(self, engine: BacktestEngine) -> None:
         self.engine = engine
@@ -96,21 +177,106 @@ class FactorBacktestService:
     def run(self, config: FactorConfig) -> FactorResult:
         t0 = time.perf_counter()
         run_id = uuid.uuid4().hex[:10]
+        panel = self._load_factor_panel(config, [config.factor_name])
+        if panel.is_empty():
+            return self._error_result(config, run_id, t0, "无数据, 请检查日期范围或先运行盘后管道")
 
-        def _err(msg: str) -> FactorResult:
-            return FactorResult(
+        return self._evaluate_panel(panel, config, run_id, t0)
+
+    def run_batch(self, config: FactorBatchConfig) -> FactorBatchResult:
+        """在同一份 Panel 上依次评估多个因子, 避免重复读取和计算指标。"""
+        t0 = time.perf_counter()
+        run_id = uuid.uuid4().hex[:10]
+        factor_names = list(dict.fromkeys(config.factor_names))
+        result_config = self._batch_config_to_dict(config, factor_names)
+        if not factor_names:
+            return FactorBatchResult(
                 run_id=run_id,
-                config=self._config_to_dict(config),
-                error=msg,
-                elapsed_ms=(time.perf_counter() - t0) * 1000,
+                config=result_config,
+                error="至少选择一个因子",
             )
 
-        # 加载基础面板: 当前 enriched parquet 只持久化基础列, 指标因子可能需要运行时计算。
-        panel_columns = ["symbol", "date", "open", "high", "low", "close", "volume", "turnover_rate"]
-        if config.factor_name not in panel_columns:
-            panel_columns.append(config.factor_name)
+        panel = self._load_factor_panel(config, factor_names)
+        if panel.is_empty():
+            return FactorBatchResult(
+                run_id=run_id,
+                config=result_config,
+                error="无数据, 请检查日期范围或先运行盘后管道",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            )
+
+        metadata = {item["id"]: item for item in FACTOR_COLUMNS}
+        items: list[FactorBatchItem] = []
+        for factor_name in factor_names:
+            item_t0 = time.perf_counter()
+            factor_config = FactorConfig(
+                factor_name=factor_name,
+                symbols=config.symbols,
+                start=config.start,
+                end=config.end,
+                n_groups=config.n_groups,
+                rebalance=config.rebalance,
+                weight=config.weight,
+                fees_pct=config.fees_pct,
+                slippage_bps=config.slippage_bps,
+                asset_type=config.asset_type,
+            )
+            meta = metadata.get(factor_name, {})
+            try:
+                result = self._evaluate_panel(
+                    panel,
+                    factor_config,
+                    f"{run_id}-{len(items) + 1}",
+                    item_t0,
+                )
+                long_short = result.long_short_stats
+                items.append(FactorBatchItem(
+                    factor_name=factor_name,
+                    label=str(meta.get("label", factor_name)),
+                    group=str(meta.get("group", "")),
+                    ic_mean=result.ic_mean,
+                    ir=result.ir,
+                    ic_win_rate=result.ic_win_rate,
+                    long_short_return=long_short.get("total_return"),
+                    long_short_max_drawdown=long_short.get("max_drawdown"),
+                    n_symbols=result.n_symbols,
+                    n_dates=result.n_dates,
+                    elapsed_ms=result.elapsed_ms,
+                    error=result.error,
+                ))
+            except Exception as exc:  # 单因子失败不能中止整个筛选批次
+                logger.exception("factor batch item failed: %s", factor_name)
+                items.append(FactorBatchItem(
+                    factor_name=factor_name,
+                    label=str(meta.get("label", factor_name)),
+                    group=str(meta.get("group", "")),
+                    elapsed_ms=round((time.perf_counter() - item_t0) * 1000, 1),
+                    error=str(exc),
+                ))
+
+        n_symbols = max((item.n_symbols for item in items), default=0)
+        n_dates = max((item.n_dates for item in items), default=0)
+        return FactorBatchResult(
+            run_id=run_id,
+            config=result_config,
+            results=items,
+            elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            n_symbols=n_symbols,
+            n_dates=n_dates,
+        )
+
+    def _load_factor_panel(
+        self,
+        config: FactorConfig | FactorBatchConfig,
+        factor_names: list[str],
+    ) -> pl.DataFrame:
+        panel_columns = [
+            "symbol", "date", "open", "high", "low", "close", "volume", "amount",
+            "turnover_rate",
+        ]
+        panel_columns.extend(name for name in factor_names if name not in panel_columns)
         load_start = config.start
-        if config.factor_name not in {"turnover_rate"}:
+        if any(name != "turnover_rate" for name in factor_names):
             load_start = config.start - timedelta(days=FACTOR_WARMUP_DAYS)
 
         panel = self.engine.load_panel(
@@ -121,16 +287,29 @@ class FactorBacktestService:
             asset_type=config.asset_type,
         )
         if panel.is_empty():
-            return _err("无数据，请检查日期范围或先运行盘后管道")
+            return panel
+
+        missing = set(factor_names) - set(panel.columns)
+        if missing:
+            panel = self._compute_missing_factors(panel, missing)
+        return panel
+
+    def _evaluate_panel(
+        self,
+        source_panel: pl.DataFrame,
+        config: FactorConfig,
+        run_id: str,
+        t0: float,
+    ) -> FactorResult:
+        def _err(msg: str) -> FactorResult:
+            return self._error_result(config, run_id, t0, msg)
 
         factor_col = config.factor_name
-        if factor_col not in panel.columns:
-            panel = self._compute_missing_factor(panel, factor_col)
-        if factor_col not in panel.columns:
+        if factor_col not in source_panel.columns:
             return _err(f"因子列 '{factor_col}' 不存在于 enriched 数据中, 且无法从基础行情计算")
-        if "close" not in panel.columns:
+        if "close" not in source_panel.columns:
             return _err("enriched 数据缺少收盘价 close")
-        panel = panel.select(["symbol", "date", "close", factor_col])
+        panel = source_panel.select(["symbol", "date", "close", factor_col])
         panel = panel.filter((pl.col("date") >= config.start) & (pl.col("date") <= config.end))
 
         # 过滤有效行
@@ -198,20 +377,39 @@ class FactorBacktestService:
         )
 
     @staticmethod
-    def _compute_missing_factor(panel: pl.DataFrame, factor_col: str) -> pl.DataFrame:
+    def _compute_missing_factors(panel: pl.DataFrame, factor_cols: set[str]) -> pl.DataFrame:
         required = {"symbol", "date", "open", "high", "low", "close", "volume"}
         if not required.issubset(panel.columns):
             missing = sorted(required - set(panel.columns))
-            logger.warning("factor %s cannot be computed, missing columns: %s", factor_col, missing)
+            logger.warning("factors %s cannot be computed, missing columns: %s", factor_cols, missing)
             return panel
 
         from app.indicators.pipeline import compute_indicators
 
-        # 只需要单个因子列 → 用 needed 裁剪, 跳过无关的 EMA/KDJ/RSI 等计算 pass
-        computed = compute_indicators(panel, needed={factor_col})
-        if factor_col not in computed.columns:
-            return panel
-        return computed.select(["symbol", "date", "close", factor_col])
+        derived = factor_cols & set(DERIVED_FACTOR_DEPENDENCIES)
+        indicator_columns = factor_cols - derived
+        for factor_name in derived:
+            indicator_columns.update(DERIVED_FACTOR_DEPENDENCIES[factor_name])
+        panel = compute_indicators(panel, needed=indicator_columns)
+        return FactorBacktestService._compute_derived_factors(panel, derived)
+
+    @staticmethod
+    def _compute_derived_factors(panel: pl.DataFrame, factor_cols: set[str]) -> pl.DataFrame:
+        return materialize_scoring_columns(panel, factor_cols)
+
+    @staticmethod
+    def _error_result(
+        config: FactorConfig,
+        run_id: str,
+        started_at: float,
+        message: str,
+    ) -> FactorResult:
+        return FactorResult(
+            run_id=run_id,
+            config=FactorBacktestService._config_to_dict(config),
+            error=message,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        )
 
     # ── IC 计算 ──
 
@@ -527,4 +725,20 @@ class FactorBacktestService:
             "weight": c.weight,
             "fees_pct": c.fees_pct,
             "slippage_bps": c.slippage_bps,
+            "asset_type": c.asset_type,
+        }
+
+    @staticmethod
+    def _batch_config_to_dict(c: FactorBatchConfig, factor_names: list[str]) -> dict:
+        return {
+            "factor_names": factor_names,
+            "symbols": c.symbols,
+            "start": str(c.start),
+            "end": str(c.end),
+            "n_groups": c.n_groups,
+            "rebalance": c.rebalance,
+            "weight": c.weight,
+            "fees_pct": c.fees_pct,
+            "slippage_bps": c.slippage_bps,
+            "asset_type": c.asset_type,
         }

@@ -1,6 +1,6 @@
-"""策略实时监控 — 订阅行情更新，检查策略买卖信号和提醒条件。
+"""策略实时监控 — 订阅行情更新，检查策略买卖信号。
 
-职责: 接收实时行情 DataFrame → 检查监控中策略的信号/提醒 → 推送告警。
+职责: 接收实时行情 DataFrame → 检查监控中策略的信号 → 推送告警。
 不知道: 策略加载逻辑、AI、API、配置持久化、回测。
 依赖: 外部调用 on_quote_update() 传入实时数据。
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -72,7 +73,7 @@ def _signal_cn_name(name: str) -> str:
 @dataclass
 class StrategyAlert:
     """策略告警"""
-    type: str              # "entry" | "exit" | "alert"
+    type: str              # "entry" | "exit"
     strategy_id: str
     symbol: str
     name: str | None
@@ -104,7 +105,6 @@ class StrategyMonitorService:
         config: {
             "entry_signals": ["signal_n_day_high", ...],
             "exit_signals": ["signal_ma20_breakdown", ...],
-            "alerts": [{"field": "rsi_14", "op": ">", "value": 80, "message": "..."}],
         }
         """
         with self._watching_lock:
@@ -152,7 +152,7 @@ class StrategyMonitorService:
                         strategy_id=strategy_id,
                         symbol=sym,
                         name=name,
-                        message=f"入场信号触发",
+                        message="入场信号触发",
                         price=price,
                         change_pct=pct,
                         signals=hit_sigs,
@@ -169,25 +169,10 @@ class StrategyMonitorService:
                         strategy_id=strategy_id,
                         symbol=sym,
                         name=name,
-                        message=f"出场信号触发",
+                        message="出场信号触发",
                         price=price,
                         change_pct=pct,
                         signals=hit_sigs,
-                    )
-                    all_alerts.append(alert)
-                    self._emit(alert)
-
-            # 提醒条件
-            for alert_cfg in cfg.get("alerts", []):
-                for sym, name, price, pct in self._check_alert(df, alert_cfg):
-                    alert = StrategyAlert(
-                        type="alert",
-                        strategy_id=strategy_id,
-                        symbol=sym,
-                        name=name,
-                        message=alert_cfg.get("message", "提醒"),
-                        price=price,
-                        change_pct=pct,
                     )
                     all_alerts.append(alert)
                     self._emit(alert)
@@ -229,46 +214,6 @@ class StrategyMonitorService:
             hit_sigs = [orig for orig, col in resolved if row.get(col)]
             results.append((sym, name, price, pct, hit_sigs))
         return results
-
-    @staticmethod
-    def _check_alert(
-        df: pl.DataFrame,
-        alert: dict,
-    ) -> list[tuple[str, str | None, float | None, float | None]]:
-        """检查阈值型提醒条件"""
-        field = alert.get("field", "")
-        if field not in df.columns:
-            return []
-
-        if "op" in alert:
-            # 阈值比较
-            op = alert["op"]
-            value = alert["value"]
-            col = pl.col(field)
-            ops = {
-                ">": col > value,
-                ">=": col >= value,
-                "<": col < value,
-                "<=": col <= value,
-            }
-            expr = ops.get(op)
-            if expr is None:
-                return []
-        else:
-            # 信号列 (布尔)
-            expr = pl.col(field).fill_null(False)
-
-        hit_df = df.filter(expr)
-        results = []
-        for row in hit_df.iter_rows(named=True):
-            results.append((
-                row.get("symbol", ""),
-                row.get("name"),
-                row.get("close"),
-                row.get("change_pct"),
-            ))
-        return results
-
 
 # ================================================================
 # 通用监控规则引擎 MonitorRuleEngine
@@ -414,6 +359,8 @@ class MonitorRuleEngine:
         return (
             rule.get("type"),
             rule.get("strategy_id"),
+            rule.get("score_min"),
+            rule.get("score_max"),
             rule.get("asset_type", "stock"),
             rule.get("scope", "symbols"),
             tuple(sorted(str(symbol) for symbol in rule.get("symbols", []))),
@@ -987,7 +934,16 @@ class MonitorRuleEngine:
                 current=df,
                 market=matrix,
             )
-        elif s.filter_history_fn:
+        required_history_bars = 1
+        history_resolver = getattr(self._strategy_engine, "required_history_bars", None)
+        if callable(history_resolver):
+            required_history_bars = history_resolver(
+                [sid],
+                overrides_map={sid: overrides},
+            )
+        if getattr(s, "execution_backend", "polars_expr") not in {"composite", "matrix_native"} and (
+            s.filter_history_fn or required_history_bars > 1
+        ):
             history_loader = self._history_loader_for(rule)
             if history_loader is None:
                 logger.debug("策略 %s 需要历史数据但未注入 history_loader (asset_type=%s), 跳过实时监控",
@@ -995,7 +951,7 @@ class MonitorRuleEngine:
                 return []
             try:
                 today = cn_today()
-                lookback = max(1, getattr(s, "lookback_days", 30))
+                lookback = max(1, getattr(s, "lookback_days", 1), required_history_bars)
                 hist_df = history_loader(today, lookback)
                 if hist_df is None or hist_df.is_empty():
                     logger.debug("策略 %s 历史数据为空, 跳过本轮实时监控", sid)
@@ -1039,7 +995,6 @@ class MonitorRuleEngine:
         # 避免并发读到半填充状态。
         if at == "stock":
             try:
-                import math
                 self._building_strategy_results[sid] = {
                     "total": result.total,
                     "as_of": str(cn_today()),
@@ -1053,7 +1008,27 @@ class MonitorRuleEngine:
             except Exception:  # noqa: BLE001
                 pass
 
-        current_pool: set[str] = {r["symbol"] for r in result.rows}
+        score_min = rule.get("score_min")
+        score_max = rule.get("score_max")
+        score_filter_enabled = score_min is not None or score_max is not None
+        eligible_symbols: set[str] = set()
+        if score_filter_enabled:
+            for row in result.rows:
+                symbol = str(row.get("symbol", ""))
+                score = row.get("score", result.scores.get(symbol))
+                if isinstance(score, bool) or not isinstance(score, (int, float)):
+                    continue
+                if not math.isfinite(score):
+                    continue
+                if score_min is not None and score < score_min:
+                    continue
+                if score_max is not None and score > score_max:
+                    continue
+                eligible_symbols.add(symbol)
+        else:
+            eligible_symbols = {str(row["symbol"]) for row in result.rows}
+
+        current_pool = eligible_symbols
         prev_pool = self._strategy_pools.get(pool_key)
         self._strategy_pools[pool_key] = current_pool
 
@@ -1066,9 +1041,15 @@ class MonitorRuleEngine:
         except Exception:
             pass
 
+        entry_signal_hits = result.entry_signal_hits
+        if score_filter_enabled:
+            entry_signal_hits = [
+                hit for hit in entry_signal_hits
+                if str(hit.get("symbol", "")) in eligible_symbols
+            ]
         changes: dict[str, set[str]] = {
             "buy_signal": self._new_strategy_signals(
-                pool_key, "buy_signal", result.as_of, result.entry_signal_hits,
+                pool_key, "buy_signal", result.as_of, entry_signal_hits,
             ),
             "sell_signal": self._new_strategy_signals(
                 pool_key, "sell_signal", result.as_of, result.exit_signal_hits,
@@ -1081,7 +1062,7 @@ class MonitorRuleEngine:
         signal_map = {
             "buy_signal": {
                 str(hit["symbol"]): list(hit.get("signals") or [])
-                for hit in result.entry_signal_hits
+                for hit in entry_signal_hits
             },
             "sell_signal": {
                 str(hit["symbol"]): list(hit.get("signals") or [])

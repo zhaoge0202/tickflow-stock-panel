@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 
 from app.backtest import matrix as matrix_module
+from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService
 from app.backtest.matrix import (
     MatrixPipelineConfig,
     MatrixStrategyPipeline,
@@ -78,6 +79,40 @@ def test_common_matrix_features_match_polars_indicator_pipeline():
         atol=2e-5,
         equal_nan=True,
     )
+
+
+def test_research_factor_catalog_matches_matrix_features():
+    rows = []
+    start = date(2024, 1, 1)
+    for offset in range(120):
+        for asset_id, symbol in enumerate(("000001.SZ", "600000.SH")):
+            close = 10.0 + asset_id * 5.0 + offset * (0.02 + asset_id * 0.01) + np.sin(offset / 5.0)
+            rows.append({
+                "symbol": symbol,
+                "date": start + timedelta(days=offset),
+                "open": close - 0.15 + (offset % 3) * 0.02,
+                "high": close + 0.35 + asset_id * 0.03,
+                "low": close - 0.3,
+                "close": close,
+                "volume": 1000.0 + asset_id * 250.0 + (offset % 9) * 80.0,
+                "amount": (1000.0 + asset_id * 250.0 + (offset % 9) * 80.0) * close,
+                "turnover_rate": 1.0 + asset_id * 0.2 + (offset % 7) * 0.05,
+            })
+    panel = pl.DataFrame(rows)
+    factor_names = {item["id"] for item in FACTOR_COLUMNS}
+    expected = FactorBacktestService._compute_missing_factors(panel, factor_names)
+    market = build_market_data_matrix(panel, field_columns={"amount", "turnover_rate"})
+
+    for name in sorted(factor_names):
+        expected_values = expected.sort(["date", "symbol"])[name].to_numpy().reshape(market.shape)
+        np.testing.assert_allclose(
+            matrix_feature(market, name),
+            expected_values,
+            rtol=2e-4,
+            atol=2e-4,
+            equal_nan=True,
+            err_msg=name,
+        )
 
 
 def _panel_with_missing_asset_bar() -> pl.DataFrame:
@@ -739,6 +774,22 @@ def test_chunked_matrix_score_matches_previous_full_matrix_formula():
         fallback=np.zeros(market.shape, dtype=np.float32),
     )
     np.testing.assert_array_equal(actual, expected)
+
+    inverted = build_matrix_score(
+        market,
+        universe,
+        weights,
+        "score",
+        True,
+        fallback=np.zeros(market.shape, dtype=np.float32),
+        directions={"feature_a": "low", "feature_b": "low"},
+    )
+    np.testing.assert_allclose(
+        inverted[universe],
+        np.float32(100.0) - expected[universe],
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def test_signal_slice_is_zero_copy_and_masking_only_allocates_final_flags():

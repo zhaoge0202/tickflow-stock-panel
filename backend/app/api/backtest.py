@@ -134,11 +134,11 @@ def factor_columns():
 
 
 class FactorBacktestRequest(BaseModel):
-    factor_name: str
+    factor_name: str = Field(..., min_length=1, max_length=64)
     symbols: list[str] | None = None
     start: date | None = None
     end: date | None = None
-    n_groups: int = 5
+    n_groups: int = Field(5, ge=2, le=10)
     rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
     weight: Literal["equal", "factor_weight"] = "equal"
     fees_pct: float = 0.0002
@@ -149,7 +149,10 @@ class FactorBacktestRequest(BaseModel):
 @router.post("/factor/run")
 def factor_run(req: FactorBacktestRequest, request: Request):
     """因子回测 — IC/IR 分析 + 分层回测。"""
-    from app.backtest.factor import FactorBacktestService, FactorConfig
+    from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService, FactorConfig
+
+    if req.factor_name not in {item["id"] for item in FACTOR_COLUMNS}:
+        raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
 
     engine = _get_engine(request)
     svc = FactorBacktestService(engine)
@@ -178,6 +181,139 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     )
     result = svc.run(cfg)
     return asdict(result)
+
+
+class FactorBatchRequest(BaseModel):
+    factor_names: list[str] = Field(..., min_length=1, max_length=64)
+    symbols: list[str] | None = None
+    start: date | None = None
+    end: date | None = None
+    n_groups: int = Field(5, ge=2, le=10)
+    rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
+    weight: Literal["equal", "factor_weight"] = "equal"
+    fees_pct: float = 0.0002
+    slippage_bps: float = 5.0
+    asset_type: str = "stock"
+
+
+@router.post("/factor/batch")
+def factor_batch(req: FactorBatchRequest, request: Request):
+    """批量筛选因子, 同一批次只加载并计算一次数据面板。"""
+    from app.backtest.factor import (
+        FACTOR_COLUMNS,
+        FactorBacktestService,
+        FactorBatchConfig,
+    )
+
+    factor_names = list(dict.fromkeys(req.factor_names))
+    allowed = {item["id"] for item in FACTOR_COLUMNS}
+    invalid = [name for name in factor_names if name not in allowed]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
+
+    end = req.end or date.today()
+    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
+    _guard_server_backtest_range(start, end)
+    symbols = req.symbols if req.symbols else None
+    if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只, 请缩小标的范围。",
+        )
+
+    svc = FactorBacktestService(_get_engine(request))
+    result = svc.run_batch(FactorBatchConfig(
+        factor_names=factor_names,
+        symbols=symbols,
+        start=start,
+        end=end,
+        n_groups=req.n_groups,
+        rebalance=req.rebalance,
+        weight=req.weight,
+        fees_pct=req.fees_pct,
+        slippage_bps=req.slippage_bps,
+        asset_type=req.asset_type,
+    ))
+    return asdict(result)
+
+
+# ================================================================
+# 研究候选方案
+# ================================================================
+
+class CandidateCreateRequest(BaseModel):
+    kind: Literal["factor", "strategy"]
+    name: str = Field(..., min_length=1, max_length=80)
+    source_id: str = Field(..., min_length=1, max_length=120)
+    config: dict = Field(default_factory=dict)
+    metrics: dict = Field(default_factory=dict)
+    data_as_of: date | None = None
+    status: Literal["pending", "validated", "rejected"] = "pending"
+
+
+class CandidateUpdateRequest(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=80)
+    status: Literal["pending", "validated", "rejected"] | None = None
+
+
+def _candidate_store():
+    from app.backtest.candidates import CandidateStore
+
+    return CandidateStore(settings.data_dir)
+
+
+def _raise_candidate_error(exc: Exception) -> None:
+    from app.backtest.candidates import CandidateValidationError
+
+    status_code = 400 if isinstance(exc, CandidateValidationError) else 500
+    raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.get("/candidates")
+def candidates_list():
+    try:
+        return {"items": _candidate_store().list()}
+    except Exception as exc:
+        _raise_candidate_error(exc)
+
+
+@router.post("/candidates")
+def candidate_create(req: CandidateCreateRequest):
+    try:
+        return _candidate_store().create(
+            kind=req.kind,
+            name=req.name,
+            source_id=req.source_id,
+            config=req.config,
+            metrics=req.metrics,
+            data_as_of=req.data_as_of.isoformat() if req.data_as_of else None,
+            status=req.status,
+        )
+    except Exception as exc:
+        _raise_candidate_error(exc)
+
+
+@router.patch("/candidates/{candidate_id}")
+def candidate_update(candidate_id: str, req: CandidateUpdateRequest):
+    if req.name is None and req.status is None:
+        raise HTTPException(status_code=400, detail="至少提供一个需要更新的字段")
+    try:
+        return _candidate_store().update(candidate_id, name=req.name, status=req.status)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="候选方案不存在") from exc
+    except Exception as exc:
+        _raise_candidate_error(exc)
+
+
+@router.delete("/candidates/{candidate_id}")
+def candidate_delete(candidate_id: str):
+    try:
+        _candidate_store().delete(candidate_id)
+        return {"ok": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="候选方案不存在") from exc
+    except Exception as exc:
+        _raise_candidate_error(exc)
 
 
 # ================================================================

@@ -61,6 +61,8 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   threshold_pct: 1,
   window_minutes: 5,
   strategy_id: null,
+  score_min: null,
+  score_max: null,
   direction: 'entry',
   conditions: [],
   logic: 'or',
@@ -138,7 +140,17 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       if (d.type === 'strategy') {
         if (!d.strategy_id) throw new Error('策略监控必须选择一个策略')
         if (!d.notify_events?.length) throw new Error('至少选择一个通知事件')
+        for (const [label, value] of [['最低分', d.score_min], ['最高分', d.score_max]] as const) {
+          if (value != null && (!Number.isFinite(value) || value < 0 || value > 100)) {
+            throw new Error(`${label}必须在 0 到 100 之间`)
+          }
+        }
+        if (d.score_min != null && d.score_max != null && d.score_min > d.score_max) {
+          throw new Error('最低分不能高于最高分')
+        }
       } else if (d.type === 'sector') {
+        delete d.score_min
+        delete d.score_max
         d.scope = 'all'
         d.symbols = []
         d.conditions = []
@@ -146,6 +158,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         if (!d.sector_targets?.length) throw new Error('请选择至少一个监控对象')
         if ((d.threshold_pct ?? 0) <= 0 || (d.threshold_pct ?? 0) > 20) throw new Error('阈值必须大于 0 且不超过 20%')
       } else {
+        delete d.score_min
+        delete d.score_max
         delete d.notify_events
         if (d.conditions.length === 0) throw new Error('至少选择一个触发条件')
         for (const c of d.conditions) {
@@ -841,6 +855,50 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 </button>
               )
             })}
+          </div>
+
+          <div className="border-t border-border/60 pt-3">
+            <div
+              className="mb-2 text-[11px] text-muted"
+              title="评分范围仅过滤选股结果与买入信号，卖出信号不受限制"
+            >
+              评分范围
+            </div>
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <label className="space-y-1.5">
+                <span className="text-[10px] text-muted">最低分（含）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="any"
+                  value={draft.score_min ?? ''}
+                  onChange={event => setDraft(d => ({
+                    ...d,
+                    score_min: event.target.value === '' ? null : Number(event.target.value),
+                  }))}
+                  placeholder="不限"
+                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                />
+              </label>
+              <span className="mt-5 text-xs text-muted">至</span>
+              <label className="space-y-1.5">
+                <span className="text-[10px] text-muted">最高分（含）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="any"
+                  value={draft.score_max ?? ''}
+                  onChange={event => setDraft(d => ({
+                    ...d,
+                    score_max: event.target.value === '' ? null : Number(event.target.value),
+                  }))}
+                  placeholder="不限"
+                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
+                />
+              </label>
+            </div>
           </div>
 
           <div className="border-t border-border/60 pt-3">
