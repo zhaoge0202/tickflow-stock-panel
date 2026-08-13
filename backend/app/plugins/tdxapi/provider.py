@@ -8,7 +8,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 _DATASETS = ("daily", "minute", "realtime", "trade_ticks", "auction_result", "financial")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
+_QUOTE_WORKERS_DEFAULT = 8
+_QUOTE_WORKERS_MAX = 16
 _KLINE_BATCH = 8
 _MINUTE_FETCH_ATTEMPTS = 3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -121,6 +125,8 @@ class TDXAPIProvider:
         self.timeout = float(os.getenv("TDX_API_TIMEOUT", "30") or 30)
         self._client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
         self._instrument_cache: dict[str, list[dict]] = {}
+        self._invalid_quote_codes: set[str] = set()
+        self._invalid_quote_codes_lock = threading.Lock()
 
     def close(self) -> None:
         self._client.close()
@@ -234,8 +240,32 @@ class TDXAPIProvider:
             logger.warning("tdx-api codes 拉取失败, 实时行情将不补名称: %s", e)
             name_map = {}
         rows: list[dict] = []
-        for chunk in chunked(target_symbols, _QUOTE_BATCH):
-            rows.extend(self._fetch_realtime_chunk(chunk, name_map))
+        chunks = chunked(target_symbols, _QUOTE_BATCH)
+        workers = min(_realtime_workers(), len(chunks))
+        if workers <= 1 or len(chunks) <= 1:
+            for chunk in chunks:
+                rows.extend(self._fetch_realtime_chunk(chunk, name_map))
+            return rows
+
+        chunk_results: list[list[dict]] = [[] for _ in chunks]
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tdx-quote") as executor:
+            futures = {
+                executor.submit(self._fetch_realtime_chunk, chunk, name_map): idx
+                for idx, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    chunk_results[idx] = future.result()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "tdx-api realtime 并发批次 %d/%d 拉取失败: %s",
+                        idx + 1,
+                        len(chunks),
+                        e,
+                    )
+        for chunk_rows in chunk_results:
+            rows.extend(chunk_rows)
         return rows
 
     def _fetch_realtime_chunk(
@@ -245,12 +275,15 @@ class TDXAPIProvider:
     ) -> list[dict]:
         if not symbols:
             return []
-        codes = [_to_tdx_code(symbol) for symbol in symbols]
+        symbols, codes = self._filter_invalid_quote_symbols(symbols)
+        if not symbols:
+            return []
         try:
             data = self._request("POST", "/api/batch-quote", json={"codes": codes})
         except Exception as e:
             missing_code = _missing_quote_code(e)
             if missing_code:
+                self._remember_invalid_quote_code(missing_code)
                 remaining = [
                     symbol
                     for symbol, code in zip(symbols, codes, strict=True)
@@ -283,6 +316,27 @@ class TDXAPIProvider:
             if row:
                 rows.append(row)
         return rows
+
+    def _filter_invalid_quote_symbols(self, symbols: list[str]) -> tuple[list[str], list[str]]:
+        pairs = [(symbol, _to_tdx_code(symbol)) for symbol in symbols]
+        with self._invalid_quote_codes_lock:
+            invalid = set(self._invalid_quote_codes)
+        if invalid:
+            pairs = [
+                (symbol, code)
+                for symbol, code in pairs
+                if code.lower() not in invalid
+            ]
+        if not pairs:
+            return [], []
+        return [symbol for symbol, _code in pairs], [code for _symbol, code in pairs]
+
+    def _remember_invalid_quote_code(self, code: str) -> None:
+        normalized = str(code or "").strip().lower()
+        if not normalized:
+            return
+        with self._invalid_quote_codes_lock:
+            self._invalid_quote_codes.add(normalized)
 
     # ---- trade ticks ----
     def get_trade_ticks(
@@ -1112,6 +1166,14 @@ def _base_url() -> str:
     return (os.getenv("TDX_API_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
 
+def _realtime_workers() -> int:
+    try:
+        workers = int(os.getenv("TDX_API_REALTIME_WORKERS", str(_QUOTE_WORKERS_DEFAULT)) or _QUOTE_WORKERS_DEFAULT)
+    except ValueError:
+        workers = _QUOTE_WORKERS_DEFAULT
+    return max(1, min(_QUOTE_WORKERS_MAX, workers))
+
+
 def _symbols_from_env() -> list[str]:
     raw = os.getenv("TDX_API_REALTIME_SYMBOLS", "")
     if not raw.strip():
@@ -1433,7 +1495,7 @@ def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
             seconds = whole_second + int(fraction) / (10 ** len(fraction)) if fraction else whole_second
             midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
             decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=seconds)
-            return int(decoded.timestamp() * 1000)
+            return int(_normalize_compact_server_time(decoded, now=now).timestamp() * 1000)
 
     head = text[:-6]
     try:
@@ -1455,7 +1517,27 @@ def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
 
     midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=second)
-    return int(decoded.timestamp() * 1000)
+    return int(_normalize_compact_server_time(decoded, now=now).timestamp() * 1000)
+
+
+def _normalize_compact_server_time(decoded: datetime, *, now: datetime) -> datetime:
+    """TDX compact ServerTime 不带日期，凌晨拿到收盘快照时应归到上一交易日。"""
+    now_cn = now.astimezone(_CN_TZ)
+    decoded_cn = decoded.astimezone(_CN_TZ)
+    if decoded_cn > now_cn + timedelta(minutes=5):
+        return _previous_weekday_same_time(decoded_cn, now=now_cn)
+    if now_cn.weekday() >= 5 and decoded_cn.date() == now_cn.date():
+        return _previous_weekday_same_time(decoded_cn, now=now_cn)
+    return decoded_cn
+
+
+def _previous_weekday_same_time(decoded: datetime, *, now: datetime) -> datetime:
+    days = 1
+    while True:
+        candidate = decoded - timedelta(days=days)
+        if candidate.weekday() < 5 and candidate <= now:
+            return candidate
+        days += 1
 
 
 def _preview(provider: str, dataset: str, df: pl.DataFrame) -> dict:

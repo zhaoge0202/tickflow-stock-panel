@@ -9,6 +9,7 @@ import pytest
 
 from app.services.quote_snapshot_mysql import (
     CREATE_TABLE_SQL,
+    MAX_EVENT_FUTURE_SKEW_MS,
     UPSERT_SQL,
     QuoteSnapshotMySQLStore,
     _from_mysql_row,
@@ -60,7 +61,8 @@ def test_ddl_uses_symbol_primary_key_and_json_payload():
     assert "PRIMARY KEY (symbol)" in CREATE_TABLE_SQL
     assert "payload JSON NOT NULL" in CREATE_TABLE_SQL
     assert "idx_trade_date_event_ts" in CREATE_TABLE_SQL
-    assert "GREATEST(event_ts, VALUES(event_ts))" in UPSERT_SQL
+    assert "UNIX_TIMESTAMP(ingested_at)" in UPSERT_SQL
+    assert "VALUES(event_ts) >= event_ts" in UPSERT_SQL
 
 
 def test_to_mysql_row_keeps_complete_normalized_payload():
@@ -101,6 +103,28 @@ def test_to_mysql_row_rejects_missing_event_time():
         _to_mysql_row({"symbol": "000001.SZ", "last_price": 10.0})
 
 
+def test_to_mysql_row_rejects_future_event_time(monkeypatch):
+    from app.services import quote_snapshot_mysql
+
+    fixed_now = dt.datetime(2026, 8, 12, 8, 30, tzinfo=quote_snapshot_mysql.CN_TZ)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(quote_snapshot_mysql, "datetime", FixedDateTime)
+
+    with pytest.raises(ValueError, match="明显晚于写入时间"):
+        _to_mysql_row(
+            {
+                "symbol": "000001.SZ",
+                "event_ts": int(fixed_now.timestamp() * 1000) + MAX_EVENT_FUTURE_SKEW_MS + 1,
+                "last_price": 10.0,
+            }
+        )
+
+
 def test_upsert_deduplicates_symbol_and_keeps_newest(monkeypatch):
     cursor = FakeCursor()
     connection = FakeConnection(cursor)
@@ -135,7 +159,7 @@ def test_upsert_skips_invalid_record_without_dropping_valid_batch(monkeypatch):
 
     written = store.upsert([
         {"symbol": "BAD.SZ", "last_price": 1.0},
-        {"symbol": "000001.SZ", "event_ts": 2_000_000_000_000, "last_price": 10.2},
+        {"symbol": "000001.SZ", "event_ts": 1_752_723_000_000, "last_price": 10.2},
     ])
 
     assert written == 1
@@ -162,7 +186,13 @@ def test_list_filters_symbols_and_trade_date(monkeypatch):
     sql, params = cursor.executed[0]
     assert "symbol IN (%s, %s)" in sql
     assert "trade_date = %s" in sql
-    assert params == ["000001.SZ", "600000.SH", dt.date(2026, 7, 17)]
+    assert "event_ts <= UNIX_TIMESTAMP(ingested_at) * 1000 + %s" in sql
+    assert params == [
+        "000001.SZ",
+        "600000.SH",
+        dt.date(2026, 7, 17),
+        MAX_EVENT_FUTURE_SKEW_MS,
+    ]
     assert rows == [
         {
             "last_price": 10.45,

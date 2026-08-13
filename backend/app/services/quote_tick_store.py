@@ -19,6 +19,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -76,6 +77,14 @@ MARKET_FRAME_SOURCE = "tdxapi_market_frame"
 MINUTE_BACKFILL_SOURCE = "minute_backfill"
 MARKET_REPLAY_SOURCES = {MARKET_FRAME_SOURCE, MINUTE_BACKFILL_SOURCE}
 TIMELINE_MAX_POINTS = 2000
+REPLAY_START_TIME = dt_time(9, 27)
+REPLAY_MORNING_END_TIME = dt_time(11, 30)
+REPLAY_AFTERNOON_START_TIME = dt_time(13, 0)
+REPLAY_END_TIME = dt_time(15, 5)
+REPLAY_SESSION_TIMES = (
+    (REPLAY_START_TIME, REPLAY_MORNING_END_TIME),
+    (REPLAY_AFTERNOON_START_TIME, REPLAY_END_TIME),
+)
 
 _lock = threading.Lock()
 _buffers: dict[str, list[dict]] = defaultdict(list)
@@ -378,39 +387,100 @@ def read_sampled_ticks(
     symbols: list[str] | None = None,
     step_seconds: int = 60,
     max_files: int | None = None,
+    align_by_ingest: bool = False,
 ) -> list[dict]:
     """按固定时间粒度读取某天 tick 序列。
 
     面向板块曲线这类多标的聚合场景：读取阶段先把同一 symbol 在同一
     时间桶内压成最后一条，避免把全天全市场原始 tick 全部物化成 Python dict。
     """
+    frame = read_sampled_tick_frame(
+        data_dir,
+        target_date=target_date,
+        symbols=symbols,
+        step_seconds=step_seconds,
+        max_files=max_files,
+        align_by_ingest=align_by_ingest,
+    )
+    return [_json_safe(row) for row in frame.iter_rows(named=True)]
+
+
+def read_sampled_tick_frame(
+    data_dir: Path,
+    *,
+    target_date: date | None = None,
+    symbols: list[str] | None = None,
+    step_seconds: int = 60,
+    max_files: int | None = None,
+    align_by_ingest: bool = False,
+) -> pl.DataFrame:
+    """按固定时间粒度读取某天 tick 序列, 返回 Polars DataFrame。"""
     target_date = target_date or cn_today()
     wanted = {str(s).strip().upper() for s in symbols or [] if str(s).strip()}
     ds = target_date.isoformat()
     base = data_dir / "quote_ticks" / f"date={ds}"
-    disk_rows: list[dict] = []
+    frames: list[pl.DataFrame] = []
     if base.exists():
         paths = (
             _recent_partition_paths(base, max_files=max_files)
             if max_files is not None
             else sorted(base.rglob("*.parquet"))
         )
-        disk_rows = _read_sampled_parquet_paths(
+        disk_frame = _read_sampled_parquet_frame(
             paths,
             base,
             symbols=wanted or None,
             step_seconds=step_seconds,
+            target_date=target_date,
+            align_by_ingest=align_by_ingest,
         )
+        if not disk_frame.is_empty():
+            frames.append(disk_frame)
 
-    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    hot_rows = [
+        row for row in _hot_rows(data_dir, target_date=target_date)
+        if (
+            _is_plausible_event_time(row.get("event_ts"), row.get("ingest_ts"))
+            and _is_replay_ts(
+                _sample_ts(row, align_by_ingest=align_by_ingest, target_date=target_date),
+                target_date,
+            )
+        )
+    ]
     if wanted:
         hot_rows = [
             row for row in hot_rows
             if str(row.get("symbol", "")).upper() in wanted
         ]
-    rows = _sample_tick_rows(disk_rows + hot_rows, step_seconds=step_seconds)
-    rows.sort(key=lambda r: (r.get("event_ts") or 0, r.get("symbol") or "", r.get("ingest_ts") or 0))
-    return rows
+    sampled_hot_rows = _sample_tick_rows(
+        hot_rows,
+        step_seconds=step_seconds,
+        align_by_ingest=align_by_ingest,
+        target_date=target_date,
+    )
+    if sampled_hot_rows:
+        frames.append(_sampled_rows_frame(sampled_hot_rows))
+    if not frames:
+        return _empty_sampled_frame()
+    frame = pl.concat(frames, how="diagonal_relaxed")
+    return (
+        _ensure_sampled_columns(frame)
+        .sort(["symbol", "event_ts", "ingest_ts"])
+        .unique(subset=["symbol", "event_ts"], keep="last")
+        .sort(["event_ts", "symbol", "ingest_ts"])
+    )
+
+
+def replay_points_from_timestamps(
+    event_ts: list[int],
+    *,
+    target_date: date,
+    step_seconds: int = 60,
+    max_points: int = TIMELINE_MAX_POINTS,
+) -> list[int]:
+    """按交易回放窗口生成连续时间点, 午休不补伪交易点。"""
+    step_ms = max(30, int(step_seconds or 60)) * 1000
+    return _regular_points(event_ts, step_ms=step_ms, max_points=max_points, target_date=target_date)
 
 
 def event_timestamps(
@@ -433,10 +503,21 @@ def event_timestamps(
                     hive_partitioning=False,
                     cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
                 )
+                schema_names = set(frame.collect_schema().names())
+                if "event_ts" not in schema_names:
+                    frame = None
+                elif "ingest_ts" not in schema_names:
+                    frame = frame.with_columns(
+                        pl.lit(None, dtype=pl.Int64).alias("ingest_ts")
+                    )
+                if frame is None:
+                    raise ValueError("quote_ticks 缺少 event_ts")
                 df = (
                     frame
-                    .select("event_ts")
+                    .select(["event_ts", "ingest_ts"])
                     .filter(pl.col("event_ts").is_not_null())
+                    .filter(_plausible_event_time_expr())
+                    .filter(_replay_ts_expr(target_date))
                     .unique()
                     .collect(engine="streaming")
                 )
@@ -445,7 +526,11 @@ def event_timestamps(
                 logger.warning("quote_ticks 时间线读取失败(%s): %s", base, e)
     for row in _hot_rows(data_dir, target_date=target_date):
         ts = row.get("event_ts")
-        if ts is not None:
+        if (
+            ts is not None
+            and _is_plausible_event_time(ts, row.get("ingest_ts"))
+            and _is_replay_ts(ts, target_date)
+        ):
             timestamps.add(int(ts))
     return sorted(timestamps)
 
@@ -475,16 +560,15 @@ def timeline_points(
             "count": 0,
         }
 
-    start_ts = event_ts[0]
-    end_ts = event_ts[-1]
     step_ms = max(30, int(step_seconds)) * 1000
-    points: list[int] = []
-    cur = start_ts
-    while cur <= end_ts and len(points) < TIMELINE_MAX_POINTS:
-        points.append(cur)
-        cur += step_ms
-    if (not points or points[-1] != end_ts) and len(points) < TIMELINE_MAX_POINTS:
-        points.append(end_ts)
+    points = _regular_points(
+        event_ts,
+        step_ms=step_ms,
+        max_points=TIMELINE_MAX_POINTS,
+        target_date=target_date,
+    )
+    start_ts = points[0] if points else None
+    end_ts = points[-1] if points else None
     return {
         "points": points,
         "start_ts": start_ts,
@@ -578,6 +662,13 @@ def snapshot_as_of(
                 )
                 if as_of_ts is not None:
                     frame = frame.filter(pl.col("event_ts") <= int(as_of_ts))
+                schema_names = set(frame.collect_schema().names())
+                if "ingest_ts" not in schema_names:
+                    frame = frame.with_columns(
+                        pl.lit(None, dtype=pl.Int64).alias("ingest_ts")
+                    )
+                frame = frame.filter(_replay_ts_expr(target_date))
+                frame = frame.filter(_plausible_event_time_expr())
                 frames.append(
                     frame
                     .sort(["symbol", "event_ts", "ingest_ts"])
@@ -586,7 +677,13 @@ def snapshot_as_of(
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("quote_ticks 快照读取失败(%s): %s", base, e)
-    hot_rows = _hot_rows(data_dir, target_date=target_date)
+    hot_rows = [
+        row for row in _hot_rows(data_dir, target_date=target_date)
+        if (
+            _is_plausible_event_time(row.get("event_ts"), row.get("ingest_ts"))
+            and _is_replay_ts(row.get("event_ts"), target_date)
+        )
+    ]
     if as_of_ts is not None:
         hot_rows = [
             row for row in hot_rows
@@ -830,6 +927,12 @@ def _partition_symbols_sources(data_dir: Path, *, target_date: date) -> tuple[se
                 cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
             )
             schema_names = set(frame.collect_schema().names())
+            if "event_ts" in schema_names:
+                frame = (
+                    frame
+                    .filter(pl.col("event_ts").is_not_null())
+                    .filter(_replay_ts_expr(target_date))
+                )
             if "symbol" in schema_names:
                 symbol_df = frame.select(pl.col("symbol").drop_nulls().unique()).collect()
                 symbols.update(
@@ -848,6 +951,8 @@ def _partition_symbols_sources(data_dir: Path, *, target_date: date) -> tuple[se
             logger.warning("quote_ticks metadata read failed(%s): %s", base, exc)
 
     for row in _hot_rows(data_dir, target_date=target_date):
+        if not _is_replay_ts(row.get("event_ts"), target_date):
+            continue
         symbol = str(row.get("symbol") or "").strip().upper()
         if symbol:
             symbols.add(symbol)
@@ -1064,15 +1169,17 @@ def _read_parquet_paths(
         return []
 
 
-def _read_sampled_parquet_paths(
+def _read_sampled_parquet_frame(
     paths: list[Path],
     base: Path,
     *,
     symbols: set[str] | None = None,
     step_seconds: int = 60,
-) -> list[dict]:
+    target_date: date,
+    align_by_ingest: bool,
+) -> pl.DataFrame:
     if not paths:
-        return []
+        return _empty_sampled_frame()
     wanted = sorted(symbols or set())
     step_ms = max(30, int(step_seconds or 60)) * 1000
     keep = [
@@ -1088,7 +1195,7 @@ def _read_sampled_parquet_paths(
         )
         schema_names = set(frame.collect_schema().names())
         if not {"symbol", "event_ts"}.issubset(schema_names):
-            return []
+            return _empty_sampled_frame()
         for column in keep:
             if column not in schema_names:
                 dtype = pl.Utf8 if column in {"symbol", "source"} else pl.Float64
@@ -1101,37 +1208,162 @@ def _read_sampled_parquet_paths(
                 pl.col("event_ts").cast(pl.Int64, strict=False).alias("event_ts"),
                 pl.col("ingest_ts").cast(pl.Int64, strict=False).alias("ingest_ts"),
             ])
+            .filter(_plausible_event_time_expr())
+            .with_columns(_sample_ts_expr(target_date, align_by_ingest=align_by_ingest).alias("_sample_ts"))
+            .filter(pl.col("_sample_ts").is_not_null())
+            .filter(_replay_ts_expr(target_date, column="_sample_ts"))
             .filter(pl.col("symbol") != "")
         )
         if wanted:
             frame = frame.filter(pl.col("symbol").is_in(wanted))
-        sampled = (
+        return (
             frame
-            .with_columns((pl.col("event_ts") // step_ms * step_ms).alias("_bucket_ts"))
-            .sort(["symbol", "_bucket_ts", "event_ts", "ingest_ts"])
+            .with_columns((pl.col("_sample_ts") // step_ms * step_ms).alias("_bucket_ts"))
+            .sort(["symbol", "_bucket_ts", "_sample_ts", "event_ts", "ingest_ts"])
             .unique(subset=["symbol", "_bucket_ts"], keep="last")
             .with_columns(pl.col("_bucket_ts").alias("event_ts"))
-            .drop("_bucket_ts")
+            .drop(["_bucket_ts", "_sample_ts"])
             .collect(engine="streaming")
         )
-        return [_json_safe(row) for row in sampled.iter_rows(named=True)]
     except Exception as e:
         logger.warning("quote_ticks 采样读取失败(%s): %s", base, e)
+        return _empty_sampled_frame()
+
+
+def _sampled_tick_columns() -> list[str]:
+    return [
+        "symbol", "event_ts", "ingest_ts", "last_price", "prev_close", "change_pct", "amount",
+        "outside_volume", "inside_volume", "active_net_volume", "source",
+    ]
+
+
+def _sampled_tick_schema() -> dict[str, pl.DataType]:
+    return {
+        column: pl.Utf8 if column in {"symbol", "source"} else pl.Float64
+        for column in _sampled_tick_columns()
+    } | {"event_ts": pl.Int64, "ingest_ts": pl.Int64}
+
+
+def _plausible_event_time_expr() -> pl.Expr:
+    return (
+        pl.col("ingest_ts").is_null()
+        | pl.col("event_ts").is_null()
+        | (pl.col("event_ts") <= pl.col("ingest_ts") + 5 * 60 * 1000)
+    )
+
+
+def _is_plausible_event_time(event_ts, ingest_ts) -> bool:
+    try:
+        if event_ts is None or ingest_ts is None:
+            return True
+        return int(event_ts) <= int(ingest_ts) + 5 * 60 * 1000
+    except (TypeError, ValueError):
+        return False
+
+
+def _empty_sampled_frame() -> pl.DataFrame:
+    return pl.DataFrame(schema=_sampled_tick_schema())
+
+
+def _ensure_sampled_columns(frame: pl.DataFrame) -> pl.DataFrame:
+    schema = _sampled_tick_schema()
+    missing = [
+        pl.lit(None, dtype=dtype).alias(column)
+        for column, dtype in schema.items()
+        if column not in frame.columns
+    ]
+    return frame.with_columns(missing) if missing else frame
+
+
+def _sampled_rows_frame(rows: list[dict]) -> pl.DataFrame:
+    if not rows:
+        return _empty_sampled_frame()
+    return _ensure_sampled_columns(pl.DataFrame(rows, infer_schema_length=None)).select(_sampled_tick_columns())
+
+
+def _replay_session_ranges(target_date: date) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for start_time, end_time in REPLAY_SESSION_TIMES:
+        start_dt = datetime.combine(target_date, start_time).replace(tzinfo=CN_TZ)
+        end_dt = datetime.combine(target_date, end_time).replace(tzinfo=CN_TZ)
+        start_ms = int(start_dt.timestamp() * 1000)
+        # 结束时间按分钟桶口径包含整分钟, 例如 11:30:59.999 / 15:05:59.999。
+        end_ms = int(end_dt.timestamp() * 1000) + 60_000 - 1
+        ranges.append((start_ms, end_ms))
+    return ranges
+
+
+def _replay_ts_expr(target_date: date, *, column: str = "event_ts") -> pl.Expr:
+    ts = pl.col(column).cast(pl.Int64, strict=False)
+    expr = pl.lit(False)
+    for start_ms, end_ms in _replay_session_ranges(target_date):
+        expr = expr | ((ts >= start_ms) & (ts <= end_ms))
+    return expr
+
+
+def _is_replay_ts(ts_ms: int | str | None, target_date: date) -> bool:
+    try:
+        ts = int(ts_ms)
+    except (TypeError, ValueError):
+        return False
+    return any(start_ms <= ts <= end_ms for start_ms, end_ms in _replay_session_ranges(target_date))
+
+
+def _regular_points(
+    event_ts: list[int],
+    *,
+    step_ms: int,
+    max_points: int,
+    target_date: date,
+) -> list[int]:
+    buckets: set[int] = set()
+    for value in event_ts:
+        try:
+            ts = int(value)
+        except (TypeError, ValueError):
+            continue
+        if _is_replay_ts(ts, target_date):
+            buckets.add(ts // step_ms * step_ms)
+    if not buckets:
         return []
 
+    limit = max(1, int(max_points or TIMELINE_MAX_POINTS))
+    points: list[int] = []
+    for session_start_ms, session_end_ms in _replay_session_ranges(target_date):
+        session_start = session_start_ms // step_ms * step_ms
+        session_end = session_end_ms // step_ms * step_ms
+        covered = [bucket for bucket in buckets if session_start <= bucket <= session_end]
+        if not covered:
+            continue
+        # 只要该交易段有覆盖, 就从段首开始; 但段尾只到真实数据覆盖处。
+        cur = session_start
+        last = min(max(covered), session_end)
+        while cur <= last and len(points) < limit:
+            points.append(cur)
+            cur += step_ms
+        if len(points) >= limit:
+            break
+    return points
 
-def _sample_tick_rows(rows: list[dict], *, step_seconds: int = 60) -> list[dict]:
+
+def _sample_tick_rows(
+    rows: list[dict],
+    *,
+    step_seconds: int = 60,
+    align_by_ingest: bool = False,
+    target_date: date | None = None,
+) -> list[dict]:
     if not rows:
         return []
     step_ms = max(30, int(step_seconds or 60)) * 1000
     latest: dict[tuple[str, int], dict] = {}
     for row in rows:
         symbol = str(row.get("symbol") or "").strip().upper()
-        event_ts = row.get("event_ts")
-        if not symbol or event_ts is None:
+        sample_ts = _sample_ts(row, align_by_ingest=align_by_ingest, target_date=target_date)
+        if not symbol or sample_ts is None:
             continue
         try:
-            ts = int(event_ts)
+            ts = int(sample_ts)
         except (TypeError, ValueError):
             continue
         bucket = ts // step_ms * step_ms
@@ -1139,15 +1371,33 @@ def _sample_tick_rows(rows: list[dict], *, step_seconds: int = 60) -> list[dict]
         prev = latest.get(key)
         rank = (ts, int(row.get("ingest_ts") or 0))
         prev_rank = (
-            int(prev.get("event_ts") or 0),
+            int(prev.get("_sample_sort_ts") or prev.get("event_ts") or 0),
             int(prev.get("ingest_ts") or 0),
         ) if prev is not None else None
         if prev is None or rank >= prev_rank:
             item = dict(row)
             item["symbol"] = symbol
             item["event_ts"] = bucket
+            item["_sample_sort_ts"] = ts
             latest[key] = item
+    for item in latest.values():
+        item.pop("_sample_sort_ts", None)
     return list(latest.values())
+
+
+def _sample_ts(row: dict, *, align_by_ingest: bool, target_date: date | None) -> int | str | None:
+    ingest_ts = row.get("ingest_ts")
+    if align_by_ingest and target_date is not None and _is_replay_ts(ingest_ts, target_date):
+        return ingest_ts
+    return row.get("event_ts")
+
+
+def _sample_ts_expr(target_date: date, *, align_by_ingest: bool) -> pl.Expr:
+    event_ts = pl.col("event_ts").cast(pl.Int64, strict=False)
+    if not align_by_ingest:
+        return event_ts
+    ingest_ts = pl.col("ingest_ts").cast(pl.Int64, strict=False)
+    return pl.when(_replay_ts_expr(target_date, column="ingest_ts")).then(ingest_ts).otherwise(event_ts)
 
 
 def _mysql_latest(

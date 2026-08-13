@@ -558,6 +558,11 @@ export interface SectorFlowSeriesResponse {
     sources: string[]
     flow_source?: string | null
     is_proxy?: boolean
+    expected_point_count?: number
+    observed_point_count?: number
+    missing_point_count?: number
+    point_coverage_ratio?: number
+    max_gap_seconds?: number
   }
 }
 

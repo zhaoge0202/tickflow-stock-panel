@@ -233,6 +233,114 @@ def test_event_timestamps_and_snapshot_as_of_use_full_partition(tmp_path):
     assert by_symbol["300750.SZ"]["last_price"] == 319.0
 
 
+def test_replay_filters_non_trading_ticks_and_skips_lunch_break(tmp_path):
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "OUT-00", "last_price": 1.0, "timestamp": _ms(0, 0)},
+            {"symbol": "OUT-07", "last_price": 1.0, "timestamp": _ms(7, 50)},
+            {"symbol": "OUT-09", "last_price": 1.0, "timestamp": _ms(9, 15)},
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(9, 27)},
+            {"symbol": "A", "last_price": 10.1, "timestamp": _ms(9, 29)},
+            {"symbol": "A", "last_price": 10.2, "timestamp": _ms(11, 30)},
+            {"symbol": "A", "last_price": 10.3, "timestamp": _ms(13, 0)},
+            {"symbol": "A", "last_price": 10.4, "timestamp": _ms(15, 5)},
+            {"symbol": "OUT-15", "last_price": 1.0, "timestamp": _ms(15, 6)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    timestamps = quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE)
+    assert timestamps == [
+        _ms(9, 27),
+        _ms(9, 29),
+        _ms(11, 30),
+        _ms(13, 0),
+        _ms(15, 5),
+    ]
+
+    timeline = quote_tick_store.timeline_points(tmp_path, target_date=TRADE_DATE)
+    points = timeline["points"]
+    assert points[0] == _ms(9, 27)
+    assert points[-1] == _ms(15, 5)
+    assert _ms(9, 28) in points
+    assert _ms(11, 30) in points
+    assert _ms(11, 31) not in points
+    assert _ms(12, 59) not in points
+    assert _ms(13, 0) in points
+    assert _ms(15, 5) in points
+
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    assert {row["symbol"] for row in sampled} == {"A"}
+
+
+def test_read_sampled_ticks_can_align_full_market_snapshot_by_ingest_time(monkeypatch, tmp_path):
+    monkeypatch.setattr(quote_tick_store.time, "time", lambda: _ms(14, 13) / 1000)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(13, 0)},
+            {"symbol": "B", "last_price": 20.0, "timestamp": _ms(14, 12)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    by_event_ts = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    by_ingest_ts = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+        align_by_ingest=True,
+    )
+
+    assert {row["event_ts"] for row in by_event_ts} == {_ms(13, 0), _ms(14, 12)}
+    assert {row["event_ts"] for row in by_ingest_ts} == {_ms(14, 13)}
+    assert {row["symbol"] for row in by_ingest_ts} == {"A", "B"}
+
+
+def test_replay_readers_ignore_event_time_after_ingest_time(tmp_path):
+    target_dir = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=15"
+    target_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["BAD.SZ", "OK.SZ"],
+        "event_ts": [_ms(15, 34), _ms(14, 58)],
+        "ingest_ts": [_ms(0, 26), _ms(14, 58, 10)],
+        "trade_date": [TRADE_DATE.isoformat(), TRADE_DATE.isoformat()],
+        "hour": ["15", "14"],
+        "last_price": [10.0, 20.0],
+        "source": ["tdxapi", "tdxapi"],
+    }).write_parquet(target_dir / "part.parquet")
+
+    timestamps = quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE)
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    snapshot, actual_ts = quote_tick_store.snapshot_as_of(
+        tmp_path,
+        target_date=TRADE_DATE,
+        as_of_ts=_ms(15, 40),
+    )
+
+    assert timestamps == [_ms(14, 58)]
+    assert {row["symbol"] for row in sampled} == {"OK.SZ"}
+    assert {row["symbol"] for row in snapshot} == {"OK.SZ"}
+    assert actual_ts == _ms(14, 58)
+
+
 def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, monkeypatch):
     quote_tick_store.append_many(tmp_path, [
         {
