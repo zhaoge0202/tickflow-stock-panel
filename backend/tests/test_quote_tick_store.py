@@ -306,8 +306,10 @@ def test_read_sampled_ticks_can_align_full_market_snapshot_by_ingest_time(monkey
     )
 
     assert {row["event_ts"] for row in by_event_ts} == {_ms(13, 0), _ms(14, 12)}
-    assert {row["event_ts"] for row in by_ingest_ts} == {_ms(14, 13)}
+    assert {row["event_ts"] for row in by_ingest_ts} == {_ms(14, 12), _ms(14, 13)}
     assert {row["symbol"] for row in by_ingest_ts} == {"A", "B"}
+    assert next(row["event_ts"] for row in by_ingest_ts if row["symbol"] == "A") == _ms(14, 13)
+    assert next(row["event_ts"] for row in by_ingest_ts if row["symbol"] == "B") == _ms(14, 12)
 
 
 def test_replay_readers_ignore_event_time_after_ingest_time(tmp_path):
@@ -339,6 +341,76 @@ def test_replay_readers_ignore_event_time_after_ingest_time(tmp_path):
     assert {row["symbol"] for row in sampled} == {"OK.SZ"}
     assert {row["symbol"] for row in snapshot} == {"OK.SZ"}
     assert actual_ts == _ms(14, 58)
+
+
+def test_read_sampled_ticks_keeps_fresh_event_minutes_when_aligning_by_ingest(monkeypatch, tmp_path):
+    clock = {"now": _ms(9, 32) / 1000}
+
+    def now():
+        return clock["now"]
+
+    monkeypatch.setattr(quote_tick_store.time, "time", now)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(9, 30)},
+            {"symbol": "B", "last_price": 20.0, "timestamp": _ms(9, 30)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    clock["now"] = _ms(9, 33) / 1000
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.2, "timestamp": _ms(9, 31)},
+            {"symbol": "B", "last_price": 20.2, "timestamp": _ms(9, 31)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+        align_by_ingest=True,
+    )
+
+    assert {row["event_ts"] for row in sampled} == {_ms(9, 30), _ms(9, 31)}
+
+
+def test_sample_tick_rows_aligns_only_after_stale_threshold():
+    exact_threshold_rows = quote_tick_store._sample_tick_rows(
+        [
+            {
+                "symbol": "A",
+                "event_ts": _ms(9, 30),
+                "ingest_ts": _ms(9, 40),
+                "last_price": 10.0,
+            },
+        ],
+        step_seconds=60,
+        align_by_ingest=True,
+        target_date=TRADE_DATE,
+    )
+    stale_rows = quote_tick_store._sample_tick_rows(
+        [
+            {
+                "symbol": "A",
+                "event_ts": _ms(9, 30),
+                "ingest_ts": _ms(9, 40) + 1,
+                "last_price": 10.0,
+            },
+        ],
+        step_seconds=60,
+        align_by_ingest=True,
+        target_date=TRADE_DATE,
+    )
+
+    assert exact_threshold_rows[0]["event_ts"] == _ms(9, 30)
+    assert stale_rows[0]["event_ts"] == _ms(9, 40)
 
 
 def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, monkeypatch):

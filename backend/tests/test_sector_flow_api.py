@@ -352,7 +352,7 @@ def test_sector_flow_series_aligns_snapshots_by_ingest_time_without_future_leak(
     quote_tick_store.append_many(
         tmp_path,
         [
-            # TDX 个股时间可能停在上一笔成交，但本轮全市场快照是 14:13 抓到的。
+            # TDX 个股时间可能停在上一笔成交, 但本轮全市场快照是 14:13 抓到的。
             {"symbol": "A", "last_price": 10, "prev_close": 10, "active_net_volume": 130, "amount": 130_000, "timestamp": _ms(13, 0)},
             {"symbol": "B", "last_price": 20, "prev_close": 20, "active_net_volume": -30, "amount": 120_000, "timestamp": _ms(13, 0)},
             {"symbol": "000001.SH", "last_price": 3060, "prev_close": 3000, "timestamp": _ms(13, 0)},
@@ -388,6 +388,51 @@ def test_sector_flow_series_aligns_snapshots_by_ingest_time_without_future_leak(
     assert payload["data_quality"]["point_coverage_ratio"] == pytest.approx(2 / len(points))
     assert payload["data_quality"]["max_gap_seconds"] > 60 * 60
     assert payload["data_quality"]["status"] == "incomplete"
+
+
+def test_sector_flow_series_keeps_fresh_minutes_despite_poll_delay(monkeypatch, tmp_path):
+    _write_concept_members(tmp_path)
+
+    monkeypatch.setattr(quote_tick_store.time, "time", lambda: _ms(9, 32) / 1000)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10, "prev_close": 10, "active_net_volume": 100, "amount": 100_000, "timestamp": _ms(9, 30)},
+            {"symbol": "B", "last_price": 20, "prev_close": 20, "active_net_volume": -50, "amount": 100_000, "timestamp": _ms(9, 30)},
+            {"symbol": "000001.SH", "last_price": 3030, "prev_close": 3000, "timestamp": _ms(9, 30)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    monkeypatch.setattr(quote_tick_store.time, "time", lambda: _ms(9, 33) / 1000)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 11, "prev_close": 10, "active_net_volume": 150, "amount": 130_000, "timestamp": _ms(9, 31)},
+            {"symbol": "B", "last_price": 19, "prev_close": 20, "active_net_volume": -30, "amount": 120_000, "timestamp": _ms(9, 31)},
+            {"symbol": "000001.SH", "last_price": 3060, "prev_close": 3000, "timestamp": _ms(9, 31)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    payload = sector_flow_api.sector_flow_series(
+        _request(tmp_path),
+        kind="concept",
+        metric="main_flow",
+        trade_date=TRADE_DATE,
+        step_seconds=60,
+        limit=5,
+    )
+
+    points = payload["points"]
+    sector = payload["sectors"][0]
+    assert _ms(9, 30) in points
+    assert _ms(9, 31) in points
+    assert sector["flow_values"][points.index(_ms(9, 30))] == pytest.approx(0)
+    assert sector["flow_values"][points.index(_ms(9, 31))] == pytest.approx(108_000)
+    assert payload["index"]["values"][points.index(_ms(9, 30))] == pytest.approx(0.01)
+    assert payload["index"]["values"][points.index(_ms(9, 31))] == pytest.approx(0.02)
 
 
 def test_sector_flow_series_ranks_before_building_limited_curves(tmp_path):
