@@ -257,7 +257,7 @@ class TDXAPIProvider:
                 idx = futures[future]
                 try:
                     chunk_results[idx] = future.result()
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     logger.warning(
                         "tdx-api realtime 并发批次 %d/%d 拉取失败: %s",
                         idx + 1,
@@ -1480,12 +1480,28 @@ def _server_time_ms(value) -> int | None:
     return _tdx_compact_time_ms(raw, now=now)
 
 
+_COMPACT_OVERFLOW_MAX_MINUTES = 150
+_COMPACT_REALTIME_WINDOW_SECONDS = 30 * 60
+
+
 def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
+    """解码 TDX compact ServerTime。
+
+    存在两种编码: HHMMSSmmm (如 143523199 = 14:35:23.199) 和
+    小时*1e6 + 分钟*1e4 (万分位是分钟小数, 如 15329240 = 15:32:55)。
+    部分 TDX 服务器时钟的小时字段滞后、分钟溢出到 60 以上 (实测可超过 100),
+    溢出后与 HHMMSSmmm 无法从字面区分, 因此枚举所有合法解释,
+    实时场景 (贴近当前时间) 取最接近当前时间的候选, 其余保持原口径。
+    """
     text = str(value).strip()
     if not text:
         return None
 
-    # TDX ServerTime 常用 HHMMSSmmm, 例如 143523199 表示 14:35:23.199。
+    now_cn = now.astimezone(_CN_TZ)
+    midnight = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
+    canonical: list[datetime] = []
+    overflow: list[datetime] = []
+
     if len(text) in {8, 9, 10} and text[:6].isdigit():
         hour = int(text[:2])
         minute = int(text[2:4])
@@ -1493,35 +1509,37 @@ def _tdx_compact_time_ms(value: int, *, now: datetime) -> int | None:
         fraction = text[6:]
         if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= whole_second < 60:
             seconds = whole_second + int(fraction) / (10 ** len(fraction)) if fraction else whole_second
-            midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-            decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=seconds)
-            return int(_normalize_compact_server_time(decoded, now=now).timestamp() * 1000)
+            canonical.append(midnight + timedelta(hours=hour, minutes=minute, seconds=seconds))
 
-    head = text[:-6]
-    try:
-        hour = int(head) if head else 0
-        tail = text[-6:].zfill(6)
-        marker = int(tail[:2])
-        if marker < 60:
-            minute = marker
-            second = int(tail[2:]) * 60 / 10_000.0
-        else:
-            raw_tail = int(tail)
-            minute = int(raw_tail * 60 / 1_000_000)
-            second = ((raw_tail * 60) % 1_000_000) * 60 / 1_000_000.0
-    except ValueError:
+    for hour in range(24):
+        tail = value - hour * 1_000_000
+        if tail < 0:
+            break
+        minutes = tail / 10_000.0
+        if minutes >= _COMPACT_OVERFLOW_MAX_MINUTES:
+            continue
+        decoded = midnight + timedelta(hours=hour, minutes=minutes)
+        (canonical if minutes < 60 else overflow).append(decoded)
+
+    normalized = [
+        _normalize_compact_server_time(decoded, now=now)
+        for decoded in canonical + overflow
+    ]
+    if not normalized:
         return None
 
-    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second < 60):
-        return None
+    def distance(candidate: datetime) -> float:
+        return abs((candidate - now_cn).total_seconds())
 
-    midnight = now.astimezone(_CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    decoded = midnight + timedelta(hours=hour, minutes=minute, seconds=second)
-    return int(_normalize_compact_server_time(decoded, now=now).timestamp() * 1000)
+    best = min(normalized, key=distance)
+    if distance(best) > _COMPACT_REALTIME_WINDOW_SECONDS and canonical:
+        # 非实时场景 (如凌晨解码收盘快照) 分钟溢出解释不再可信, 保持既有口径。
+        best = min(normalized[:len(canonical)], key=distance)
+    return int(best.timestamp() * 1000)
 
 
 def _normalize_compact_server_time(decoded: datetime, *, now: datetime) -> datetime:
-    """TDX compact ServerTime 不带日期，凌晨拿到收盘快照时应归到上一交易日。"""
+    """TDX compact ServerTime 不带日期, 凌晨拿到收盘快照时应归到上一交易日。"""
     now_cn = now.astimezone(_CN_TZ)
     decoded_cn = decoded.astimezone(_CN_TZ)
     if decoded_cn > now_cn + timedelta(minutes=5):
