@@ -37,7 +37,7 @@ FLUSH_BATCH_SIZE = 5000
 # 每个 symbol 热序列上限: 决策台分时/信号帧够用, 避免全市场 2 万行 Python dict ring。
 SERIES_MAX_PER_SYMBOL = 300
 STALE_MS = 15_000
-# 无 symbol 条件的磁盘读取只允许读取最近文件，避免误把整天全市场快照物化。
+# 无 symbol 条件的磁盘读取只允许读取最近文件, 避免误把整天全市场快照物化。
 UNSCOPED_READ_MAX_FILES = 16
 DEPTH_FIELD_NAMES = [
     *(f"bid{i}_price" for i in range(1, 6)),
@@ -77,6 +77,10 @@ MARKET_FRAME_SOURCE = "tdxapi_market_frame"
 MINUTE_BACKFILL_SOURCE = "minute_backfill"
 MARKET_REPLAY_SOURCES = {MARKET_FRAME_SOURCE, MINUTE_BACKFILL_SOURCE}
 TIMELINE_MAX_POINTS = 2000
+# 通达信个股时间可能停在上一笔成交。只有同一交易时段内且明显过期的
+# 快照才按入库时间对齐; 正常 2-3 分钟轮询延迟必须保留行情时间,
+# 否则全天分钟会被压进少量入库桶, 曲线出现大面积假断档。
+STALE_EVENT_ALIGN_MS = 10 * 60 * 1000
 REPLAY_START_TIME = dt_time(9, 27)
 REPLAY_MORNING_END_TIME = dt_time(11, 30)
 REPLAY_AFTERNOON_START_TIME = dt_time(13, 0)
@@ -205,8 +209,8 @@ def latest(
         if _symbols_covered(recent_rows, wanted):
             return _latest_by_symbol(recent_rows)
     else:
-        # 进程重启后内存环为空时，从 MySQL 热表恢复最新行情；
-        # 这张表只有每个 symbol 一行，不会扫描 quote_ticks 历史。
+        # 进程重启后内存环为空时, 从 MySQL 热表恢复最新行情;
+        # 这张表只有每个 symbol 一行, 不会扫描 quote_ticks 历史。
         mysql_rows = _mysql_latest(target_date=target_date)
         if mysql_rows:
             return _latest_by_symbol(mysql_rows)
@@ -391,8 +395,8 @@ def read_sampled_ticks(
 ) -> list[dict]:
     """按固定时间粒度读取某天 tick 序列。
 
-    面向板块曲线这类多标的聚合场景：读取阶段先把同一 symbol 在同一
-    时间桶内压成最后一条，避免把全天全市场原始 tick 全部物化成 Python dict。
+    面向板块曲线这类多标的聚合场景: 读取阶段先把同一 symbol 在同一
+    时间桶内压成最后一条, 避免把全天全市场原始 tick 全部物化成 Python dict。
     """
     frame = read_sampled_tick_frame(
         data_dir,
@@ -522,7 +526,7 @@ def event_timestamps(
                     .collect(engine="streaming")
                 )
                 timestamps.update(int(v) for v in df["event_ts"].to_list() if v is not None)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("quote_ticks 时间线读取失败(%s): %s", base, e)
     for row in _hot_rows(data_dir, target_date=target_date):
         ts = row.get("event_ts")
@@ -543,7 +547,7 @@ def timeline_points(
 ) -> dict:
     """返回某日可回放时间线摘要。
 
-    points 仍按固定步长生成，避免把全市场分钟帧的全部原始 event_ts 暴露给前端。
+    points 仍按固定步长生成, 避免把全市场分钟帧的全部原始 event_ts 暴露给前端。
     symbol_count/sources 用于判断旧分区是否只是关注标的稀疏 tick。
     """
     target_date = target_date or cn_today()
@@ -588,7 +592,7 @@ def materialize_from_minute(
 ) -> dict:
     """用本地 1m K 线补出板块回放用的全市场分钟帧。
 
-    不访问外部 provider；若本地没有 kline_minute，则返回 missing_minute。
+    不访问外部 provider; 若本地没有 kline_minute, 则返回 missing_minute。
     """
     target_date = target_date or cn_today()
     ds = target_date.isoformat()
@@ -603,7 +607,7 @@ def materialize_from_minute(
     try:
         minute_df = pl.read_parquet(minute_path)
         tick_df = _minute_frame_to_quote_ticks(data_dir, target_date, minute_df)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("minute replay backfill failed(%s): %s", minute_path, exc)
         return {"status": "failed", "date": ds, "rows": 0, "symbols": 0, "hours": 0, "error": str(exc)}
     if tick_df.is_empty():
@@ -623,7 +627,7 @@ def materialize_from_minute(
             tmp_path.replace(final_path)
             written += hour_df.height
             hours += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("minute replay backfill write failed(%s): %s", final_path, exc)
             with suppress(OSError):
                 tmp_path.unlink()
@@ -675,7 +679,7 @@ def snapshot_as_of(
                     .unique(subset=["symbol"], keep="last")
                     .collect(engine="streaming")
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("quote_ticks 快照读取失败(%s): %s", base, e)
     hot_rows = [
         row for row in _hot_rows(data_dir, target_date=target_date)
@@ -700,7 +704,7 @@ def snapshot_as_of(
         df = df.sort(["symbol", "event_ts", "ingest_ts"]).unique(subset=["symbol"], keep="last")
         actual_ts = int(df["event_ts"].max())
         return [_json_safe(row) for row in df.iter_rows(named=True)], actual_ts
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("quote_ticks 快照合并失败(%s): %s", base, e)
         return [], None
 
@@ -724,7 +728,7 @@ def _recent_rows(
             symbols=symbols,
         )
     else:
-        # 无条件的全市场读取仅作为无 MySQL 配置时的有限降级，
+        # 无条件的全市场读取仅作为无 MySQL 配置时的有限降级,
         # 不允许回到“整天所有文件 + Python dict”模式。
         disk_rows = _read_recent_partition(
             data_dir,
@@ -855,7 +859,7 @@ def compact_partition(
             if wanted:
                 frame = frame.filter(pl.col("symbol").is_in(sorted(wanted)))
             df = frame.collect(engine="streaming")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("quote_ticks 压缩读取失败(%s): %s", hour_dir, exc)
             continue
 
@@ -866,15 +870,11 @@ def compact_partition(
             if df.is_empty():
                 # 该小时没有关注标的: 清空整个 hour 目录
                 for path in paths:
-                    try:
+                    with suppress(OSError):
                         path.unlink()
                         removed_files += 1
-                    except OSError:
-                        pass
-                try:
+                with suppress(OSError):
                     hour_dir.rmdir()
-                except OSError:
-                    pass
                 continue
 
             df.write_parquet(tmp_path)
@@ -891,12 +891,10 @@ def compact_partition(
             if "symbol" in df.columns:
                 kept_symbols.update(str(s).upper() for s in df["symbol"].unique().to_list())
             written_hours += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("quote_ticks 压缩写入失败(%s): %s", hour_dir, exc)
-            try:
+            with suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     result = {
         "date": ds,
@@ -947,7 +945,7 @@ def _partition_symbols_sources(data_dir: Path, *, target_date: date) -> tuple[se
                     for s in source_df["source"].to_list()
                     if str(s).strip()
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("quote_ticks metadata read failed(%s): %s", base, exc)
 
     for row in _hot_rows(data_dir, target_date=target_date):
@@ -979,7 +977,7 @@ def _partition_has_source(base: Path, source: str) -> bool:
             return False
         result = frame.filter(pl.col("source") == source).select(pl.len().alias("n")).collect()
         return int(result["n"][0] or 0) > 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("quote_ticks source check failed(%s): %s", base, exc)
         return False
 
@@ -1091,7 +1089,7 @@ def _prev_close_frame(data_dir: Path, target_date: date) -> pl.DataFrame | None:
                 pl.col("symbol").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("symbol"),
                 pl.col("close").cast(pl.Float64, strict=False).alias("prev_close"),
             ]).unique(subset=["symbol"], keep="last")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("prev close read skipped(%s): %s", path, exc)
     return None
 
@@ -1386,10 +1384,15 @@ def _sample_tick_rows(
 
 
 def _sample_ts(row: dict, *, align_by_ingest: bool, target_date: date | None) -> int | str | None:
+    event_ts = row.get("event_ts")
     ingest_ts = row.get("ingest_ts")
-    if align_by_ingest and target_date is not None and _is_replay_ts(ingest_ts, target_date):
+    if align_by_ingest and target_date is not None and _should_align_to_ingest(
+        event_ts,
+        ingest_ts,
+        target_date,
+    ):
         return ingest_ts
-    return row.get("event_ts")
+    return event_ts
 
 
 def _sample_ts_expr(target_date: date, *, align_by_ingest: bool) -> pl.Expr:
@@ -1397,7 +1400,50 @@ def _sample_ts_expr(target_date: date, *, align_by_ingest: bool) -> pl.Expr:
     if not align_by_ingest:
         return event_ts
     ingest_ts = pl.col("ingest_ts").cast(pl.Int64, strict=False)
-    return pl.when(_replay_ts_expr(target_date, column="ingest_ts")).then(ingest_ts).otherwise(event_ts)
+    return (
+        pl.when(_should_align_to_ingest_expr(target_date))
+        .then(ingest_ts)
+        .otherwise(event_ts)
+    )
+
+
+def _should_align_to_ingest(event_ts, ingest_ts, target_date: date) -> bool:
+    try:
+        event = int(event_ts)
+        ingest = int(ingest_ts)
+    except (TypeError, ValueError):
+        return False
+    if ingest - event <= STALE_EVENT_ALIGN_MS:
+        return False
+    return _same_replay_session(event, ingest, target_date)
+
+
+def _should_align_to_ingest_expr(target_date: date) -> pl.Expr:
+    event_ts = pl.col("event_ts").cast(pl.Int64, strict=False)
+    ingest_ts = pl.col("ingest_ts").cast(pl.Int64, strict=False)
+    return (
+        event_ts.is_not_null()
+        & ingest_ts.is_not_null()
+        & ((ingest_ts - event_ts) > STALE_EVENT_ALIGN_MS)
+        & _same_replay_session_expr(target_date, event_ts, ingest_ts)
+    )
+
+
+def _same_replay_session(left_ts: int, right_ts: int, target_date: date) -> bool:
+    return any(
+        start_ms <= left_ts <= end_ms and start_ms <= right_ts <= end_ms
+        for start_ms, end_ms in _replay_session_ranges(target_date)
+    )
+
+
+def _same_replay_session_expr(target_date: date, left: pl.Expr, right: pl.Expr) -> pl.Expr:
+    expr = pl.lit(False)
+    for start_ms, end_ms in _replay_session_ranges(target_date):
+        expr = expr | (
+            (left >= start_ms) & (left <= end_ms)
+            & (right >= start_ms) & (right <= end_ms)
+        )
+    return expr
 
 
 def _mysql_latest(
@@ -1405,14 +1451,14 @@ def _mysql_latest(
     target_date: date,
     symbols: list[str] | None = None,
 ) -> list[dict]:
-    """读取 MySQL 最新快照；不可用时返回空并让调用方走本地降级。"""
+    """读取 MySQL 最新快照; 不可用时返回空并让调用方走本地降级。"""
     try:
         from app.services.quote_snapshot_mysql import quote_snapshot_mysql_store
 
         if target_date != cn_today() or not quote_snapshot_mysql_store.enabled():
             return []
         return quote_snapshot_mysql_store.list(symbols=symbols, trade_date=target_date)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("quote_latest MySQL 读取失败, 使用本地 tick: %s", exc)
         return []
 
