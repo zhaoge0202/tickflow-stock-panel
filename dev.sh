@@ -138,7 +138,9 @@ echo
 
 (
   cd "$BACKEND_DIR"
-  uv run uvicorn app.main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" 2>&1 \
+  # --no-sync: 跳过依赖解析, 直接用已安装的 .venv 环境。
+  # 避免 uv 每次启动都访问镜像源校验 lockfile (镜像源 403/网络抖动会导致后端起不来)。
+  uv run --no-sync uvicorn app.main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &
 PIDS+=("$!")
