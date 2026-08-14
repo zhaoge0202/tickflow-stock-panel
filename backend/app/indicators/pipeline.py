@@ -36,12 +36,16 @@ logger = logging.getLogger(__name__)
 
 # ── 自定义信号缓存 ─────────────────────────────────────
 # 从 data/user_data/custom_signals/*.json 加载并编译为 Polars 表达式。
+# 两套表达式分别用于全量路径 (allow_shift=True, 支持日期偏移条件)
+# 和盘中增量热路径 (allow_shift=False, 跳过偏移条件)。
 # 模块级缓存：首次调用时加载，invalidate_custom_signals() 后下次重载。
+# 增量路径每秒级执行, 若不缓存则每轮 glob + 读所有 JSON + 重编译表达式。
 _custom_signal_exprs: dict[str, pl.Expr] | None = None
+_custom_signal_exprs_today: dict[str, pl.Expr] | None = None
 
 
 def _get_custom_signal_exprs() -> dict[str, pl.Expr]:
-    """懒加载自定义信号表达式（带模块级缓存）。"""
+    """懒加载自定义信号表达式（带模块级缓存，allow_shift=True）。"""
     global _custom_signal_exprs
     if _custom_signal_exprs is None:
         from app.strategy import custom_signals
@@ -54,10 +58,29 @@ def _get_custom_signal_exprs() -> dict[str, pl.Expr]:
     return _custom_signal_exprs
 
 
+def _get_custom_signal_exprs_today() -> dict[str, pl.Expr]:
+    """盘中增量热路径专用 (allow_shift=False, 跳过日期偏移条件)。
+
+    与全量版分开缓存：盘中单日快照上 .shift 跨 symbol 语义不正确,
+    build_expressions(allow_shift=False) 会跳过带偏移的信号, 结果集不同。
+    """
+    global _custom_signal_exprs_today
+    if _custom_signal_exprs_today is None:
+        from app.strategy import custom_signals
+        try:
+            sigs = custom_signals.load_all(settings.data_dir)
+            _custom_signal_exprs_today = custom_signals.build_expressions(sigs, allow_shift=False)
+        except Exception as e:
+            logger.warning("custom signals load failed (today): %s", e)
+            _custom_signal_exprs_today = {}
+    return _custom_signal_exprs_today
+
+
 def invalidate_custom_signals() -> None:
     """失效自定义信号缓存（保存/删除信号后调用，下次计算重新加载）。"""
-    global _custom_signal_exprs
+    global _custom_signal_exprs, _custom_signal_exprs_today
     _custom_signal_exprs = None
+    _custom_signal_exprs_today = None
 
 
 # enriched parquet 仅存储的列 (14 列)
@@ -1652,14 +1675,10 @@ def compute_enriched_today(
     df = df.drop([c for c in drop_cols if c in df.columns])
 
     # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
+    # 复用模块级缓存 _custom_signal_exprs_today: 增量热路径每秒级执行,
+    # 不缓存则每轮 glob + 读所有 JSON + 重编译表达式。失效由 invalidate_custom_signals 统一管理。
     from app.strategy import custom_signals
-    try:
-        sigs = custom_signals.load_all(settings.data_dir)
-        today_exprs = custom_signals.build_expressions(sigs, allow_shift=False)
-    except Exception as e:
-        logger.warning("custom signals load failed (today): %s", e)
-        today_exprs = {}
-    df = custom_signals.inject(df, today_exprs)
+    df = custom_signals.inject(df, _get_custom_signal_exprs_today())
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]

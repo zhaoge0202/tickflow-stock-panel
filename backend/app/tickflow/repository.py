@@ -1327,6 +1327,23 @@ class KlineRepository:
         """单股日K查询 — 从14列parquet读取后即时计算指标。"""
         from datetime import timedelta
 
+        # 快路径: 请求的列全是 parquet 直接存储的列 (如迷你蜡烛图只要 OHLCV) →
+        # scan + 列下推直接返回, 跳过 warmup(150天) 与 _compute_enriched_range 全套指标计算。
+        # 仍用 enriched_latest 缓存覆盖最新日 (盘中更准), 只保留请求列。
+        # 试探 scan 仅读请求的列; 缺列时回退到下方完整计算路径 (代价仅一次轻量 scan)。
+        if columns:
+            df = self._scan_daily_symbol(symbol, start, end, columns)
+            if not df.is_empty() and all(c in df.columns for c in columns):
+                cached, cache_date = self.get_enriched_latest()
+                if cached is not None and not cached.is_empty() and cache_date:
+                    if start <= cache_date <= end:
+                        cached_part = self._filter_cached(cached, symbol, columns)
+                        if not cached_part.is_empty():
+                            df = df.filter(pl.col("date") != cache_date)
+                            common_cols = [c for c in df.columns if c in cached_part.columns]
+                            df = pl.concat([df.select(common_cols), cached_part.select(common_cols)])
+                return df
+
         # 扩展范围用于指标预热 (MA60 需要 ~60 交易日 ≈ 120 日历日)
         warmup_start = start - timedelta(days=150)
 
@@ -1381,6 +1398,14 @@ class KlineRepository:
         """指数日K查询 — 从独立指数 enriched parquet 读取后即时计算通用指标。"""
         from datetime import timedelta
 
+        # 快路径: 若请求的列全部是 parquet 直接存储的列 (如迷你蜡烛图只要 OHLCV),
+        # 直接 scan + 列下推返回, 跳过 warmup(150天) 与 _compute_index_enriched_range 全套指标计算。
+        # 试探 scan 仅读请求的列, 缺列时回退到下方完整计算路径 (代价仅一次轻量 scan)。
+        if columns:
+            df = self._scan_index_daily_symbol(symbol, start, end, columns)
+            if not df.is_empty() and all(c in df.columns for c in columns):
+                return df
+
         warmup_start = start - timedelta(days=150)
         df = self._scan_index_daily_symbol(symbol, warmup_start, end, None)
         if not df.is_empty():
@@ -1400,6 +1425,13 @@ class KlineRepository:
     ) -> pl.DataFrame:
         """ETF 日K查询 — 优先读独立 ETF enriched，兼容旧版 index enriched 中的 ETF。"""
         from datetime import timedelta
+
+        # 快路径: 独立 ETF 数据 + 请求列全是 parquet 存储列 → 直接 scan 列下推, 跳过 warmup + compute。
+        # 无独立 ETF 数据 (旧版存入 index enriched) 时 df 为空, 自然回退到下方完整路径。
+        if columns:
+            df = self._scan_etf_daily_symbol(symbol, start, end, columns)
+            if not df.is_empty() and all(c in df.columns for c in columns):
+                return df
 
         warmup_start = start - timedelta(days=150)
         df = self._scan_etf_daily_symbol(symbol, warmup_start, end, None)
