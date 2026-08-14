@@ -205,6 +205,9 @@ class FactorBacktestService:
                 elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
             )
 
+        # P1: 预计算共享下期收益 (仅依赖 close/date/symbol), 避免每个因子重复 shift/调仓日 JOIN。
+        panel = self._attach_shared_next_return(panel, config)
+
         metadata = {item["id"]: item for item in FACTOR_COLUMNS}
         items: list[FactorBatchItem] = []
         for factor_name in factor_names:
@@ -294,6 +297,39 @@ class FactorBacktestService:
             panel = self._compute_missing_factors(panel, missing)
         return panel
 
+    @staticmethod
+    def _attach_shared_next_return(
+        panel: pl.DataFrame, config: FactorBatchConfig,
+    ) -> pl.DataFrame:
+        """对 [start, end] 内 close 有效序列计算一次 _next_return, 复用给批次内每个因子。
+
+        _next_return 仅依赖 (symbol, date, close, rebalance), 与具体因子无关; 因子空值
+        集中在预热期前缀, 过滤后剩余序列无内部空洞, 故与 _evaluate_panel 内逐因子在
+        过滤后面板上重算的结果完全等价。
+        """
+        if "_next_return" in panel.columns:
+            return panel
+        base = (
+            panel.filter((pl.col("date") >= config.start) & (pl.col("date") <= config.end))
+            .filter(pl.col("close").is_not_null() & (pl.col("close") > 0))
+            .select(["symbol", "date", "close"])
+            .sort(["symbol", "date"])
+        )
+        if base.is_empty():
+            return panel.with_columns(pl.lit(None).cast(pl.Float64).alias("_next_return"))
+        if config.rebalance == "daily":
+            base = base.with_columns(
+                (pl.col("close").shift(-1).over("symbol") / pl.col("close") - 1)
+                .alias("_next_return")
+            )
+        else:
+            base = FactorBacktestService._calc_period_return(base, config.rebalance)
+        return panel.join(
+            base.select(["symbol", "date", "_next_return"]),
+            on=["symbol", "date"],
+            how="left",
+        )
+
     def _evaluate_panel(
         self,
         source_panel: pl.DataFrame,
@@ -309,7 +345,14 @@ class FactorBacktestService:
             return _err(f"因子列 '{factor_col}' 不存在于 enriched 数据中, 且无法从基础行情计算")
         if "close" not in source_panel.columns:
             return _err("enriched 数据缺少收盘价 close")
-        panel = source_panel.select(["symbol", "date", "close", factor_col])
+
+        # 批量模式由 run_batch 预计算 _next_return 并随 source_panel 传入, 直接复用;
+        # 单因子 run() 路径未预计算, 仍按原逻辑在此计算。
+        select_cols = ["symbol", "date", "close", factor_col]
+        precomputed_return = "_next_return" in source_panel.columns
+        if precomputed_return:
+            select_cols.append("_next_return")
+        panel = source_panel.select(select_cols)
         panel = panel.filter((pl.col("date") >= config.start) & (pl.col("date") <= config.end))
 
         # 过滤有效行
@@ -326,16 +369,17 @@ class FactorBacktestService:
         n_symbols = panel["symbol"].n_unique()
         n_dates = panel["date"].n_unique()
 
-        # 计算下期收益
-        # 根据调仓频率计算不同周期的 forward return
-        if config.rebalance == "daily":
-            panel = panel.with_columns(
-                (pl.col("close").shift(-1).over("symbol") / pl.col("close") - 1)
-                .alias("_next_return")
-            )
-        else:
-            # weekly/monthly: 计算到下个调仓日的收益
-            panel = self._calc_period_return(panel, config.rebalance)
+        # 计算下期收益 — _next_return 仅依赖 (symbol, date, close, rebalance), 与因子无关;
+        # 因子空值集中在预热期前缀, 过滤后剩余序列无内部空洞, 故预计算与逐因子重算结果等价。
+        if not precomputed_return:
+            if config.rebalance == "daily":
+                panel = panel.with_columns(
+                    (pl.col("close").shift(-1).over("symbol") / pl.col("close") - 1)
+                    .alias("_next_return")
+                )
+            else:
+                # weekly/monthly: 计算到下个调仓日的收益
+                panel = self._calc_period_return(panel, config.rebalance)
 
         # ── 1. IC 分析 ──
         ic_df = self._calc_ic(panel, factor_col)
@@ -578,16 +622,16 @@ class FactorBacktestService:
 
         group_cols = sorted([c for c in pivot.columns if c != "date"], key=FactorBacktestService._group_sort_key)
 
-        # 累乘净值曲线
+        # 向量化累乘净值: null 视为 0 收益 (净值不变); 累乘保持全精度, 输出时 round(4),
+        # 等价于原 dict 累乘 `nav_values[c] *= (1+ret); entry[c] = round(nav_values[c], 4)`。
+        nav_df = pivot.with_columns(
+            [(1.0 + pl.col(c).fill_null(0.0)).cum_prod().alias(c) for c in group_cols]
+        )
         result: list[dict] = []
-        nav_values: dict[str, float] = {c: 1.0 for c in group_cols}
-
-        for row in pivot.iter_rows(named=True):
+        for row in nav_df.iter_rows(named=True):
             entry: dict = {"date": str(row["date"])[:10]}
             for c in group_cols:
-                ret = float(row[c]) if row[c] is not None else 0.0
-                nav_values[c] *= (1 + ret)
-                entry[c] = round(nav_values[c], 4)
+                entry[c] = round(float(row[c]), 4)
             result.append(entry)
 
         return result
@@ -608,36 +652,33 @@ class FactorBacktestService:
         )
         n_days = max((end - start).days, 1)
         years = n_days / 365.25
+        # 夏普 — 年化系数必须匹配 group_nav 的调仓频率 (每个净值点 = 一个调仓周期收益);
+        # 周/月频收益若乘 √252 会把 Sharpe 高估 √(252/期数) 倍 (月频 ≈4.6x, 周频 ≈2.2x)。
+        _ann = {"daily": 252, "weekly": 52, "monthly": 12}.get(rebalance, 252)
 
         stats = []
         for i, c in enumerate(group_cols):
             values = [r[c] for r in group_nav if r.get(c) is not None]
             if not values:
                 continue
-            total_return = values[-1] - 1.0
-            annual_return = (values[-1]) ** (1 / max(years, 0.01)) - 1 if values[-1] > 0 else 0.0
+            arr = np.asarray(values, dtype=np.float64)
+            last = float(arr[-1])
+            total_return = last - 1.0
+            annual_return = last ** (1 / max(years, 0.01)) - 1 if last > 0 else 0.0
 
-            # 最大回撤
-            peak = 1.0
-            max_dd = 0.0
-            for v in values:
-                peak = max(peak, v)
-                dd = (v - peak) / peak
-                max_dd = min(max_dd, dd)
+            # 最大回撤 (向量化): 峰值 = max(1.0, 历史最高), 与原 peak 初值 1.0 的逐行 max 一致
+            peak = np.maximum(np.maximum.accumulate(arr), 1.0)
+            max_dd = float(np.min((arr - peak) / peak))
 
-            # 日收益序列
-            daily_rets = []
-            for j in range(1, len(values)):
-                if values[j - 1] > 0:
-                    daily_rets.append(values[j] / values[j - 1] - 1)
-
-            # 夏普 — 年化系数必须匹配 group_nav 的调仓频率 (每个净值点 = 一个调仓周期收益);
-            # 周/月频收益若乘 √252 会把 Sharpe 高估 √(252/期数) 倍 (月频 ≈4.6x, 周频 ≈2.2x)。
-            if daily_rets:
-                arr = np.array(daily_rets)
-                _ann = {"daily": 252, "weekly": 52, "monthly": 12}.get(rebalance, 252)
-                sharpe = float(np.mean(arr) / np.std(arr)) * np.sqrt(_ann) if np.std(arr) > 0 else 0.0
-                win_rate = float(np.mean(arr > 0))
+            # 周期收益序列 (向量化): nav[t]/nav[t-1] - 1, 仅保留 nav[t-1] > 0 的样本
+            prev = arr[:-1]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rets = arr[1:] / prev - 1.0
+            rets = rets[prev > 0]
+            if rets.size:
+                std = float(np.std(rets))
+                sharpe = float(np.mean(rets) / std) * np.sqrt(_ann) if std > 0 else 0.0
+                win_rate = float(np.mean(rets > 0))
             else:
                 sharpe = 0.0
                 win_rate = 0.0
@@ -674,38 +715,36 @@ class FactorBacktestService:
         top_col = group_cols[-1]  # Q5 (最高)
         bottom_col = group_cols[0]  # Q1 (最低)
 
-        # 独立计算 top 和 bottom 的日收益，然后合成
-        ls_value = 1.0
-        prev_top = 1.0
-        prev_bot = 1.0
-        peak = 1.0
-        max_dd = 0.0
-        ls_nav: list[dict] = []
+        # 向量化: 各组净值 (null 视为 1.0), 前置 1.0 作为初值 prev_top/prev_bot,
+        # 等价于原逐行 prev_top/prev_bot 初始 1.0 的累乘逻辑。
+        top = np.array(
+            [r[top_col] if r.get(top_col) is not None else 1.0 for r in group_nav],
+            dtype=np.float64,
+        )
+        bot = np.array(
+            [r[bottom_col] if r.get(bottom_col) is not None else 1.0 for r in group_nav],
+            dtype=np.float64,
+        )
+        prev_top = np.concatenate(([1.0], top[:-1]))
+        prev_bot = np.concatenate(([1.0], bot[:-1]))
 
-        for row in group_nav:
-            top_nav = float(row.get(top_col, 1.0)) if row.get(top_col) is not None else 1.0
-            bot_nav = float(row.get(bottom_col, 1.0)) if row.get(bottom_col) is not None else 1.0
+        # 分组收益; prev <= 0 时按原逻辑置 0 (做多 top, 做空 bottom = 取反)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            top_ret = np.where(prev_top > 0, top / prev_top - 1.0, 0.0)
+            bot_ret = np.where(prev_bot > 0, bot / prev_bot - 1.0, 0.0)
+        ls_ret = (top_ret - bot_ret) / 2.0  # 各分配 50% 资金
+        ls_value = np.cumprod(1.0 + ls_ret)
 
-            # top 组收益 (做多)
-            top_ret = (top_nav / prev_top - 1) if prev_top > 0 else 0.0
-            # bottom 组收益 (做空 = 取反)
-            bot_ret = -(bot_nav / prev_bot - 1) if prev_bot > 0 else 0.0
-            # 多空组合收益
-            ls_ret = (top_ret + bot_ret) / 2  # 各分配 50% 资金
-            ls_value *= (1 + ls_ret)
+        # 最大回撤: 峰值 = max(1.0, 历史最高), 与原 peak 初值 1.0 一致
+        peak = np.maximum(np.maximum.accumulate(ls_value), 1.0)
+        max_dd = float(np.min((ls_value - peak) / peak))
 
-            prev_top = top_nav
-            prev_bot = bot_nav
-
-            peak = max(peak, ls_value)
-            dd = (ls_value - peak) / peak if peak > 0 else 0.0
-            max_dd = min(max_dd, dd)
-
-            ls_nav.append({"date": row["date"], "value": round(ls_value, 4)})
-
-        total_ret = ls_value - 1.0
+        ls_nav = [
+            {"date": group_nav[k]["date"], "value": round(float(ls_value[k]), 4)}
+            for k in range(len(group_nav))
+        ]
         ls_stats = {
-            "total_return": round(total_ret, 4),
+            "total_return": round(float(ls_value[-1]) - 1.0, 4),
             "max_drawdown": round(max_dd, 4),
             "top_group": top_col,
             "bottom_group": bottom_col,
