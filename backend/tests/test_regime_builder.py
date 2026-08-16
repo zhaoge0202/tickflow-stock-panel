@@ -341,17 +341,30 @@ def test_build_regime_mask_fails_when_required_t1_date_is_missing(tmp_path):
         )
 
 
-def test_build_regime_mask_first_day_allowed(tmp_path):
-    """首日无前一日环境数据 → 默认允许(不阻断)。"""
+def test_build_regime_mask_first_formal_day_requires_warmup_predecessor(tmp_path):
+    """正式首日缺少前一交易标签时必须阻断; warmup 前缀可安全对齐。"""
     from app.backtest.strategy import StrategyBacktestService
 
     regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": [date(2026, 1, 1)],
-        "state": ["weak"], "score": [10],
+        "date": [date(2026, 1, 1), date(2026, 1, 2)],
+        "state": ["weak", "strong"],
+        "score": [10, 85],
     }))
-    labels = ("2026-01-01", "2026-01-02")
+    with pytest.raises(ValueError, match="正式首日"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02"),
+            {"states": ["strong"]},
+            tmp_path,
+            required_start=date(2026, 1, 1),
+            required_end=date(2026, 1, 2),
+        )
+
     mask = StrategyBacktestService._build_regime_mask(
-        labels, {"states": ["strong"]}, tmp_path,
+        ("2026-01-01", "2026-01-02", "2026-01-03"),
+        {"states": ["strong"]},
+        tmp_path,
+        required_start=date(2026, 1, 2),
+        required_end=date(2026, 1, 3),
     )
-    # 1/1 首日 → True; 1/2 由 1/1(weak) → False
-    assert mask.tolist() == [True, False]
+    assert mask is not None
+    assert mask.tolist() == [True, False, True]

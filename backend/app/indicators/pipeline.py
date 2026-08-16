@@ -22,6 +22,10 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
+from app.enriched_generation import (
+    EnrichedPublication,
+    enriched_publication_incomplete,
+)
 from app.market_time import cn_today
 from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 from app.price_limits import (
@@ -350,7 +354,12 @@ def _resolve_needed(needed: set[str] | None) -> set[str]:
     return want
 
 
-def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
+def compute_indicators(
+    df: pl.DataFrame,
+    needed: set[str] | None = None,
+    *,
+    assume_sorted: bool = False,
+) -> pl.DataFrame:
     """从 OHLCV 数据计算全套技术指标。
 
     输入必须包含: symbol, date, open, high, low, close, volume
@@ -370,7 +379,7 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
 
     want = _resolve_needed(needed)
 
-    df = df.sort(["symbol", "date"])
+    df = df if assume_sorted else df.sort(["symbol", "date"])
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
@@ -670,7 +679,7 @@ def compute_limit_signals(
       signal_limit_down_recovery (跌停翘板)
       signal_broken_limit_up (炸板: 最高价触及涨停价但收盘未封住)
 
-    输入必须包含: symbol, date, raw_close, raw_high, open, high, low, close,
+    输入必须包含: symbol, date, raw_close, raw_high, raw_low, open, high, low, close,
                   change_pct, vol_ratio_5d。
     """
     if df.is_empty():
@@ -879,9 +888,10 @@ def compute_limit_signals(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
+            & (pl.col("raw_low") > 0)
         ).then(
             (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
-            & (pl.col("low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停
+            & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停(原始价口径, 跌停价为原始价基准)
             & (pl.col("close") > pl.col("open"))                          # 收阳
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down_recovery")
@@ -1045,6 +1055,11 @@ def run_pipeline(data_dir: Path | None = None,
     t0 = _t.perf_counter()
 
     d = Path(data_dir or settings.data_dir)
+    if enriched_publication_incomplete(d, "stock"):
+        logger.warning("检测到未完成的 enriched 发布,改为全量重建")
+        symbols = None
+        new_dates_only = False
+    publication = EnrichedPublication(d, "stock", recover=True)
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
@@ -1134,7 +1149,7 @@ def run_pipeline(data_dir: Path | None = None,
                     out = enriched_base / f"date={ds}" / "part.parquet"
                     out.parent.mkdir(parents=True, exist_ok=True)
                     date_df = _select_storage_cols(date_df).sort(["symbol"])
-                    date_df.write_parquet(out)
+                    publication.write_parquet(date_df, out)
                     written += date_df.height
                 t_write_new = _t.perf_counter()
                 logger.info("增量写入: %.2fs, %d 行", t_write_new - t_new, written)
@@ -1166,10 +1181,11 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = existing.filter(~pl.col("symbol").is_in(list(sym_set)))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                     date_df_storage = date_df_storage.sort(["symbol"])
-                    date_df_storage.write_parquet(out)
+                    publication.write_parquet(date_df_storage, out)
                     written += date_df.height
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
 
+        publication.commit()
         t_done = _t.perf_counter()
         logger.info("增量管道完成: %.2fs, %d 行", t_done - t0, written)
         return written
@@ -1267,7 +1283,7 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = existing.filter(~pl.col("symbol").is_in(batch_syms))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                     date_df_storage = date_df_storage.sort(["symbol"])
-                    date_df_storage.write_parquet(out)
+                    publication.write_parquet(date_df_storage, out)
                     written += date_df_storage.height
             else:
                 # 全量模式: 缓冲到 date_buffers, 最后一次性写入
@@ -1308,11 +1324,12 @@ def run_pipeline(data_dir: Path | None = None,
             out = base / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
             merged = pl.concat(dfs, how="diagonal_relaxed").sort(["symbol"])
-            merged.write_parquet(out)
+            publication.write_parquet(merged, out)
 
         date_buffers.clear()
         gc.collect()
 
+    publication.commit()
     t_done = _t.perf_counter()
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",
@@ -1339,9 +1356,13 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
     from datetime import date, timedelta
     cutoff = date.today() - timedelta(days=days + 30)  # 多读 30 天余量
 
+    cast_options = pl.ScanCastOptions(integer_cast="allow-float")
     try:
         lf = (
-            scan_enriched_parquet(str(enriched_base / "**" / "*.parquet"), cast_options=_cast)
+            scan_enriched_parquet(
+                str(enriched_base / "**" / "*.parquet"),
+                cast_options=cast_options,
+            )
             .filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= cutoff)
@@ -1814,10 +1835,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         # 跌停翘板
         pl.when(no_price_limit)
           .then(False)
-          .when(valid_prev_raw | has_authoritative_down)
+          .when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_low") > 0))
           .then(
               (~is_limit_down.fill_null(True))
-              & (pl.col("low") <= effective_limit_down + 0.005)
+              & (pl.col("raw_low") <= effective_limit_down + 0.005)
               & (pl.col("close") > pl.col("open"))
           ).otherwise(None).cast(pl.Boolean)
           .alias("signal_limit_down_recovery"),

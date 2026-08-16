@@ -154,7 +154,7 @@ def _sync_table(
     )
 
 
-def _merge_share_history(*frames: pl.DataFrame) -> pl.DataFrame:
+def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     valid = [
         frame
         for frame in frames
@@ -162,65 +162,74 @@ def _merge_share_history(*frames: pl.DataFrame) -> pl.DataFrame:
     ]
     if not valid:
         return pl.DataFrame()
-    return (
+    merged = (
         pl.concat(valid, how="diagonal_relaxed")
         .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
-        .unique(subset=["symbol", "period_end"], keep="last")
-        .sort(["symbol", "period_end"])
+    )
+    # 同一 (symbol, period_end) 多条时保留 announce_date 最新一条 (业绩修正以最新公告为准)。
+    if "announce_date" in merged.columns:
+        merged = merged.sort(["symbol", "period_end", "announce_date"], nulls_last=True)
+    return merged.unique(subset=["symbol", "period_end"], keep="last").sort(
+        ["symbol", "period_end"]
     )
 
 
-def _sync_shares_for_symbols(
+def _sync_history_table_for_symbols(
+    table: str,
     symbols: list[str],
     data_dir: Path,
     capset: CapabilitySet,
 ) -> int:
-    """首次拉全量股本历史，后续更新最新记录并补齐新增标的历史。"""
-    existing = get_financial_df(data_dir, "shares")
+    """历史累积同步: 保留已有各期记录, 仅拉最新期 + 为新标的补全量历史。
+
+    与 shares 同一模式。若改为 latest_only 全量覆盖, 历史各期会在每次同步时
+    被冲掉, 财务因子将永远只有单期快照, 任何回测都是未来函数。
+    """
+    existing = get_financial_df(data_dir, table)
     if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
-        return _sync_table("shares", symbols, data_dir, capset, latest_only=False)
+        return _sync_table(table, symbols, data_dir, capset, latest_only=False)
 
     existing_symbols = set(existing["symbol"].drop_nulls().to_list())
     missing_symbols = [symbol for symbol in symbols if symbol not in existing_symbols]
     missing_history = (
-        _fetch_table("shares", missing_symbols, capset, latest_only=False)
+        _fetch_table(table, missing_symbols, capset, latest_only=False)
         if missing_symbols
         else pl.DataFrame()
     )
     current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
-    latest = _fetch_table("shares", current_symbols, capset, latest_only=True)
-    merged = _merge_share_history(existing, missing_history, latest)
-    return _write_table("shares", merged, data_dir)
+    latest = _fetch_table(table, current_symbols, capset, latest_only=True)
+    merged = _merge_report_history(existing, missing_history, latest)
+    return _write_table(table, merged, data_dir)
 
 
 def sync_metrics(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步核心财务指标 (metrics)。"""
+    """同步核心财务指标 (metrics), 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("metrics", symbols, data_dir, capset, latest_only=True)
+    return _sync_history_table_for_symbols("metrics", symbols, data_dir, capset)
 
 
 def sync_income(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步利润表。"""
+    """同步利润表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("income", symbols, data_dir, capset, latest_only=True)
+    return _sync_history_table_for_symbols("income", symbols, data_dir, capset)
 
 
 def sync_balance_sheet(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步资产负债表。"""
+    """同步资产负债表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("balance_sheet", symbols, data_dir, capset, latest_only=True)
+    return _sync_history_table_for_symbols("balance_sheet", symbols, data_dir, capset)
 
 
 def sync_cash_flow(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步现金流量表。"""
+    """同步现金流量表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("cash_flow", symbols, data_dir, capset, latest_only=True)
+    return _sync_history_table_for_symbols("cash_flow", symbols, data_dir, capset)
 
 
 def sync_shares(data_dir: Path, capset: CapabilitySet) -> int:
     """同步历史股本表。"""
     symbols = _get_symbols(data_dir)
-    return _sync_shares_for_symbols(symbols, data_dir, capset)
+    return _sync_history_table_for_symbols("shares", symbols, data_dir, capset)
 
 
 def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
@@ -232,10 +241,8 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     symbols = _get_symbols(data_dir)
     results: dict[str, int] = {}
     for table in FINANCIAL_TABLES:
-        results[table] = (
-            _sync_shares_for_symbols(symbols, data_dir, capset)
-            if table == "shares"
-            else _sync_table(table, symbols, data_dir, capset, latest_only=True)
+        results[table] = _sync_history_table_for_symbols(
+            table, symbols, data_dir, capset
         )
 
     # 同步完成后注册 DuckDB 视图
@@ -428,10 +435,8 @@ class FinancialScheduler:
         symbols = _get_symbols(self._data_dir)
         result: dict[str, int] = {}
         for t in FINANCIAL_TABLES:
-            result[t] = (
-                _sync_shares_for_symbols(symbols, self._data_dir, self._capset)
-                if t == "shares"
-                else _sync_table(t, symbols, self._data_dir, self._capset, latest_only=True)
+            result[t] = _sync_history_table_for_symbols(
+                t, symbols, self._data_dir, self._capset
             )
             self._record_sync(t)
         _refresh_financials_views(self._data_dir)

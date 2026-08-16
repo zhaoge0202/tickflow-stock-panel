@@ -18,6 +18,7 @@ import {
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
+const Mining = lazy(() => import('./pages/Mining').then(m => ({ default: m.Mining })))
 const Financials = lazy(() => import('./pages/Financials').then(m => ({ default: m.Financials })))
 const Data = lazy(() => import('./pages/Data').then(m => ({ default: m.Data })))
 const Monitor = lazy(() => import('./pages/Monitor').then(m => ({ default: m.Monitor })))
@@ -48,6 +49,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/watchlist',
   '/screener',
   '/backtest',
+  '/mining',
   '/financials',
   '/data',
   '/monitor',
@@ -119,6 +121,7 @@ export const router = createBrowserRouter([
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
+      { path: 'mining', element: <Mining /> },
       { path: 'financials', element: <Financials /> },
       { path: 'data', element: <Data /> },
       { path: 'monitor', element: <Monitor /> },

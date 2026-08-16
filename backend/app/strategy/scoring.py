@@ -35,12 +35,31 @@ VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
     "close_position": frozenset({"high", "low", "close"}),
     "distance_to_high_60d": frozenset({"close", "high_60d"}),
     "distance_from_low_60d": frozenset({"close", "low_60d"}),
+    "max_ret_20d": frozenset({"close"}),
+    "ret_skew_20d": frozenset({"close"}),
+    "up_days_20d": frozenset({"close"}),
+    "amihud_20d": frozenset({"close", "amount"}),
+    "turnover_z_60d": frozenset({"turnover_rate"}),
+    "vol_price_corr_20d": frozenset({"close", "volume"}),
+    "vwap_bias": frozenset({"close", "volume", "amount"}),
+    "vol_trend_5_60": frozenset({"volume"}),
+    "limit_up_count_20d": frozenset({"consecutive_limit_ups"}),
+    "limit_up_count_60d": frozenset({"consecutive_limit_ups"}),
 }
 
 _ROLLING_SCORING_WARMUP: dict[str, int] = {
     "vol_ratio_10d": 11,
     "turnover_ratio_5d": 6,
     "amount_ratio_5d": 6,
+    "max_ret_20d": 21,
+    "ret_skew_20d": 21,
+    "up_days_20d": 21,
+    "amihud_20d": 21,
+    "turnover_z_60d": 61,
+    "vol_price_corr_20d": 21,
+    "vol_trend_5_60": 60,
+    "limit_up_count_20d": 21,
+    "limit_up_count_60d": 61,
 }
 
 
@@ -143,7 +162,71 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         return _relative(pl.col("close"), pl.col("high_60d"))
     if name == "distance_from_low_60d":
         return _relative(pl.col("close"), pl.col("low_60d"))
+    if name in {
+        "max_ret_20d", "ret_skew_20d", "up_days_20d",
+        "amihud_20d", "vol_price_corr_20d",
+    }:
+        change = _daily_change_expr()
+        if name == "max_ret_20d":
+            return change.rolling_max(20, min_samples=20).over("symbol")
+        if name == "ret_skew_20d":
+            return change.rolling_skew(20, bias=True).over("symbol")
+        if name == "up_days_20d":
+            return (
+                (change > 0).cast(pl.Float64)
+                .rolling_sum(20, min_samples=20).over("symbol")
+            )
+        if name == "amihud_20d":
+            illiquidity = _ratio(change.abs(), pl.col("amount") / 1e8)
+            return illiquidity.rolling_mean(20, min_samples=20).over("symbol")
+        volume = pl.col("volume")
+        product = change * volume
+        return _rolling_corr_expr(change, volume, product, 20).over("symbol")
+    if name == "turnover_z_60d":
+        baseline = pl.col("turnover_rate").shift(1)
+        mean = baseline.rolling_mean(60, min_samples=60)
+        std = baseline.rolling_std(60, min_samples=60)
+        return (
+            pl.when(std > 0).then((pl.col("turnover_rate") - mean) / std)
+            .otherwise(None)
+            .over("symbol")
+        )
+    if name == "vwap_bias":
+        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
+        return _relative(pl.col("close"), vwap)
+    if name == "vol_trend_5_60":
+        fast = pl.col("volume").rolling_mean(5)
+        slow = pl.col("volume").rolling_mean(60)
+        return _relative(fast, slow).over("symbol")
+    if name in {"limit_up_count_20d", "limit_up_count_60d"}:
+        window = 20 if name == "limit_up_count_20d" else 60
+        hit = (pl.col("consecutive_limit_ups").fill_null(0) > 0).cast(pl.Float64)
+        return hit.rolling_sum(window, min_samples=window).over("symbol")
     return None
+
+
+def _daily_change_expr() -> pl.Expr:
+    previous = pl.col("close").shift(1)
+    return _ratio(pl.col("close"), previous) - 1.0
+
+
+def _rolling_corr_expr(
+    left: pl.Expr, right: pl.Expr, product: pl.Expr, window: int
+) -> pl.Expr:
+    """Pearson correlation over a rolling window, matching the matrix kernel formula."""
+    mean_left = left.rolling_mean(window, min_samples=window)
+    mean_right = right.rolling_mean(window, min_samples=window)
+    mean_product = product.rolling_mean(window, min_samples=window)
+    mean_left_sq = (left * left).rolling_mean(window, min_samples=window)
+    mean_right_sq = (right * right).rolling_mean(window, min_samples=window)
+    covariance = mean_product - mean_left * mean_right
+    variance_left = mean_left_sq - mean_left * mean_left
+    variance_right = mean_right_sq - mean_right * mean_right
+    return pl.when(
+        (variance_left > 0) & (variance_right > 0)
+    ).then(
+        covariance / (variance_left * variance_right).sqrt()
+    ).otherwise(None)
 
 
 def materialize_scoring_columns(

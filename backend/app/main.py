@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,15 +12,42 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import (
+    alerts,
+    analysis,
+    backtest,
+    data,
+    ext_data,
+    financials,
+    indices,
+    intraday,
+    kline,
+    market_recap,
+    mining,
+    monitor_rules,
+    overview,
+    pipeline,
+    regime,
+    rps,
+    screener,
+    signals,
+    stock_analysis,
+    strategy,
+    watchlist,
+)
+from app.api import auth as auth_api
+from app.api import settings as settings_api
 from app.api.routes import router as core_router
 from app.config import settings
+from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.extensions.loader import (
     configure_backend_extensions,
     current_extension_context,
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
+from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
@@ -57,7 +83,7 @@ if not getattr(sys, "frozen", False):
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     logger.info(
         "Tick Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
@@ -76,9 +102,19 @@ async def lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    from app.services.mining_manager import MiningJobManager
+
+    mining_manager = MiningJobManager(store.data_dir)
+    recovered_mining_runs = mining_manager.recover_interrupted()
+    app.state.mining_manager = mining_manager
+    if recovered_mining_runs:
+        logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
-        repo.get_matrix_data_generation("stock")
+        try:
+            repo.get_matrix_data_generation("stock")
+        except EnrichedGenerationUnavailableError as exc:
+            logger.warning("enriched generation requires a full rebuild: %s", exc)
     # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
     app.state.indicators_ready = False
     repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
@@ -188,51 +224,50 @@ async def lifespan(app: FastAPI):
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
 
-    matrix_prewarm_lock = threading.Lock()
-    matrix_prewarm_running = False
+    matrix_prewarm_owner = MatrixCachePrewarmOwner()
 
     def _schedule_matrix_cache_prewarm() -> None:
-        nonlocal matrix_prewarm_running
         if (
             not settings.backtest_matrix_disk_cache_enabled
             or not settings.backtest_matrix_cache_prewarm
         ):
             return
-        with matrix_prewarm_lock:
-            if matrix_prewarm_running:
-                logger.info("matrix cache prewarm already in progress, skip")
-                return
-            matrix_prewarm_running = True
 
         def _prewarm() -> None:
-            nonlocal matrix_prewarm_running
+            from app.backtest.engine import BacktestEngine
+            from app.backtest.matrix import MatrixPrewarmCancelledError
+            from app.backtest.strategy import prewarm_matrix_cache
+            from app.services.heavy_job_limiter import (
+                HeavyJobCancelledError,
+                shared_heavy_job_limiter,
+            )
+
             try:
                 latest = repo.latest_enriched_date("stock")
                 if latest is None:
                     logger.info("matrix cache prewarm skipped: no stock enriched data")
                     return
-                from app.backtest.engine import BacktestEngine
-                from app.backtest.strategy import prewarm_matrix_cache
 
-                result = prewarm_matrix_cache(
-                    BacktestEngine(repo),
-                    strategy_engine,
-                    asset_type="stock",
-                    latest_date=latest,
-                    years=settings.backtest_matrix_cache_prewarm_years,
-                )
+                with shared_heavy_job_limiter.slot(
+                    "normal",
+                    cancel_event=matrix_prewarm_owner.cancel_event,
+                ):
+                    result = prewarm_matrix_cache(
+                        BacktestEngine(repo),
+                        strategy_engine,
+                        asset_type="stock",
+                        latest_date=latest,
+                        years=settings.backtest_matrix_cache_prewarm_years,
+                        cancel_event=matrix_prewarm_owner.cancel_event,
+                    )
                 logger.info("matrix cache prewarm done: %s", result)
+            except (HeavyJobCancelledError, MatrixPrewarmCancelledError):
+                logger.info("matrix cache prewarm cancelled")
             except Exception:  # noqa: BLE001
                 logger.exception("matrix cache prewarm failed")
-            finally:
-                with matrix_prewarm_lock:
-                    matrix_prewarm_running = False
 
-        threading.Thread(
-            target=_prewarm,
-            name="matrix-cache-prewarm",
-            daemon=True,
-        ).start()
+        if not matrix_prewarm_owner.schedule(_prewarm):
+            logger.info("matrix cache prewarm already running or shutting down, skip")
 
     repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
     if repo.enriched_ready:
@@ -281,26 +316,44 @@ async def lifespan(app: FastAPI):
         extension_registry,
     )
 
-    yield
+    try:
+        yield
+    finally:
+        repo._on_refresh_done = None  # noqa: SLF001
+        if not matrix_prewarm_owner.shutdown(timeout=5.0):
+            logger.warning("matrix cache prewarm did not stop within 5 seconds")
+        mmanager = getattr(app.state, "mining_manager", None)
+        if mmanager:
+            mmanager.shutdown()
+        if app.state.scheduler:
+            app.state.scheduler.shutdown(wait=False)
+        ps = getattr(app.state, "pull_scheduler", None)
+        if ps:
+            ps.stop()
+        fsc = getattr(app.state, "financial_scheduler", None)
+        if fsc:
+            fsc.stop()
+        qs = getattr(app.state, "quote_service", None)
+        if qs:
+            qs.stop()
+        dsvc = getattr(app.state, "depth_service", None)
+        if dsvc:
+            dsvc.stop_polling()
+        wbot = getattr(app.state, "wecom_bot_service", None)
+        if wbot:
+            wbot.stop()
+        logger.info("shutdown")
 
-    if app.state.scheduler:
-        app.state.scheduler.shutdown(wait=False)
-    ps = getattr(app.state, "pull_scheduler", None)
-    if ps:
-        ps.stop()
-    fsc = getattr(app.state, "financial_scheduler", None)
-    if fsc:
-        fsc.stop()
-    qs = getattr(app.state, "quote_service", None)
-    if qs:
-        qs.stop()
-    dsvc = getattr(app.state, "depth_service", None)
-    if dsvc:
-        dsvc.stop_polling()
-    wbot = getattr(app.state, "wecom_bot_service", None)
-    if wbot:
-        wbot.stop()
-    logger.info("shutdown")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mining_process_lock = MiningProcessLock(settings.data_dir)
+    mining_process_lock.acquire()
+    try:
+        async with _application_lifespan(app):
+            yield
+    finally:
+        mining_process_lock.release()
 
 
 app = FastAPI(
@@ -374,6 +427,7 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
+app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)

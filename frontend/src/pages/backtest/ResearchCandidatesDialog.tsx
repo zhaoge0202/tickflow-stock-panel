@@ -46,7 +46,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
   const [kind, setKind] = useState<'all' | 'factor' | 'strategy'>('all')
   const [linkDraft, setLinkDraft] = useState<LinkDraft | null>(null)
   const candidates = useQuery({ queryKey: QK.researchCandidates, queryFn: api.researchCandidates })
-  const strategies = useQuery({ queryKey: QK.strategyLinkOptions, queryFn: () => api.strategyList() })
+  const strategies = useQuery({ queryKey: QK.strategyLinkOptions(), queryFn: () => api.strategyList() })
   const factorColumns = useQuery({ queryKey: QK.factorColumns, queryFn: api.factorColumns })
   const supportedFactors = useMemo(
     () => new Set((factorColumns.data?.columns ?? []).map(item => item.id)),
@@ -98,7 +98,7 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
     onSuccess: result => {
       queryClient.invalidateQueries({ queryKey: QK.strategyDetail(result.strategyId) })
       queryClient.invalidateQueries({ queryKey: ['screener-strategies'] })
-      queryClient.invalidateQueries({ queryKey: QK.strategyLinkOptions })
+      queryClient.invalidateQueries({ queryKey: QK.strategyLinkOptions() })
       setLinkDraft(null)
       toast(`已加入“${result.strategyName}”评分方案`, 'success')
     },

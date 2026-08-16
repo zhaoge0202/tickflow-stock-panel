@@ -25,6 +25,7 @@ import {
   Star,
   ScanSearch,
   History,
+  Pickaxe,
   FileText,
   Settings,
   Key,
@@ -79,6 +80,7 @@ const nav = [
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测', icon: History },
+  { to: '/mining',     label: '挖掘', icon: Pickaxe },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
@@ -424,12 +426,11 @@ export function Layout() {
     : (dataSources?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
   const isCustomActive = activeProvider !== 'tickflow'
 
-  // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒)
+  // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒; 后台标签页由 SSE 事件驱动, 不轮询)
   const alertsTotalQuery = useQuery({
     queryKey: ['alerts-total'],
     queryFn: () => api.alertsList({ days: 7, limit: 1 }),
     refetchInterval: 15000,
-    refetchIntervalInBackground: true,
     select: (data) => data.total,
   })
   // 只在拿到真实总数时同步徽标 (避免 data=undefined 时传 0 重置 lastSeen)
@@ -456,11 +457,27 @@ export function Layout() {
   const navItems = savedOrder.length > 0
     ? (() => {
         const byTo = new Map(allNav.map(n => [n.to, n]))
-        const ordered = savedOrder
+        const ordered = (savedOrder
           .map(id => byTo.get(id) ?? byTo.get(`/analysis/${id}`))
-          .filter(Boolean)
-        const seen = new Set(ordered.map(n => n!.to))
-        return [...ordered as typeof allNav, ...allNav.filter(n => !seen.has(n.to))]
+          .filter(Boolean)) as typeof allNav
+        const seen = new Set(ordered.map(n => n.to))
+        const merged = [...ordered]
+        for (const item of allNav) {
+          if (seen.has(item.to)) continue
+          // 未保存过排序的新条目: 内置页插回默认位置(排在已保存的默认前驱之后),
+          // 分析/扩展菜单仍追加到末尾
+          const defaultIndex = nav.findIndex(n => n.to === item.to)
+          let anchor = -1
+          if (defaultIndex > 0) {
+            for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
+              anchor = merged.findIndex(n => n.to === nav[i].to)
+            }
+          }
+          if (anchor >= 0) merged.splice(anchor + 1, 0, item)
+          else if (defaultIndex >= 0) merged.unshift(item)
+          else merged.push(item)
+        }
+        return merged
       })()
     : allNav
 

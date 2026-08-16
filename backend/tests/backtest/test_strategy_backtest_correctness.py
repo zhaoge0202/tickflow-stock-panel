@@ -181,12 +181,17 @@ def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
             "signal_limit_up": False,
             "signal_limit_down": False,
         }
-        for offset in range(3)
+        for offset in range(-1, 3)
     ]).sort(["symbol", "date"])
     regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": [start, start + timedelta(days=1)],
-        "state": ["weak", "strong"],
-        "score": [10, 85],
+        "date": [
+            start - timedelta(days=1),
+            start,
+            start + timedelta(days=1),
+            start + timedelta(days=2),
+        ],
+        "state": ["weak", "weak", "strong", "strong"],
+        "score": [10, 10, 85, 85],
     }))
     engine = _EngineStub(panel, data_dir=tmp_path)
     service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(_strategy()))
@@ -204,14 +209,68 @@ def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
 
     assert result.error is None
     assert engine.sim_matrix is not None
-    assert engine.sim_matrix.entry[:, 0].tolist() == [1, 0, 1]
+    assert engine.sim_matrix.entry[:, 0].tolist() == [0, 0, 1]
     assert result.config["regime_filter"] == regime_filter
     assert result.stats["selection"] == {
-        "strategy_matches": 2,
-        "entry_candidates": 2,
+        "strategy_matches": 1,
+        "entry_candidates": 1,
         "entry_trigger_filtered": 0,
         "entry_trigger_enabled": False,
     }
+
+
+def test_regime_filter_matches_raw_five_level_states(tmp_path):
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame([
+        {
+            "symbol": "A",
+            "name": "A",
+            "date": start + timedelta(days=offset),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 1000.0,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        }
+        for offset in range(-1, 3)
+    ]).sort(["symbol", "date"])
+    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+        "date": [
+            start - timedelta(days=1),
+            start,
+            start + timedelta(days=1),
+            start + timedelta(days=2),
+        ],
+        "state": ["weak", "lean_strong", "strong", "strong"],
+        "score": [10, 60, 85, 85],
+    }))
+
+    def run_with(states: list[str]):
+        engine = _EngineStub(panel, data_dir=tmp_path)
+        service = StrategyBacktestService(
+            engine=engine,
+            strategy_engine=_StrategyEngineStub(_strategy()),
+        )
+        result = service.run(StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=2),
+            matching="close_t",
+            mode="position",
+            regime_filter={"states": states},
+        ))
+        assert result.error is None
+        assert engine.sim_matrix is not None
+        return engine.sim_matrix.entry[:, 0].tolist()
+
+    # 强势与偏强是两个独立档位; 只选强势时偏强日不入场
+    assert run_with(["strong"]) == [0, 0, 1]
+    assert run_with(["strong", "lean_strong"]) == [0, 1, 1]
+    assert run_with(["lean_strong"]) == [0, 1, 0]
 
 
 def test_selection_stats_explain_entry_trigger_filtering():

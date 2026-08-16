@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import secrets_store
 from app.data_providers.custom.config import MAX_TIMEOUT
@@ -427,6 +428,14 @@ class CustomSourceTestIn(BaseModel):
     config: CustomSourceIn | None = None
 
 
+class MiningSchedulePrefs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mining_schedule_enabled: bool
+    mining_schedule_weekday: int = Field(ge=0, le=4)
+    mining_budget_profile: Literal["balanced", "strict"]
+
+
 @router.get("/preferences")
 def get_preferences() -> dict:
     """返回用户偏好设置。"""
@@ -485,6 +494,7 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        **preferences.get_mining_schedule(),
     }
 
 
@@ -655,6 +665,18 @@ def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
     from app.services import preferences
     preferences.save(req.model_dump())
     return req.model_dump()
+
+
+@router.put("/preferences/mining-schedule")
+def update_mining_schedule(req: MiningSchedulePrefs) -> dict:
+    """一次更新周度自动 mining 配置。"""
+    from app.services import preferences
+
+    return preferences.set_mining_schedule(
+        req.mining_schedule_enabled,
+        req.mining_schedule_weekday,
+        req.mining_budget_profile,
+    )
 
 
 @router.get("/preferences/watchlist-columns")
@@ -925,6 +947,23 @@ def update_regime_batch_params(req: RegimeBatchParamsIn) -> dict:
 class PipelineIndexSymbolsIn(BaseModel):
     """指数自定义拉取代码(逗号/换行/空格分隔,空串表示全量)。"""
     symbols: str = ""
+
+
+class MainlineFilterIn(BaseModel):
+    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单)。"""
+
+    min_members: int | None = None
+    max_members: int | None = None
+    blacklist: list[str] | str | None = None
+
+
+@router.put("/preferences/mainline-filter")
+def update_mainline_filter(req: MainlineFilterIn) -> dict:
+    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。"""
+    from app.services import preferences
+
+    payload = req.model_dump()
+    return preferences.set_mainline_filter_config(payload)
 
 
 @router.put("/preferences/pipeline-index-symbols")

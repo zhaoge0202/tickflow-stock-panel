@@ -79,10 +79,10 @@ def test_batch_isolates_a_single_factor_failure(monkeypatch):
     service = FactorBacktestService(engine)
     original = service._evaluate_panel
 
-    def evaluate(panel, config, run_id, started_at):
+    def evaluate(panel, config, run_id, started_at, **kwargs):
         if config.factor_name == "turnover_rate":
             raise ValueError("broken factor")
-        return original(panel, config, run_id, started_at)
+        return original(panel, config, run_id, started_at, **kwargs)
 
     monkeypatch.setattr(service, "_evaluate_panel", evaluate)
     result = service.run_batch(_batch_config(["change_pct", "turnover_rate"]))
@@ -135,6 +135,20 @@ def test_factor_catalog_covers_normalized_indicator_families():
         "log_amount",
         "gap_return",
         "distance_to_high_60d",
+        "max_ret_20d",
+        "ret_skew_20d",
+        "up_days_20d",
+        "amihud_20d",
+        "turnover_z_60d",
+        "vol_price_corr_20d",
+        "vwap_bias",
+        "vol_trend_5_60",
+        "limit_up_count_20d",
+        "limit_up_count_60d",
+        "pb_latest",
+        "roe_latest",
+        "revenue_yoy_latest",
+        "debt_ratio_latest",
     } <= set(factor_ids)
     assert set(DERIVED_FACTOR_DEPENDENCIES) <= set(factor_ids)
 

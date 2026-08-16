@@ -26,7 +26,11 @@ export const QK = {
   watchlistGroups:      ['watchlist-groups'] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
-  watchlistKlineBatch:  (symbols: string) => ['watchlist-kline-batch', symbols] as const,
+  // 不用 watchlist- 前缀: 日K历史盘中几乎不变, 若被 SSE quotes_updated 高频失效
+  // (expert 1s) 会导致全自选日K每秒重拉, staleTime 形同虚设。
+  // 刷新点: staleTime 过期 + Watchlist 增删自选/改蜡烛天数时的手动失效;
+  // 当日最后一根蜡烛由 Watchlist 用 enriched 实时 OHLC 前端修补 (零额外请求)。
+  watchlistKlineBatch:  (symbols: string) => ['kline-batch', symbols] as const,
   // 不用 watchlist- 前缀: 避免被 SSE quotes_updated 高频失效(expert 1s/pro 2s)
   // 导致每次都拉 TickFlow 触限流。分时图用固定 refetchInterval 刷新即可。
   minuteBatch:          (symbols: string) => ['minute-batch', symbols] as const,
@@ -45,8 +49,16 @@ export const QK = {
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
   factorColumns:        ['backtest-factor-columns'] as const,
+  miningRuns:           ['backtest-mining-runs'] as const,
+  miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
+                          ['backtest-mining-availability', assetType, profile, start, end] as const,
+  miningRun:            (id: string) => ['backtest-mining-run', id] as const,
+  miningResult:         (id: string) => ['backtest-mining-result', id] as const,
+  miningConfig:         ['backtest-mining-config'] as const,
   researchCandidates:  ['research-candidates'] as const,
-  strategyLinkOptions: ['strategy-link-options'] as const,
+  strategyLinkOptions: (assetType?: 'stock' | 'etf') => assetType
+    ? ['strategy-link-options', assetType] as const
+    : ['strategy-link-options'] as const,
   strategyDetail:       (id: string) => ['strategy-detail', id] as const,
 
   // Data / Pipeline
@@ -96,6 +108,8 @@ export const QK = {
   regimeLatest:         ['regime-latest'] as const,
   regimeStates:         (days: number) => ['regime-states', days] as const,
   regimeCoverage:       ['regime-coverage'] as const,
+  regimePhases:         (start?: string, end?: string) => ['regime-phases', start ?? '', end ?? ''] as const,
+  regimeMainline:       (kind: string, start?: string, end?: string) => ['regime-mainline', kind, start ?? '', end ?? ''] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
@@ -107,7 +121,11 @@ export const QK = {
 // 且在 monitor "重算" 窗口内读到空结果, 造成策略列表闪烁 (变 0 → 空失效 → 又出现)。
 
 export const SSE_INVALIDATE_PREFIXES = [
-  'watchlist',
+  // 精确前缀: 只命中自选页的实时数据 (quotes/enriched)。不能用宽泛的 'watchlist' ——
+  // 会误伤 ['watchlist'] (自选列表) 和 ['watchlist-groups'] (分组配置, 只随手动操作变化)。
+  // 旧设置里的 'watchlist' 单开关由 useQuoteStream 兼容读取。
+  'watchlist-quotes',
+  'watchlist-enriched',
   'quote-status',
   'index-quotes',
   'overview-market',

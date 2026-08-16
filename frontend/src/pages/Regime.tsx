@@ -12,11 +12,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
   Activity, RefreshCw, Loader2, Gauge, TrendingUp, TrendingDown, Minus,
-  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid,
+  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, Filter, X,
 } from 'lucide-react'
 import {
-  api, type RegimeRow, type RegimeState,
+  api, type RegimeRow, type RegimeState, type MarketPhase,
   REGIME_STATE_LABELS, REGIME_STATE_COLORS,
+  MARKET_PHASE_LABELS, MARKET_PHASE_COLORS, MARKET_PHASE_ORDER,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
@@ -139,10 +140,43 @@ export function Regime() {
     queryFn: () => api.regimeStates(days),
     staleTime: 5 * 60 * 1000,
   })
+  // 情绪周期阶段段 + 主线排行(与 history 同一时间范围)
+  const phases = useQuery({
+    queryKey: QK.regimePhases(histRange.start, histRange.end),
+    queryFn: () => api.regimePhases(histRange.start, histRange.end),
+    staleTime: 5 * 60 * 1000,
+  })
+  const [mainlineKind, setMainlineKind] = useState<'concept' | 'industry'>('concept')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const mainline = useQuery({
+    queryKey: QK.regimeMainline(mainlineKind, histRange.start, histRange.end),
+    queryFn: () => api.regimeMainline(histRange.start, histRange.end, 10, mainlineKind),
+    staleTime: 5 * 60 * 1000,
+  })
   const [recomputing, setRecomputing] = useState(false)
 
   const rows: RegimeRow[] = history.data?.rows ?? []
   const latest = rows.length > 0 ? rows[rows.length - 1] : null
+  const hasPhaseData = rows.length > 0 && rows.some(r => r.phase != null)
+  const segments = phases.data?.segments ?? []
+
+  // 当前阶段持续天数(末尾连续同阶段) + 当前主线(最新交易日 top3)
+  const phaseStreak = useMemo(() => {
+    if (!hasPhaseData) return null
+    const lastPhase = rows[rows.length - 1].phase
+    let streak = 1
+    for (let i = rows.length - 2; i >= 0; i--) {
+      if (rows[i].phase === lastPhase) streak++
+      else break
+    }
+    return { phase: lastPhase as MarketPhase, streak }
+  }, [rows, hasPhaseData])
+  const latestMainlines = useMemo(() => {
+    const mlRows = mainline.data?.rows ?? []
+    if (mlRows.length === 0) return []
+    const lastDate = mlRows[mlRows.length - 1].date
+    return mlRows.filter(r => r.date === lastDate && r.rank <= 3)
+  }, [mainline.data])
 
   // ── 当前势头: 末尾连续同态天数 + score 5日斜率(改善/恶化) + 上次弱势距今 ──
   const momentum = useMemo(() => {
@@ -184,6 +218,77 @@ export function Regime() {
   }, [rows])
 
 
+
+  // 阶段时间轴: 高度折线 + 2板以上宽度柱 + 晋级率曲线, 背景色带=情绪周期阶段
+  const phaseOption = useMemo<echarts.EChartsOption | null>(() => {
+    if (rows.length === 0 || !hasPhaseData) return null
+    const dates = rows.map(r => r.date)
+    const heights = rows.map(r => r.max_consecutive)
+    const ge2 = rows.map(r => r.ge2_count ?? null)
+    const promo = rows.map(r => (r.promo_rate != null ? Math.round(r.promo_rate * 100) : null))
+    const phaseBands: any[] = []
+    let bandStart = rows[0]?.date
+    let prevPhase = rows[0]?.phase
+    rows.forEach((r, i) => {
+      if (r.phase !== prevPhase || i === rows.length - 1) {
+        const bandEnd = i === rows.length - 1 ? r.date : rows[i - 1].date
+        if (prevPhase && MARKET_PHASE_COLORS[prevPhase as MarketPhase]) {
+          phaseBands.push([
+            { xAxis: bandStart, itemStyle: { color: MARKET_PHASE_COLORS[prevPhase as MarketPhase], opacity: 0.10 } },
+            { xAxis: bandEnd },
+          ])
+        }
+        bandStart = r.date
+        prevPhase = r.phase
+      }
+    })
+    return {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder,
+        textStyle: { color: ct.tooltipText },
+        formatter: (params: any) => {
+          const p0 = Array.isArray(params) ? params[0] : params
+          const i = dates.indexOf(p0.axisValue)
+          const r = rows[i]
+          if (!r) return ''
+          const phase = r.phase ? MARKET_PHASE_LABELS[r.phase] : '—'
+          return [
+            `<b>${r.date}</b> · ${phase}`,
+            `高度 ${r.max_consecutive} · 首板 ${r.first_board ?? '—'} · 2板+ ${r.ge2_count ?? '—'}`,
+            `晋级率 ${r.promo_rate != null ? (r.promo_rate * 100).toFixed(1) + '%' : '—'} · 封板率 ${r.seal_rate != null ? (r.seal_rate * 100).toFixed(1) + '%' : '—'}`,
+          ].join('<br/>')
+        },
+      },
+      legend: {
+        data: ['高度', '2板+', '晋级率'], textStyle: { color: ct.text, fontSize: 10 }, top: 0,
+      },
+      grid: { left: 44, right: 44, top: 32, bottom: 44 },
+      xAxis: {
+        type: 'category', data: dates, boundaryGap: false,
+        axisLabel: { color: ct.text, fontSize: 10, formatter: (v: string) => v.slice(5) },
+        axisLine: { lineStyle: { color: ct.grid } },
+      },
+      yAxis: [
+        { type: 'value', name: '高度/宽度', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '晋级率%', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
+      ],
+      dataZoom: [
+        { type: 'inside', start: Math.max(0, 100 - (60 / days) * 100) },
+        { type: 'slider', bottom: 6, height: 14, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
+      ],
+      series: [
+        { name: '2板+', type: 'bar', data: ge2, yAxisIndex: 0, barMaxWidth: 5,
+          itemStyle: { color: '#f59e0b', opacity: 0.4 }, z: 1 },
+        { name: '高度', type: 'line', data: heights, smooth: true, symbol: 'none', yAxisIndex: 0,
+          lineStyle: { width: 1.6, color: '#ef4444' }, z: 3,
+          markArea: { silent: true, data: phaseBands } },
+        { name: '晋级率', type: 'line', data: promo, smooth: true, symbol: 'none', yAxisIndex: 1,
+          lineStyle: { width: 1.2, color: '#3b82f6', type: 'dotted' }, z: 2 },
+      ],
+    }
+  }, [rows, days, ct, hasPhaseData])
+  const phaseChartRef = useEChart(phaseOption, [phaseOption])
 
   // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
@@ -366,6 +471,8 @@ export function Regime() {
         qc.invalidateQueries({ queryKey: ['regime-history'] }),
         qc.invalidateQueries({ queryKey: ['regime-states'] }),
         qc.invalidateQueries({ queryKey: ['regime-latest'] }),
+        qc.invalidateQueries({ queryKey: ['regime-phases'] }),
+        qc.invalidateQueries({ queryKey: ['regime-mainline'] }),
         qc.invalidateQueries({ queryKey: QK.regimeCoverage }),
       ])
     } catch (e) {
@@ -426,6 +533,207 @@ export function Regime() {
               {recomputing ? '重算中…' : '重算'}
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* ── 市场阶段概览 (情绪周期 + 梯队指标 + 当前主线) ── */}
+      {hasPhaseData && latest ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {/* 当前阶段 */}
+          <div className={cn(cardCls, 'p-3')}>
+            <div className="flex items-center gap-1.5 text-[10px] text-muted">
+              <Flame className="h-3 w-3" /> 当前阶段 · {latest.date}
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className="text-2xl font-bold" style={{ color: MARKET_PHASE_COLORS[phaseStreak?.phase ?? 'repair'] }}>
+                {MARKET_PHASE_LABELS[phaseStreak?.phase ?? 'repair']}
+              </span>
+              {phaseStreak && <span className="text-xs text-muted">第 {phaseStreak.streak} 天</span>}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {latestMainlines.length > 0 ? latestMainlines.map(m => (
+                <span key={m.member} className="rounded px-1.5 py-px text-[9px] font-medium"
+                  style={{ color: '#f59e0b', backgroundColor: '#f59e0b18' }} title={`涨停${m.limit_up_count}家 · 最高${m.max_boards}板 · 梯队${m.rungs_filled}档`}>
+                  {m.member}
+                </span>
+              )) : <span className="text-[9px] text-muted">暂无主线数据</span>}
+            </div>
+          </div>
+          {([
+            { label: '市场高度', val: latest.max_consecutive, unit: '板', color: '#ef4444' },
+            { label: '首板宽度', val: latest.first_board, unit: '家', color: '#f97316' },
+            { label: '2板+宽度', val: latest.ge2_count, unit: '家', color: '#f59e0b' },
+            { label: '晋级率', val: latest.promo_rate != null ? `${(latest.promo_rate * 100).toFixed(0)}%` : '—',
+              unit: '', color: '#3b82f6',
+              sub: latest.promo_pool != null ? `池 ${latest.promo_pool} 家` : undefined },
+            { label: '梯队完整度', val: latest.ladder_completeness != null ? `${(latest.ladder_completeness * 100).toFixed(0)}%` : '—',
+              unit: '', color: '#a855f7', sub: '2板→最高板不断档' },
+          ] as { label: string; val: React.ReactNode; unit: string; color: string; sub?: string }[]).map(k => (
+            <div key={k.label} className={cn(cardCls, 'p-3')}>
+              <div className="flex items-center gap-1.5 text-[10px] text-muted">
+                <Activity className="h-3 w-3" /> {k.label}
+              </div>
+              <div className="mt-1.5 text-2xl font-bold" style={{ color: k.color }}>
+                {k.val}<span className="ml-0.5 text-xs font-normal text-muted">{k.unit}</span>
+              </div>
+              {k.sub && <div className="mt-1 text-[9px] text-muted">{k.sub}</div>}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-card border border-dashed border-border p-4 text-center text-xs text-muted">
+          市场阶段(情绪周期)数据尚未生成 — 点击右上角「重算」即可回填全部历史阶段与主线
+        </div>
+      )}
+
+      {/* ── 情绪周期时间轴 (阶段色带 + 高度/宽度/晋级率) ── */}
+      {hasPhaseData && rows.length > 0 && (
+        <div className={cn(cardCls, 'p-3')}>
+          <SectionTitle icon={Flame} title="情绪周期时间轴"
+            hint="高度(红) · 2板+宽度(琥珀柱) · 晋级率(蓝虚线) · 背景色带=阶段" />
+          <div ref={phaseChartRef} className="mt-2 h-[280px]" />
+          <div className="mt-1.5 flex h-6 w-full overflow-hidden rounded-md">
+            {rows.map(r => (
+              <div key={r.date} title={`${r.date} ${MARKET_PHASE_LABELS[r.phase as MarketPhase]}`}
+                className="flex-1 min-w-[2px] transition-opacity hover:opacity-80"
+                style={{ backgroundColor: MARKET_PHASE_COLORS[r.phase as MarketPhase] }} />
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-muted">
+            {MARKET_PHASE_ORDER.map(p => (
+              <span key={p} className="flex items-center gap-1">
+                <span className="inline-block h-2.5 w-2.5 rounded" style={{ backgroundColor: MARKET_PHASE_COLORS[p] }} />
+                {MARKET_PHASE_LABELS[p]}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── 阶段 × 主线 (什么阶段走什么主升) ── */}
+      {segments.length > 0 && (
+        <div className={cn(cardCls, 'p-3')}>
+          <SectionTitle icon={Layers} title="阶段 × 主线"
+            hint={`${segments.length} 段 · 主线按段内 top5 天数排序`} />
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-[11px]">
+              <thead>
+                <tr className="border-b border-border text-[10px] text-muted">
+                  <th className="py-1.5 pr-3 font-medium">阶段</th>
+                  <th className="py-1.5 pr-3 font-medium">区间</th>
+                  <th className="py-1.5 pr-3 font-medium text-right">天数</th>
+                  <th className="py-1.5 pr-3 font-medium text-right">高度</th>
+                  <th className="py-1.5 pr-3 font-medium text-right">2板+</th>
+                  <th className="py-1.5 pr-3 font-medium text-right">晋级率</th>
+                  <th className="py-1.5 pr-3 font-medium text-right">封板率</th>
+                  <th className="py-1.5 font-medium">主导主线</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...segments].reverse().map((seg, i) => (
+                  <tr key={`${seg.start}-${seg.phase}-${i}`} className="border-b border-border/50 last:border-0">
+                    <td className="py-1.5 pr-3">
+                      <span className="rounded px-1.5 py-px text-[10px] font-semibold"
+                        style={{ color: MARKET_PHASE_COLORS[seg.phase], backgroundColor: MARKET_PHASE_COLORS[seg.phase] + '20' }}>
+                        {seg.label}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-3 font-mono text-[10px] text-secondary">
+                      {seg.start.slice(5)} ~ {seg.end.slice(5)}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right font-mono">{seg.days}</td>
+                    <td className="py-1.5 pr-3 text-right font-mono">{seg.avg_height}</td>
+                    <td className="py-1.5 pr-3 text-right font-mono">{seg.avg_ge2}</td>
+                    <td className="py-1.5 pr-3 text-right font-mono">
+                      {seg.avg_promo != null ? `${(seg.avg_promo * 100).toFixed(0)}%` : '—'}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right font-mono">
+                      {seg.avg_seal_rate != null ? `${(seg.avg_seal_rate * 100).toFixed(0)}%` : '—'}
+                    </td>
+                    <td className="py-1.5">
+                      <div className="flex flex-wrap gap-1">
+                        {seg.top_mainlines.length > 0 ? seg.top_mainlines.map(m => (
+                          <span key={m.member} className="rounded px-1.5 py-px text-[9px]"
+                            style={{ color: '#f59e0b', backgroundColor: '#f59e0b18' }}
+                            title={`top5 ${m.top5_days} 天 · 最高 ${m.max_boards} 板 · 龙头 ${m.leader_symbol}`}>
+                            {m.member}<span className="ml-1 font-mono opacity-70">{m.top5_days}d</span>
+                          </span>
+                        )) : <span className="text-[9px] text-muted">—</span>}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── 主线排行 (窗口内持续性 + 过滤设置) ── */}
+      <div className={cn(cardCls, 'p-3')}>
+        <SectionTitle icon={Layers} title="主线排行"
+          hint={
+            <span className="flex items-center gap-2">
+              <span className="hidden sm:inline text-[9px] text-muted">{mainline.data?.membership_note}</span>
+              <button
+                onClick={() => setFilterOpen(v => !v)}
+                className={cn('inline-flex items-center gap-1 rounded-btn border px-2 py-0.5 text-[10px] transition-colors',
+                  filterOpen ? 'border-accent/50 text-accent' : 'border-border bg-base text-secondary hover:text-accent')}
+              >
+                <Filter className="h-3 w-3" /> 过滤
+              </button>
+            </span>
+          }
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
+            {([['concept', '概念'], ['industry', '行业']] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setMainlineKind(k)}
+                className={cn('h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
+                  mainlineKind === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground')}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="text-[10px] text-muted">窗口内 top1 天数排序 · 点击「过滤」配置宽基概念屏蔽</span>
+        </div>
+        {filterOpen && (
+          <MainlineFilterPanel
+            filter={mainline.data?.filter}
+            onDone={async () => {
+              await qc.invalidateQueries({ queryKey: ['regime-mainline'] })
+              await qc.invalidateQueries({ queryKey: ['regime-phases'] })
+            }}
+          />
+        )}
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full min-w-[560px] text-left text-[11px]">
+            <thead>
+              <tr className="border-b border-border text-[10px] text-muted">
+                <th className="py-1.5 pr-3 font-medium">#</th>
+                <th className="py-1.5 pr-3 font-medium">主线</th>
+                <th className="py-1.5 pr-3 font-medium text-right">top1 天数</th>
+                <th className="py-1.5 pr-3 font-medium text-right">日均分</th>
+                <th className="py-1.5 pr-3 font-medium text-right">最高板</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(mainline.data?.leaders ?? []).map((l, i) => (
+                <tr key={l.member} className="border-b border-border/50 last:border-0">
+                  <td className="py-1.5 pr-3 font-mono text-muted">{i + 1}</td>
+                  <td className="py-1.5 pr-3 font-medium text-foreground">{l.member}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">{l.top1_days}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">{l.avg_score}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">{l.max_boards} 板</td>
+                </tr>
+              ))}
+              {(mainline.data?.leaders ?? []).length === 0 && (
+                <tr><td colSpan={5} className="py-4 text-center text-[10px] text-muted">
+                  {mainline.isLoading ? '加载中…' : '暂无主线数据 — 点击「重算」回填, 或检查过滤设置'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -657,6 +965,91 @@ export function Regime() {
           onApply={(d) => { setRange({ custom: d }); setCustomOpen(false) }}
         />
       )}
+    </div>
+  )
+}
+
+// ── 主线过滤设置面板 ──────────────────────────────────────
+// 宽基/风格标签(融资融券/沪深股通等数千成分)会霸占主线榜首。默认按成员数
+// 上限过滤; 用户可调阈值并按名称屏蔽特定概念, 保存后自动重算主线。
+function MainlineFilterPanel({ filter, onDone }: {
+  filter: { min_members: number; max_members: number; blacklist: string[] } | undefined
+  onDone: () => Promise<void>
+}) {
+  const [minMembers, setMinMembers] = useState(String(filter?.min_members ?? 4))
+  const [maxMembers, setMaxMembers] = useState(String(filter?.max_members ?? 600))
+  const [blacklist, setBlacklist] = useState<string[]>(filter?.blacklist ?? [])
+  const [input, setInput] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const addTag = () => {
+    const v = input.trim()
+    if (v && !blacklist.includes(v)) setBlacklist([...blacklist, v])
+    setInput('')
+  }
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      await api.mainlineFilterUpdate({
+        min_members: Math.max(1, Number(minMembers) || 4),
+        max_members: Math.max(50, Number(maxMembers) || 600),
+        blacklist,
+      })
+      await api.regimeMainlineRecompute()
+      toast('过滤已保存, 主线已重算', 'success')
+      await onDone()
+    } catch (e) {
+      toast(`保存失败 · ${String((e as Error)?.message || e)}`, 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-btn border border-border bg-base/40 p-2.5">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted">成员数上限(过滤宽基标签)</span>
+          <input type="number" min={50} max={5000} value={maxMembers}
+            onChange={e => setMaxMembers(e.target.value)}
+            className="h-7 w-24 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted">成员数下限</span>
+          <input type="number" min={1} max={200} value={minMembers}
+            onChange={e => setMinMembers(e.target.value)}
+            className="h-7 w-20 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
+        </label>
+        <div className="flex min-w-[220px] flex-1 flex-col gap-1">
+          <span className="text-[10px] text-muted">按名称屏蔽(回车添加)</span>
+          <div className="flex items-center gap-1.5">
+            <input value={input} onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag() } }}
+              placeholder="如: 融资融券、沪股通"
+              className="h-7 flex-1 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
+          </div>
+          {blacklist.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {blacklist.map(b => (
+                <span key={b} className="inline-flex items-center gap-1 rounded bg-accent/10 px-1.5 py-px text-[10px] text-accent">
+                  {b}
+                  <button onClick={() => setBlacklist(blacklist.filter(x => x !== b))} className="hover:text-foreground">
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <button onClick={save} disabled={saving}
+          className="h-7 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50">
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '保存并重算'}
+        </button>
+      </div>
+      <div className="mt-1.5 text-[9px] text-muted">
+        说明: 成分股数超过上限的概念(如 融资融券~7700家/沪深股通~3300家)视为宽基/风格标签, 不参与主线排名; 修改后自动重算全部历史主线(秒级)。
+      </div>
     </div>
   )
 }

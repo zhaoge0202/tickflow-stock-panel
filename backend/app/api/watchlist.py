@@ -212,7 +212,7 @@ def clear_all():
 
 # 自选页需要的列
 _WATCHLIST_COLS = [
-    "symbol", "close", "change_pct", "change_amount", "amount",
+    "symbol", "close", "open", "high", "low", "change_pct", "change_amount", "amount",
     "turnover_rate",
     "amplitude", "annual_vol_20d",
     "vol_ratio_5d",

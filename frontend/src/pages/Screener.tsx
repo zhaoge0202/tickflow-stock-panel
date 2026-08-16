@@ -36,6 +36,9 @@ import {
   type ColumnConfig,
 } from '@/lib/screener-columns'
 
+// 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
+const SHOW_STRATEGY_STORE = false
+
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
@@ -115,10 +118,12 @@ export function Screener() {
     setFilter(filterMap.current.get(strategyId) ?? { ...defaultFilter })
   }, [])
 
-  // 对原始结果应用过滤
-  const filteredRows = result
-    ? applyFilter(result.rows, filter)
-    : []
+  // 对原始结果应用过滤 (memo: 否则每次渲染都对全部结果行过滤,
+  // 且新数组身份会击穿下游 displayRows 的 memo)
+  const filteredRows = useMemo(
+    () => (result ? applyFilter(result.rows, filter) : []),
+    [result, filter],
+  )
 
   const { data: prefs } = usePreferences()
   const screenerAutoRun = prefs?.screener_auto_run ?? true
@@ -698,16 +703,18 @@ export function Screener() {
               <Sparkles className="h-3.5 w-3.5" />
               创建策略 · AI
             </button>
-            {/* 获取策略（占位，敬请期待） */}
-            <button
-              onClick={() => setShowStore(true)}
-              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn
-                border border-border bg-surface text-xs font-medium text-secondary
-                hover:text-accent hover:border-accent/50 transition-colors cursor-pointer"
-            >
-              <Store className="h-3.5 w-3.5" />
-              获取策略
-            </button>
+            {/* 获取策略（占位，敬请期待）— 暂时隐藏 */}
+            {SHOW_STRATEGY_STORE && (
+              <button
+                onClick={() => setShowStore(true)}
+                className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn
+                  border border-border bg-surface text-xs font-medium text-secondary
+                  hover:text-accent hover:border-accent/50 transition-colors cursor-pointer"
+              >
+                <Store className="h-3.5 w-3.5" />
+                获取策略
+              </button>
+            )}
           </div>
         }
       />

@@ -130,16 +130,36 @@ class QuoteSubscriber:
             self._event.set()
 
 
+# 落盘节流间隔: last_fetch_ms 仅在进程重启后用于显示"最后获取时间"(运行中读内存值),
+# 每 30s 持久化一次足够, 避免 expert 档每秒一轮的全量 preferences 重写磁盘。
+_LAST_FETCH_WRITE_INTERVAL_MS = 30_000.0
+_last_fetch_written_at_ms: float = 0.0
+
+
 def _persist_last_fetch(fetched_at_ms: float) -> None:
     """把"最后获取"时间戳持久化到 preferences, 使进程重启后仍可显示。
 
     放在锁外调用 (IO); 失败不影响主流程 (内存值已更新, 下次 fetch 再写)。
+    距上次成功落盘不足 30s 时跳过 (节流只影响落盘频率, 内存值不受影响)。
     """
+    global _last_fetch_written_at_ms
+    if (fetched_at_ms - _last_fetch_written_at_ms) < _LAST_FETCH_WRITE_INTERVAL_MS:
+        return
     try:
         from app.services import preferences
         preferences.save({"last_fetch_ms": round(fetched_at_ms, 0)})
+        _last_fetch_written_at_ms = fetched_at_ms
     except Exception as e:  # noqa: BLE001
         logger.debug("last_fetch_ms 持久化失败 (不影响行情): %s", e)
+
+
+def _monitor_name_map(repo) -> dict[str, str]:
+    """监控回填用的 symbol → name 映射 (股票 + ETF + 指数, 股票优先)。
+
+    走 repo.get_name_map() 的进程内 memo (三份 instruments 维表刷新时失效),
+    避免每轮监控对 ~7000 行维表 iter_rows 重建。过滤空名称与旧行为一致。
+    """
+    return {s: n for s, n in repo.get_name_map().items() if n}
 
 
 class QuoteService:
@@ -1081,28 +1101,10 @@ class QuoteService:
                 engine = getattr(self._app_state, "monitor_engine", None)
                 if engine and engine.rule_count > 0:
                     # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)。
-                    # 含股票 + ETF 维表, 保证 ETF 监控告警也能回填名称。
+                    # 股票 + ETF + 指数三表合并走 _monitor_name_map -> repo.get_name_map()
+                    # 的进程内 memo, 避免每轮监控对 ~7000 行维表 iter_rows 重建。
                     try:
-                        name_map: dict[str, str] = {}
-                        inst_df = self._app_state.repo.get_instruments()
-                        if not inst_df.is_empty() and "symbol" in inst_df.columns and "name" in inst_df.columns:
-                            for row in inst_df.select(["symbol", "name"]).iter_rows(named=True):
-                                if row.get("name"):
-                                    name_map[row["symbol"]] = row["name"]
-                        # 仅当存在 ETF 规则时补 ETF 维表 (股票名优先, setdefault 不覆盖股票)
-                        if engine.has_asset_rules("etf"):
-                            etf_inst = self._app_state.repo.get_etf_instruments()
-                            if not etf_inst.is_empty() and "symbol" in etf_inst.columns and "name" in etf_inst.columns:
-                                for row in etf_inst.select(["symbol", "name"]).iter_rows(named=True):
-                                    if row.get("name"):
-                                        name_map.setdefault(row["symbol"], row["name"])
-                        # 仅当存在指数规则时补指数维表 (setdefault 不覆盖股票/ETF)
-                        if engine.has_asset_rules("index"):
-                            idx_inst = self._app_state.repo.get_instruments_asset("index")
-                            if not idx_inst.is_empty() and "symbol" in idx_inst.columns and "name" in idx_inst.columns:
-                                for row in idx_inst.select(["symbol", "name"]).iter_rows(named=True):
-                                    if row.get("name"):
-                                        name_map.setdefault(row["symbol"], row["name"])
+                        name_map = _monitor_name_map(self._app_state.repo)
                         if name_map:
                             engine.set_name_map(name_map)
                     except Exception as e:  # noqa: BLE001

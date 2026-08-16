@@ -150,13 +150,25 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
 
     纯 polars 聚合, 不重算指标(假设 df 已含 signal_*/change_pct/ma20 等列)。
     index_pct_map: {date: 指数涨幅} 可选, 由调用方从指数数据预先算好。
+    梯队指标(首板/N板宽度/晋级率)由 market_phase 提供; phase 列不在此算
+    (需要完整日序做平滑), 由 refresh_phase_labels 在 upsert 后统一重标。
     """
+    from app.services.market_phase import (
+        finalize_ladder_row,
+        ladder_daily_aggs,
+        ladder_promo_aggs,
+        with_prev_consecutive,
+    )
+
     needed = ["date", "change_pct", "amount", "signal_limit_up",
               "signal_limit_down", "signal_broken_limit_up",
               "consecutive_limit_ups", "close", "ma20"]
     avail = [c for c in needed if c in df.columns]
     if "date" not in avail or "change_pct" not in avail:
         return pl.DataFrame()
+
+    if "consecutive_limit_ups" in avail and "symbol" in df.columns:
+        df = with_prev_consecutive(df)
 
     # 基础聚合 — 全部用 group_by 一次性向量化算出, 避免逐日 filter 扫全表(OOM/超时元凶)。
     has_ma20 = "close" in avail and "ma20" in avail
@@ -215,6 +227,15 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
                   .then(1).otherwise(None).sum().alias("_valid_cnt"),
             ]
             if has_ma20 else []
+        ),
+        # 梯队指标(阶段判定所需): 首板/N板宽度/非空档位数; 晋级率需 _prev_consec
+        *(
+            ladder_daily_aggs()
+            if "consecutive_limit_ups" in avail else []
+        ),
+        *(
+            ladder_promo_aggs()
+            if "consecutive_limit_ups" in avail and "_prev_consec" in df.columns else []
         ),
     ).sort("date")
 
@@ -289,6 +310,8 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "speculation_score": round(sub["speculation"]),
             "resilience_score": round(sub["resilience"]),
             "trend_score": round(sub["trend"]),
+            # 梯队指标(阶段判定所需); phase 由 refresh_phase_labels 统一重标
+            **finalize_ladder_row(r),
         })
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
@@ -325,6 +348,10 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
             needed={"signal_limit_up", "signal_limit_down", "signal_broken_limit_up"},
             historical_shares=historical_shares,
         )
+    # 晋级率需要昨日连板数: 在裁掉 warmup 之前先按 symbol 平移,
+    # 保证每批首日的 _prev_consec 来自 warmup 的最后一个交易日而非 null。
+    from app.services.market_phase import with_prev_consecutive
+    df = with_prev_consecutive(df)
     # 丢弃 warmup 行, 只留目标区间
     return df.filter((pl.col("date") >= batch_start) & (pl.col("date") <= batch_end))
 
@@ -446,6 +473,28 @@ def load_regime_history(data_dir: Path) -> pl.DataFrame:
         return pl.DataFrame()
 
 
+def refresh_phase_labels(data_dir: Path) -> int:
+    """对全量 regime 时序重标情绪周期阶段(冰点/启动/主升/高潮/退潮/修复)。
+
+    阶段判定需要完整日序(EMA 平滑 + 持续性确认), 不能在单批内完成,
+    因此每次 upsert 后调用本函数整体重标并写回。行数为天数(千级), 开销可忽略。
+    返回标注的天数; 阶段列缺失所需指标(旧 schema 未重算)时返回 0。
+    """
+    from app.services.market_phase import classify_phase_series
+
+    df = load_regime_history(data_dir)
+    required = {"date", "max_consecutive", "first_board", "ge2_count", "promo_rate", "seal_rate"}
+    if df.is_empty() or not required.issubset(df.columns):
+        return 0
+    try:
+        labeled = classify_phase_series(df)
+    except Exception as e:
+        logger.warning("refresh_phase_labels failed: %s", e)
+        return 0
+    labeled.write_parquet(regime_path(data_dir))
+    return labeled.height
+
+
 def upsert_regime_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
     """按 date 覆盖(upsert): 重算的天覆盖旧行, 新天追加。
 
@@ -553,6 +602,7 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
     new_rows = run_regime_batch(repo, start=to_compute[0], end=to_compute[-1])
     if not new_rows.is_empty():
         upsert_regime_history(data_dir, new_rows)
+        refresh_phase_labels(data_dir)
     return new_rows
 
 

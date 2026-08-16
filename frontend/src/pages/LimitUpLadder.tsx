@@ -1517,7 +1517,10 @@ export function LimitUpLadder() {
   const extColumnsParam = useMemo(() => buildExtColumnsParam(extFields), [extFields])
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: [QK.limitLadder(asOf || undefined), extColumnsParam, direction],
+    // key 必须拍平 (spread 展开): key[0] 为字符串 'limit-ladder' 才能被 SSE 前缀失效
+    // 命中实现实时刷新, depth_updated 事件 (invalidate ['limit-ladder']) 也才能匹配本查询。
+    // 嵌套数组 key 会导致前者靠 String() 侥幸命中、后者永远失配。
+    queryKey: [...QK.limitLadder(asOf || undefined), extColumnsParam, direction],
     queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction),
     staleTime: 5 * 60_000,
   })

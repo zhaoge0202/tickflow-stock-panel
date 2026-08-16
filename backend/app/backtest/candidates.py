@@ -1,4 +1,5 @@
 """量化研究候选方案的轻量本地存储。"""
+
 from __future__ import annotations
 
 import json
@@ -17,28 +18,108 @@ MAX_NAME_LENGTH = 80
 MAX_PAYLOAD_BYTES = 32 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
+_MINING_SOURCE_CONFIG_FIELDS = frozenset(
+    {
+        "origin_run_id",
+        "candidate_signature",
+        "regime_state",
+        "algorithm_version",
+        "methodology_version",
+    }
+)
 _CONFIG_FIELDS: dict[str, frozenset[str]] = {
-    "factor": frozenset({
-        "factor_name", "symbols", "start", "end", "n_groups", "rebalance", "weight",
-        "fees_pct", "slippage_bps", "asset_type",
-    }),
-    "strategy": frozenset({
-        "strategy_id", "symbols", "start", "end", "params", "overrides", "matching",
-        "entry_fill", "exit_fill", "fees_pct", "commission_pct", "stamp_tax_pct",
-        "slippage_bps", "max_positions", "max_exposure_pct", "initial_capital",
-        "position_sizing", "mode", "holding_days", "asset_type", "minute_fill",
-        "regime_filter",
-    }),
+    "factor": frozenset(
+        {
+            "factor_name",
+            "symbols",
+            "start",
+            "end",
+            "n_groups",
+            "rebalance",
+            "weight",
+            "fees_pct",
+            "slippage_bps",
+            "asset_type",
+        }
+    )
+    | _MINING_SOURCE_CONFIG_FIELDS,
+    "strategy": frozenset(
+        {
+            "strategy_id",
+            "symbols",
+            "start",
+            "end",
+            "params",
+            "overrides",
+            "matching",
+            "entry_fill",
+            "exit_fill",
+            "fees_pct",
+            "commission_pct",
+            "stamp_tax_pct",
+            "slippage_bps",
+            "max_positions",
+            "max_exposure_pct",
+            "initial_capital",
+            "position_sizing",
+            "mode",
+            "holding_days",
+            "asset_type",
+            "minute_fill",
+            "regime_filter",
+            "factor_names",
+            "directions",
+            "weights",
+        }
+    )
+    | _MINING_SOURCE_CONFIG_FIELDS,
 }
+_MINING_METRIC_FIELDS = frozenset(
+    {
+        "oos_sharpe",
+        "oos_return",
+        "oos_max_drawdown",
+        "oos_positive_fold_ratio",
+        "oos_n_trades",
+        "valid_folds",
+        "skipped_folds",
+        "confidence",
+        "coverage",
+        "turnover",
+        "long_short_sharpe",
+    }
+)
 _METRIC_FIELDS: dict[str, frozenset[str]] = {
-    "factor": frozenset({
-        "ic_mean", "ic_std", "ir", "ic_win_rate", "long_short_return",
-        "long_short_max_drawdown", "n_symbols", "n_dates", "elapsed_ms",
-    }),
-    "strategy": frozenset({
-        "total_return", "annual_return", "max_drawdown", "sharpe", "sortino", "win_rate",
-        "n_trades", "profit_factor", "avg_return", "median_return", "elapsed_ms",
-    }),
+    "factor": frozenset(
+        {
+            "ic_mean",
+            "ic_std",
+            "ir",
+            "ic_win_rate",
+            "long_short_return",
+            "long_short_max_drawdown",
+            "n_symbols",
+            "n_dates",
+            "elapsed_ms",
+        }
+    )
+    | _MINING_METRIC_FIELDS,
+    "strategy": frozenset(
+        {
+            "total_return",
+            "annual_return",
+            "max_drawdown",
+            "sharpe",
+            "sortino",
+            "win_rate",
+            "n_trades",
+            "profit_factor",
+            "avg_return",
+            "median_return",
+            "elapsed_ms",
+        }
+    )
+    | _MINING_METRIC_FIELDS,
 }
 _lock = threading.RLock()
 
@@ -79,6 +160,70 @@ class CandidateStore:
 
         with _lock:
             items = self._load()
+            if len(items) >= MAX_CANDIDATES:
+                raise CandidateValidationError(f"候选方案最多保存 {MAX_CANDIDATES} 个")
+            now = datetime.now(UTC).isoformat()
+            item = {
+                "id": uuid.uuid4().hex,
+                "kind": kind,
+                "name": clean_name,
+                "source_id": clean_source_id,
+                "config": clean_config,
+                "metrics": clean_metrics,
+                "data_as_of": data_as_of,
+                "status": status,
+                "created_at": now,
+                "updated_at": now,
+            }
+            items.insert(0, item)
+            self._write(items)
+            return item
+
+    def create_or_get_by_provenance(
+        self,
+        *,
+        origin_run_id: str,
+        candidate_signature: str,
+        kind: CandidateKind,
+        name: str,
+        source_id: str,
+        config: dict[str, Any],
+        metrics: dict[str, Any],
+        data_as_of: str | None,
+        status: CandidateStatus = "pending",
+    ) -> dict[str, Any]:
+        """Atomically return or create one item for a mining run candidate."""
+        clean_name = self._validate_name(name)
+        clean_source_id = source_id.strip()
+        if not clean_source_id or len(clean_source_id) > 120:
+            raise CandidateValidationError("候选来源标识不能为空且不能超过 120 个字符")
+        clean_config = self._validate_config(kind, config)
+        clean_metrics = self._validate_metrics(kind, metrics)
+        if (
+            clean_config.get("origin_run_id") != origin_run_id
+            or clean_config.get("candidate_signature") != candidate_signature
+        ):
+            raise CandidateValidationError("候选来源与配置中的挖掘溯源不一致")
+
+        with _lock:
+            items = self._load()
+            for item in items:
+                item_config = item.get("config") or {}
+                if (
+                    item_config.get("origin_run_id") == origin_run_id
+                    and item_config.get("candidate_signature") == candidate_signature
+                ):
+                    if (
+                        item.get("kind") == kind
+                        and item.get("source_id") == clean_source_id
+                        and item_config == clean_config
+                        and item.get("metrics") == clean_metrics
+                        and item.get("data_as_of") == data_as_of
+                    ):
+                        return item
+                    raise CandidateValidationError(
+                        "相同挖掘溯源的候选内容冲突, 已停止覆盖"
+                    )
             if len(items) >= MAX_CANDIDATES:
                 raise CandidateValidationError(f"候选方案最多保存 {MAX_CANDIDATES} 个")
             now = datetime.now(UTC).isoformat()
@@ -203,7 +348,9 @@ class CandidateStore:
     def _validate_config(kind: CandidateKind, config: dict[str, Any]) -> dict[str, Any]:
         unknown = set(config) - _CONFIG_FIELDS[kind]
         if unknown:
-            raise CandidateValidationError(f"候选配置包含不允许的字段: {', '.join(sorted(unknown))}")
+            raise CandidateValidationError(
+                f"候选配置包含不允许的字段: {', '.join(sorted(unknown))}"
+            )
         CandidateStore._check_json_size(config)
         return config
 
@@ -211,7 +358,9 @@ class CandidateStore:
     def _validate_metrics(kind: CandidateKind, metrics: dict[str, Any]) -> dict[str, Any]:
         unknown = set(metrics) - _METRIC_FIELDS[kind]
         if unknown:
-            raise CandidateValidationError(f"候选指标包含不允许的字段: {', '.join(sorted(unknown))}")
+            raise CandidateValidationError(
+                f"候选指标包含不允许的字段: {', '.join(sorted(unknown))}"
+            )
         if any(isinstance(value, (dict, list)) for value in metrics.values()):
             raise CandidateValidationError("候选指标只允许保存标量摘要")
         CandidateStore._check_json_size(metrics)

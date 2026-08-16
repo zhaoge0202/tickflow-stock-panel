@@ -787,7 +787,32 @@ export function Watchlist() {
     staleTime: 5 * 60_000,  // 5 分钟内不重请求
   })
 
-  const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
+  // 当日蜡烛实时修补: 历史 K 线按 staleTime 周期拉取 (见 queryKeys 注释), 最后一根
+  // 蜡烛用每 tick 刷新的 enriched 当日 OHLC 前端覆盖/追加, 蜡烛随实时行情跳动, 零额外请求。
+  const klineData = useMemo(() => {
+    const base = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
+    const liveRows = enriched.data?.rows
+    const asOf = enriched.data?.as_of
+    if (!dailyKVisible || !liveRows?.length || !asOf) return base
+    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
+    const patched: Record<string, KlineRow[]> = {}
+    for (const sym of Object.keys(base)) {
+      const arr = base[sym]
+      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
+      const live = liveBySymbol.get(sym)
+      const { open, high, low, close } = live ?? {}
+      if (open == null || high == null || low == null || close == null) { patched[sym] = arr; continue }
+      const last = arr[arr.length - 1]
+      if (last.date === asOf) {
+        patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
+      } else if (last.date < asOf) {
+        patched[sym] = [...arr, { date: asOf, open, high, low, close }]
+      } else {
+        patched[sym] = arr
+      }
+    }
+    return patched
+  }, [dailyKVisible, klineBatch.data, enriched.data])
 
   // 批量分时数据 (Pro+ 用户, 列可见时才拉)
   // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
@@ -811,7 +836,7 @@ export function Watchlist() {
       qc.setQueryData(QK.watchlist, data)
       qc.invalidateQueries({ queryKey: QK.watchlist })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
-      qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
+      qc.invalidateQueries({ queryKey: ['kline-batch'] })
     },
   })
 
@@ -826,7 +851,7 @@ export function Watchlist() {
       // 2. 清除 list 缓存，触发后台 refetch
       qc.invalidateQueries({ queryKey: QK.watchlist })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
-      qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
+      qc.invalidateQueries({ queryKey: ['kline-batch'] })
     },
   })
 
@@ -836,7 +861,7 @@ export function Watchlist() {
       qc.setQueryData(QK.watchlist, data)
       qc.invalidateQueries({ queryKey: QK.watchlist })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
-      qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
+      qc.invalidateQueries({ queryKey: ['kline-batch'] })
       qc.invalidateQueries({ queryKey: QK.preferences })
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
     },
@@ -850,7 +875,7 @@ export function Watchlist() {
       qc.setQueryData(['watchlist-enriched', extColumnsParam], { rows: [], as_of: null, elapsed_ms: 0 })
       qc.invalidateQueries({ queryKey: QK.watchlist })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
-      qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
+      qc.invalidateQueries({ queryKey: ['kline-batch'] })
     },
   })
 

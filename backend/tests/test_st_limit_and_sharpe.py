@@ -55,6 +55,7 @@ def _two_day(
         "raw_close": [prev_close, today_close],
         "close": [prev_close, today_close],
         "raw_high": [prev_close, today_close],
+        "raw_low": [prev_close, today_close],
         "open": [prev_close, today_close],
         "high": [prev_close, today_close],
         "low": [prev_close, today_close],

@@ -54,7 +54,7 @@
 | :--------------- | :--------------------------------------------------------------------- | :-------------------------------- |
 | 🔍 **选股引擎**   | 18 个内置策略 + 自定义信号 + AI 生成 + 代码迁移,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等,一次扫表落盘 enriched Parquet          | [features.md](./docs/features.md) |
-| 🧪 **回测引擎**   | 三种模式(个股/策略组合/自由信号),T+1/手续费/滑点/止损,SSE 流式进度     | [features.md](./docs/features.md) |
+| 🧪 **回测研究**   | 因子/策略回测 + 嵌套样本外挖掘,T+1/费用/滑点约束,SSE 持久任务              | [mining.md](./docs/mining.md)       |
 | 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
 | 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
 | 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警             | [features.md](./docs/features.md) |
@@ -238,6 +238,7 @@ PORT=3018                      # 服务端口
 | [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
 | [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、YAML 配置与 mock 联调示例                         |
 | [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(18 内置策略 + 三种扩展方式 + 文件结构)                      |
+| [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import { BarChart3, BookmarkCheck, FlaskConical, ShieldCheck } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { FactorDiscovery } from './backtest/FactorDiscovery'
@@ -27,8 +28,27 @@ const MODES: Record<Tab, { title: string; subtitle: string; icon: typeof BarChar
 }
 
 export function Backtest() {
-  const [activeTab, setActiveTab] = useState<Tab>('strategy')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab')
   const [candidatesOpen, setCandidatesOpen] = useState(false)
+
+  // 旧链接兼容: 挖掘已升级为一级路由 /mining, 保留 run/candidate 参数重定向
+  if (requestedTab === 'mining') {
+    const next = new URLSearchParams(searchParams)
+    next.delete('tab')
+    const search = next.toString()
+    return <Navigate to={search ? `/mining?${search}` : '/mining'} replace />
+  }
+
+  const activeTab: Tab = requestedTab && requestedTab in MODES
+    ? requestedTab as Tab
+    : 'strategy'
+
+  const changeTab = (tab: Tab) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', tab)
+    setSearchParams(next, { replace: true })
+  }
 
   return (
     <div className="flex min-h-full flex-col bg-base">
@@ -59,7 +79,7 @@ export function Backtest() {
                     <button
                       key={tab}
                       type="button"
-                      onClick={() => setActiveTab(tab)}
+                      onClick={() => changeTab(tab)}
                       aria-current={active ? 'page' : undefined}
                       className={`inline-flex h-7 items-center gap-1 rounded-[5px] px-1.5 text-[11px] font-medium transition-colors sm:gap-1.5 sm:px-2.5 sm:text-xs ${active
                         ? 'bg-accent text-white shadow-sm'

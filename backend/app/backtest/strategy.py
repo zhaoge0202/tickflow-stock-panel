@@ -20,11 +20,13 @@ import numpy as np
 import polars as pl
 
 from app.backtest.engine import BacktestEngine, MatcherConfig, SimResult, SimulationOptions
+from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
 from app.backtest.matrix import (
     MarketDataMatrix,
     MatrixCacheProfile,
     MatrixComputeCache,
     MatrixPipelineConfig,
+    MatrixPrewarmCancelledError,
     MatrixStrategyPipeline,
     apply_time_masks,
     build_market_matrix,
@@ -59,7 +61,7 @@ _EXECUTION_COLUMNS = frozenset({
     "symbol", "date", "open", "high", "low", "close", "volume",
     "name", "score", "signal_limit_up", "signal_limit_down",
 })
-_LIMIT_BASE_COLUMNS = frozenset({"raw_close", "raw_high"})
+_LIMIT_BASE_COLUMNS = frozenset({"raw_close", "raw_high", "raw_low"})
 _INSTRUMENT_COLUMNS = frozenset({"name", "total_shares", "float_shares"})
 
 
@@ -81,6 +83,8 @@ class ResolvedFeaturePlan:
     warmup_bars: int
     full_feature_fallback: bool = False
     execution_backend: str = "polars_expr"
+    # 财务因子列不落 enriched 存储, 由 engine 在加载口按公告日门控附加。
+    fundamental_columns: frozenset[str] = frozenset()
 
 
 def _merge_resolved_feature_plans(
@@ -108,6 +112,7 @@ def _merge_resolved_feature_plans(
         warmup_bars=max(plan.warmup_bars for plan in plans),
         full_feature_fallback=any(plan.full_feature_fallback for plan in plans),
         execution_backend="matrix_native",
+        fundamental_columns=_union("fundamental_columns"),
     )
 
 
@@ -206,6 +211,9 @@ class StrategyDependencyResolver:
             warmup_bars=plan.warmup_bars,
             full_feature_fallback=full_fallback,
             execution_backend=strategy.execution_backend,
+            fundamental_columns=frozenset(
+                required_features & FUNDAMENTAL_FACTOR_NAMES
+            ),
         )
 
     @staticmethod
@@ -224,6 +232,18 @@ class StrategyDependencyResolver:
 
         required_features = set(strategy.required_features)
         required_features.update(strategy.matrix_strategy.required_fields())
+        parameter_fields = getattr(
+            strategy.matrix_strategy,
+            "required_fields_for_params",
+            None,
+        )
+        parameter_scoring: dict[str, float] = {}
+        if callable(parameter_fields):
+            parameter_scoring = {
+                str(name): 1.0
+                for name in parameter_fields(params)
+            }
+            required_features.update(scoring_dependencies(parameter_scoring))
         required_features.update(_basic_filter_dependencies(basic_filter))
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         required_features.update(scoring_dependencies(scoring))
@@ -239,6 +259,7 @@ class StrategyDependencyResolver:
             60,
             int(strategy.matrix_strategy.required_warmup_bars(params)),
             scoring_warmup_bars(scoring),
+            scoring_warmup_bars(parameter_scoring),
         )
         matrix_columns = set(base_columns) | set(instrument_columns) | {
             "signal_limit_up",
@@ -254,6 +275,9 @@ class StrategyDependencyResolver:
             warmup_bars=warmup_bars,
             full_feature_fallback=False,
             execution_backend="matrix_native",
+            fundamental_columns=frozenset(
+                required_features & FUNDAMENTAL_FACTOR_NAMES
+            ),
         )
 
 
@@ -346,10 +370,13 @@ def prewarm_matrix_cache(
     asset_type: str,
     latest_date: date,
     years: int = 5,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, object]:
     """Build the shared full-universe mmap outside a user backtest request."""
     if years <= 0:
         raise ValueError("matrix cache prewarm years must be positive")
+    if cancel_event is not None and cancel_event.is_set():
+        raise MatrixPrewarmCancelledError("matrix cache prewarm cancelled")
     profile = build_matrix_cache_profile(
         strategy_engine,
         asset_type,
@@ -390,6 +417,7 @@ def prewarm_matrix_cache(
         cache_profile=profile,
         coverage_start=coverage_start,
         coverage_end=latest_date,
+        cancel_event=cancel_event,
     )
     result = {
         "asset_type": asset_type,
@@ -1696,14 +1724,7 @@ class StrategyBacktestService:
         required_start: date | None = None,
         required_end: date | None = None,
     ) -> np.ndarray | None:
-        """构造逐日 regime mask。强制 T-1 防未来函数: regime[T-1] 决定 entry[T]。
-
-        timestamp_labels[i] 的入场资格 = 它的"前一交易日"的 regime 是否满足条件。
-        "前一交易日"用 timestamp_labels 自身的顺序确定(回测时间轴上的前一天)。
-        边界: 首日无前一日环境 → 默认允许(不阻断)。
-        regime_filter 为 None 时返回 None(不过滤)。启用过滤后缺少正式区间所需的
-        环境数据则 fail-closed, 避免界面显示已过滤但实际静默放行。
-        """
+        """构造逐日 T-1 regime mask, 保留历史静态入口兼容调用方。"""
         if not regime_filter:
             return None
         allowed_states = set(regime_filter.get("states") or [])
@@ -1713,52 +1734,25 @@ class StrategyBacktestService:
         if data_dir is None:
             raise ValueError("市场环境过滤不可用: 未找到环境数据目录")
 
+        from app.backtest.regime_alignment import build_regime_filter_mask
         from app.services import regime_builder
+
         regime_df = regime_builder.load_regime_history(data_dir)
-        if regime_df.is_empty():
-            raise ValueError("市场环境数据为空, 请先在数据页完成市场环境计算后再回测")
-
-        # 构建 date(ISO) → (state, score) 映射
-        regime_map: dict[str, tuple[str, int]] = {}
-        for r in regime_df.iter_rows(named=True):
-            d = r.get("date")
-            ds = str(d)[:10] if d is not None else None
-            if ds:
-                regime_map[ds] = (str(r.get("state", "")), int(r.get("score", 0) or 0))
-
-        # 对每个 label, 找它的前一交易日的 regime(timestamp_labels 顺序里的前一天)
-        n = len(timestamp_labels)
-        mask = np.ones(n, dtype=bool)  # 默认允许
-        required_start_text = str(required_start) if required_start is not None else None
-        required_end_text = str(required_end) if required_end is not None else None
-        missing_dates: list[str] = []
-        for i in range(1, n):
-            current_label = timestamp_labels[i][:10]
-            prev_label = timestamp_labels[i - 1][:10]
-            entry = regime_map.get(prev_label)
-            if entry is None:
-                required = (
-                    (required_start_text is None or current_label >= required_start_text)
-                    and (required_end_text is None or current_label <= required_end_text)
-                )
-                if required:
-                    missing_dates.append(prev_label)
-                continue
-            state, score = entry
-            ok = True
-            if allowed_states and state not in allowed_states:
-                ok = False
-            if min_score is not None and score < min_score:
-                ok = False
-            mask[i] = ok
-        if missing_dates:
-            first_missing = missing_dates[0]
-            suffix = f" 等 {len(missing_dates)} 天" if len(missing_dates) > 1 else ""
-            raise ValueError(
-                f"市场环境数据覆盖不完整: 缺少前一交易日环境 {first_missing}{suffix}, "
-                "请先补算对应区间"
-            )
-        return mask
+        regime_by_date = {
+            row["date"]: {
+                "state": row.get("state", ""),
+                "score": row.get("score", 0),
+            }
+            for row in regime_df.iter_rows(named=True)
+            if row.get("date") is not None
+        }
+        return build_regime_filter_mask(
+            timestamp_labels,
+            regime_filter,
+            regime_by_date,
+            required_start=required_start,
+            required_end=required_end,
+        )
 
     def _build_candidate_filter_mask(
         self,

@@ -473,6 +473,15 @@ export interface RegimeRow {
   speculation_score?: number
   resilience_score?: number
   trend_score?: number
+  // 情绪周期阶段与梯队指标(重算后才有; 旧数据可能缺)
+  phase?: MarketPhase | null
+  first_board?: number | null
+  ge2_count?: number | null
+  ge3_count?: number | null
+  ge5_count?: number | null
+  ladder_completeness?: number | null
+  promo_rate?: number | null
+  promo_pool?: number | null
 }
 
 export interface RegimeHistory {
@@ -496,6 +505,90 @@ export interface RegimeCoverage {
   rows: number
   earliest_date: string | null
   latest_date: string | null
+}
+
+// ── 市场阶段(情绪周期) 与 主线 ──
+export type MarketPhase = 'ice' | 'ignite' | 'rally' | 'climax' | 'ebb' | 'repair'
+
+export const MARKET_PHASE_LABELS: Record<MarketPhase, string> = {
+  ice: '冰点',
+  ignite: '启动',
+  rally: '主升',
+  climax: '高潮',
+  ebb: '退潮',
+  repair: '修复',
+}
+
+export const MARKET_PHASE_COLORS: Record<MarketPhase, string> = {
+  ice: '#38bdf8',     // 天蓝(冻结)
+  ignite: '#f59e0b',  // 琥珀(升温)
+  rally: '#ef4444',   // 红(主升)
+  climax: '#d946ef',  // 品红(极端)
+  ebb: '#14b8a6',     // 青(退潮)
+  repair: '#94a3b8',  // 灰(修复)
+}
+
+export const MARKET_PHASE_ORDER: MarketPhase[] = ['ice', 'ignite', 'rally', 'climax', 'ebb', 'repair']
+
+export interface MainlineMemberStat {
+  member: string
+  top5_days: number
+  score_sum: number
+  max_boards: number
+  leader_symbol: string
+}
+
+export interface PhaseSegment {
+  phase: MarketPhase
+  label: string
+  start: string
+  end: string
+  days: number
+  avg_height: number
+  avg_first_board: number
+  avg_ge2: number
+  avg_promo: number | null
+  avg_seal_rate: number
+  top_mainlines: MainlineMemberStat[]
+}
+
+export interface PhaseSegments {
+  segments: PhaseSegment[]
+  total: number
+}
+
+export interface MainlineRow {
+  date: string
+  kind: string
+  member: string
+  limit_up_count: number
+  ge2_count: number
+  max_boards: number
+  boards_sum: number
+  rungs_filled: number
+  leader_symbol: string
+  score: number
+  rank: number
+}
+
+export interface MainlineLeader {
+  member: string
+  top1_days: number
+  avg_score: number
+  max_boards: number
+}
+
+export interface MainlineFilter {
+  min_members: number
+  max_members: number
+  blacklist: string[]
+}
+
+export interface MainlineResult {
+  rows: MainlineRow[]
+  leaders: MainlineLeader[]
+  membership_note: string
+  filter: MainlineFilter
 }
 
 // ===== 大盘复盘 =====
@@ -844,6 +937,217 @@ export interface FactorBatchResult {
   n_symbols: number
   n_dates: number
   error: string | null
+}
+
+// ===== Factor / strategy mining =====
+export type MiningBudgetProfile = 'exploratory' | 'balanced' | 'strict'
+export type MiningRunStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'succeeded_with_budget_exhausted'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+  | 'skipped_prerequisite'
+
+export interface MiningAvailability {
+  asset_type: 'stock' | 'etf'
+  budget_profile: MiningBudgetProfile
+  trading_bars: number
+  required_bars: number
+  outer_folds: number
+  required_outer_folds: number
+  eligible: boolean
+  available_start: string | null
+  available_end: string | null
+  effective_start: string | null
+  effective_end: string | null
+  suggested_start: string | null
+}
+
+export interface MiningRequestV1 {
+  factor_names: string[]
+  strategy_ids?: string[]
+  symbols?: string[] | null
+  asset_type?: 'stock' | 'etf'
+  start?: string | null
+  end?: string | null
+  budget_profile?: MiningBudgetProfile
+  commission_pct?: number
+  stamp_tax_pct?: number
+  slippage_bps?: number
+  correlation_threshold?: number
+  max_combination_factors?: number
+  beam_width?: number
+  max_finalists?: number
+  force?: boolean
+}
+
+export interface MiningRunProgress {
+  phase: string
+  label?: string
+  done?: number
+  total?: number
+  percent?: number
+  elapsed_ms?: number
+  message?: string
+}
+
+export interface MiningRun {
+  run_id: string
+  signature: string
+  status: MiningRunStatus
+  request: MiningRequestV1
+  source?: 'manual' | 'scheduled'
+  created_at: string
+  updated_at: string
+  started_at?: string | null
+  finished_at?: string | null
+  data_as_of?: string | null
+  progress?: MiningRunProgress | null
+  error?: string | null
+  reused?: boolean
+  summary?: MiningResultSummary | null
+}
+
+export interface MiningResultSummary {
+  factor_count: number
+  selected_factor_count: number
+  candidate_count: number
+  valid_fold_count: number
+  skipped_fold_count: number
+  confidence: 'low' | 'standard' | 'high'
+  budget_exhausted?: boolean
+  elapsed_ms?: number
+  peak_rss_bytes?: number
+}
+
+export interface MiningFactorRow {
+  factor_name: string
+  label?: string
+  direction: 1 | -1
+  score: number | null
+  ic_mean: number | null
+  ir: number | null
+  coverage: number | null
+  turnover: number | null
+  spread_return?: number | null
+  spread_sharpe?: number | null
+  selected: boolean
+  excluded_reason?: string | null
+}
+
+export interface MiningRegimeRow {
+  state: 'overall' | 'strong' | 'range' | 'weak' | string
+  label: string
+  n_dates: number
+  total_return: number | null
+  sharpe: number | null
+  max_drawdown: number | null
+}
+
+export interface MiningFoldRow {
+  fold: number
+  label?: string
+  train_start?: string
+  train_end?: string
+  test_start?: string
+  test_end?: string
+  selected_factors?: string[]
+  total_return: number | null
+  sharpe: number | null
+  max_drawdown?: number | null
+  n_trades?: number | null
+  skipped?: boolean
+  reason?: string | null
+  evaluation_kind?: 'selected' | 'cross' | 'benchmark' | null
+}
+
+export interface MiningCandidateGate {
+  qualified: boolean
+  reasons: string[]
+}
+
+export interface MiningCandidateRow {
+  signature: string
+  name: string
+  kind: 'factor_combination' | 'existing_strategy'
+  factor_names?: string[]
+  strategy_id?: string | null
+  regime_state?: string | null
+  score: number | null
+  oos_return: number | null
+  oos_sharpe: number | null
+  oos_max_drawdown: number | null
+  oos_positive_fold_ratio: number | null
+  oos_n_trades: number | null
+  confidence: 'low' | 'standard' | 'high'
+  valid_folds?: number | null
+  skipped_folds?: number | null
+  promoted_candidate_id?: string | null
+  published_strategy_id?: string | null
+  gate?: MiningCandidateGate | null
+  folds?: MiningFoldRow[]
+}
+
+export interface MiningTelemetry {
+  elapsed_ms?: number
+  peak_rss_bytes?: number
+  panel_scans?: number
+  matrix_bytes?: number
+  cache_hits?: number
+  fold_reuses?: number
+  serialized_result_bytes?: number
+  phase_ms?: Record<string, number>
+}
+
+export interface MiningRequestSummary {
+  asset_type: string
+  budget_profile: string
+  start: string | null
+  end: string | null
+  factor_count: number
+  strategy_count: number
+  commission_pct: number | null
+  stamp_tax_pct: number | null
+  slippage_bps: number | null
+  correlation_threshold: number | null
+}
+
+export interface MiningResult {
+  run_id: string
+  methodology_version: string
+  algorithm_version: string
+  data_as_of: string | null
+  summary: MiningResultSummary
+  request_summary?: MiningRequestSummary | null
+  factors: MiningFactorRow[]
+  correlation: {
+    labels: string[]
+    matrix: (number | null)[][]
+    pair_counts?: (number | null)[][]
+    threshold: number
+  }
+  regimes: MiningRegimeRow[]
+  candidates: MiningCandidateRow[]
+  folds: MiningFoldRow[]
+  telemetry: MiningTelemetry
+}
+
+export interface MiningEvent {
+  id: number
+  type: string
+  timestamp?: string
+  payload?: Record<string, unknown>
+  message?: string
+}
+
+export interface MiningScheduleConfig {
+  mining_schedule_enabled: boolean
+  mining_schedule_weekday: number
+  mining_budget_profile: Exclude<MiningBudgetProfile, 'exploratory'>
 }
 
 export type ResearchCandidateKind = 'factor' | 'strategy'
@@ -1751,8 +2055,28 @@ export const api = {
     if (start) params.set('start', start)
     if (end) params.set('end', end)
     const qs = params.toString()
-    return request<{ ok: boolean; computed: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
+    return request<{ ok: boolean; computed: number; phase_days?: number; mainline_rows?: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
   },
+  regimePhases: (start?: string, end?: string) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    const qs = params.toString()
+    return request<PhaseSegments>(`/api/regime/phases${qs ? `?${qs}` : ''}`)
+  },
+  regimeMainline: (start?: string, end?: string, top = 10, kind: 'concept' | 'industry' = 'concept') => {
+    const params = new URLSearchParams({ top: String(top), kind })
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    return request<MainlineResult>(`/api/regime/mainline?${params.toString()}`)
+  },
+  regimeMainlineRecompute: () =>
+    request<{ ok: boolean; rows: number }>('/api/regime/mainline/recompute', { method: 'POST' }),
+  mainlineFilterUpdate: (payload: { min_members?: number; max_members?: number; blacklist?: string[] }) =>
+    request<MainlineFilter>('/api/settings/preferences/mainline-filter', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
@@ -1817,6 +2141,64 @@ export const api = {
   }) =>
     request<FactorBatchResult>('/api/backtest/factor/batch', {
       method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  miningRuns: () =>
+    request<{ items: MiningRun[] }>('/api/backtest/mining/runs'),
+
+  miningAvailability: (params: {
+    assetType: 'stock' | 'etf'
+    budgetProfile: MiningBudgetProfile
+    start?: string
+    end?: string
+  }) => {
+    const query = new URLSearchParams({
+      asset_type: params.assetType,
+      budget_profile: params.budgetProfile,
+    })
+    if (params.start) query.set('start', params.start)
+    if (params.end) query.set('end', params.end)
+    return request<MiningAvailability>(`/api/backtest/mining/availability?${query}`, {
+      quiet: true,
+    })
+  },
+
+  miningRun: (runId: string) =>
+    request<MiningRun>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}`),
+
+  miningStart: (payload: MiningRequestV1) =>
+    request<MiningRun>('/api/backtest/mining/runs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  miningResult: (runId: string) =>
+    request<MiningResult>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/result`),
+
+  miningCancel: (runId: string) =>
+    request<MiningRun>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+    }),
+
+  miningPromote: (runId: string, signature: string) =>
+    request<ResearchCandidate>(
+      `/api/backtest/mining/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(signature)}/promote`,
+      { method: 'POST' },
+    ),
+
+  miningPublish: (runId: string, signature: string) =>
+    request<{ ok: boolean; strategy_id: string }>(
+      `/api/backtest/mining/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(signature)}/publish`,
+      { method: 'POST' },
+    ),
+
+  miningConfig: () =>
+    request<MiningScheduleConfig>('/api/backtest/mining/config'),
+
+  updateMiningConfig: (payload: Partial<MiningScheduleConfig>) =>
+    request<MiningScheduleConfig>('/api/backtest/mining/config', {
+      method: 'PATCH',
       body: JSON.stringify(payload),
     }),
 

@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Request
 
+from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -504,26 +505,21 @@ def _compute_storage(data_dir: Path) -> dict:
         stats[f"{key}_files"] = fc
         stats[f"{key}_size_mb"] = sz
 
-    # total: 再加上其他零散文件(pools, financials, capabilities.json 等)
-    other_dirs = ["pools", "financials", "backtest_results", "screener_results", "ai_cache"]
+    # total: 再加上其他零散目录 (financials 有下方专属明细统计, 不在此列)
+    other_dirs = ["pools", "backtest_results", "screener_results", "ai_cache"]
     for name in other_dirs:
         d = data_dir / name
         if d.exists():
             _, s = _scan_dir_stats(d)
             total_size += s
 
-    # financials 单独统计
+    # financials 单独统计 (明细与 total 各计入一次, 不得与其他目录循环重复累加)
     fin_dir = data_dir / "financials"
     if fin_dir.exists():
         fc, sz = _scan_dir_stats(fin_dir)
         stats["financials_files"] = fc
         stats["financials_size_mb"] = sz
         total_size += sz
-    for name in other_dirs:
-        d = data_dir / name
-        if d.exists():
-            _, s = _scan_dir_stats(d)
-            total_size += s
     # 根目录散文件
     for entry in os.scandir(data_dir):
         if entry.is_file(follow_symlinks=False):
@@ -626,6 +622,10 @@ def clear_data(request: Request):
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
     deleted = 0
+    publications = {
+        "kline_daily_enriched": EnrichedPublication(data_dir, "stock"),
+        "kline_etf_enriched": EnrichedPublication(data_dir, "etf"),
+    }
 
     for sub in (
         "kline_daily", "kline_daily_enriched", "kline_index_daily", "kline_index_enriched",
@@ -634,15 +634,27 @@ def clear_data(request: Request):
         "backtest_results", "screener_results", "ai_cache",
     ):
         d = data_dir / sub
-        if d.exists():
-            # 先删所有 parquet 文件
-            for f in d.rglob("*.parquet"):
+        if not d.exists():
+            continue
+        publication = publications.get(sub)
+        parquet_files = list(d.rglob("*.parquet"))
+        if publication is not None and parquet_files:
+            publication.begin()
+        try:
+            for f in parquet_files:
                 f.unlink()
                 deleted += 1
-            # 再删除空的日期分区子目录（date=YYYY-MM-DD 等）
+                if publication is not None:
+                    publication.mark_changed()
             for child in list(d.iterdir()):
                 if child.is_dir():
                     shutil.rmtree(child, ignore_errors=True)
+            if publication is not None:
+                publication.commit()
+        except BaseException:
+            if publication is not None:
+                publication.abandon()
+            raise
 
     # 清除同步历史（内存 + 磁盘 job_store/ 文件夹）
     from app.services.pipeline_jobs import job_store

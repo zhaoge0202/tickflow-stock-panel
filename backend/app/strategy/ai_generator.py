@@ -343,6 +343,7 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
         "polars",
         "numpy",
         "app.backtest.matrix",
+        "app.strategy.builtin.factor_rank_research",
         "datetime",
         "__future__",
     })

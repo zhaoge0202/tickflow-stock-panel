@@ -554,10 +554,12 @@ class StrategyEngine:
     # 查询
     # ================================================================
 
-    def list_strategies(self) -> list[dict]:
-        """返回所有策略的元信息"""
+    def list_strategies(self, *, include_research: bool = False) -> list[dict]:
+        """Return public strategy metadata unless research templates are requested."""
         result = []
         for s in self._strategies.values():
+            if s.meta.get("research_only") and not include_research:
+                continue
             result.append({
                 **s.meta,
                 "source": s.source,
@@ -732,7 +734,11 @@ class StrategyEngine:
                 ),
             )
             field_columns.update(
-                self._matrix_field_columns(strategy, overrides_map.get(strategy_id))
+                self._matrix_field_columns(
+                    strategy,
+                    overrides_map.get(strategy_id),
+                    params,
+                )
             )
         if not matrix_ids:
             return None
@@ -1027,7 +1033,11 @@ class StrategyEngine:
             field_columns: set[str] = set()
             for sid, strategy in matrix_strats:
                 field_columns.update(
-                    self._matrix_field_columns(strategy, overrides_map.get(sid))
+                    self._matrix_field_columns(
+                        strategy,
+                        overrides_map.get(sid),
+                        params_map.get(sid),
+                    )
                 )
             shared_matrix = build_market_data_matrix(
                 shared_history,
@@ -1052,8 +1062,26 @@ class StrategyEngine:
         return results
 
     @staticmethod
-    def _matrix_field_columns(strategy: StrategyDef, overrides: dict | None = None) -> set[str]:
+    def _matrix_field_columns(
+        strategy: StrategyDef,
+        overrides: dict | None = None,
+        params: dict | None = None,
+    ) -> set[str]:
         fields = set(strategy.matrix_strategy.required_fields())
+        # 参数评分字段 (如挖掘策略的因子组合) 需展开为实际数据依赖,
+        # 与 backtest._resolve_matrix_native 保持同一语义, 否则虚拟因子
+        # (limit_up_count_* -> consecutive_limit_ups) 在矩阵里缺字段。
+        parameter_fields = getattr(
+            strategy.matrix_strategy,
+            "required_fields_for_params",
+            None,
+        )
+        if callable(parameter_fields):
+            fields.update(
+                scoring_dependencies(
+                    {str(name): 1.0 for name in parameter_fields(params or {})}
+                )
+            )
         basic_filter = dict(strategy.basic_filter or {})
         if (overrides or {}).get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
@@ -1102,7 +1130,7 @@ class StrategyEngine:
                 return StrategyResult(as_of=as_of, strategy_id=strategy_id)
             market = build_market_data_matrix(
                 source_panel,
-                field_columns=self._matrix_field_columns(strategy, overrides),
+                field_columns=self._matrix_field_columns(strategy, overrides, params),
             )
 
         if source_panel is None or source_panel.is_empty():
