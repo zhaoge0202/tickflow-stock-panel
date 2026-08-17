@@ -89,12 +89,12 @@ const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
   price:     { label: '价格',   cls: 'bg-emerald-400/15 text-emerald-400' },
   market:    { label: '异动',   cls: 'bg-purple-500/15 text-purple-400' },
   sector:    { label: '板块',   cls: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300' },
-  pool_entry: { label: '进入', cls: 'bg-emerald-400/15 text-emerald-400' },
-  pool_exit:   { label: '移出', cls: 'bg-warning/15 text-warning' },
+  pool_entry: { label: '进入', cls: 'bg-danger/15 text-danger' },
+  pool_exit:   { label: '移出', cls: 'bg-bear/15 text-bear' },
   buy_signal: { label: '买入', cls: 'bg-danger/15 text-danger' },
   sell_signal: { label: '卖出', cls: 'bg-bear/15 text-bear' },
-  new_entry: { label: '进入', cls: 'bg-emerald-400/15 text-emerald-400' },
-  dropped:   { label: '移出', cls: 'bg-warning/15 text-warning' },
+  new_entry: { label: '进入', cls: 'bg-danger/15 text-danger' },
+  dropped:   { label: '移出', cls: 'bg-bear/15 text-bear' },
 }
 
 // ===== 容器 — 挂在 Layout =====
