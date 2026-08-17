@@ -197,6 +197,24 @@ def test_openai_kwargs_include_configured_reasoning_effort(monkeypatch):
     assert "reasoning_effort" not in ai_provider._openai_kwargs(temperature=None, max_tokens=1000)
 
 
+def test_openai_kwargs_none_max_tokens_omits_limit():
+    """max_tokens=None → 不传上限(推理模型思考 token 计入预算, 分析类调用放开)。"""
+    kwargs = ai_provider._openai_kwargs(temperature=0.5, max_tokens=None)
+    assert "max_tokens" not in kwargs
+    assert kwargs.get("temperature") == 0.5
+
+    # 显式数值仍正常下发(策略标题生成等小任务依赖)
+    assert ai_provider._openai_kwargs(temperature=None, max_tokens=8) == {"max_tokens": 8}
+
+
+def test_codex_prompt_none_max_tokens_skips_length_hint():
+    prompt = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=None)
+    assert "Keep the final answer" not in prompt
+
+    bounded = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=300)
+    assert "Keep the final answer" in bounded
+
+
 def test_ai_settings_keep_provider_models_separate(monkeypatch):
     stored = {
         "ai_provider": "openai_compat",
