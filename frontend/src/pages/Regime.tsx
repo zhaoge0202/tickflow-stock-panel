@@ -79,8 +79,6 @@ function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
   const ref = useRef<HTMLDivElement>(null)
   const instRef = useRef<echarts.ECharts | null>(null)
   useEffect(() => {
-    if (!ref.current) return
-    instRef.current = echarts.init(ref.current, undefined, { renderer: 'canvas' })
     const onResize = () => instRef.current?.resize()
     window.addEventListener('resize', onResize)
     return () => {
@@ -90,7 +88,14 @@ function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
     }
   }, [])
   useEffect(() => {
-    if (instRef.current && option) instRef.current.setOption(option, { notMerge: true })
+    if (!ref.current) return
+    // 惰性 init: 图表容器可能条件渲染晚于组件挂载 (如情绪周期图依赖异步查询结果,
+    // 冷加载时首帧 rows 为空 → div 不在 DOM, 仅挂载时跑一次的 init 会扑空)。
+    // 数据到达后 option 变化触发本 effect, 此时 div 已挂载 — 补建实例再 setOption。
+    if (!instRef.current) {
+      instRef.current = echarts.init(ref.current, undefined, { renderer: 'canvas' })
+    }
+    if (option) instRef.current.setOption(option, { notMerge: true })
   }, [option, ...deps])
   return ref
 }
