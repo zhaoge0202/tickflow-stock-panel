@@ -95,7 +95,12 @@ function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
     if (!instRef.current) {
       instRef.current = echarts.init(ref.current, undefined, { renderer: 'canvas' })
     }
-    if (option) instRef.current.setOption(option, { notMerge: true })
+    if (option) {
+      instRef.current.setOption(option, { notMerge: true })
+      // 容器可能经历 display:none(tab 隐藏) → 可见的切换, 画布尺寸需要按当前
+      // 容器实际尺寸重算; 调用方把 view 等显隐依赖传入 deps 以触发本 effect。
+      instRef.current.resize()
+    }
   }, [option, ...deps])
   return ref
 }
@@ -119,6 +124,9 @@ const cardCls = 'rounded-card border border-border bg-surface/80 shadow-[0_1px_2
 export function Regime() {
   const qc = useQueryClient()
   const [range, setRange] = useState<RangePreset>('1y')
+  // 视图 tab: 市场环境(状态/趋势/日历) 与 情绪周期(阶段/主线) 两组内容同页切换,
+  // 避免单页过长需要大幅滚动。两组共用时间范围与重算入口。
+  const [view, setView] = useState<'regime' | 'phase'>('regime')
   const [customOpen, setCustomOpen] = useState(false)
   // 日历热力图显示模式: false=单行(月份网格横向排列+滚动条, 默认), true=展开(换行完整网格)
   const [calendarExpanded, setCalendarExpanded] = useState(false)
@@ -293,7 +301,7 @@ export function Regime() {
       ],
     }
   }, [rows, days, ct, hasPhaseData])
-  const phaseChartRef = useEChart(phaseOption, [phaseOption])
+  const phaseChartRef = useEChart(phaseOption, [phaseOption, view])
 
   // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
@@ -385,7 +393,7 @@ export function Regime() {
       ],
     }
   }, [rows, days, ct])
-  const trendRef = useEChart(trendOption, [trendOption])
+  const trendRef = useEChart(trendOption, [trendOption, view])
 
   // 状态分布饼图
   const pieOption = useMemo<echarts.EChartsOption | null>(() => {
@@ -420,7 +428,7 @@ export function Regime() {
       }],
     }
   }, [states.data, ct])
-  const pieRef = useEChart(pieOption, [pieOption])
+  const pieRef = useEChart(pieOption, [pieOption, view])
 
   // 日历热力图数据: 按月分组(纯 CSS 渲染, 不依赖 echarts calendar 的跨年怪异行为)。
   // 结构: [{ year, month, label, weeks: [[cell|gap]×7]×N }]
@@ -500,7 +508,9 @@ export function Regime() {
         <div className="flex items-center gap-3">
           <Activity className="h-5 w-5 text-accent" />
           <h1 className="text-base font-semibold text-foreground">市场环境</h1>
-          <span className="text-xs text-muted">每日环境状态 · 赚钱效应 · 趋势分析</span>
+          <span className="text-xs text-muted">
+            {view === 'phase' ? '涨停情绪 · 市场阶段 · 主线脉络' : '每日环境状态 · 赚钱效应 · 趋势分析'}
+          </span>
           <div className="ml-auto flex items-center gap-2">
             {/* 时间范围按钮组 */}
             <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
@@ -540,6 +550,24 @@ export function Regime() {
           </div>
         </div>
       </div>
+
+      {/* ── 视图切换: 市场环境 / 情绪周期 (两组内容 tab 隔离, 减少单页高度) ── */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
+          {([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const).map(([k, label, Icon]) => (
+            <button key={k} onClick={() => setView(k)}
+              className={cn('inline-flex items-center gap-1.5 h-7 rounded-[5px] px-3 text-xs font-medium transition-colors',
+                view === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground')}>
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] text-muted">两组内容同页切换 · 共用时间范围</span>
+      </div>
+
+      {/* ══ 情绪周期 tab: 阶段概览 + 时间轴 + 阶段×主线 + 主线排行 ══ */}
+      <div className={cn('space-y-4', view !== 'phase' && 'hidden')}>
 
       {/* ── 市场阶段概览 (情绪周期 + 梯队指标 + 当前主线) ── */}
       {hasPhaseData && latest ? (
@@ -741,6 +769,11 @@ export function Regime() {
           </table>
         </div>
       </div>
+
+      </div>{/* /情绪周期 tab */}
+
+      {/* ══ 市场环境 tab: 最新日概览 + 状态时间轴 + 趋势/分布 + 日历热力图 ══ */}
+      <div className={cn('space-y-4', view !== 'regime' && 'hidden')}>
 
       {/* ── 最新日概览 (4 个指标卡, 去掉与看板重复的涨停/涨跌/成交额) ── */}
       {latest ? (
@@ -961,6 +994,8 @@ export function Regime() {
           )}
         </div>
       )}
+
+      </div>{/* /市场环境 tab */}
 
       {/* ── 自定义天数弹窗 ── */}
       {customOpen && (
