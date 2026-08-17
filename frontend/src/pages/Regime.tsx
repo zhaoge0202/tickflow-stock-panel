@@ -7,7 +7,7 @@
  * 时间范围: 1年(250交易日) / 2年(500) / 自定义(1~1000天) / 全部(走日期范围)。
  * 美化对齐 Dashboard 设计语言: 半透明 surface 卡片 + 渐变竖条标题 + 语义色。
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
@@ -26,6 +26,16 @@ import { Modal } from '@/components/Modal'
 import { cn } from '@/lib/cn'
 
 const STATE_ORDER: RegimeState[] = ['strong', 'lean_strong', 'range', 'lean_weak', 'weak']
+
+/** 阶段含义与应对提示 — meaning 与后端 market_phase.py 判定规则对齐, 供当前阶段卡展示 */
+const MARKET_PHASE_GUIDE: Record<MarketPhase, { meaning: string; action: string }> = {
+  ice:     { meaning: '高度/宽度/首板同时贴地, 亏钱效应极致', action: '观望 · 跟踪率先异动股' },
+  ignite:  { meaning: '低位放量扩张, 晋级率回升', action: '试仓主线 · 快进快出' },
+  rally:   { meaning: '高度+宽度+晋级率共振', action: '持股 · 顺势而为' },
+  climax:  { meaning: '情绪极端宣泄, 批量二板+', action: '逐步兑现 · 不追高' },
+  ebb:     { meaning: '自高位回落, 晋级率坍塌', action: '防守 · 不接力' },
+  repair:  { meaning: '多空拉锯, 无明确方向', action: '轻仓试错 · 控回撤' },
+}
 
 /** 综合分 → 对应状态色(与 classify_state 阈值一致: 70/55/45/30) */
 function scoreToColor(score: number): string {
@@ -191,6 +201,40 @@ export function Regime() {
     return mlRows.filter(r => r.date === lastDate && r.rank <= 3)
   }, [mainline.data])
 
+  // ── 指标历史分位: 最新值在当前窗口内的位置 (≤ 它的天数占比), 给指标卡参照系 ──
+  const pctRank = useCallback((field: keyof RegimeRow): number | null => {
+    if (!latest) return null
+    const latestV = latest[field] as number | null
+    if (latestV == null) return null
+    const vals = rows.map(r => r[field] as number | null).filter((v): v is number => v != null)
+    if (vals.length < 20) return null   // 样本太少分位无意义
+    const below = vals.filter(v => v <= latestV).length
+    return Math.round((100 * below) / vals.length)
+  }, [rows, latest])
+
+  // ── 阶段规律: 当前阶段的历史段统计 + 下一阶段转移分布 (窗口内 segments) ──
+  const phaseStats = useMemo(() => {
+    if (!phaseStreak || segments.length === 0) return null
+    const cur = phaseStreak.phase
+    const segs = segments.filter(s => s.phase === cur)
+    if (segs.length === 0) return null
+    const avgDays = Math.round(segs.reduce((a, s) => a + s.days, 0) / segs.length)
+    const maxDays = Math.max(...segs.map(s => s.days))
+    // 转移分布: 每个历史同阶段段的后继段 (segments 按开始日期升序, 最后一段无后继不计)
+    const nexts = new Map<MarketPhase, number>()
+    segments.forEach((s, i) => {
+      if (s.phase !== cur) return
+      const nx = segments[i + 1]
+      if (!nx) return
+      nexts.set(nx.phase as MarketPhase, (nexts.get(nx.phase as MarketPhase) ?? 0) + 1)
+    })
+    const total = [...nexts.values()].reduce((a, b) => a + b, 0)
+    const transitions = [...nexts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([phase, count]) => ({ phase, count, pct: total > 0 ? Math.round((100 * count) / total) : 0 }))
+    return { count: segs.length, avgDays, maxDays, transitions }
+  }, [phaseStreak, segments])
+
   // ── 当前势头: 末尾连续同态天数 + score 5日斜率(改善/恶化) + 上次弱势距今 ──
   const momentum = useMemo(() => {
     if (rows.length === 0) return null
@@ -255,6 +299,17 @@ export function Regime() {
         prevPhase = r.phase
       }
     })
+    // 阶段切换点: 当日 phase ≠ 前日 → 在高度线上标一枚新阶段颜色的小三角
+    const switchPoints: any[] = []
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].phase && rows[i].phase !== rows[i - 1].phase) {
+        switchPoints.push({
+          coord: [rows[i].date, heights[i]],
+          itemStyle: { color: MARKET_PHASE_COLORS[rows[i].phase as MarketPhase] },
+          label: { show: false },
+        })
+      }
+    }
     return {
       backgroundColor: 'transparent',
       tooltip: {
@@ -295,7 +350,19 @@ export function Regime() {
           itemStyle: { color: '#f59e0b', opacity: 0.4 }, z: 1 },
         { name: '高度', type: 'line', data: heights, smooth: true, symbol: 'none', yAxisIndex: 0,
           lineStyle: { width: 1.6, color: '#ef4444' }, z: 3,
-          markArea: { silent: true, data: phaseBands } },
+          markArea: { silent: true, data: phaseBands },
+          // 最新交易日竖线 (定位"现在"): 淡白细线, 不参与交互
+          markLine: {
+            silent: true, symbol: 'none',
+            lineStyle: { color: ct.text, opacity: 0.35, width: 1 },
+            label: { show: true, position: 'end', formatter: '今日', color: ct.text, fontSize: 9 },
+            data: [{ xAxis: dates[dates.length - 1] }],
+          },
+          // 阶段切换点: 小三角=当日切换, 颜色=新阶段
+          markPoint: {
+            silent: true, symbol: 'triangle', symbolSize: 7,
+            data: switchPoints,
+          } },
         { name: '晋级率', type: 'line', data: promo, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { width: 1.2, color: '#3b82f6', type: 'dotted' }, z: 2 },
       ],
@@ -578,11 +645,20 @@ export function Regime() {
               <Flame className="h-3 w-3" /> 当前阶段 · {latest.date}
             </div>
             <div className="mt-1.5 flex items-baseline gap-2">
-              <span className="text-2xl font-bold" style={{ color: MARKET_PHASE_COLORS[phaseStreak?.phase ?? 'repair'] }}>
+              <span
+                className="text-2xl font-bold cursor-help"
+                style={{ color: MARKET_PHASE_COLORS[phaseStreak?.phase ?? 'repair'] }}
+                title={phaseStreak ? `${MARKET_PHASE_GUIDE[phaseStreak.phase].meaning}\n应对: ${MARKET_PHASE_GUIDE[phaseStreak.phase].action}` : undefined}
+              >
                 {MARKET_PHASE_LABELS[phaseStreak?.phase ?? 'repair']}
               </span>
               {phaseStreak && <span className="text-xs text-muted">第 {phaseStreak.streak} 天</span>}
             </div>
+            {phaseStreak && (
+              <div className="mt-0.5 text-[9px] text-muted/90 truncate" title={MARKET_PHASE_GUIDE[phaseStreak.phase].meaning}>
+                {MARKET_PHASE_GUIDE[phaseStreak.phase].action}
+              </div>
+            )}
             <div className="mt-1.5 flex flex-wrap gap-1">
               {latestMainlines.length > 0 ? latestMainlines.map(m => (
                 <span key={m.member} className="rounded px-1.5 py-px text-[9px] font-medium"
@@ -593,25 +669,36 @@ export function Regime() {
             </div>
           </div>
           {([
-            { label: '市场高度', val: latest.max_consecutive, unit: '板', color: '#ef4444' },
-            { label: '首板宽度', val: latest.first_board, unit: '家', color: '#f97316' },
-            { label: '2板+宽度', val: latest.ge2_count, unit: '家', color: '#f59e0b' },
+            { label: '市场高度', val: latest.max_consecutive, unit: '板', color: '#ef4444', field: 'max_consecutive' as const },
+            { label: '首板宽度', val: latest.first_board, unit: '家', color: '#f97316', field: 'first_board' as const },
+            { label: '2板+宽度', val: latest.ge2_count, unit: '家', color: '#f59e0b', field: 'ge2_count' as const },
             { label: '晋级率', val: latest.promo_rate != null ? `${(latest.promo_rate * 100).toFixed(0)}%` : '—',
-              unit: '', color: '#3b82f6',
+              unit: '', color: '#3b82f6', field: 'promo_rate' as const,
               sub: latest.promo_pool != null ? `池 ${latest.promo_pool} 家` : undefined },
             { label: '梯队完整度', val: latest.ladder_completeness != null ? `${(latest.ladder_completeness * 100).toFixed(0)}%` : '—',
-              unit: '', color: '#a855f7', sub: '2板→最高板不断档' },
-          ] as { label: string; val: React.ReactNode; unit: string; color: string; sub?: string }[]).map(k => (
-            <div key={k.label} className={cn(cardCls, 'p-3')}>
-              <div className="flex items-center gap-1.5 text-[10px] text-muted">
-                <Activity className="h-3 w-3" /> {k.label}
+              unit: '', color: '#a855f7', field: 'ladder_completeness' as const, sub: '2板→最高板不断档' },
+          ] as { label: string; val: React.ReactNode; unit: string; color: string; field: keyof RegimeRow; sub?: string }[]).map(k => {
+            const p = pctRank(k.field)
+            return (
+              <div key={k.label} className={cn(cardCls, 'p-3')}>
+                <div className="flex items-center gap-1.5 text-[10px] text-muted">
+                  <Activity className="h-3 w-3" /> {k.label}
+                  {p != null && (
+                    <span
+                      className="ml-auto font-mono text-[9px] text-muted/70"
+                      title={`当前值在所选时间窗口内的历史分位 (p${p})`}
+                    >
+                      p{p}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1.5 text-2xl font-bold" style={{ color: k.color }}>
+                  {k.val}<span className="ml-0.5 text-xs font-normal text-muted">{k.unit}</span>
+                </div>
+                {k.sub && <div className="mt-1 text-[9px] text-muted">{k.sub}</div>}
               </div>
-              <div className="mt-1.5 text-2xl font-bold" style={{ color: k.color }}>
-                {k.val}<span className="ml-0.5 text-xs font-normal text-muted">{k.unit}</span>
-              </div>
-              {k.sub && <div className="mt-1 text-[9px] text-muted">{k.sub}</div>}
-            </div>
-          ))}
+            )
+          })}
         </div>
       ) : (
         <div className="rounded-card border border-dashed border-border p-4 text-center text-xs text-muted">
@@ -619,11 +706,47 @@ export function Regime() {
         </div>
       )}
 
+      {/* ── 阶段规律: 当前阶段的历史统计 + 下阶段转移分布 (窗口内 segments 提炼) ── */}
+      {phaseStats && phaseStreak && (
+        <div className={cn(cardCls, 'p-3')}>
+          <SectionTitle icon={Flame} title="阶段规律"
+            hint="当前阶段在窗口内的历史统计 · 去向=每段之后进入的阶段" />
+          <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px]">
+            <span className="text-secondary">
+              <span style={{ color: MARKET_PHASE_COLORS[phaseStreak.phase], fontWeight: 600 }}>
+                {MARKET_PHASE_LABELS[phaseStreak.phase]}
+              </span>
+              <span className="text-muted"> 已持续 </span>
+              <span className="font-mono text-foreground">{phaseStreak.streak}</span> 天
+              <span className="text-muted"> · 历史 {phaseStats.count} 段, 平均 {phaseStats.avgDays} 天, 最长 {phaseStats.maxDays} 天</span>
+            </span>
+            {phaseStreak.streak > phaseStats.avgDays && (
+              <span className="rounded bg-warning/10 px-1.5 py-px text-[10px] font-medium text-warning"
+                title="持续天数已超过窗口内该阶段的平均时长">
+                已超历史平均
+              </span>
+            )}
+            {phaseStats.transitions.length > 0 && (
+              <span className="flex flex-wrap items-center gap-1.5 text-muted">
+                历史去向:
+                {phaseStats.transitions.map(t => (
+                  <span key={t.phase} className="rounded px-1.5 py-px font-medium"
+                    style={{ color: MARKET_PHASE_COLORS[t.phase], backgroundColor: MARKET_PHASE_COLORS[t.phase] + '18' }}
+                    title={`${phaseStats.count} 段中 ${t.count} 段之后进入`}>
+                    {MARKET_PHASE_LABELS[t.phase]} {t.pct}%
+                  </span>
+                ))}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── 情绪周期时间轴 (阶段色带 + 高度/宽度/晋级率) ── */}
       {hasPhaseData && rows.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Flame} title="情绪周期时间轴"
-            hint="高度(红) · 2板+宽度(琥珀柱) · 晋级率(蓝虚线) · 背景色带=阶段" />
+            hint="高度(红) · 2板+(琥珀柱) · 晋级率(蓝虚线) · ▲阶段切换 · 竖线今日" />
           <div ref={phaseChartRef} className="mt-2 h-[280px]" />
           <div className="mt-1.5 flex h-6 w-full overflow-hidden rounded-md">
             {rows.map(r => (
