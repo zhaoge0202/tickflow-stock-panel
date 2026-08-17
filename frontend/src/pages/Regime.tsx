@@ -85,7 +85,11 @@ function isPresetKey(p: RangePreset, k: '1y' | '2y' | 'all'): boolean {
 }
 
 // ── EChart hook ───────────────────────────────────────────
-function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
+function useEChart(
+  option: echarts.EChartsOption | null,
+  deps: unknown[],
+  onReady?: (inst: echarts.ECharts) => void,
+) {
   const ref = useRef<HTMLDivElement>(null)
   const instRef = useRef<echarts.ECharts | null>(null)
   useEffect(() => {
@@ -104,6 +108,7 @@ function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
     // 数据到达后 option 变化触发本 effect, 此时 div 已挂载 — 补建实例再 setOption。
     if (!instRef.current) {
       instRef.current = echarts.init(ref.current, undefined, { renderer: 'canvas' })
+      onReady?.(instRef.current)
     }
     if (option) {
       instRef.current.setOption(option, { notMerge: true })
@@ -111,6 +116,7 @@ function useEChart(option: echarts.EChartsOption | null, deps: unknown[]) {
       // 容器实际尺寸重算; 调用方把 view 等显隐依赖传入 deps 以触发本 effect。
       instRef.current.resize()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [option, ...deps])
   return ref
 }
@@ -171,6 +177,9 @@ export function Regime() {
   })
   const [mainlineKind, setMainlineKind] = useState<'concept' | 'industry'>('concept')
   const [filterOpen, setFilterOpen] = useState(false)
+  // 时间轴点击选中的交易日 (当日快照联动); null = 未选。窗口切换后失效。
+  const [selDate, setSelDate] = useState<string | null>(null)
+  useEffect(() => { setSelDate(null) }, [histRange.start, histRange.end])
   const mainline = useQuery({
     queryKey: QK.regimeMainline(mainlineKind, histRange.start, histRange.end),
     queryFn: () => api.regimeMainline(histRange.start, histRange.end, 10, mainlineKind),
@@ -200,6 +209,26 @@ export function Regime() {
     const lastDate = mlRows[mlRows.length - 1].date
     return mlRows.filter(r => r.date === lastDate && r.rank <= 3)
   }, [mainline.data])
+
+  // ── 时间轴点击选中日: 当日行 + 当日主线 top3 (主查询窗口内可回看任意一天) ──
+  const selRow = useMemo(
+    () => (selDate ? rows.find(r => r.date === selDate) ?? null : null),
+    [rows, selDate],
+  )
+  const selMainlines = useMemo(() => {
+    if (!selDate) return []
+    return (mainline.data?.rows ?? []).filter(r => r.date === selDate && r.rank <= 3)
+  }, [mainline.data, selDate])
+  // 选中日处于其阶段段的第几天 (自段首数起, 与"当前阶段第 N 天"同口径)
+  const selStreak = useMemo(() => {
+    if (!selRow?.phase) return null
+    let streak = 1
+    for (let i = rows.findIndex(r => r.date === selRow.date); i > 0; i--) {
+      if (rows[i - 1].phase === selRow.phase) streak++
+      else break
+    }
+    return streak
+  }, [rows, selRow])
 
   // ── 指标历史分位: 最新值在当前窗口内的位置 (≤ 它的天数占比), 给指标卡参照系 ──
   const pctRank = useCallback((field: keyof RegimeRow): number | null => {
@@ -281,21 +310,35 @@ export function Regime() {
     if (rows.length === 0 || !hasPhaseData) return null
     const dates = rows.map(r => r.date)
     const heights = rows.map(r => r.max_consecutive)
+    const firstBoard = rows.map(r => r.first_board ?? null)
     const ge2 = rows.map(r => r.ge2_count ?? null)
     const promo = rows.map(r => (r.promo_rate != null ? Math.round(r.promo_rate * 100) : null))
+    const seal = rows.map(r => (r.seal_rate != null ? Math.round(r.seal_rate * 100) : null))
+    // 阶段色带: 连续同阶段为一带; ≥6 天的宽带标阶段名(窄带不标避免糊作一团)
     const phaseBands: any[] = []
-    let bandStart = rows[0]?.date
+    let bandStartIdx = 0
     let prevPhase = rows[0]?.phase
     rows.forEach((r, i) => {
       if (r.phase !== prevPhase || i === rows.length - 1) {
-        const bandEnd = i === rows.length - 1 ? r.date : rows[i - 1].date
+        const endIdx = i === rows.length - 1 ? i : i - 1
         if (prevPhase && MARKET_PHASE_COLORS[prevPhase as MarketPhase]) {
+          const color = MARKET_PHASE_COLORS[prevPhase as MarketPhase]
+          const bandDays = endIdx - bandStartIdx + 1
           phaseBands.push([
-            { xAxis: bandStart, itemStyle: { color: MARKET_PHASE_COLORS[prevPhase as MarketPhase], opacity: 0.10 } },
-            { xAxis: bandEnd },
+            {
+              xAxis: rows[bandStartIdx].date,
+              itemStyle: { color, opacity: 0.10 },
+              label: {
+                show: bandDays >= 6,
+                formatter: MARKET_PHASE_LABELS[prevPhase as MarketPhase],
+                position: 'insideTopLeft', distance: 6,
+                color, fontSize: 9, fontWeight: 600,
+              },
+            },
+            { xAxis: rows[endIdx].date },
           ])
         }
-        bandStart = r.date
+        bandStartIdx = i
         prevPhase = r.phase
       }
     })
@@ -315,21 +358,33 @@ export function Regime() {
       tooltip: {
         trigger: 'axis', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder,
         textStyle: { color: ct.tooltipText },
+        axisPointer: { type: 'line', snap: true, lineStyle: { color: ct.grid } },
         formatter: (params: any) => {
           const p0 = Array.isArray(params) ? params[0] : params
           const i = dates.indexOf(p0.axisValue)
           const r = rows[i]
           if (!r) return ''
           const phase = r.phase ? MARKET_PHASE_LABELS[r.phase] : '—'
+          // 该日处于阶段段的第几天 (与"当前阶段第 N 天"同口径)
+          let dayN = 1
+          for (let j = i; j > 0; j--) {
+            if (rows[j - 1].phase === r.phase) dayN++
+            else break
+          }
+          const pct = (v: number | null | undefined) =>
+            v != null ? (v * 100).toFixed(1) + '%' : '—'
           return [
-            `<b>${r.date}</b> · ${phase}`,
-            `高度 ${r.max_consecutive} · 首板 ${r.first_board ?? '—'} · 2板+ ${r.ge2_count ?? '—'}`,
-            `晋级率 ${r.promo_rate != null ? (r.promo_rate * 100).toFixed(1) + '%' : '—'} · 封板率 ${r.seal_rate != null ? (r.seal_rate * 100).toFixed(1) + '%' : '—'}`,
+            `<b>${r.date}</b> · ${phase} 第${dayN}天`,
+            `高度 ${r.max_consecutive}板 · 完整度 ${r.ladder_completeness != null ? (r.ladder_completeness * 100).toFixed(0) + '%' : '—'}`,
+            `涨停 ${r.limit_up ?? '—'}家 = 首板 ${r.first_board ?? '—'} + 2板+ ${r.ge2_count ?? '—'}`,
+            `晋级率 ${pct(r.promo_rate)} · 封板率 ${pct(r.seal_rate)}`,
           ].join('<br/>')
         },
       },
       legend: {
-        data: ['高度', '2板+', '晋级率'], textStyle: { color: ct.text, fontSize: 10 }, top: 0,
+        data: ['首板', '2板+', '高度', '晋级率', '封板率'],
+        selected: { 封板率: false },
+        textStyle: { color: ct.text, fontSize: 10 }, top: 0,
       },
       grid: { left: 44, right: 44, top: 32, bottom: 44 },
       xAxis: {
@@ -338,25 +393,40 @@ export function Regime() {
         axisLine: { lineStyle: { color: ct.grid } },
       },
       yAxis: [
-        { type: 'value', name: '高度/宽度', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
-        { type: 'value', name: '晋级率%', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '板/家', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '比率%', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
       ],
       dataZoom: [
         { type: 'inside', start: Math.max(0, 100 - (60 / days) * 100) },
         { type: 'slider', bottom: 6, height: 14, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
       ],
       series: [
-        { name: '2板+', type: 'bar', data: ge2, yAxisIndex: 0, barMaxWidth: 5,
-          itemStyle: { color: '#f59e0b', opacity: 0.4 }, z: 1 },
+        // 首板/2板+ 堆叠柱: 两段之和 = 当日涨停总数 (首板宽度=底部, 2板+=顶段),
+        // 总高看涨停宽度、顶段看连板厚度; 高度线在其上穿行
+        { name: '首板', type: 'bar', stack: 'lu', data: firstBoard, yAxisIndex: 0,
+          barMaxWidth: 5, itemStyle: { color: '#f97316', opacity: 0.35 }, z: 1 },
+        { name: '2板+', type: 'bar', stack: 'lu', data: ge2, yAxisIndex: 0,
+          barMaxWidth: 5, itemStyle: { color: '#f59e0b', opacity: 0.65 }, z: 1 },
         { name: '高度', type: 'line', data: heights, smooth: true, symbol: 'none', yAxisIndex: 0,
           lineStyle: { width: 1.6, color: '#ef4444' }, z: 3,
           markArea: { silent: true, data: phaseBands },
-          // 最新交易日竖线 (定位"现在"): 淡白细线, 不参与交互
+          // 定位竖线: 今日(淡白) + 选中日(蓝虚线, 点击图表日期出现)
           markLine: {
             silent: true, symbol: 'none',
-            lineStyle: { color: ct.text, opacity: 0.35, width: 1 },
-            label: { show: true, position: 'end', formatter: '今日', color: ct.text, fontSize: 9 },
-            data: [{ xAxis: dates[dates.length - 1] }],
+            data: [
+              {
+                xAxis: dates[dates.length - 1],
+                lineStyle: { color: ct.text, opacity: 0.35, width: 1 },
+                label: { show: true, position: 'end', formatter: '今日', color: ct.text, fontSize: 9 },
+              },
+              ...(selDate && selDate !== dates[dates.length - 1]
+                ? [{
+                    xAxis: selDate,
+                    lineStyle: { color: '#3b82f6', type: 'dashed' as const, width: 1.2, opacity: 0.9 },
+                    label: { show: true, position: 'end' as const, formatter: selDate.slice(5), color: '#3b82f6', fontSize: 9 },
+                  } as const]
+                : []),
+            ],
           },
           // 阶段切换点: 小三角=当日切换, 颜色=新阶段
           markPoint: {
@@ -365,10 +435,27 @@ export function Regime() {
           } },
         { name: '晋级率', type: 'line', data: promo, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { width: 1.2, color: '#3b82f6', type: 'dotted' }, z: 2 },
+        { name: '封板率', type: 'line', data: seal, smooth: true, symbol: 'none', yAxisIndex: 1,
+          lineStyle: { width: 1.2, color: '#10b981', type: 'dashed' }, z: 2 },
       ],
     }
-  }, [rows, days, ct, hasPhaseData])
-  const phaseChartRef = useEChart(phaseOption, [phaseOption, view])
+  }, [rows, days, ct, hasPhaseData, selDate])
+  const [phaseChartInst, setPhaseChartInst] = useState<echarts.ECharts | null>(null)
+  const phaseChartRef = useEChart(phaseOption, [phaseOption, view], setPhaseChartInst)
+  // 点击图表任意位置 → 选中最近的交易日 (zrender 级监听, 命中区为整个网格,
+  // 不依赖细线/窄柱的精确点击); 点击图例/dataZoom 不在网格内, 自动忽略
+  useEffect(() => {
+    if (!phaseChartInst || !phaseOption) return
+    const zr = phaseChartInst.getZr()
+    const onClick = (e: { offsetX: number; offsetY: number }) => {
+      if (!phaseChartInst.containPixel('grid', [e.offsetX, e.offsetY])) return
+      const dates = rows.map(r => r.date)
+      const idx = Math.round(phaseChartInst.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY])[0])
+      if (Number.isFinite(idx) && idx >= 0 && idx < dates.length) setSelDate(dates[idx])
+    }
+    zr.on('click', onClick)
+    return () => { zr.off('click', onClick) }
+  }, [phaseChartInst, phaseOption, rows])
 
   // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
@@ -742,11 +829,44 @@ export function Regime() {
         </div>
       )}
 
-      {/* ── 情绪周期时间轴 (阶段色带 + 高度/宽度/晋级率) ── */}
+      {/* ── 情绪周期时间轴 (阶段色带 + 高度/宽度/晋级率 + 点击回看) ── */}
       {hasPhaseData && rows.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Flame} title="情绪周期时间轴"
-            hint="高度(红) · 2板+(琥珀柱) · 晋级率(蓝虚线) · ▲阶段切换 · 竖线今日" />
+            hint="堆叠柱=涨停(首板+2板+) · 高度(红) · 晋级率(蓝) · ▲切换 · 点击日期回看当日" />
+          {/* 当日快照: 点击图表日期出现 — 阶段/梯队指标/当日主线 top3 一屏回看 */}
+          {selRow && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-accent/25 bg-accent/5 px-2.5 py-1.5">
+              <span className="flex items-center gap-1.5">
+                <span className="font-mono text-xs font-semibold text-foreground">{selRow.date}</span>
+                <span className="rounded px-1.5 py-px text-[10px] font-semibold"
+                  style={{ color: MARKET_PHASE_COLORS[selRow.phase as MarketPhase], backgroundColor: MARKET_PHASE_COLORS[selRow.phase as MarketPhase] + '20' }}>
+                  {MARKET_PHASE_LABELS[selRow.phase as MarketPhase]}
+                </span>
+                {selStreak != null && <span className="text-[10px] text-muted">第 {selStreak} 天</span>}
+              </span>
+              <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-[10px] text-secondary">
+                <span>高度 <b className="text-danger">{selRow.max_consecutive}板</b></span>
+                <span>涨停 <b className="text-foreground">{selRow.limit_up ?? '—'}</b>
+                  <span className="text-muted"> = 首板{selRow.first_board ?? '—'} + 2板+{selRow.ge2_count ?? '—'}</span></span>
+                <span>晋级 <b className="text-[#3b82f6]">{selRow.promo_rate != null ? (selRow.promo_rate * 100).toFixed(0) + '%' : '—'}</b></span>
+                <span>封板 <b className="text-[#10b981]">{selRow.seal_rate != null ? (selRow.seal_rate * 100).toFixed(0) + '%' : '—'}</b></span>
+              </span>
+              <span className="flex flex-wrap items-center gap-1">
+                {selMainlines.length > 0 ? selMainlines.map(m => (
+                  <span key={m.member} className="rounded px-1.5 py-px text-[9px] font-medium"
+                    style={{ color: '#f59e0b', backgroundColor: '#f59e0b18' }}
+                    title={`涨停${m.limit_up_count}家 · 最高${m.max_boards}板 · 梯队${m.rungs_filled}档`}>
+                    {m.member}
+                  </span>
+                )) : <span className="text-[9px] text-muted">当日无主线数据</span>}
+              </span>
+              <button onClick={() => setSelDate(null)}
+                className="ml-auto flex items-center gap-1 rounded px-1.5 py-px text-[10px] text-muted hover:bg-elevated hover:text-foreground">
+                <X className="h-3 w-3" /> 回到今日
+              </button>
+            </div>
+          )}
           <div ref={phaseChartRef} className="mt-2 h-[280px]" />
           <div className="mt-1.5 flex h-6 w-full overflow-hidden rounded-md">
             {rows.map(r => (
