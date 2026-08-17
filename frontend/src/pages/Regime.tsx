@@ -648,42 +648,45 @@ export function Regime() {
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Layers} title="阶段 × 主线"
             hint={`${segments.length} 段 · 主线按段内 top5 天数排序`} />
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-[11px]">
+          {/* 最大高度内滚动: 段数多时不再拉长页面; 表头吸顶保证滚动时列名可见。
+              border-separate 是 sticky 前提 — Chromium 在 border-collapse:collapse
+              (preflight 默认) 下表格元素 sticky 失效; spacing-0 保持视觉不变。 */}
+          <div className="mt-2 max-h-[420px] overflow-auto">
+            <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-[11px]">
               <thead>
-                <tr className="border-b border-border text-[10px] text-muted">
-                  <th className="py-1.5 pr-3 font-medium">阶段</th>
-                  <th className="py-1.5 pr-3 font-medium">区间</th>
-                  <th className="py-1.5 pr-3 font-medium text-right">天数</th>
-                  <th className="py-1.5 pr-3 font-medium text-right">高度</th>
-                  <th className="py-1.5 pr-3 font-medium text-right">2板+</th>
-                  <th className="py-1.5 pr-3 font-medium text-right">晋级率</th>
-                  <th className="py-1.5 pr-3 font-medium text-right">封板率</th>
-                  <th className="py-1.5 font-medium">主导主线</th>
+                <tr className="text-[10px] text-muted">
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium">阶段</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium">区间</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium text-right">天数</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium text-right">高度</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium text-right">2板+</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium text-right">晋级率</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 pr-3 font-medium text-right">封板率</th>
+                  <th className="sticky top-0 z-10 border-b border-border bg-surface py-1.5 font-medium">主导主线</th>
                 </tr>
               </thead>
               <tbody>
                 {[...segments].reverse().map((seg, i) => (
-                  <tr key={`${seg.start}-${seg.phase}-${i}`} className="border-b border-border/50 last:border-0">
-                    <td className="py-1.5 pr-3">
+                  <tr key={`${seg.start}-${seg.phase}-${i}`}>
+                    <td className="border-b border-border/50 py-1.5 pr-3">
                       <span className="rounded px-1.5 py-px text-[10px] font-semibold"
                         style={{ color: MARKET_PHASE_COLORS[seg.phase], backgroundColor: MARKET_PHASE_COLORS[seg.phase] + '20' }}>
                         {seg.label}
                       </span>
                     </td>
-                    <td className="py-1.5 pr-3 font-mono text-[10px] text-secondary">
+                    <td className="border-b border-border/50 py-1.5 pr-3 font-mono text-[10px] text-secondary">
                       {seg.start.slice(5)} ~ {seg.end.slice(5)}
                     </td>
-                    <td className="py-1.5 pr-3 text-right font-mono">{seg.days}</td>
-                    <td className="py-1.5 pr-3 text-right font-mono">{seg.avg_height}</td>
-                    <td className="py-1.5 pr-3 text-right font-mono">{seg.avg_ge2}</td>
-                    <td className="py-1.5 pr-3 text-right font-mono">
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.days}</td>
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_height}</td>
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_ge2}</td>
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">
                       {seg.avg_promo != null ? `${(seg.avg_promo * 100).toFixed(0)}%` : '—'}
                     </td>
-                    <td className="py-1.5 pr-3 text-right font-mono">
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">
                       {seg.avg_seal_rate != null ? `${(seg.avg_seal_rate * 100).toFixed(0)}%` : '—'}
                     </td>
-                    <td className="py-1.5">
+                    <td className="border-b border-border/50 py-1.5">
                       <div className="flex flex-wrap gap-1">
                         {seg.top_mainlines.length > 0 ? seg.top_mainlines.map(m => (
                           <span key={m.member} className="rounded px-1.5 py-px text-[9px]"
