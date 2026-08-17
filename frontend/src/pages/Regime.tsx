@@ -1138,13 +1138,15 @@ export function Regime() {
 // ── 主线过滤设置面板 ──────────────────────────────────────
 // 宽基/风格标签(融资融券/沪深股通等数千成分)会霸占主线榜首。默认按成员数
 // 上限过滤; 用户可调阈值并按名称屏蔽特定概念, 保存后自动重算主线。
+// ST 剔除开关联动情绪周期口径 — 切换时额外触发 regime 全量重算。
 function MainlineFilterPanel({ filter, onDone }: {
-  filter: { min_members: number; max_members: number; blacklist: string[] } | undefined
+  filter: { min_members: number; max_members: number; blacklist: string[]; exclude_st?: boolean } | undefined
   onDone: () => Promise<void>
 }) {
   const [minMembers, setMinMembers] = useState(String(filter?.min_members ?? 4))
   const [maxMembers, setMaxMembers] = useState(String(filter?.max_members ?? 600))
   const [blacklist, setBlacklist] = useState<string[]>(filter?.blacklist ?? [])
+  const [excludeSt, setExcludeSt] = useState(filter?.exclude_st ?? true)
   const [input, setInput] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -1161,9 +1163,17 @@ function MainlineFilterPanel({ filter, onDone }: {
         min_members: Math.max(1, Number(minMembers) || 4),
         max_members: Math.max(50, Number(maxMembers) || 600),
         blacklist,
+        exclude_st: excludeSt,
       })
-      await api.regimeMainlineRecompute()
-      toast('过滤已保存, 主线已重算', 'success')
+      const stChanged = excludeSt !== (filter?.exclude_st ?? true)
+      if (stChanged) {
+        // 口径切换影响情绪周期驱动指标, 需全量重算 regime+主线(较重, 需等待)
+        await api.regimeRecompute()
+        toast('过滤已保存, 主线与情绪周期已全量重算', 'success')
+      } else {
+        await api.regimeMainlineRecompute()
+        toast('过滤已保存, 主线已重算', 'success')
+      }
       await onDone()
     } catch (e) {
       toast(`保存失败 · ${String((e as Error)?.message || e)}`, 'error')
@@ -1213,8 +1223,31 @@ function MainlineFilterPanel({ filter, onDone }: {
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '保存并重算'}
         </button>
       </div>
+      <div className="mt-2 flex items-center gap-2 border-t border-border/60 pt-2">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={excludeSt}
+          aria-label="统计剔除 ST 股"
+          onClick={() => setExcludeSt(v => !v)}
+          className={cn(
+            'relative inline-flex h-4.5 w-8 items-center rounded-full border transition-all duration-200',
+            excludeSt ? 'border-accent/50 bg-accent' : 'border-border bg-elevated hover:border-muted',
+          )}
+        >
+          <span className={cn(
+            'inline-block h-3 w-3 rounded-full border border-black/5 bg-white shadow-sm transition-transform duration-200',
+            excludeSt ? 'translate-x-[17px]' : 'translate-x-0.5',
+          )} />
+        </button>
+        <span className="text-[11px] text-secondary">
+          统计剔除 ST 股
+          <span className="ml-1.5 text-[9px] text-muted">主线 + 情绪周期统一口径; 切换后自动全量重算(约 1-2 分钟)</span>
+        </span>
+      </div>
       <div className="mt-1.5 text-[9px] text-muted">
-        说明: 成分股数超过上限的概念(如 融资融券~7700家/沪深股通~3300家)视为宽基/风格标签, 不参与主线排名; 修改后自动重算全部历史主线(秒级)。
+        说明: 成分股数超过上限的概念(如 融资融券~7700家/沪深股通~3300家)视为宽基/风格标签, 不参与主线排名;
+        风险警示股(名称含 ST)不参与涨停梯队统计 — 主板 5% 便宜板时代曾系统性霸榜, 且 ST 是状态桶而非题材。修改后自动重算全部历史(秒级~分钟级)。
       </div>
     </div>
   )

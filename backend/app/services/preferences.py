@@ -385,12 +385,28 @@ def get_mainline_blacklist() -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()]
 
 
+def get_sentiment_exclude_st() -> bool:
+    """市场环境/主线统计是否剔除风险警示(ST)股。默认 True。
+
+    口径: 主板 ST 在 2026-07 前享 5% 涨跌幅(封板成本减半), 且 ST 是跨行业的
+    状态桶而非投资题材, 混入会系统性抬高涨停宽度/高度(弱市尤甚)。剔除后
+    涨跌家数等宽度占比几乎不受影响。修改后需重算 regime 与主线生效。
+    """
+    return bool(load().get("sentiment_exclude_st", True))
+
+
+def set_sentiment_exclude_st(v: bool) -> bool:
+    save({"sentiment_exclude_st": bool(v)})
+    return get_sentiment_exclude_st()
+
+
 def get_mainline_filter_config() -> dict:
     """主线过滤配置汇总(供 API 返回与计算读取)。"""
     return {
         "min_members": get_mainline_min_members(),
         "max_members": get_mainline_max_members(),
         "blacklist": get_mainline_blacklist(),
+        "exclude_st": get_sentiment_exclude_st(),
     }
 
 
@@ -401,6 +417,8 @@ def set_mainline_filter_config(cfg: dict) -> dict:
         updates["mainline_min_members"] = cfg["min_members"]
     if "max_members" in cfg and cfg["max_members"] is not None:
         updates["mainline_max_members"] = cfg["max_members"]
+    if "exclude_st" in cfg and cfg["exclude_st"] is not None:
+        updates["sentiment_exclude_st"] = bool(cfg["exclude_st"])
     if "blacklist" in cfg and cfg["blacklist"] is not None:
         raw = cfg["blacklist"]
         if isinstance(raw, str):

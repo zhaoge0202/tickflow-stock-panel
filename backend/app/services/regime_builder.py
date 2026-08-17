@@ -449,6 +449,23 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
         logger.info("regime batch: no enriched data for [%s~%s]", start, end)
         return pl.DataFrame()
 
+    # 口径: 默认剔除风险警示(ST)股(与主线统计同一开关) — 主板 ST 在 2026-07 前
+    # 享 5% 涨跌幅且是跨行业状态桶, 混入会系统性抬高涨停宽度/高度(弱市炒 ST 尤甚)。
+    # 涨跌家数/MA20 占比等宽度指标几乎不受影响。切换口径需全量重算 regime。
+    try:
+        from app.services import preferences as _prefs_st
+        exclude_st = _prefs_st.get_sentiment_exclude_st()
+    except Exception:
+        exclude_st = True
+    if exclude_st:
+        from app.services.market_mainline import load_risk_warning_symbols
+
+        st_syms = load_risk_warning_symbols(repo.store.data_dir)
+        if st_syms and "symbol" in df.columns:
+            df = df.filter(
+                ~pl.col("symbol").str.to_uppercase().is_in(sorted(st_syms))
+            )
+
     return _aggregate_daily(df, index_pct_map)
 
 

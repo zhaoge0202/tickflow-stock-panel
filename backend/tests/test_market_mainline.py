@@ -159,4 +159,70 @@ class TestMainlineFilterPreferences:
         path = tmp_path / "preferences.json"
         monkeypatch.setattr(preferences, "_path", lambda: path)
         cfg = preferences.get_mainline_filter_config()
-        assert cfg == {"min_members": 4, "max_members": 600, "blacklist": []}
+        assert cfg == {"min_members": 4, "max_members": 600, "blacklist": [], "exclude_st": True}
+
+    def test_sentiment_exclude_st_roundtrip(self, tmp_path, monkeypatch):
+        path = tmp_path / "preferences.json"
+        monkeypatch.setattr(preferences, "_path", lambda: path)
+        assert preferences.get_sentiment_exclude_st() is True  # 默认剔除
+        assert preferences.set_sentiment_exclude_st(False) is False
+        assert preferences.get_sentiment_exclude_st() is False
+        # 经主线过滤配置部分更新同样生效
+        got = preferences.set_mainline_filter_config({"exclude_st": True})
+        assert got["exclude_st"] is True
+
+
+class TestExcludeST:
+    """风险警示股剔除: 维表名称含 ST → 主线聚合前过滤。"""
+
+    @staticmethod
+    def _write_instruments(tmp_path, names: dict[str, str]) -> None:
+        part = tmp_path / "instruments" / "part.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": list(names),
+            "name": list(names.values()),
+        }).write_parquet(part)
+
+    def _reset_cache(self, monkeypatch):
+        monkeypatch.setattr(market_mainline, "_ST_SYMBOLS_CACHE", None)
+
+    def test_load_risk_warning_symbols(self, tmp_path, monkeypatch):
+        self._reset_cache(monkeypatch)
+        self._write_instruments(tmp_path, {
+            "s1.SH": "*ST环保", "S2.SH": "ST万邦", "S3.SZ": "正常股",
+            "s4.BJ": "S*ST京", "S5.SH": "斯太尔",  # 中文名含"斯"不含 ST 标记
+        })
+        got = market_mainline.load_risk_warning_symbols(tmp_path)
+        assert got == frozenset({"S1.SH", "S2.SH", "S4.BJ"})  # 大写归一
+        # 缓存命中: 再次读取不重扫磁盘
+        self._write_instruments(tmp_path, {"S9.SH": "ST新增"})
+        assert market_mainline.load_risk_warning_symbols(tmp_path) == got
+
+    def test_load_risk_warning_symbols_empty_dir(self, tmp_path, monkeypatch):
+        self._reset_cache(monkeypatch)
+        assert market_mainline.load_risk_warning_symbols(tmp_path) == frozenset()
+
+    def test_compute_mainline_excludes_st(self, tmp_path, monkeypatch):
+        """S1(ST) 涨停被剔除 → 概念 X 计数/高度/龙头随之变化; 关闭开关恢复。"""
+        self._reset_cache(monkeypatch)
+        self._write_instruments(tmp_path, {"S1.SH": "*ST一", "S2.SH": "正常一"})
+        repo, d1, d2 = TestComputeMainline()._setup(tmp_path, monkeypatch)
+        cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
+
+        out = market_mainline.compute_mainline_range(
+            repo, tmp_path, d1, d2, kind="concept", filter_cfg=cfg, exclude_st=True,
+        )
+        x_d1 = out.filter((pl.col("date") == d1) & (pl.col("member") == "X")).to_dicts()[0]
+        assert x_d1["limit_up_count"] == 3      # S1(ST) 被剔除, 剩 S2,S3,S4
+        assert x_d1["ge2_count"] == 1           # 仅 S4=2板
+        assert x_d1["max_boards"] == 2
+        assert x_d1["leader_symbol"] == "S4.SH"
+
+        out_keep = market_mainline.compute_mainline_range(
+            repo, tmp_path, d1, d2, kind="concept", filter_cfg=cfg, exclude_st=False,
+        )
+        x_d1_keep = out_keep.filter((pl.col("date") == d1) & (pl.col("member") == "X")).to_dicts()[0]
+        assert x_d1_keep["limit_up_count"] == 4
+        assert x_d1_keep["ge2_count"] == 2      # S1=2板, S4=2板
+        assert x_d1_keep["leader_symbol"] == "S1.SH"

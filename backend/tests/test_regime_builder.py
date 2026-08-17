@@ -146,6 +146,43 @@ def test_aggregate_empty_returns_empty():
     assert regime_builder._aggregate_daily(pl.DataFrame()).is_empty()
 
 
+def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
+    """run_regime_batch 默认剔除风险警示股: A(*ST) 的涨停/涨幅不进入统计。
+
+    宽度类指标(涨跌家数)同样只统计非 ST 标的 — 同一 df 统一过滤。
+    关闭开关(preferences)后恢复全市场口径。
+    """
+    from app.services import market_mainline, preferences
+
+    instruments = tmp_path / "instruments" / "part.parquet"
+    instruments.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["A", "B"], "name": ["*ST甲", "正常乙"]}).write_parquet(instruments)
+    monkeypatch.setattr(market_mainline, "_ST_SYMBOLS_CACHE", None)
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
+    monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *a, **k: {})
+
+    class _FakeRepo:
+        class store:
+            data_dir = tmp_path
+
+        def get_enriched_range(self, start, end):
+            return _enriched_df()
+
+    out = regime_builder.run_regime_batch(_FakeRepo(), date(2026, 1, 2), date(2026, 1, 3))
+    r1 = out.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
+    r2 = out.filter(pl.col("date") == date(2026, 1, 3)).row(0, named=True)
+    assert r1["limit_up"] == 0          # A(ST) 涨停被剔除
+    assert r1["up_count"] == 1          # 剩 B/C/D 中仅 C 上涨
+    assert r1["down_count"] == 2
+    assert r2["max_consecutive"] == 1   # A 的 2板不计, C=1板
+
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: False)
+    out_all = regime_builder.run_regime_batch(_FakeRepo(), date(2026, 1, 2), date(2026, 1, 3))
+    r1_all = out_all.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
+    assert r1_all["limit_up"] == 1      # A 计入
+    assert r1_all["up_count"] == 2      # A,C 上涨
+
+
 # ───────────────────────── 持久化(upsert) ─────────────────────────
 
 

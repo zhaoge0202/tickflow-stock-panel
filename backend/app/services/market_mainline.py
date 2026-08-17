@@ -15,6 +15,7 @@ join 概念映射后 group_by, 峰值内存 <100MB。
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 from pathlib import Path
 
@@ -68,6 +69,35 @@ def mainline_path(data_dir: Path) -> Path:
     return data_dir / MAINLINE_DIR / "part.parquet"
 
 
+_ST_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
+
+
+def load_risk_warning_symbols(data_dir: Path) -> frozenset[str]:
+    """当前维表快照中名称含 ST 标记的 symbol 集合(大写), 供主线/情绪统计剔除。
+
+    判定与 indicators 涨跌停口径共用同一权威实现(price_limits.polars_is_risk_warning_name,
+    即名称含 "ST", 覆盖 ST/*ST/S*ST)。维表是快照无历史版本, 与概念成分同样的
+    回看限制。600s 进程内缓存(维表 snapshot 进程内不变)。
+    """
+    global _ST_SYMBOLS_CACHE
+    now = time.time()
+    if _ST_SYMBOLS_CACHE is not None and now - _ST_SYMBOLS_CACHE[0] < 600:
+        return _ST_SYMBOLS_CACHE[1]
+    from app.price_limits import polars_is_risk_warning_name
+
+    syms: frozenset[str] = frozenset()
+    inst_dir = data_dir / "instruments"
+    if inst_dir.exists():
+        try:
+            df = pl.read_parquet(inst_dir / "**" / "*.parquet").select(["symbol", "name"])
+            st = df.filter(polars_is_risk_warning_name(pl.col("name")))
+            syms = frozenset(s.upper() for s in st["symbol"].to_list())
+        except Exception as e:
+            logger.warning("load risk-warning symbols failed: %s", e)
+    _ST_SYMBOLS_CACHE = (now, syms)
+    return syms
+
+
 def load_mainline_history(data_dir: Path, kind: str = "concept") -> pl.DataFrame:
     """读取主线时序(全部 kind), 不存在返回空 DataFrame。"""
     p = mainline_path(data_dir)
@@ -92,12 +122,15 @@ def _industry_member(member: str, kind: str) -> str:
 
 def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
                            kind: str = "concept",
-                           filter_cfg: dict | None = None) -> pl.DataFrame:
+                           filter_cfg: dict | None = None,
+                           exclude_st: bool | None = None) -> pl.DataFrame:
     """计算 [start, end] 每日主线排行(按 _SCORE_WEIGHTS 加权截面分)。
 
     filter_cfg: {"min_members", "max_members", "blacklist"}; None 时读用户偏好。
     宽基/风格标签(融资融券/沪深股通等数千成分)按成员数上限过滤,
     用户黑名单按名称过滤(不论大小)。修改配置后重算主线生效。
+    exclude_st: 是否剔除风险警示(ST)股(按当前维表名称); None 时读用户偏好
+    (默认剔除 — ST 是状态桶非题材, 主板 5% 便宜板时代曾系统性霸榜)。
 
     返回列: date, kind, member, limit_up_count, ge2_count, max_boards,
     boards_sum, rungs_filled, leader_symbol, score, rank。空数据返回空表。
@@ -138,6 +171,19 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
         return pl.DataFrame()
 
     limit_rows = limit_rows.with_columns(pl.col("symbol").str.to_uppercase().alias("_sym_up"))
+
+    # 剔除风险警示股: ST 板块的涨停生态(主板曾 5% 便宜板)不代表题材主线。
+    if exclude_st is None:
+        try:
+            from app.services import preferences
+            exclude_st = preferences.get_sentiment_exclude_st()
+        except Exception:
+            exclude_st = True
+    if exclude_st:
+        st_syms = load_risk_warning_symbols(repo.store.data_dir)
+        if st_syms:
+            limit_rows = limit_rows.filter(~pl.col("_sym_up").is_in(sorted(st_syms)))
+
     joined = limit_rows.join(map_df, on="_sym_up", how="inner")
     if joined.is_empty():
         return pl.DataFrame()

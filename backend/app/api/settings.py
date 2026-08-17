@@ -966,16 +966,20 @@ class PipelineIndexSymbolsIn(BaseModel):
 
 
 class MainlineFilterIn(BaseModel):
-    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单)。"""
+    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单 + ST 剔除开关)。"""
 
     min_members: int | None = None
     max_members: int | None = None
     blacklist: list[str] | str | None = None
+    exclude_st: bool | None = None
 
 
 @router.put("/preferences/mainline-filter")
 def update_mainline_filter(req: MainlineFilterIn) -> dict:
-    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。"""
+    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。
+
+    exclude_st 同步控制市场环境(regime)统计口径 — 切换后需全量重算 regime。
+    """
     from app.services import preferences
 
     payload = req.model_dump()

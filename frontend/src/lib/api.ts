@@ -582,6 +582,7 @@ export interface MainlineFilter {
   min_members: number
   max_members: number
   blacklist: string[]
+  exclude_st: boolean
 }
 
 export interface MainlineResult {
@@ -2072,7 +2073,7 @@ export const api = {
   },
   regimeMainlineRecompute: () =>
     request<{ ok: boolean; rows: number }>('/api/regime/mainline/recompute', { method: 'POST' }),
-  mainlineFilterUpdate: (payload: { min_members?: number; max_members?: number; blacklist?: string[] }) =>
+  mainlineFilterUpdate: (payload: { min_members?: number; max_members?: number; blacklist?: string[]; exclude_st?: boolean }) =>
     request<MainlineFilter>('/api/settings/preferences/mainline-filter', {
       method: 'PUT',
       body: JSON.stringify(payload),
