@@ -2,9 +2,11 @@
  * 自选分组涨跌幅 — 等权平均口径。
  *
  * 组内每只成员取「实时优先、收盘兜底」的涨跌幅(与自选表格展示同源:
- * rt_pct ?? change_pct, 百分数单位), 算术平均即分组涨跌幅。等权最贴合
+ * rt_pct ?? change_pct, 小数单位), 算术平均即分组涨跌幅。等权最贴合
  * 自选的"个人组合"视角 — 透明且无需市值数据。
  */
+
+import { fmtPct } from '@/lib/format'
 
 export interface GroupPctInfo {
   /** 等权平均涨跌幅(小数, 0.0123 = +1.23%, 与 enriched change_pct 同单位); 无有效样本为 null */
@@ -52,21 +54,14 @@ export function computeGroupPcts(
   return out
 }
 
-/** 涨跌幅文本: +1.23% / -0.50% / 0.00% / — (无样本)。入参为小数(0.0123) */
-export function formatGroupPct(pct: number | null): string {
-  if (pct == null) return '—'
-  const v = pct * 100
-  return `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
-}
-
 /** 涨跌色 (A 股惯例红涨绿跌) */
 export function groupPctColor(pct: number | null): string {
   if (pct == null || pct === 0) return 'text-muted'
   return pct > 0 ? 'text-bull' : 'text-bear'
 }
 
-/** 悬停明细: 等权平均 +1.23% · 上涨12 下跌5 平1 */
+/** 悬停明细: 等权平均 +1.23% · 上涨12 下跌5 平1 (格式化复用全站 fmtPct) */
 export function groupPctTitle(info: GroupPctInfo | undefined): string {
   if (!info || info.pct == null) return '暂无涨跌幅数据'
-  return `等权平均 ${formatGroupPct(info.pct)} · 上涨${info.up} 下跌${info.down} 平${info.flat} (共${info.sampled}只)`
+  return `等权平均 ${fmtPct(info.pct)} · 上涨${info.up} 下跌${info.down} 平${info.flat} (共${info.sampled}只)`
 }

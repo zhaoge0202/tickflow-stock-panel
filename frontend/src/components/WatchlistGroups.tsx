@@ -5,9 +5,9 @@ import { Modal } from '@/components/Modal'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
+import { fmtPct } from '@/lib/format'
 import type { WatchlistGroup, WatchlistGroupColor } from '@/lib/api'
 import {
-  formatGroupPct,
   groupPctColor,
   groupPctTitle,
   type GroupPctMap,
@@ -91,7 +91,7 @@ export function WatchlistGroupBar({
                       className={`font-mono text-[10px] tabular-nums ${groupPctColor(info.pct)}`}
                       title={groupPctTitle(info)}
                     >
-                      {formatGroupPct(info.pct)}
+                      {fmtPct(info.pct)}
                     </span>
                   )
                 })()}
