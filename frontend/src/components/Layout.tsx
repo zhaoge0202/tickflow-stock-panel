@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, Suspense } from 'react'
+import { useEffect, useMemo, useRef, useState, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -57,6 +57,7 @@ import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
+import { computeGroupPcts, formatGroupPct, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
@@ -301,6 +302,27 @@ export function Layout() {
     staleTime: 60_000,
   })
   const watchlistGroups = watchlistGroupsData?.groups ?? []
+  // 分组等权平均涨跌幅 — 复用 watchlist/enriched 查询缓存(与自选页同 key,
+  // 盘中随 SSE 刷新); 侧栏开启分组时才拉取
+  const { data: navWatchlist } = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: api.watchlistList,
+    enabled: groupsInNav,
+    staleTime: 60_000,
+  })
+  const { data: navEnriched } = useQuery({
+    queryKey: QK.watchlistEnriched(undefined),
+    queryFn: () => api.watchlistEnriched(),
+    enabled: groupsInNav,
+    staleTime: 60_000,
+  })
+  const navGroupPcts = useMemo(
+    () => computeGroupPcts(
+      navWatchlist?.symbols ?? [],
+      new Map((navEnriched?.rows ?? []).map((r: any) => [r.symbol as string, r])),
+    ),
+    [navWatchlist, navEnriched],
+  )
   // 自选二级菜单展开状态 — 默认当前在自选页时展开
   const [watchlistNavExpanded, setWatchlistNavExpanded] = useState(location.pathname === '/watchlist')
 
@@ -650,11 +672,20 @@ export function Layout() {
                     >
                       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted" />
                       <span>全部</span>
+                      {(() => {
+                        const info = navGroupPcts['all']
+                        return info && info.pct != null ? (
+                          <span className={`ml-auto font-mono text-[10px] tabular-nums ${groupPctColor(info.pct)}`} title={groupPctTitle(info)}>
+                            {formatGroupPct(info.pct)}
+                          </span>
+                        ) : null
+                      })()}
                     </NavLink>
                     {watchlistGroups.map(group => {
                       const color = resolveWatchlistGroupColor(group.color)
                       const groupPath = `/watchlist?group=${group.id}`
                       const isGroupActive = location.pathname === '/watchlist' && location.search === `?group=${group.id}`
+                      const pctInfo = navGroupPcts[group.id]
                       return (
                         <NavLink
                           key={group.id}
@@ -668,6 +699,11 @@ export function Layout() {
                         >
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color.dot}`} />
                           <span className="truncate">{group.name}</span>
+                          {pctInfo && pctInfo.pct != null && (
+                            <span className={`ml-auto font-mono text-[10px] tabular-nums ${groupPctColor(pctInfo.pct)}`} title={groupPctTitle(pctInfo)}>
+                              {formatGroupPct(pctInfo.pct)}
+                            </span>
+                          )}
                         </NavLink>
                       )
                     })}

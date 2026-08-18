@@ -7,6 +7,12 @@ import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import type { WatchlistGroup, WatchlistGroupColor } from '@/lib/api'
 import {
+  formatGroupPct,
+  groupPctColor,
+  groupPctTitle,
+  type GroupPctMap,
+} from '@/lib/watchlistGroupStats'
+import {
   DEFAULT_WATCHLIST_GROUP_COLOR,
   WATCHLIST_GROUP_COLORS,
   resolveWatchlistGroupColor,
@@ -19,6 +25,8 @@ interface GroupBarProps {
   counts: Record<string, number>
   selected: WatchlistGroupFilter
   total: number
+  /** 分组等权平均涨跌幅 (key: 'all' | 'ungrouped' | 分组id); 缺省不显示 */
+  pcts?: GroupPctMap
   onSelect: (group: WatchlistGroupFilter) => void
   onCreate: (name: string, color: WatchlistGroupColor) => Promise<void>
   onRename: (groupId: string, name: string, color: WatchlistGroupColor) => Promise<void>
@@ -31,6 +39,7 @@ export function WatchlistGroupBar({
   counts,
   selected,
   total,
+  pcts,
   onSelect,
   onCreate,
   onRename,
@@ -74,6 +83,18 @@ export function WatchlistGroupBar({
                 <span className={`font-mono text-[10px] tabular-nums ${active && !color ? 'text-accent/80' : 'text-muted'}`}>
                   {tab.count}
                 </span>
+                {pcts && (() => {
+                  const info = pcts[tab.id]
+                  if (!info || info.pct == null || info.sampled === 0) return null
+                  return (
+                    <span
+                      className={`font-mono text-[10px] tabular-nums ${groupPctColor(info.pct)}`}
+                      title={groupPctTitle(info)}
+                    >
+                      {formatGroupPct(info.pct)}
+                    </span>
+                  )
+                })()}
               </button>
             )
           })}

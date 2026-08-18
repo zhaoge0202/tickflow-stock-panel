@@ -8,6 +8,7 @@ import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type Watc
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
+import { computeGroupPcts } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -938,6 +939,14 @@ export function Watchlist() {
     () => new Map(listEntries.map(entry => [entry.symbol, entry.group_id ?? null])),
     [listEntries],
   )
+  // 分组等权平均涨跌幅 (实时优先 rt_pct, 收盘兜底 change_pct; 与表格同源)
+  const groupPcts = useMemo(
+    () => computeGroupPcts(
+      listEntries,
+      new Map(rows.map((r: any) => [r.symbol as string, r])),
+    ),
+    [listEntries, rows],
+  )
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = { ungrouped: 0 }
     for (const entry of listEntries) {
@@ -1263,6 +1272,7 @@ export function Watchlist() {
         counts={groupCounts}
         selected={selectedGroup}
         total={allSymbols.length}
+        pcts={groupPcts}
         onSelect={setSelectedGroup}
         onCreate={(name, color) => createGroup.mutateAsync({ name, color }).then(() => undefined)}
         onRename={(groupId, name, color) => renameGroup.mutateAsync({ groupId, name, color }).then(() => undefined)}
