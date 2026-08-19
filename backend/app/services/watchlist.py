@@ -246,6 +246,18 @@ def rename_group(group_id: str, name: str, color: str | None = None) -> list[dic
         return groups
 
 
+def reorder_groups(ordered_ids: list[str]) -> list[dict]:
+    """按给定 id 顺序重排分组 (json 数组顺序即定义顺序)。"""
+    with _LOCK:
+        groups = _read_groups()
+        by_id = {group["id"]: group for group in groups}
+        if len(ordered_ids) != len(groups) or set(ordered_ids) != set(by_id):
+            raise ValueError("分组顺序与现有分组不一致")
+        reordered = [by_id[group_id] for group_id in ordered_ids]
+        _write_groups(reordered)
+        return reordered
+
+
 def delete_group(group_id: str) -> tuple[list[dict], list[dict]]:
     """删除分组定义，原分组内的自选保留并转为未分组。"""
     with _LOCK:

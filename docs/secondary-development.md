@@ -20,7 +20,7 @@
 - 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
 - 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
 - 后端源码扩展注册：`backend/app/custom/<module>.py`，支持 FastAPI 路由、启动钩子和通知格式化器。
-- 当前前端插槽：`layout.navigation.extra`。
+- 当前前端插槽：`layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`。
 - 当前后端继承点：`NotificationFormatter`。
 
 尚未实现、只能在真实需求出现后增加的能力：
@@ -111,11 +111,19 @@ export default extension
 - 注册顺序确定，使用 `order` 后再按 `id` 排序，避免加载顺序导致界面漂移。
 - 插槽内容必须遵守项目现有设计系统、响应式和可访问性要求。
 
-当前只开放：
+当前开放：
 
 ```text
 layout.navigation.extra
+stock-preview.footer
+watchlist.toolbar
 ```
+
+各插槽 context 契约（均要求 `apiVersion: 1`，定义见 `frontend/src/extensions/types.ts` 的 `FrontendSlotContextMap`）：
+
+- `layout.navigation.extra`：`{ collapsed, pathname }`，侧边栏导航底部。
+- `stock-preview.footer`：`{ symbol, name, view }`，个股详情对话框底部（日K/分时图表下方）；`view` 为 `'daily' | 'intraday'`。适合个股附加面板：龙虎榜、资金流、外部研究链接等。
+- `watchlist.toolbar`：`{ symbols, viewMode, selectedGroup, refresh }`，自选页工具栏末尾；`symbols` 为当前筛选视图中的标的，`refresh` 在扩展修改数据后调用以刷新自选增强数据。适合批量操作入口：自定义分析、导出、组合计算等。
 
 新增插槽前必须有真实用例，并同时定义 context 类型、异常隔离和测试；不能只在类型表中预留名字。
 

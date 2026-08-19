@@ -174,7 +174,8 @@ export function getFrontendExtensionNavigation() {
 
 export function getFrontendSlotRegistrations<K extends FrontendSlotName>(name: K) {
   if (!frozen) throw new Error('读取扩展插槽前必须冻结注册表')
-  return (slots.get(name) ?? []) as Array<FrontendSlotRegistration<K> & { extensionId: string }>
+  // 存储按槽位名分桶, 桶内注册项的 name 必与键一致, 断言安全
+  return (slots.get(name) ?? []) as unknown as Array<FrontendSlotRegistration<K> & { extensionId: string }>
 }
 
 export function getFrontendExtensionLoadErrors() {

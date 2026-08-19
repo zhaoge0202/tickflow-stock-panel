@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -32,6 +32,8 @@ interface GroupBarProps {
   onRename: (groupId: string, name: string, color: WatchlistGroupColor) => Promise<void>
   onDelete: (groupId: string) => Promise<void>
   onClearGroup?: (groupId: string) => Promise<void>
+  /** 手动调整分组前后顺序 (持久化到后端) */
+  onReorder?: (orderedIds: string[]) => Promise<void>
 }
 
 export function WatchlistGroupBar({
@@ -45,6 +47,7 @@ export function WatchlistGroupBar({
   onRename,
   onDelete,
   onClearGroup,
+  onReorder,
 }: GroupBarProps) {
   const [managerOpen, setManagerOpen] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -53,22 +56,82 @@ export function WatchlistGroupBar({
     { id: 'ungrouped', name: '未分组', count: counts.ungrouped ?? 0, color: null },
     ...groups.map(group => ({ id: group.id, name: group.name, count: counts[group.id] ?? 0, color: group.color })),
   ]
+  // 拖拽排序状态: dragIndex = 拖动中的分组下标, dropIndex = 插入位置 (均相对 groups 数组)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const reorderable = !!onReorder && groups.length > 1
+  const tablistRef = useRef<HTMLDivElement>(null)
+
+  const clearDrag = () => { setDragIndex(null); setDropIndex(null) }
+
+  // 分组很多时标签栏横向滚动, 拖到边缘附近自动滚动, 保证能拖到视野外的位置
+  const autoScroll = (clientX: number) => {
+    const el = tablistRef.current
+    if (!el || el.scrollWidth <= el.clientWidth) return
+    const rect = el.getBoundingClientRect()
+    const edge = 48
+    if (clientX < rect.left + edge) el.scrollLeft -= 16
+    else if (clientX > rect.right - edge) el.scrollLeft += 16
+  }
+
+  const handleDrop = () => {
+    if (dragIndex == null || dropIndex == null) { clearDrag(); return }
+    const ids = groups.map(group => group.id)
+    const [moved] = ids.splice(dragIndex, 1)
+    if (moved) {
+      ids.splice(dropIndex > dragIndex ? dropIndex - 1 : dropIndex, 0, moved)
+      if (ids.join(',') !== groups.map(group => group.id).join(',')) {
+        void onReorder?.(ids)
+      }
+    }
+    clearDrag()
+  }
 
   return (
     <>
       <div className="flex h-10 items-stretch border-b border-border bg-surface/40 px-5">
-        <div role="tablist" aria-label="自选分组" className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
-          {tabs.map(tab => {
+        <div
+          ref={tablistRef}
+          role="tablist"
+          aria-label="自选分组"
+          onDragOver={dragIndex != null ? e => autoScroll(e.clientX) : undefined}
+          className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto"
+        >
+          {tabs.map((tab, tabIndex) => {
             const active = selected === tab.id
             const color = tab.color ? resolveWatchlistGroupColor(tab.color) : null
+            // 前两个为固定标签 (全部/未分组), 其后对应 groups 数组 — 可拖拽排序
+            const groupIndex = tabIndex - 2
+            const draggable = reorderable && tabIndex >= 2
+            const dragging = draggable && dragIndex === groupIndex
             return (
               <button
                 key={tab.id}
                 type="button"
                 role="tab"
                 aria-selected={active}
+                draggable={draggable}
+                onDragStart={draggable ? e => {
+                  setDragIndex(groupIndex)
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData('text/plain', tab.id)
+                } : undefined}
+                onDragOver={draggable ? e => {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  autoScroll(e.clientX)
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  setDropIndex(groupIndex + (e.clientX > rect.left + rect.width / 2 ? 1 : 0))
+                } : undefined}
+                onDrop={draggable ? e => { e.preventDefault(); handleDrop() } : undefined}
+                onDragEnd={draggable ? clearDrag : undefined}
                 onClick={() => onSelect(tab.id)}
-                className={`my-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-btn border px-3 text-xs transition-colors ${
+                title={draggable ? `${tab.name} — 可拖拽调整分组顺序` : undefined}
+                className={`relative my-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-btn border px-3 text-xs transition-colors ${
+                  draggable ? 'cursor-grab active:cursor-grabbing' : ''
+                } ${
+                  dragging ? 'opacity-40' : ''
+                } ${
                   active
                     ? color
                       ? `${color.text} ${color.border} ${color.background}`
@@ -78,6 +141,12 @@ export function WatchlistGroupBar({
                       : 'border-transparent text-secondary hover:bg-elevated hover:text-foreground'
                 }`}
               >
+                {draggable && dragIndex != null && dropIndex === groupIndex && (
+                  <span className="absolute -left-0.5 top-1 bottom-1 w-0.5 rounded-full bg-accent" />
+                )}
+                {draggable && dragIndex != null && dropIndex === groupIndex + 1 && groupIndex === groups.length - 1 && (
+                  <span className="absolute -right-0.5 top-1 bottom-1 w-0.5 rounded-full bg-accent" />
+                )}
                 {color && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color.dot}`} />}
                 <span>{tab.name}</span>
                 <span className={`font-mono text-[10px] tabular-nums ${active && !color ? 'text-accent/80' : 'text-muted'}`}>
@@ -160,6 +229,7 @@ export function WatchlistGroupBar({
           onCreate={onCreate}
           onRename={onRename}
           onDelete={onDelete}
+          onReorder={onReorder}
         />
       )}
     </>
@@ -207,6 +277,7 @@ function GroupManagerDialog({
   onCreate,
   onRename,
   onDelete,
+  onReorder,
 }: Omit<GroupBarProps, 'selected' | 'total' | 'onSelect' | 'onClearGroup'> & { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [newName, setNewName] = useState('')
@@ -278,6 +349,17 @@ function GroupManagerDialog({
     })
   }
 
+  // 上移/下移: 与相邻分组交换位置, 新顺序由后端持久化 (json 数组顺序即定义顺序)
+  const move = async (groupId: string, dir: -1 | 1) => {
+    if (!onReorder) return
+    const ids = groups.map(group => group.id)
+    const index = ids.indexOf(groupId)
+    const target = index + dir
+    if (index < 0 || target < 0 || target >= ids.length) return
+    ;[ids[index], ids[target]] = [ids[target], ids[index]]
+    await run(async () => { await onReorder(ids) })
+  }
+
   return (
     <Modal
       onClose={onClose}
@@ -347,7 +429,7 @@ function GroupManagerDialog({
       <div className="max-h-[360px] overflow-y-auto border-t border-border px-4">
         {groups.length === 0 ? (
           <div className="py-10 text-center text-xs text-muted">暂无自定义分组</div>
-        ) : groups.map(group => {
+        ) : groups.map((group, index) => {
           const color = resolveWatchlistGroupColor(group.color)
           return (
           <div key={group.id} className="flex min-h-12 items-center gap-2 border-b border-border/60 last:border-0">
@@ -395,6 +477,30 @@ function GroupManagerDialog({
               <>
                 <span className={`min-w-0 flex-1 truncate text-xs ${color.text}`}>{group.name}</span>
                 <span className="font-mono text-[10px] text-muted tabular-nums">{counts[group.id] ?? 0} 只</span>
+                {onReorder && groups.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={pending || index === 0}
+                      onClick={() => void move(group.id, -1)}
+                      className="p-1 text-muted hover:text-accent disabled:opacity-30 disabled:hover:text-muted"
+                      title="上移"
+                      aria-label={`上移分组 ${group.name}`}
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pending || index === groups.length - 1}
+                      onClick={() => void move(group.id, 1)}
+                      className="p-1 text-muted hover:text-accent disabled:opacity-30 disabled:hover:text-muted"
+                      title="下移"
+                      aria-label={`下移分组 ${group.name}`}
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => {

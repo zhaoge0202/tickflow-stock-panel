@@ -30,6 +30,8 @@ export interface StockDataTableProps {
   /** 排序：外部受控时传入（含当前 sort 与 toggle）；不传则表头不可排序 */
   sort?: SortState | null
   onSortToggle?: (colId: string) => void
+  /** 实例级放行: 让 UNSORTABLE_KEYS 中的 builtin 列在本表也可排序 (如自选页分时列) */
+  extraSortableKeys?: ReadonlySet<string>
   /** 追加在每行末尾的额外单元格（如自选页的操作列） */
   renderExtraCol?: (r: any) => ReactNode
   /** 追加的表头单元格（对应 renderExtraCol） */
@@ -54,6 +56,7 @@ export function StockDataTable({
   minWidth,
   sort,
   onSortToggle,
+  extraSortableKeys,
   renderExtraCol,
   extraHeader,
   renderHeaderContent,
@@ -85,7 +88,7 @@ export function StockDataTable({
   const isColSortable = (col: ColumnConfig): boolean => {
     // 排序能力由调用方是否提供 onSortToggle 决定；sort 是否为 null 只影响当前指示器
     if (!onSortToggle) return false
-    if (col.source.type === 'builtin' && UNSORTABLE_KEYS.has(col.source.key)) return false
+    if (col.source.type === 'builtin' && UNSORTABLE_KEYS.has(col.source.key) && !extraSortableKeys?.has(col.source.key)) return false
     return true
   }
 

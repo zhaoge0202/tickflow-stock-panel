@@ -71,6 +71,44 @@ def test_group_validation_and_assignment_errors(monkeypatch, tmp_path):
     assert rows[0]["group_id"] is None
 
 
+def test_reorder_groups(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, first = watchlist.create_group("一")
+    _, second = watchlist.create_group("二")
+    _, third = watchlist.create_group("三")
+
+    reordered = watchlist.reorder_groups([third["id"], first["id"], second["id"]])
+    assert [group["name"] for group in reordered] == ["三", "一", "二"]
+    assert [group["name"] for group in watchlist.list_groups()] == ["三", "一", "二"]
+
+    # ids 与现有分组不一致 (缺失 / 多余 / 重复) 均拒绝
+    with pytest.raises(ValueError, match="不一致"):
+        watchlist.reorder_groups([first["id"], second["id"]])
+    with pytest.raises(ValueError, match="不一致"):
+        watchlist.reorder_groups([first["id"], second["id"], third["id"], "missing"])
+    with pytest.raises(ValueError, match="不一致"):
+        watchlist.reorder_groups([first["id"], first["id"], second["id"], third["id"]])
+    # 失败请求不改变现有顺序
+    assert [group["name"] for group in watchlist.list_groups()] == ["三", "一", "二"]
+
+
+def test_reorder_groups_api(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, first = watchlist.create_group("一")
+    _, second = watchlist.create_group("二")
+
+    result = watchlist_api.reorder_groups(
+        watchlist_api.GroupReorderRequest(ordered_ids=[second["id"], first["id"]])
+    )
+    assert [group["name"] for group in result["groups"]] == ["二", "一"]
+
+    with pytest.raises(HTTPException) as exc_info:
+        watchlist_api.reorder_groups(
+            watchlist_api.GroupReorderRequest(ordered_ids=["missing"])
+        )
+    assert exc_info.value.status_code == 400
+
+
 def test_group_api_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     request = _request()

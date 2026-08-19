@@ -50,6 +50,10 @@ class GroupNameRequest(BaseModel):
     color: str | None = None
 
 
+class GroupReorderRequest(BaseModel):
+    ordered_ids: list[str]
+
+
 class GroupAssignRequest(BaseModel):
     group_id: str | None = None
 
@@ -103,6 +107,16 @@ def create_group(req: GroupNameRequest):
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"groups": groups, "group": group}
+
+
+@router.put("/groups/reorder")
+def reorder_groups(req: GroupReorderRequest):
+    """重排分组前后顺序 (json 数组顺序即定义顺序, 侧边栏/标签栏/分组视图共用)。"""
+    try:
+        groups = watchlist.reorder_groups(req.ordered_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"groups": groups}
 
 
 @router.put("/groups/{group_id}")

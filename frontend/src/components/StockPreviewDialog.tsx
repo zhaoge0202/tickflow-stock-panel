@@ -17,6 +17,7 @@ import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
+import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
 interface Props {
   symbol: string | null
@@ -421,6 +422,14 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 />
                 </>
               )}
+            </div>
+
+            {/* 扩展插槽: 对话框底部二开区 (无注册时不渲染) */}
+            <div className="shrink-0">
+              <ExtensionSlot
+                name="stock-preview.footer"
+                context={{ symbol, name: name ?? null, view }}
+              />
             </div>
 
             {/* 加监控编辑器弹层 */}

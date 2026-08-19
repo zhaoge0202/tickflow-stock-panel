@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, ChartNoAxesCombined, Check, Layers3, Plus, RadioTower, Save, Search, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
+import { Activity, Building2, ChartNoAxesCombined, Check, Layers3, ListPlus, Plus, RadioTower, Save, Search, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type SectorKind, type SectorMonitorTarget, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
 import { boardTag } from '@/components/stock-table/primitives'
+import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { MONITOR_INTRADAY_SIGNAL_OPTIONS, SIGNAL_OPTIONS, cnSignal } from '@/lib/signals'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -109,6 +110,29 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   })
   const [error, setError] = useState('')
   const [symbolQuery, setSymbolQuery] = useState('')
+  // 「自选导入」下拉: 从自选/自选分组批量并入标的 (与自选页共用查询缓存)
+  const [watchMenuOpen, setWatchMenuOpen] = useState(false)
+  const watchMenuRef = useRef<HTMLDivElement>(null)
+  const watchlistQ = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: api.watchlistList,
+    enabled: watchMenuOpen,
+  })
+  const watchGroupsQ = useQuery({
+    queryKey: QK.watchlistGroups,
+    queryFn: api.watchlistGroups,
+    enabled: watchMenuOpen,
+  })
+  useEffect(() => {
+    if (!watchMenuOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (watchMenuRef.current && !watchMenuRef.current.contains(e.target as Node)) {
+        setWatchMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [watchMenuOpen])
   const [sectorQuery, setSectorQuery] = useState('')
   const [industryLevel, setIndustryLevel] = useState<1 | 2 | 3>(() => {
     const level = rule?.sector_targets?.[0]?.level
@@ -198,6 +222,39 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     }
     setSymbolQuery('')
   }
+
+  // 并入一组标的 (去重); 选择后关闭自选导入下拉
+  const importSymbols = (syms: string[]) => {
+    setDraft(d => {
+      const merged = [...d.symbols]
+      for (const s of syms) {
+        if (!merged.includes(s)) merged.push(s)
+      }
+      return { ...d, symbols: merged }
+    })
+    setWatchMenuOpen(false)
+  }
+  // 自选导入选项: 全部自选 + 各分组 (空分组隐藏) + 未分组
+  const watchImportOptions = (() => {
+    const entries = watchlistQ.data?.symbols ?? []
+    if (entries.length === 0) return []
+    const options = [{
+      key: 'all',
+      name: '全部自选',
+      dot: 'bg-muted/60',
+      symbols: entries.map(e => e.symbol),
+    }]
+    for (const group of watchGroupsQ.data?.groups ?? []) {
+      const syms = entries.filter(e => e.group_id === group.id).map(e => e.symbol)
+      if (syms.length === 0) continue
+      options.push({ key: group.id, name: group.name, dot: resolveWatchlistGroupColor(group.color).dot, symbols: syms })
+    }
+    const ungrouped = entries.filter(e => !e.group_id).map(e => e.symbol)
+    if (ungrouped.length > 0) {
+      options.push({ key: 'ungrouped', name: '未分组', dot: 'bg-muted/60', symbols: ungrouped })
+    }
+    return options
+  })()
 
   const selectSectorKind = (kind: SectorKind) => {
     setDraft(d => ({ ...d, sector_kind: kind, sector_targets: [] }))
@@ -684,6 +741,41 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   </button>
                 </span>
               ))}
+              {/* 从自选/自选分组批量导入标的 */}
+              <div className="relative" ref={watchMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setWatchMenuOpen(v => !v)}
+                  title="从自选 / 自选分组导入标的 (导入当前成员, 后续增删自选不影响本规则)"
+                  className={`inline-flex h-7 items-center gap-1 rounded border px-2 text-[11px] transition-colors cursor-pointer ${
+                    watchMenuOpen
+                      ? 'border-accent/40 bg-accent/10 text-accent'
+                      : 'border-border bg-base text-secondary hover:border-accent/30 hover:text-foreground'
+                  }`}
+                >
+                  <ListPlus className="h-3 w-3" />自选导入
+                </button>
+                {watchMenuOpen && (
+                  <div className="absolute z-10 mt-1 max-h-56 w-44 overflow-y-auto rounded border border-border bg-surface py-1 shadow-lg">
+                    {watchlistQ.isLoading ? (
+                      <div className="px-2.5 py-2 text-[11px] text-muted">正在加载自选...</div>
+                    ) : watchImportOptions.length === 0 ? (
+                      <div className="px-2.5 py-2 text-[11px] text-muted">自选列表为空</div>
+                    ) : watchImportOptions.map(option => (
+                      <button
+                        key={option.key}
+                        type="button"
+                        onClick={() => importSymbols(option.symbols)}
+                        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-secondary transition-colors hover:bg-elevated hover:text-foreground cursor-pointer"
+                      >
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${option.dot}`} />
+                        <span className="min-w-0 flex-1 truncate">{option.name}</span>
+                        <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted">{option.symbols.length}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="relative">
                 <input
                   value={symbolQuery}

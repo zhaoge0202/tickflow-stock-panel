@@ -3,12 +3,12 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
-import { computeGroupPcts } from '@/lib/watchlistGroupStats'
+import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -24,6 +24,12 @@ import {
   WatchlistGroupPicker,
   type WatchlistGroupFilter,
 } from '@/components/WatchlistGroups'
+import { WatchlistGroupCards } from '@/components/WatchlistGroupCards'
+import { WatchlistGroupStatsBar } from '@/components/WatchlistGroupStatsBar'
+import { ExtensionSlot } from '@/extensions/ExtensionSlot'
+
+// 分时列开放排序 (StockDataTable 实例级白名单; 表头眼睛/刷新按钮已 stopPropagation)
+const INTRADAY_SORTABLE_KEYS = new Set(['intraday'])
 import { getOcrInstallHint } from '@/lib/ocrInstallHint'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
@@ -32,7 +38,7 @@ import { useTableSort } from '@/components/stock-table/useTableSort'
 import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
-import { getSignals, signalCls, getSortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
+import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import {
@@ -534,7 +540,7 @@ const StockCard = React.memo(function StockCard({
           </span>
           {pct != null && (
             <span className={`shrink-0 inline-flex items-center px-1.5 py-[2px] rounded text-[11px] tabular-nums ${pctBg}`}>
-              {isUp ? '+' : ''}{pct.toFixed(2)}%
+              {fmtPct(pct)}
             </span>
           )}
         </div>
@@ -558,7 +564,7 @@ const StockCard = React.memo(function StockCard({
 
             return (
               <span key={col.id} title={col.label}>
-                <span className="text-secondary">{fieldName}</span>
+                <span className="text-secondary">{col.label}</span>
                 <span className="font-mono ml-0.5">
                   {renderExtValue(
                     val,
@@ -608,6 +614,10 @@ export function Watchlist() {
   const [viewMode, setViewMode] = useState<'table' | 'card'>(() => {
     return (storage.watchlistView.get('table') as 'table' | 'card')
   })
+  // 分组卡片总览: 临时整页模式, 不持久化; 关闭(含刷新)后回到原视图设置
+  const [groupCardsOpen, setGroupCardsOpen] = useState(false)
+  // 分组统计条: 顶部图形化分组涨跌概览, 会话内开关, 不影响个股视图设置
+  const [groupStatsOpen, setGroupStatsOpen] = useState(false)
   const [dailyKChartVisible, setDailyKChartVisible] = useState(() => {
     return storage.watchlistCandle.get(true)
   })
@@ -696,11 +706,19 @@ export function Watchlist() {
   const extColumnsParam = useMemo(() => buildExtColumnsParam(columns), [columns])
 
   const toggleView = useCallback(() => {
+    setGroupCardsOpen(false)
     setViewMode(v => {
       const next = v === 'table' ? 'card' : 'table'
       storage.watchlistView.set(next)
       return next
     })
+  }, [])
+  // 分组卡片: 整页临时展示, 开关不触碰个股视图设置
+  const toggleGroupView = useCallback(() => {
+    setGroupCardsOpen(open => !open)
+  }, [])
+  const toggleGroupStats = useCallback(() => {
+    setGroupStatsOpen(open => !open)
   }, [])
   const toggleDailyKChart = useCallback(() => {
     setDailyKChartVisible(v => {
@@ -780,11 +798,11 @@ export function Watchlist() {
   const quoteStatus = useQuoteStatus()
   const realtimeRunning = quoteStatus.data?.running ?? false
 
-  // 批量日k数据 (天数由列配置决定)
+  // 批量日k数据 (天数由列配置决定; 分组卡片视图不展示蜡烛, 挂起请求)
   const klineBatch = useQuery({
     queryKey: QK.watchlistKlineBatch(`${symbolsKey}|${candleDays}`),
     queryFn: () => api.klineDailyBatch(symbols, candleDays),
-    enabled: dailyKVisible && symbols.length > 0,
+    enabled: dailyKVisible && symbols.length > 0 && !groupCardsOpen,
     staleTime: 5 * 60_000,  // 5 分钟内不重请求
   })
 
@@ -824,7 +842,7 @@ export function Watchlist() {
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(minuteSymbolsKey),
     queryFn: () => api.klineMinuteBatch(minuteSymbols),
-    enabled: intradayVisible && minuteSymbols.length > 0,
+    enabled: intradayVisible && minuteSymbols.length > 0 && !groupCardsOpen,
     staleTime: 10_000,
     refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
@@ -895,6 +913,11 @@ export function Watchlist() {
     onSuccess: data => qc.setQueryData(QK.watchlistGroups, data),
   })
 
+  const reorderGroup = useMutation({
+    mutationFn: (orderedIds: string[]) => api.watchlistGroupReorder(orderedIds),
+    onSuccess: data => qc.setQueryData(QK.watchlistGroups, data),
+  })
+
   const deleteGroup = useMutation({
     mutationFn: (groupId: string) => api.watchlistGroupDelete(groupId),
     onSuccess: (data, groupId) => {
@@ -931,6 +954,12 @@ export function Watchlist() {
   const handleGroupChange = useCallback((symbol: string, groupId: string | null) => {
     assignGroup.mutate({ symbol, groupId })
   }, [assignGroup])
+  // 分组卡片总览下点击分组 tab / 卡片头 = 钻取该分组: 关闭总览并选中分组,
+  // 个股视图设置(table/card)保持用户原选择
+  const handleGroupSelect = useCallback((group: WatchlistGroupFilter) => {
+    setSelectedGroup(group)
+    setGroupCardsOpen(false)
+  }, [])
 
   const listEntries = list.data?.symbols ?? []
   const allSymbols = listEntries.map(s => s.symbol)
@@ -947,6 +976,15 @@ export function Watchlist() {
     ),
     [listEntries, rows],
   )
+  // 分组「指标 + 排序 + 卡片显示项」配置: 分组统计条与分组卡片共享同一份持久化设置
+  const [groupStatsConfig, setGroupStatsConfig] = useState(loadGroupStatsConfig)
+  const updateGroupStatsConfig = useCallback((patch: GroupStatsConfigPatch) => {
+    setGroupStatsConfig(prev => {
+      const next = { ...prev, ...patch }
+      storage.watchlistGroupStats.set(next)
+      return next
+    })
+  }, [])
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = { ungrouped: 0 }
     for (const entry of listEntries) {
@@ -1078,8 +1116,15 @@ export function Watchlist() {
   const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
   const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter
 
-  // 排序（复用共享三态排序 hook）
-  const { sort, toggle: handleSortToggle, sortRows } = useTableSort()
+  // 排序（复用共享三态排序 hook）。分时列按「最新分钟收盘 vs 昨收」排序（分时图最后一点同口径），
+  // 其余列走共享取值；眼睛关闭时不拉分钟数据，取值为 null → 保持原序。
+  const getWatchlistSortValue = useCallback((r: any, col: ColumnConfig) => {
+    if (col.source.type === 'builtin' && col.source.key === 'intraday') {
+      return getIntradaySortValue(r, minuteData[r.symbol])
+    }
+    return getSortValue(r, col)
+  }, [minuteData])
+  const { sort, toggle: handleSortToggle, sortRows } = useTableSort(getWatchlistSortValue)
 
   const sortedRows = useMemo(
     () => sortRows(filteredRows, columns),
@@ -1088,7 +1133,7 @@ export function Watchlist() {
 
   const cardColumns = useCardColumnCount()
   const cardGridRef = useRef<HTMLDivElement>(null)
-  const virtualizeCards = viewMode === 'card' && sortedRows.length > VIRTUAL_LIST_THRESHOLD
+  const virtualizeCards = viewMode === 'card' && !groupCardsOpen && sortedRows.length > VIRTUAL_LIST_THRESHOLD
   const cardRowCount = Math.ceil(sortedRows.length / cardColumns)
   const { getScrollElement: getCardScrollElement, scrollMargin: cardScrollMargin } = useParentScroll(
     cardGridRef,
@@ -1234,6 +1279,34 @@ export function Watchlist() {
             >
               {viewMode === 'table' ? <LayoutGrid className="h-4 w-4" /> : <List className="h-4 w-4" />}
             </button>
+            {/* 分组卡片视图 */}
+            <button
+              onClick={toggleGroupView}
+              aria-pressed={groupCardsOpen}
+              className={`inline-flex items-center justify-center h-8 w-8 rounded-btn transition-colors duration-150 ease-smooth ${
+                groupCardsOpen
+                  ? 'bg-accent/15 text-accent hover:bg-accent/25'
+                  : 'bg-elevated text-secondary hover:bg-elevated/80 hover:text-foreground'
+              }`}
+              title={groupCardsOpen ? '退出分组卡片' : '分组卡片视图'}
+              aria-label={groupCardsOpen ? '退出分组卡片' : '分组卡片视图'}
+            >
+              <Rows3 className="h-4 w-4" />
+            </button>
+            {/* 分组统计条 */}
+            <button
+              onClick={toggleGroupStats}
+              aria-pressed={groupStatsOpen}
+              className={`inline-flex items-center justify-center h-8 w-8 rounded-btn transition-colors duration-150 ease-smooth ${
+                groupStatsOpen
+                  ? 'bg-accent/15 text-accent hover:bg-accent/25'
+                  : 'bg-elevated text-secondary hover:bg-elevated/80 hover:text-foreground'
+              }`}
+              title={groupStatsOpen ? '收起分组统计' : '分组统计'}
+              aria-label={groupStatsOpen ? '收起分组统计' : '分组统计'}
+            >
+              <BarChart3 className="h-4 w-4" />
+            </button>
             <div className="w-px h-5 bg-border" />
             {/* 自定义列 / 刷新 */}
             <button
@@ -1263,9 +1336,31 @@ export function Watchlist() {
                 </button>
               </>
             )}
+            {/* 扩展插槽: 自选页工具栏二开区 (无注册时不渲染) */}
+            <ExtensionSlot
+              name="watchlist.toolbar"
+              context={{
+                symbols: sortedRows.map((row: any) => row.symbol),
+                viewMode,
+                selectedGroup,
+                refresh: () => enriched.refetch(),
+              }}
+            />
           </div>
         }
       />
+
+      {groupStatsOpen && (
+        <WatchlistGroupStatsBar
+          groups={groups}
+          counts={groupCounts}
+          pcts={groupPcts}
+          selected={selectedGroup}
+          onSelect={handleGroupSelect}
+          config={groupStatsConfig}
+          onConfigChange={updateGroupStatsConfig}
+        />
+      )}
 
       <WatchlistGroupBar
         groups={groups}
@@ -1273,11 +1368,12 @@ export function Watchlist() {
         selected={selectedGroup}
         total={allSymbols.length}
         pcts={groupPcts}
-        onSelect={setSelectedGroup}
+        onSelect={handleGroupSelect}
         onCreate={(name, color) => createGroup.mutateAsync({ name, color }).then(() => undefined)}
         onRename={(groupId, name, color) => renameGroup.mutateAsync({ groupId, name, color }).then(() => undefined)}
         onDelete={groupId => deleteGroup.mutateAsync(groupId).then(() => undefined)}
         onClearGroup={groupId => clearGroup.mutateAsync(groupId).then(() => undefined)}
+        onReorder={orderedIds => reorderGroup.mutateAsync(orderedIds).then(() => undefined)}
       />
 
       {/* 筛选栏 */}
@@ -1374,6 +1470,17 @@ export function Watchlist() {
               title="该分组暂无标的"
               hint="使用右上角搜索添加，或通过股票旁的分组按钮移入当前分组。"
             />
+          ) : groupCardsOpen ? (
+            <WatchlistGroupCards
+              groups={groups}
+              rows={rows}
+              groupBySymbol={groupBySymbol}
+              pcts={groupPcts}
+              onPreview={handleCardPreview}
+              onOpenGroup={handleGroupSelect}
+              config={groupStatsConfig}
+              onConfigChange={updateGroupStatsConfig}
+            />
           ) : viewMode === 'table' ? (
             <StockDataTable
               columns={visibleColumns}
@@ -1381,6 +1488,7 @@ export function Watchlist() {
               headerSticky
               sort={sort}
               onSortToggle={handleSortToggle}
+              extraSortableKeys={INTRADAY_SORTABLE_KEYS}
               rowKey={(r: any) => r.symbol}
               rowClassName={() => 'border-t border-border hover:bg-elevated/50 transition-colors duration-150 ease-smooth'}
               // 日k列表头：标签 + 显示/隐藏眼睛按钮

@@ -1950,6 +1950,11 @@ export const api = {
       `/api/watchlist/groups/${encodeURIComponent(groupId)}`,
       { method: 'PUT', body: JSON.stringify({ name, color }) },
     ),
+  watchlistGroupReorder: (orderedIds: string[]) =>
+    request<{ groups: WatchlistGroup[] }>('/api/watchlist/groups/reorder', {
+      method: 'PUT',
+      body: JSON.stringify({ ordered_ids: orderedIds }),
+    }),
   watchlistGroupDelete: (groupId: string) =>
     request<{ groups: WatchlistGroup[]; symbols: WatchlistEntry[] }>(
       `/api/watchlist/groups/${encodeURIComponent(groupId)}`,

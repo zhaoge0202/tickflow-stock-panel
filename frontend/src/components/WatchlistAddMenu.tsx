@@ -104,7 +104,11 @@ export function WatchlistGroupMenu({
       if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return
       setOpen(false)
     }
-    const closeOnViewportChange = () => setOpen(false)
+    // 菜单内部分组列表可滚动 (max-h-60), 其 scroll 事件不应触发关闭; 仅页面/祖先容器滚动时关闭
+    const closeOnViewportChange = (event: Event) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      setOpen(false)
+    }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
