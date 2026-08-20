@@ -1525,8 +1525,7 @@ export function Watchlist() {
                 if (col.source.type === 'builtin' && col.source.key === 'candle') {
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
-                      {/* 收起态只留眼睛按钮, 避免标签在窄列内换行顶高表头 */}
-                      {dailyKChartVisible && <span className="shrink-0 whitespace-nowrap">{col.label}</span>}
+                      <span className="shrink-0 whitespace-nowrap">{col.label}</span>
                       <button
                         type="button"
                         onClick={(event) => { event.stopPropagation(); toggleDailyKChart() }}
@@ -1547,7 +1546,7 @@ export function Watchlist() {
                   const intradayAutoRefresh = intradayRefreshEnabled && realtimeRunning
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
-                      {intradayChartVisible && <span className="shrink-0 whitespace-nowrap">{col.label}</span>}
+                      <span className="shrink-0 whitespace-nowrap">{col.label}</span>
                       <button
                         type="button"
                         onClick={(event) => { event.stopPropagation(); toggleIntradayChart() }}
