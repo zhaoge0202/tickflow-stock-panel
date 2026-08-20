@@ -80,12 +80,14 @@ def test_get_minute_datetime_is_beijing_wall_clock(monkeypatch):
     assert df["symbol"][0] == "600519.SH"
 
 
-def test_get_realtime_passthrough(monkeypatch):
+def test_get_realtime_normalizes_change_pct_to_decimal(monkeypatch):
     rows = [{"symbol": "600519.SH", "name": "贵州茅台", "last_price": 1200.0,
-             "prev_close": 1194.0, "open": 1186.0, "high": 1203.0, "low": 1180.0, "volume": 16325}]
+             "prev_close": 1194.0, "open": 1186.0, "high": 1203.0, "low": 1180.0,
+             "volume": 16325, "change_pct": -1.15}]
     _patch_run_job(monkeypatch, {"realtime": {"ok": True, "op": "realtime", "rows": rows}})
     out = StockSDKProvider().get_realtime()
-    assert out == rows
+    assert abs(out[0]["change_pct"] - (-0.0115)) < 1e-12
+    assert rows[0]["change_pct"] == -1.15
     required = {"symbol", "last_price", "prev_close", "open", "high", "low", "volume"}
     assert required <= set(out[0].keys())
 
