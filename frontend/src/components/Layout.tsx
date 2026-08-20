@@ -28,6 +28,7 @@ import {
   Pickaxe,
   FileText,
   Settings,
+  ChartLine,
   Database,
   Loader2,
   LayoutDashboard,
@@ -228,7 +229,7 @@ function TierBadge({ label, hasKey, providerName, isTickflow }: { label: string;
         className="pointer-events-none absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-accent/50 transition-colors group-hover:bg-accent"
         style={base === 'expert' ? { background: 'linear-gradient(180deg, #60a5fa, #c084fc, #fbbf24)' } : undefined}
       />
-      <Database className="h-3.5 w-3.5 shrink-0 text-muted group-hover:text-accent transition-colors" />
+      <ChartLine className="h-3.5 w-3.5 shrink-0 text-muted group-hover:text-accent transition-colors" />
       <span className="min-w-0 truncate text-[11px] font-medium text-secondary group-hover:text-foreground transition-colors">
         {providerName || '数据源'}
       </span>
