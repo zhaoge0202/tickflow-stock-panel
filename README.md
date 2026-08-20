@@ -267,3 +267,5 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 ## 社区
 
 本开源项目已链接并认可 [LINUX DO 社区](https://linux.do)。
+
+本开源项目基于智谱GLM大模型能力构建
