@@ -751,70 +751,13 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       {/* 作用范围 */}
       {draft.type !== 'sector' && <div className="space-y-2">
         <span className="text-[11px] text-muted">作用范围</span>
-        <div className="flex items-center gap-2">
-          <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-9 w-32 rounded-btn border border-border bg-base px-3 text-xs text-foreground">
+        <div className="flex items-center gap-1.5">
+          <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-7 w-32 shrink-0 rounded border border-border bg-base px-2 text-[11px] text-foreground">
             {visibleScopes.map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
           </select>
           {draft.scope === 'symbols' && (
-            <div className="flex-1 min-w-0 space-y-1.5">
-              {/* 收起态: 只显示「已加入 N 只」汇总, 点击展开管理 */}
-              {draft.symbols.length > 0 && !symbolsExpanded && (
-                <button
-                  type="button"
-                  onClick={() => setSymbolsExpanded(true)}
-                  title="展开管理标的列表"
-                  className="inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/20 cursor-pointer"
-                >
-                  已加入 <span className="font-mono font-semibold tabular-nums">{draft.symbols.length}</span> 只
-                  <ChevronDown className="h-3 w-3" />
-                </button>
-              )}
-              {/* 展开态: 名称+板标+代码 tag 流, 可逐个删除/清空/收起 */}
-              {draft.symbols.length > 0 && symbolsExpanded && (
-                <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-muted">已加入 <span className="font-mono tabular-nums text-secondary">{draft.symbols.length}</span> 只</span>
-                    <span className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDraft(d => ({ ...d, symbols: [] }))}
-                        className="inline-flex items-center gap-0.5 text-[10px] text-muted transition-colors hover:text-warning cursor-pointer"
-                        title="移除全部标的"
-                      >
-                        <Eraser className="h-3 w-3" />清空
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSymbolsExpanded(false)}
-                        className="inline-flex items-center gap-0.5 text-[10px] text-muted transition-colors hover:text-foreground cursor-pointer"
-                      >
-                        收起<ChevronUp className="h-3 w-3" />
-                      </button>
-                    </span>
-                  </div>
-                  <div className="flex max-h-40 flex-wrap gap-1 overflow-y-auto rounded border border-border/60 bg-base/40 p-1.5">
-                    {draft.symbols.map(sym => {
-                      const b = boardTag(sym)
-                      const name = nameBySymbol[sym]
-                      return (
-                        <span key={sym} className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-secondary">
-                          <span className="max-w-24 truncate text-foreground/90" title={name ? `${name} ${sym}` : sym}>{name ?? sym}</span>
-                          {b && <span className={`inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span>}
-                          <span className="font-mono text-[9px] tabular-nums text-muted">{sym}</span>
-                          <button
-                            onClick={() => setDraft(d => ({ ...d, symbols: d.symbols.filter(s => s !== sym) }))}
-                            className="text-muted transition-colors hover:text-danger cursor-pointer"
-                            title={name ? `移除 ${name}` : `移除 ${sym}`}
-                          >
-                            <X className="h-2.5 w-2.5" />
-                          </button>
-                        </span>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-              {/* 导入与搜索: 同一行等高(h-7), 搜索框占满剩余宽度 */}
+            <div className="min-w-0 flex-1 space-y-1.5">
+              {/* 导入与搜索: 与范围下拉同一行等高(h-7), 搜索框占满剩余宽度 */}
               <div className="flex flex-wrap items-center gap-1.5">
                 <div className="relative" ref={watchMenuRef}>
                   <button
@@ -871,6 +814,62 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   )}
                 </div>
               </div>
+              {/* 「已加入 N 只」单独成行(收起态, 与控件列左对齐) / 标签管理区(展开态) */}
+              {draft.symbols.length > 0 && !symbolsExpanded && (
+                <button
+                  type="button"
+                  onClick={() => setSymbolsExpanded(true)}
+                  title="展开管理标的列表"
+                  className="inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/20 cursor-pointer"
+                >
+                  已加入 <span className="font-mono font-semibold tabular-nums">{draft.symbols.length}</span> 只
+                  <ChevronDown className="h-3 w-3" />
+                </button>
+              )}
+              {draft.symbols.length > 0 && symbolsExpanded && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted">已加入 <span className="font-mono tabular-nums text-secondary">{draft.symbols.length}</span> 只</span>
+                    <span className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDraft(d => ({ ...d, symbols: [] }))}
+                        className="inline-flex items-center gap-0.5 text-[10px] text-muted transition-colors hover:text-warning cursor-pointer"
+                        title="移除全部标的"
+                      >
+                        <Eraser className="h-3 w-3" />清空
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSymbolsExpanded(false)}
+                        className="inline-flex items-center gap-0.5 text-[10px] text-muted transition-colors hover:text-foreground cursor-pointer"
+                      >
+                        收起<ChevronUp className="h-3 w-3" />
+                      </button>
+                    </span>
+                  </div>
+                  <div className="flex max-h-40 flex-wrap gap-1 overflow-y-auto rounded border border-border/60 bg-base/40 p-1.5">
+                    {draft.symbols.map(sym => {
+                      const b = boardTag(sym)
+                      const name = nameBySymbol[sym]
+                      return (
+                        <span key={sym} className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-secondary">
+                          <span className="max-w-24 truncate text-foreground/90" title={name ? `${name} ${sym}` : sym}>{name ?? sym}</span>
+                          {b && <span className={`inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span>}
+                          <span className="font-mono text-[9px] tabular-nums text-muted">{sym}</span>
+                          <button
+                            onClick={() => setDraft(d => ({ ...d, symbols: d.symbols.filter(s => s !== sym) }))}
+                            className="text-muted transition-colors hover:text-danger cursor-pointer"
+                            title={name ? `移除 ${name}` : `移除 ${sym}`}
+                          >
+                            <X className="h-2.5 w-2.5" />
+                          </button>
+                        </span>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           )}
           {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有标的生效</span>}
