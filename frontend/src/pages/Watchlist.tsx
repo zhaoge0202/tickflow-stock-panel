@@ -224,16 +224,23 @@ function renderExtCell(
 
 function StockSearchBox({
   onPreview,
-  existingSymbols,
+  existingBySymbol,
+  groups,
   onAdd,
+  onToggleMember,
   preferredGroupId,
   addPending,
+  memberPending,
 }: {
   onPreview: (symbol: string, name: string) => void
-  existingSymbols: string[]
+  /** symbol -> 该标的当前所属分组 id 列表; 不在 Map 中 = 未加自选 */
+  existingBySymbol: Map<string, string[]>
+  groups: WatchlistGroup[]
   onAdd: (symbol: string, groupId: string | null) => void
+  onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   preferredGroupId: string | null
   addPending: boolean
+  memberPending: boolean
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -310,7 +317,8 @@ function StockSearchBox({
             className="absolute right-0 top-full mt-1 z-50 w-64 max-h-[320px] overflow-y-auto rounded-card border border-border bg-base shadow-xl"
           >
             {results.map((r, i) => {
-              const inWatchlist = existingSymbols.includes(r.symbol)
+              const entryGids = existingBySymbol.get(r.symbol)
+              const inWatchlist = entryGids !== undefined
               return (
                 <div
                   key={r.symbol}
@@ -339,15 +347,24 @@ function StockSearchBox({
                     })()}
                   </button>
                   {inWatchlist ? (
-                    <button
-                      type="button"
-                      disabled
-                      className="shrink-0 rounded p-1 text-accent bg-accent/10 cursor-default"
-                      title="已加自选"
-                      aria-label="已加自选"
-                    >
-                      <Check className="h-3.5 w-3.5" />
-                    </button>
+                    // 已加自选: 对勾标识 + 分组勾选面板, 可继续加入/移出其他分组
+                    // (走 members 端点, 不重排列表、不覆盖备注)
+                    <span className="flex shrink-0 items-center gap-1">
+                      <span
+                        className="inline-flex p-1 text-accent/70"
+                        title="已加自选"
+                        aria-label="已加自选"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                      </span>
+                      <WatchlistGroupPicker
+                        groups={groups}
+                        groupIds={entryGids}
+                        symbol={r.symbol}
+                        disabled={memberPending}
+                        onToggleMember={onToggleMember}
+                      />
+                    </span>
                   ) : (
                     <WatchlistAddMenu
                       onSelect={groupId => onAdd(r.symbol, groupId)}
@@ -1259,10 +1276,13 @@ export function Watchlist() {
             )}
             <StockSearchBox
               onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
-              existingSymbols={allSymbols as string[]}
+              existingBySymbol={groupBySymbol}
+              groups={groups}
               onAdd={(symbol, groupId) => addMutation.mutate({ symbol, groupId })}
+              onToggleMember={handleToggleMember}
               preferredGroupId={activeGroupId}
               addPending={addMutation.isPending}
+              memberPending={addGroupMember.isPending || removeGroupMember.isPending}
             />
             <button
               onClick={() => {

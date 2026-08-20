@@ -623,6 +623,7 @@ export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onTog
           ref={popRef}
           role="menu"
           aria-label={`${symbol} 的分组`}
+          data-watchlist-group-menu
           style={{
             position: 'fixed',
             top: pos.flipUp ? undefined : pos.top,
