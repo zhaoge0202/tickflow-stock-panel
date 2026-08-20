@@ -26,6 +26,8 @@ export const QK = {
   watchlistGroups:      ['watchlist-groups'] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
+  // 异动边缘总览 (开启监控时才查询, 参数为 min_closeness/limit)
+  abnormalOverview:     (minCloseness: number, limit: number) => ['abnormal-overview', minCloseness, limit] as const,
   // 不用 watchlist- 前缀: 日K历史盘中几乎不变, 若被 SSE quotes_updated 高频失效
   // (expert 1s) 会导致全自选日K每秒重拉, staleTime 形同虚设。
   // 刷新点: staleTime 过期 + Watchlist 增删自选/改蜡烛天数时的手动失效;

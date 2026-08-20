@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags } from 'lucide-react'
@@ -22,6 +22,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
+  abnormal: '异动监控',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -36,6 +37,7 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   price:    'bg-emerald-400/10 text-emerald-400 border-emerald-400/20',
   market:   'bg-purple-500/10 text-purple-400 border-purple-500/20',
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
+  abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
 }
 
 /**
@@ -114,9 +116,22 @@ export function Monitor() {
   const qc = useQueryClient()
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingRule, setEditingRule] = useState<MonitorRule | null>(null)
+  const [editorPreset, setEditorPreset] = useState<Partial<MonitorRule> | null>(null)
+
+  // 深链: /monitor?new=abnormal (异动监控页「告警规则」入口) → 直接弹出预置类型的编辑器
+  const [searchParams, setSearchParams] = useSearchParams()
+  useEffect(() => {
+    const kind = searchParams.get('new')
+    if (kind === 'abnormal') {
+      setEditingRule(null)
+      setEditorPreset({ type: 'abnormal', threshold_pct: 70, direction: 'both', abnormal_window: 'any', scope: 'all' })
+      setEditorOpen(true)
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   // 触发记录: 过滤 + 统计 (提升到主组件, 供 header 行使用)
-  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector'>('all')
+  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal'>('all')
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
@@ -177,7 +192,7 @@ export function Monitor() {
               <SectionHeader icon={BellRing} title="触发记录" />
               {/* 过滤标签 */}
               <div className="flex flex-wrap items-center gap-0.5">
-                {(['all', 'strategy', 'signal', 'price', 'market', 'sector'] as const).map(f => (
+                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setFilter(f)}
@@ -225,7 +240,7 @@ export function Monitor() {
               <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">{rulesCount}</span>
               <div className="ml-auto flex items-center gap-1">
                 <button
-                  onClick={() => { setEditingRule(null); setEditorOpen(true) }}
+                  onClick={() => { setEditingRule(null); setEditorPreset(null); setEditorOpen(true) }}
                   title="新建规则"
                   className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/60 bg-surface text-muted transition-all hover:border-accent/40 hover:text-accent hover:shadow-sm cursor-pointer"
                 >
@@ -254,7 +269,8 @@ export function Monitor() {
       <RuleEditorDialog
         open={editorOpen}
         rule={editingRule}
-        onClose={() => { setEditorOpen(false); setEditingRule(null) }}
+        preset={editorPreset}
+        onClose={() => { setEditorOpen(false); setEditingRule(null); setEditorPreset(null) }}
       />
 
       <ConfirmDialog
@@ -778,6 +794,18 @@ function RulesList({ rulesQuery, onEdit }: {
                     {r.direction === 'down' ? ' ≤ -' : ' ≥ '}{r.threshold_pct ?? 1}%
                   </span>
                 </div>
+              ) : r.type === 'abnormal' ? (
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
+                  <span className="rounded bg-orange-500/8 px-1.5 py-0.5 text-[9px] text-orange-500 dark:text-orange-400">
+                    接近度 ≥ {r.threshold_pct ?? 70}%
+                  </span>
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                    {r.abnormal_window && r.abnormal_window !== 'any' ? `${r.abnormal_window.toUpperCase()} 窗口` : '全部窗口'}
+                  </span>
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                    {r.direction === 'up' ? '涨势偏离' : r.direction === 'down' ? '跌势偏离' : '涨跌双向'}
+                  </span>
+                </div>
               ) : r.type === 'strategy' && r.strategy_id ? (
                 <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
                   {(r.score_min != null || r.score_max != null) && (
@@ -827,7 +855,12 @@ function RulesList({ rulesQuery, onEdit }: {
 }
 
 // ── 规则编辑对话框 ────────────────────────────────────
-function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: MonitorRule | null; onClose: () => void }) {
+function RuleEditorDialog({ open, rule, preset, onClose }: {
+  open: boolean
+  rule: MonitorRule | null
+  preset?: Partial<MonitorRule> | null
+  onClose: () => void
+}) {
   const backdrop = useDialogBackdrop(onClose)
   return (
     <AnimatePresence>
@@ -849,6 +882,7 @@ function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: Monito
           >
             <RuleEditor
               rule={rule}
+              preset={preset ?? undefined}
               onClose={onClose}
               onSaved={onClose}
             />

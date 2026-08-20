@@ -164,6 +164,10 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "momentum_20d":            "20日动量",
     "momentum_30d":            "30日动量",
     "momentum_60d":            "60日动量",
+    # ── 异动偏离 (运行时由 repository 附着, 不落盘) ────────
+    "deviate_3d":              "3日涨跌幅偏离值(vs对应指数, 小数)",
+    "deviate_10d":             "10日涨跌幅偏离值",
+    "deviate_30d":             "30日涨跌幅偏离值",
     # ── 波动率 ───────────────────────────────────────────
     "annual_vol_20d":          "20日年化波动率",
     # ── RSI ──────────────────────────────────────────────
@@ -210,6 +214,7 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "volume":   ["vol_ma5", "vol_ma10", "vol_ratio_5d"],
     "extremes": ["high_60d", "low_60d"],
     "momentum": ["momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d"],
+    "deviation": ["deviate_3d", "deviate_10d", "deviate_30d"],
     "volatility": ["annual_vol_20d"],
     "rsi":      ["rsi_6", "rsi_14", "rsi_24"],
     "signals":  [k for k in ENRICHED_COLUMNS if k.startswith("signal_")],
@@ -1027,6 +1032,140 @@ def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
     """写入 parquet 前裁剪到存储列 (14 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     return df.select(cols)
+
+
+# ================================================================
+# 异动偏离列 (deviate_3d/10d/30d)
+#
+# N 日涨跌幅偏离值 = 个股 N 日累计涨跌幅 - 对应指数同期涨跌幅,
+# 是交易所「异常波动 / 严重异常波动」规则的量化口径 (如主板 3日±20%,
+# 10日+100%, 30日+200%)。不属于 compute_indicators 的纯函数范围
+# (需要指数数据), 因此在 repository 读取路径上附着, 不随 parquet 落盘。
+# ================================================================
+
+DEVIATION_WINDOWS: tuple[int, ...] = (3, 10, 30)
+
+# 各交易所基准指数 (偏离值规则的「对应指数」近似): 优先分类指数, 缺失时回退
+_BENCHMARK_PREFERENCE: dict[str, list[str]] = {
+    "SH": ["000002.SH", "000001.SH"],   # 上证A指 → 上证指数
+    "SZ": ["399107.SZ", "399001.SZ"],   # 深证A指 → 深证成指
+    "BJ": ["899050.BJ", "000001.SH"],   # 北证50 → 上证指数
+}
+
+_benchmark_cache: dict[str, tuple[float, pl.DataFrame | None]] = {}
+_BENCHMARK_CACHE_TTL = 600.0
+
+
+def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
+    """读取指数日K, 计算各基准指数的滚动 N 日涨跌幅。
+
+    返回长表: date, bench_exchange, bench_mom3d, bench_mom10d, bench_mom30d。
+    无可用指数数据时返回 None (偏离列置 null, 不阻塞主流程)。
+    进程内按 data_dir 缓存 (TTL 10 分钟)。
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    key = str(Path(data_dir).resolve())
+    cached = _benchmark_cache.get(key)
+    if cached is not None and now - cached[0] < _BENCHMARK_CACHE_TTL:
+        return cached[1]
+
+    frame: pl.DataFrame | None = None
+    try:
+        index_glob = str(Path(data_dir) / "kline_index_daily" / "**" / "*.parquet")
+        wanted: list[str] = []
+        bench_of: dict[str, str] = {}
+        for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+            for sym in candidates:
+                if sym not in bench_of:
+                    wanted.append(sym)
+                    bench_of[sym] = exchange
+        lf = scan_daily_parquet(
+            index_glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float")
+        )
+        df_idx = (
+            lf.filter(pl.col("symbol").is_in(wanted))
+            .select(["symbol", "date", "close"])
+            .sort(["symbol", "date"])
+            .collect()
+        )
+        if not df_idx.is_empty():
+            available = set(df_idx["symbol"].to_list())
+            picked = [s for s in wanted if s in available]
+            # 每个交易所取优先级最高的可用基准; 全缺时回退到任一可用基准。
+            # 同一基准可服务多个交易所 (如北证50 缺失时北交所回退上证指数)。
+            pairs: list[tuple[str, str]] = []
+            for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+                hit = next((s for s in candidates if s in available), None)
+                if hit is None and picked:
+                    hit = picked[0]
+                if hit is not None:
+                    pairs.append((hit, exchange))
+            df_bench = df_idx.filter(pl.col("symbol").is_in([p[0] for p in pairs]))
+            if not df_bench.is_empty():
+                df_bench = df_bench.with_columns(
+                    pl.col("close").cast(pl.Float64, strict=False)
+                ).with_columns([
+                    (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"_bm{n}")
+                    for n in DEVIATION_WINDOWS
+                ]).rename({f"_bm{n}": f"bench_mom{n}d" for n in DEVIATION_WINDOWS})
+                exchange_map = pl.DataFrame({
+                    "symbol": [p[0] for p in pairs],
+                    "bench_exchange": [p[1] for p in pairs],
+                })
+                frame = (
+                    df_bench.join(exchange_map, on="symbol", how="inner")
+                    .select(["date", "bench_exchange", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+                    .unique(subset=["date", "bench_exchange"])
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("基准指数偏离数据加载失败: %s", exc)
+        frame = None
+
+    _benchmark_cache[key] = (now, frame)
+    return frame
+
+
+def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
+    """为已含 momentum_Nd 的 enriched 帧附着 deviate_Nd 偏离列。
+
+    缺失的动量列 (如 momentum_3d 不在指标全集里) 就地按 close 补算,
+    与 compute_indicators 在同一帧上的 shift 语义一致。
+    基准按 symbol 后缀分交易所匹配, join 不上的行 (新上市/基准缺失) 置 null。
+    """
+    if df.is_empty():
+        return df
+    bench = load_benchmark_momentum(data_dir)
+    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
+    if bench is None or bench.is_empty():
+        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols])
+    if "close" not in df.columns:
+        logger.warning("偏离列附着跳过: 缺少 close 列")
+        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols])
+    missing = [n for n in DEVIATION_WINDOWS if f"momentum_{n}d" not in df.columns]
+    if missing:
+        df = df.sort(["symbol", "date"]).with_columns([
+            (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"momentum_{n}d")
+            for n in missing
+        ])
+    bench_exchange = (
+        pl.col("symbol").str.slice(-2).str.to_uppercase().replace(
+            {ex: ex for ex in _BENCHMARK_PREFERENCE},
+            default=None,
+            return_dtype=pl.Utf8,
+        )
+    )
+    out = (
+        df.with_columns(bench_exchange.alias("_bench_ex"))
+        .join(bench, left_on=["_bench_ex", "date"], right_on=["bench_exchange", "date"], how="left")
+        .with_columns([
+            (pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
+            for n in DEVIATION_WINDOWS
+        ])
+        .drop(["_bench_ex", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+    )
+    return out
 
 
 def run_pipeline(data_dir: Path | None = None,

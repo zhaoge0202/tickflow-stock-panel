@@ -77,7 +77,7 @@ class RuleModel(BaseModel):
     id: str
     name: str
     enabled: bool = True
-    type: str          # strategy | signal | price | market | sector
+    type: str          # strategy | signal | price | market | sector | abnormal
     asset_type: str = "stock"   # stock | etf (etf: strategy 型走 ETF 历史加载器)
     scope: str = "symbols"   # symbols | all | sector
     symbols: list[str] = []
@@ -88,7 +88,7 @@ class RuleModel(BaseModel):
     threshold_pct: float = 1.0
     window_minutes: int = 5
     strategy_id: str | None = None
-    direction: str = "entry"  # entry | exit | both
+    direction: str = "entry"  # entry | exit | both | (sector/ladder/abnormal: up|down|both)
     notify_events: list[str] | None = None
     score_min: float | None = None
     score_max: float | None = None
@@ -100,6 +100,8 @@ class RuleModel(BaseModel):
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
     webhook_channels: list[str] = []  # 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
     message: str = ""
+    # abnormal 专属 (异动边缘监控): any | 3d | 10d | 30d
+    abnormal_window: str = "any"
     # ladder 专属 (连板梯队封单监控)
     metric: str = "sealed_vol"   # sealed_vol=封单量(手) | sealed_amount=封单额(元)
     threshold: float = 0         # 封单 <= 此值时报警 (原始单位: 量=手, 额=元)
@@ -154,6 +156,7 @@ def get_options(request: Request):
             {"key": "price", "label": "价格/涨跌"},
             {"key": "market", "label": "市场异动"},
             {"key": "strategy", "label": "策略监控"},
+            {"key": "abnormal", "label": "异动监控"},
             {"key": "sector", "label": "板块监控"},
         ],
         "scopes": [

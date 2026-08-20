@@ -735,11 +735,49 @@ export interface SectorMonitorTarget {
   member_count: number
 }
 
+export interface AbnormalWindowInfo {
+  /** 实时偏离值 (小数) */
+  value: number
+  /** 该窗口阈值 (小数) */
+  threshold: number
+  /** 接近度 |value|/threshold */
+  closeness: number
+}
+
+export type AbnormalStatus = 'triggered' | 'edge' | 'watch'
+
+export interface AbnormalRow {
+  symbol: string
+  name: string | null
+  board: string
+  st: boolean
+  close: number | null
+  rt_pct: number | null
+  windows: Record<string, AbnormalWindowInfo>
+  max_closeness: number
+  status: AbnormalStatus
+}
+
+export interface AbnormalOverview {
+  asof: number
+  cache_date: string | null
+  bench_rt_pct: number
+  includes_today: boolean
+  rules: Array<{
+    board: string
+    st: boolean
+    thresholds: Record<string, number>
+    note: string
+  }>
+  counts: { triggered: number; edge: number; watch: number }
+  rows: AbnormalRow[]
+}
+
 export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal'
   asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector'
   symbols: string[]
@@ -749,6 +787,8 @@ export interface MonitorRule {
   sector_trigger?: 'change_pct' | 'momentum'
   threshold_pct?: number
   window_minutes?: 1 | 3 | 5 | 10 | 15
+  /** abnormal 专属: 关注窗口 (any=全部) */
+  abnormal_window?: 'any' | '3d' | '10d' | '30d'
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
   notify_events?: StrategyNotifyEvent[]
@@ -817,6 +857,11 @@ export interface AlertEvent {
   up_count?: number
   down_count?: number
   leader?: { symbol?: string; name?: string; change_pct?: number } | null
+  /** 异动边缘告警 (source=abnormal) 附加字段 */
+  abnormal_window?: string
+  abnormal_value?: number
+  abnormal_threshold?: number
+  abnormal_closeness?: number
   /** ext 富化字段 (行业/概念等), 键为 "{configId}__{fieldName}" */
   [key: string]: unknown
 }
@@ -2779,6 +2824,12 @@ export const api = {
 
   customSignalDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/custom-signals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ===== Abnormal Moves (异动边缘) =====
+  abnormalOverview: (minCloseness = 0.5, limit = 200) =>
+    request<AbnormalOverview>(
+      `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}`,
+    ),
 
   // ===== Monitor Rules (监控规则) =====
   monitorRulesList: () =>

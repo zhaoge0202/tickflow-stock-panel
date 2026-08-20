@@ -264,6 +264,7 @@ _WATCHLIST_COLS = [
     "boll_upper", "boll_lower",
     "atr_14",
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "deviate_3d", "deviate_10d", "deviate_30d",
     "consecutive_limit_ups", "consecutive_limit_downs",
     "signal_limit_up", "signal_limit_down", "signal_volume_surge",
     "signal_ma_golden_5_20", "signal_macd_golden", "signal_n_day_high",

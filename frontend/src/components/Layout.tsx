@@ -22,6 +22,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { tierRank } from '@/lib/capability-labels'
 import {
+  Siren,
   Star,
   ScanSearch,
   History,
@@ -90,6 +91,7 @@ const nav = [
   { to: '/financials', label: '财务分析', icon: FileText },
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/regime', label: '市场环境', icon: Gauge },
+  { to: '/abnormal', label: '异动监控', icon: Siren },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },

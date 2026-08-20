@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
+import { Activity, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Siren, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type SectorKind, type SectorMonitorTarget, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
@@ -23,7 +23,7 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控', sector: '板块监控',
+  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控', sector: '板块监控', abnormal: '异动监控',
 }
 
 const TYPE_ICONS = {
@@ -32,6 +32,7 @@ const TYPE_ICONS = {
   market: RadioTower,
   strategy: Waypoints,
   sector: Layers3,
+  abnormal: Siren,
 }
 
 const SECTOR_KIND_OPTIONS: Array<{ key: SectorKind; label: string; icon: typeof ChartNoAxesCombined }> = [
@@ -61,6 +62,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   sector_trigger: 'change_pct',
   threshold_pct: 1,
   window_minutes: 5,
+  abnormal_window: 'any',
   strategy_id: null,
   score_min: null,
   score_max: null,
@@ -157,6 +159,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         const base = TYPE_DEFAULT_NAME[d.type] ?? '监控规则'
         d.name = d.type === 'sector' && d.sector_targets?.length
           ? `${base} · ${d.sector_targets[0].name}${d.sector_targets.length > 1 ? ` 等${d.sector_targets.length}个` : ''}`
+          : d.type === 'abnormal'
+          ? `${base} · 接近度≥${d.threshold_pct ?? 70}%${d.abnormal_window && d.abnormal_window !== 'any' ? ` (${d.abnormal_window.toUpperCase()})` : ''}`
           : d.scope === 'symbols' && d.symbols.length > 0
           ? `${base} · ${d.symbols[0]}${d.symbols.length > 1 ? ` 等${d.symbols.length}只` : ''}`
           : base
@@ -181,6 +185,14 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         delete d.notify_events
         if (!d.sector_targets?.length) throw new Error('请选择至少一个监控对象')
         if ((d.threshold_pct ?? 0) <= 0 || (d.threshold_pct ?? 0) > 20) throw new Error('阈值必须大于 0 且不超过 20%')
+      } else if (d.type === 'abnormal') {
+        delete d.score_min
+        delete d.score_max
+        d.conditions = []
+        delete d.notify_events
+        if ((d.threshold_pct ?? 0) < 1 || (d.threshold_pct ?? 0) > 150) {
+          throw new Error('接近度阈值必须在 1 到 150 之间 (70=边缘, 100=已触发)')
+        }
       } else {
         delete d.score_min
         delete d.score_max
@@ -474,8 +486,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </button>
       </div>
 
-      {/* 资产类型: 股票 / ETF / 指数 (个股极简模式不显示) */}
-      {!simple && draft.type !== 'sector' && (
+      {/* 资产类型: 股票 / ETF / 指数 (个股极简模式不显示; 板块/异动仅个股) */}
+      {!simple && draft.type !== 'sector' && draft.type !== 'abnormal' && (
         <div className="space-y-1.5">
           <span className="text-[11px] text-muted">资产类型</span>
           <div className="inline-flex h-9 rounded-btn border border-border overflow-hidden">
@@ -510,7 +522,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       {/* 监控类型 */}
       <div className="space-y-1.5">
         <span className="text-[11px] text-muted">监控类型</span>
-        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-6">
           {visibleTypes.map(t => {
             const Icon = TYPE_ICONS[t.key as keyof typeof TYPE_ICONS] ?? Activity
             const active = draft.type === t.key
@@ -527,10 +539,16 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     notify_events: type === 'strategy'
                       ? [...(d.notify_events ?? DEFAULT_STRATEGY_NOTIFY_EVENTS)]
                       : undefined,
-                    scope: type === 'sector'
+                    scope: type === 'sector' || type === 'abnormal'
                       ? 'all'
                       : type === 'strategy' && d.scope === 'symbols' && d.symbols.length === 0 ? 'all' : d.scope,
-                    direction: type === 'sector' ? 'up' : d.type === 'sector' ? 'entry' : d.direction,
+                    direction: type === 'sector' ? 'up'
+                      : type === 'abnormal' ? 'both'
+                      : d.type === 'sector' || d.type === 'abnormal' ? 'entry' : d.direction,
+                    // 异动规则复用 threshold_pct 存接近度阈值%, 其他类型为涨跌幅%
+                    threshold_pct: type === 'abnormal' && d.type !== 'abnormal' ? 70
+                      : type !== 'abnormal' && d.type === 'abnormal' ? 1
+                      : d.threshold_pct,
                   }
                 })}
                 className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-btn border px-2 text-xs font-medium transition-colors cursor-pointer ${
@@ -748,6 +766,80 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </div>
       )}
 
+      {draft.type === 'abnormal' && (
+        <div className="space-y-4 border-t border-border/60 pt-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1.5">
+              <span className="text-[11px] text-muted">接近度阈值</span>
+              <span className="relative block">
+                <input
+                  type="number"
+                  min="1"
+                  max="150"
+                  step="5"
+                  value={draft.threshold_pct ?? 70}
+                  onChange={event => setDraft(d => ({ ...d, threshold_pct: Number(event.target.value) }))}
+                  className="h-9 w-full rounded-btn border border-border bg-base pl-3 pr-8 text-xs font-mono text-foreground"
+                />
+                <span className="absolute right-3 top-2.5 text-xs text-muted">%</span>
+              </span>
+              <span className="block text-[10px] text-muted/70">
+                接近度 = |偏离值| ÷ 交易所阈值。70=边缘预警, 100=已触发
+              </span>
+            </label>
+            <div className="space-y-1.5">
+              <span className="text-[11px] text-muted">方向</span>
+              <div className="grid h-9 grid-cols-3 overflow-hidden rounded-btn border border-border bg-base">
+                {([
+                  ['both', '全部'],
+                  ['up', '涨势偏离'],
+                  ['down', '跌势偏离'],
+                ] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={(draft.direction ?? 'both') === key}
+                    onClick={() => setDraft(d => ({ ...d, direction: key }))}
+                    className={`text-[11px] font-medium transition-colors cursor-pointer ${
+                      (draft.direction ?? 'both') === key ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-[11px] text-muted">关注窗口</span>
+            <div className="grid h-9 grid-cols-4 overflow-hidden rounded-btn border border-border bg-base">
+              {([
+                ['any', '全部'],
+                ['3d', '3日 (异常波动)'],
+                ['10d', '10日 (严重)'],
+                ['30d', '30日 (严重)'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={(draft.abnormal_window ?? 'any') === key}
+                  onClick={() => setDraft(d => ({ ...d, abnormal_window: key }))}
+                  className={`text-[11px] font-medium transition-colors cursor-pointer ${
+                    (draft.abnormal_window ?? 'any') === key ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-btn bg-base px-3 py-2 text-[10px] leading-relaxed text-muted">
+            按交易所异动规则口径 (3日±20%/30%… 10日+100%、30日+200% 等按板块) 计算
+            个股涨跌幅偏离值的接近度, 上穿阈值时告警; 冷却期内同一标的不重复提醒。
+          </div>
+        </div>
+      )}
+
       {/* 作用范围 */}
       {draft.type !== 'sector' && <div className="space-y-2">
         <span className="text-[11px] text-muted">作用范围</span>
@@ -878,7 +970,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       </div>}
 
       {/* 触发条件 (非 strategy) */}
-      {draft.type !== 'strategy' && draft.type !== 'sector' && (
+      {draft.type !== 'strategy' && draft.type !== 'sector' && draft.type !== 'abnormal' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted">触发条件</span>

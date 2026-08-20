@@ -86,6 +86,41 @@ def test_recovery_replaces_stale_publication_but_not_active_owner(tmp_path) -> N
     assert pl.read_parquet(out)["close"].item() == pytest.approx(12.0)
 
 
+def test_recovery_takes_over_when_owner_pid_is_dead_on_windows(tmp_path, monkeypatch) -> None:
+    # 跨进程孤儿锁: 属主进程已死, 但 Windows 的 os.kill(pid, 0) 对不存在的 pid
+    # 抛 WinError 87 (ERROR_INVALID_PARAMETER) 而非 ProcessLookupError,
+    # 存活探测若把它当"存活", recover 将永远报 another publication is active。
+    stale = {
+        "state": "publishing",
+        "generation": "stale-generation",
+        "publication_id": "stale-publication",
+        "owner_pid": 12345,
+        "updated_at_ns": 0,
+    }
+    (tmp_path / ".matrix_generation_stock.json").write_text(
+        json.dumps(stale), encoding="utf-8"
+    )
+
+    def probe(_pid: int, _sig: int) -> None:
+        error = OSError()
+        error.winerror = 87
+        raise error
+
+    monkeypatch.setattr("app.enriched_generation.os.kill", probe)
+
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    recovered = EnrichedPublication(tmp_path, recover=True)
+    recovered.write_parquet(_frame(10.0), out)
+    recovered.commit()
+
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "ready"
+    assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
+    assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
+
+
 def test_panel_cache_generation_change_forces_recompute() -> None:
     cache = PanelCache()
     calls: list[int] = []

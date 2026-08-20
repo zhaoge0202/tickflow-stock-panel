@@ -41,6 +41,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/industry-analysis', label: '行业分析', type: 'builtin', visible: true },
   { id: '/stock-analysis', label: '个股分析', type: 'builtin', visible: true },
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
+  { id: '/abnormal', label: '异动监控', type: 'builtin', visible: true },
   { id: '/review', label: '复盘', type: 'builtin', visible: true },
   { id: '/financials', label: '财务分析', type: 'builtin', visible: true },
   { id: '/indices', label: '指数', type: 'builtin', visible: true },

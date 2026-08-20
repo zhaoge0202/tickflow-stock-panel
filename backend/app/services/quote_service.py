@@ -195,6 +195,9 @@ class QuoteService:
         self._subscribers: set[QuoteSubscriber] = set()
         self._strategy_monitor = None            # 延迟注入
         self._app_state = None                   # 延迟注入 (FastAPI app.state)
+        # 异动边缘规则上次评估时间戳 (秒)。异动快照历史部分有 60s 缓存,
+        # 但每次构建仍有全市场循环, 轮询线程里限频到 30s 一次。
+        self._abnormal_last_eval = 0.0
 
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
@@ -1123,6 +1126,23 @@ class QuoteService:
                             enriched_today if stock_ready else pl.DataFrame(),
                             self.get_index_quotes(),
                         )
+                    # 异动边缘规则轮: 快照 (enriched 偏离列 + 实时叠加) 由
+                    # abnormal_moves.build_overview 统一构建, 引擎只做边缘触发判定。
+                    # 30s 限频 —— 快照历史部分 60s 缓存, 无需跟行情轮询同频重算。
+                    if engine.has_rule_type("abnormal") and self._repo is not None:
+                        _now_ts = time.time()
+                        if _now_ts - self._abnormal_last_eval >= 30.0:
+                            self._abnormal_last_eval = _now_ts
+                            try:
+                                from app.services import abnormal_moves
+                                _overview = abnormal_moves.build_overview(
+                                    self._repo, self,
+                                    min_closeness=engine.min_abnormal_closeness(),
+                                    limit=1000,
+                                )
+                                rule_events += engine.evaluate_abnormal(_overview.get("rows") or [])
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("异动监控规则评估失败 (不影响其他告警): %s", e)
                     # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
                     # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
@@ -1182,6 +1202,8 @@ class QuoteService:
                                 "sector_source_field", "sector_value", "sector_level",
                                 "window_change_pct", "coverage_ratio", "valid_count",
                                 "total_count", "up_count", "down_count", "leader",
+                                "abnormal_window", "abnormal_value", "abnormal_threshold",
+                                "abnormal_closeness",
                             ):
                                 if key in ev:
                                     alert[key] = ev[key]

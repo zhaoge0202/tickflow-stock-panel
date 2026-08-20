@@ -300,6 +300,9 @@ class MonitorRuleEngine:
         self._latest_strategy_result_ids: set[str] = set()
         self._sector_monitor_service = None
         self._sector_condition_state: dict[tuple[str, str], bool] = {}
+        # abnormal 规则边缘触发状态: (rule_id, symbol) → 上一轮是否已达阈值。
+        # 只在 False → True 跳变时告警 (首轮观测不触发, 防止新建规则瞬间刷屏)。
+        self._abnormal_condition_state: dict[tuple[str, str], bool] = {}
 
     def set_strategy_engine(self, engine) -> None:
         """注入 StrategyEngine, type=strategy 规则据此跑选股。"""
@@ -371,6 +374,7 @@ class MonitorRuleEngine:
             rule.get("direction"),
             rule.get("threshold_pct"),
             rule.get("window_minutes"),
+            rule.get("abnormal_window"),
         )
 
     def set_rules(self, rules: list[dict]) -> None:
@@ -411,6 +415,11 @@ class MonitorRuleEngine:
         self._sector_condition_state = {
             key: value
             for key, value in list(self._sector_condition_state.items())
+            if key[0] in active_ids
+        }
+        self._abnormal_condition_state = {
+            key: value
+            for key, value in list(self._abnormal_condition_state.items())
             if key[0] in active_ids
         }
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
@@ -607,7 +616,7 @@ class MonitorRuleEngine:
         for rule_id, rule in list(self._rules.items()):
             if rule.get("asset_type", "stock") != asset_type:
                 continue
-            if rule.get("type") == "sector":
+            if rule.get("type") in ("sector", "abnormal"):
                 continue
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
@@ -770,6 +779,133 @@ class MonitorRuleEngine:
                     f"{float(leader.get('change_pct') or 0) * 100:+.2f}%"
                 )
         return "｜".join(parts)
+
+    def min_abnormal_closeness(self) -> float:
+        """启用的 abnormal 规则中最小的接近度阈值 (小数)。
+
+        供调用方 (quote_service) 构建异动快照时预过滤, 不必按最高阈值拉全量。
+        """
+        thresholds = [
+            float(r.get("threshold_pct", 70)) / 100
+            for r in list(self._rules.values())
+            if r.get("enabled", True) and r.get("type") == "abnormal"
+        ]
+        return min(thresholds) if thresholds else 1.0
+
+    def evaluate_abnormal(self, rows: list[dict], *, now: float | None = None) -> list[dict]:
+        """按异动边缘快照评估 type=abnormal 规则。
+
+        rows 为 abnormal_moves.build_overview 的 rows (调用方已按
+        min_abnormal_closeness 预过滤)。rows 为空也照常评估 —— 用于把
+        已消失标的的边缘状态清理回 False。
+        """
+        rules = [
+            rule for rule in list(self._rules.values())
+            if rule.get("enabled", True) and rule.get("type") == "abnormal"
+        ]
+        if not rules:
+            return []
+        timestamp = time.time() if now is None else now
+        events: list[dict] = []
+        for rule in rules:
+            try:
+                events.extend(self._evaluate_abnormal_rule(rule, rows, timestamp))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("异动规则评估失败 %s: %s", rule.get("id"), exc)
+        return events
+
+    def _evaluate_abnormal_rule(self, rule: dict, rows: list[dict], now: float) -> list[dict]:
+        events: list[dict] = []
+        threshold = float(rule.get("threshold_pct", 70)) / 100
+        if not 0 < threshold <= 1.5:
+            threshold = 0.7
+        direction = rule.get("direction", "both")
+        window_filter = str(rule.get("abnormal_window", "any"))
+        scope_symbols = (
+            {str(s) for s in rule.get("symbols", []) if s}
+            if rule.get("scope") == "symbols" else None
+        )
+
+        seen: set[str] = set()
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            if not symbol or (scope_symbols is not None and symbol not in scope_symbols):
+                continue
+            seen.add(symbol)
+            # 方向/窗口过滤后取接近度最高的窗口作为代表
+            best: tuple[str, float, float, float] | None = None  # (窗口, 接近度, 偏离值, 阈值)
+            for key, win in (row.get("windows") or {}).items():
+                if window_filter != "any" and key != window_filter:
+                    continue
+                value = win.get("value")
+                if value is None:
+                    continue
+                if direction == "up" and value <= 0:
+                    continue
+                if direction == "down" and value >= 0:
+                    continue
+                closeness = float(win.get("closeness") or 0)
+                if best is None or closeness > best[1]:
+                    best = (key, closeness, float(value), float(win.get("threshold") or 0))
+            condition = best is not None and best[1] >= threshold
+            state_key = (rule["id"], symbol)
+            previous = self._abnormal_condition_state.get(state_key)
+            self._abnormal_condition_state[state_key] = condition
+            if previous is None or previous or not condition:
+                continue
+
+            event_type = f"abnormal_{'up' if best[2] > 0 else 'down'}"
+            cooldown_key = (rule["id"], symbol, event_type)
+            last = self._last_fire.get(cooldown_key)
+            cooldown = int(rule.get("cooldown_seconds", 3600))
+            if last is not None and now - last < cooldown:
+                continue
+            self._last_fire[cooldown_key] = now
+            event = {
+                "ts": int(now * 1000),
+                "rule_id": rule["id"],
+                "rule_name": rule.get("name", ""),
+                "strategy_id": None,
+                "source": "abnormal",
+                "type": event_type,
+                "symbol": symbol,
+                "name": row.get("name"),
+                "message": rule.get("message", "") or self._abnormal_message(row, best),
+                "price": row.get("close"),
+                "change_pct": row.get("rt_pct"),
+                "signals": [],
+                "severity": rule.get("severity", "info"),
+                "conditions": [],
+                "logic": "and",
+                "abnormal_window": best[0],
+                "abnormal_value": round(best[2], 4),
+                "abnormal_threshold": best[3],
+                "abnormal_closeness": round(best[1], 4),
+            }
+            events.append(event)
+            if self._alert_handler:
+                try:
+                    self._alert_handler(event)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("alert handler failed: %s", exc)
+        # 本轮未出现的标的 (跌出预过滤区间) 状态置 False 而非删除:
+        # 删除会被当成「首轮观测」而不触发, 置 False 才能在回升穿过阈值时再次告警。
+        for key, value in list(self._abnormal_condition_state.items()):
+            if key[0] == rule["id"] and key[1] not in seen and value:
+                self._abnormal_condition_state[key] = False
+        return events
+
+    @staticmethod
+    def _abnormal_message(row: dict, best: tuple[str, float, float, float]) -> str:
+        window, closeness, value, threshold = best
+        board = row.get("board") or ""
+        tag = f"{board}{'·ST' if row.get('st') else ''}"
+        state = "已达异常波动阈值" if closeness >= 1 else "接近异常波动阈值"
+        return (
+            f"{row.get('name') or row.get('symbol')} {window}偏离值 "
+            f"{value * 100:+.2f}%/阈值{threshold * 100:.0f}% ({tag}) "
+            f"接近度{closeness * 100:.0f}%, {state}"
+        )
 
     def _evaluate_rule(self, df: pl.DataFrame, rule: dict, now: float) -> list[dict]:
         """评估单条规则,返回触发的 events。"""

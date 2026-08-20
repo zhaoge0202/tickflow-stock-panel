@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import (
+    abnormal,
     alerts,
     analysis,
     backtest,
@@ -431,6 +432,7 @@ app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
+app.include_router(abnormal.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)

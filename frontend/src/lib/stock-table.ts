@@ -96,6 +96,9 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'momentum_20d':  return r.momentum_20d
     case 'momentum_30d':  return r.momentum_30d
     case 'momentum_60d':  return r.momentum_60d
+    case 'deviate_3d':   return r.deviate_3d
+    case 'deviate_10d':  return r.deviate_10d
+    case 'deviate_30d':  return r.deviate_30d
     case 'limit_ups':     return r.consecutive_limit_ups ?? 0
     case 'limit_downs':   return r.consecutive_limit_downs ?? 0
     case 'score':         return r.score
