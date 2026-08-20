@@ -211,6 +211,9 @@ class StockSDKProvider:
             # provider 入口契约统一使用小数制(-0.0115 = -1.15%)。
             if item.get("change_pct") is not None:
                 item["change_pct"] = float(item["change_pct"]) / 100
+            # stock-sdk 全量实时行情的 amount 单位为万元;内部日K统一使用元。
+            if item.get("amount") is not None:
+                item["amount"] = float(item["amount"]) * 10_000
             normalized.append(item)
         return normalized
 
