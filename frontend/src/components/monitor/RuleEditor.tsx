@@ -814,60 +814,62 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   </div>
                 </>
               )}
-              {/* 从自选/自选分组批量导入标的 */}
-              <div className="relative" ref={watchMenuRef}>
-                <button
-                  type="button"
-                  onClick={() => setWatchMenuOpen(v => !v)}
-                  title="从自选 / 自选分组导入标的 (导入当前成员, 后续增删自选不影响本规则)"
-                  className={`inline-flex h-7 items-center gap-1 rounded border px-2 text-[11px] transition-colors cursor-pointer ${
-                    watchMenuOpen
-                      ? 'border-accent/40 bg-accent/10 text-accent'
-                      : 'border-border bg-base text-secondary hover:border-accent/30 hover:text-foreground'
-                  }`}
-                >
-                  <ListPlus className="h-3 w-3" />自选导入
-                </button>
-                {watchMenuOpen && (
-                  <div className="absolute z-10 mt-1 max-h-56 w-44 overflow-y-auto rounded border border-border bg-surface py-1 shadow-lg">
-                    {watchlistQ.isLoading ? (
-                      <div className="px-2.5 py-2 text-[11px] text-muted">正在加载自选...</div>
-                    ) : watchImportOptions.length === 0 ? (
-                      <div className="px-2.5 py-2 text-[11px] text-muted">自选列表为空</div>
-                    ) : watchImportOptions.map(option => (
-                      <button
-                        key={option.key}
-                        type="button"
-                        onClick={() => importSymbols(option.symbols)}
-                        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-secondary transition-colors hover:bg-elevated hover:text-foreground cursor-pointer"
-                      >
-                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${option.dot}`} />
-                        <span className="min-w-0 flex-1 truncate">{option.name}</span>
-                        <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted">{option.symbols.length}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="relative">
-                <input
-                  value={symbolQuery}
-                  onChange={e => setSymbolQuery(e.target.value)}
-                  placeholder="搜索代码或名称..."
-                  className="h-7 w-32 rounded border border-border bg-base pl-6 pr-2 text-[11px] text-foreground focus:outline-none focus:border-accent/50"
-                />
-                <Search className="absolute left-1.5 top-1.5 h-3.5 w-3.5 text-muted" />
-                {symbolSearch.data && symbolSearch.data.results.length > 0 && (
-                  <div className="absolute z-10 mt-1 max-h-48 w-48 overflow-auto rounded border border-border bg-surface shadow-lg">
-                    {symbolSearch.data.results.map(r => (
-                      <button key={r.symbol} onClick={() => addSymbol(r.symbol)} className="block w-full px-2 py-1 text-left text-[11px] hover:bg-elevated cursor-pointer">
-                        <span className="font-mono text-foreground/80">{r.symbol}</span>
-                        {(() => { const b = boardTag(r.symbol); return b && <span className={`ml-1 inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span> })()}
-                        <span className="ml-1 text-muted">{r.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+              {/* 导入与搜索: 同一行等高(h-7), 搜索框占满剩余宽度 */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="relative" ref={watchMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setWatchMenuOpen(v => !v)}
+                    title="从自选 / 自选分组导入标的 (导入当前成员, 后续增删自选不影响本规则)"
+                    className={`inline-flex h-7 shrink-0 items-center gap-1 rounded border px-2 text-[11px] transition-colors cursor-pointer ${
+                      watchMenuOpen
+                        ? 'border-accent/40 bg-accent/10 text-accent'
+                        : 'border-border bg-base text-secondary hover:border-accent/30 hover:text-foreground'
+                    }`}
+                  >
+                    <ListPlus className="h-3 w-3" />自选导入
+                  </button>
+                  {watchMenuOpen && (
+                    <div className="absolute z-10 mt-1 max-h-56 w-44 overflow-y-auto rounded border border-border bg-surface py-1 shadow-lg">
+                      {watchlistQ.isLoading ? (
+                        <div className="px-2.5 py-2 text-[11px] text-muted">正在加载自选...</div>
+                      ) : watchImportOptions.length === 0 ? (
+                        <div className="px-2.5 py-2 text-[11px] text-muted">自选列表为空</div>
+                      ) : watchImportOptions.map(option => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => importSymbols(option.symbols)}
+                          className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-secondary transition-colors hover:bg-elevated hover:text-foreground cursor-pointer"
+                        >
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${option.dot}`} />
+                          <span className="min-w-0 flex-1 truncate">{option.name}</span>
+                          <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted">{option.symbols.length}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="relative min-w-[140px] flex-1">
+                  <input
+                    value={symbolQuery}
+                    onChange={e => setSymbolQuery(e.target.value)}
+                    placeholder="搜索代码或名称添加标的..."
+                    className="h-7 w-full rounded border border-border bg-base pl-6 pr-2 text-[11px] text-foreground focus:outline-none focus:border-accent/50"
+                  />
+                  <Search className="absolute left-1.5 top-1.5 h-3.5 w-3.5 text-muted" />
+                  {symbolSearch.data && symbolSearch.data.results.length > 0 && (
+                    <div className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded border border-border bg-surface shadow-lg">
+                      {symbolSearch.data.results.map(r => (
+                        <button key={r.symbol} onClick={() => addSymbol(r.symbol)} className="block w-full px-2 py-1 text-left text-[11px] hover:bg-elevated cursor-pointer">
+                          <span className="font-mono text-foreground/80">{r.symbol}</span>
+                          {(() => { const b = boardTag(r.symbol); return b && <span className={`ml-1 inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span> })()}
+                          <span className="ml-1 text-muted">{r.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
