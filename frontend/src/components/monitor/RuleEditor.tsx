@@ -751,14 +751,14 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       {/* 作用范围 */}
       {draft.type !== 'sector' && <div className="space-y-2">
         <span className="text-[11px] text-muted">作用范围</span>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-start gap-1.5">
           <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-7 w-32 shrink-0 rounded border border-border bg-base px-2 text-[11px] text-foreground">
             {visibleScopes.map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
           </select>
           {draft.scope === 'symbols' && (
             <div className="min-w-0 flex-1 space-y-1.5">
-              {/* 导入与搜索: 与范围下拉同一行等高(h-7), 搜索框占满剩余宽度 */}
-              <div className="flex flex-wrap items-center gap-1.5">
+              {/* 导入与搜索: 与范围下拉同一行等高(h-7), 不换行, 搜索框占满剩余宽度 */}
+              <div className="flex items-center gap-1.5">
                 <div className="relative" ref={watchMenuRef}>
                   <button
                     type="button"
@@ -793,7 +793,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     </div>
                   )}
                 </div>
-                <div className="relative min-w-[140px] flex-1">
+                <div className="relative min-w-0 flex-1">
                   <input
                     value={symbolQuery}
                     onChange={e => setSymbolQuery(e.target.value)}
