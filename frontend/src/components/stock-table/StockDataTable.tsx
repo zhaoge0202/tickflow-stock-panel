@@ -43,9 +43,10 @@ export interface StockDataTableProps {
 }
 
 function alignThClass(align: ColumnConfig['align']): string {
-  if (align === 'right') return 'px-3 py-2.5 font-medium text-right'
-  if (align === 'center') return 'px-3 py-2.5 font-medium text-center'
-  return 'px-3 py-2.5 font-medium'
+  // 表头一律不换行: 窄列(如收起的图表列)中标签/排序箭头折行会把整行表头顶高
+  if (align === 'right') return 'px-3 py-2.5 font-medium text-right whitespace-nowrap'
+  if (align === 'center') return 'px-3 py-2.5 font-medium text-center whitespace-nowrap'
+  return 'px-3 py-2.5 font-medium whitespace-nowrap'
 }
 
 export function StockDataTable({
