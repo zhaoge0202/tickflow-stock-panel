@@ -202,8 +202,33 @@ def move_one_to_top(symbol: str, request: Request):
 
 @router.put("/{symbol}/group")
 def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
+    """互斥设定分组(仅保留此组; None=移出全部分组)。多组操作用 members 端点。"""
     try:
         rows = watchlist.set_group(symbol, req.group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.post("/groups/{group_id}/members/{symbol}")
+def add_member(group_id: str, symbol: str, request: Request):
+    """把标的加入分组(多组成员关系: 不影响其他分组)。"""
+    try:
+        rows = watchlist.add_to_group(symbol, group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.delete("/groups/{group_id}/members/{symbol}")
+def remove_member(group_id: str, symbol: str, request: Request):
+    """把标的移出分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
+    try:
+        rows = watchlist.remove_from_group(symbol, group_id)
     except KeyError as e:
         raise HTTPException(404, "自选标的不存在") from e
     except ValueError as e:

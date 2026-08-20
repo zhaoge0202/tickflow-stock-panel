@@ -51,10 +51,12 @@ function BatchDiscovery({ onInspect }: { onInspect: (factorName: string) => void
   })
   const watchlistEntries = watchlist.data?.symbols ?? []
   const watchlistCounts = useMemo(() => {
+    // 多组并存: 一股计入每个所属分组
     const counts: Record<string, number> = { ungrouped: 0 }
     for (const entry of watchlistEntries) {
-      const groupId = entry.group_id ?? 'ungrouped'
-      counts[groupId] = (counts[groupId] ?? 0) + 1
+      const gids = entry.group_ids ?? []
+      if (gids.length === 0) counts.ungrouped += 1
+      else for (const gid of gids) counts[gid] = (counts[gid] ?? 0) + 1
     }
     return counts
   }, [watchlistEntries])
@@ -120,9 +122,12 @@ function BatchDiscovery({ onInspect }: { onInspect: (factorName: string) => void
     )
   }
   const importFromWatchlist = (groupId: string | null) => {
+    // 'all'=全部自选; null=未分组; 其他=指定分组 (多组归属时该股计入每个所属分组)
     const entries = groupId === 'all'
       ? watchlistEntries
-      : watchlistEntries.filter(entry => (entry.group_id ?? null) === groupId)
+      : groupId == null
+        ? watchlistEntries.filter(entry => !(entry.group_ids?.length))
+        : watchlistEntries.filter(entry => !!entry.group_ids?.includes(groupId))
     const current = symbols.split(',').map(value => value.trim()).filter(Boolean)
     setSymbols(Array.from(new Set([...current, ...entries.map(entry => entry.symbol)])).join(','))
   }

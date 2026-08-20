@@ -269,11 +269,11 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       symbols: entries.map(e => e.symbol),
     }]
     for (const group of watchGroupsQ.data?.groups ?? []) {
-      const syms = entries.filter(e => e.group_id === group.id).map(e => e.symbol)
+      const syms = entries.filter(e => e.group_ids?.includes(group.id)).map(e => e.symbol)
       if (syms.length === 0) continue
       options.push({ key: group.id, name: group.name, dot: resolveWatchlistGroupColor(group.color).dot, symbols: syms })
     }
-    const ungrouped = entries.filter(e => !e.group_id).map(e => e.symbol)
+    const ungrouped = entries.filter(e => !(e.group_ids?.length)).map(e => e.symbol)
     if (ungrouped.length > 0) {
       options.push({ key: 'ungrouped', name: '未分组', dot: 'bg-muted/60', symbols: ungrouped })
     }

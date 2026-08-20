@@ -40,7 +40,7 @@ export function rowPct(
 }
 
 export function computeGroupPcts(
-  entries: { symbol: string; group_id?: string | null }[],
+  entries: { symbol: string; group_ids?: string[] | null }[],
   rowsBySymbol: Map<string, { rt_pct?: number | null; change_pct?: number | null }>,
 ): GroupPctMap {
   const buckets = new Map<string, { pcts: number[]; up: number; down: number; flat: number }>()
@@ -55,8 +55,12 @@ export function computeGroupPcts(
   }
   for (const entry of entries) {
     const row = rowsBySymbol.get(entry.symbol)
-    add('all', rowPct(row))
-    add(entry.group_id ?? 'ungrouped', rowPct(row))
+    const pct = rowPct(row)
+    add('all', pct)
+    // 多组并存: 一股计入每个所属分组; 不属于任何分组才计未分组
+    const gids = entry.group_ids ?? []
+    if (gids.length === 0) add('ungrouped', pct)
+    else for (const gid of gids) add(gid, pct)
   }
   const out: GroupPctMap = {}
   for (const [key, b] of buckets) {

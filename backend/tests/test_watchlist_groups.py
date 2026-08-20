@@ -27,7 +27,7 @@ def test_historical_watchlist_is_read_as_ungrouped(monkeypatch, tmp_path):
         "note": [""],
     }).write_parquet(path)
 
-    assert watchlist.list_symbols()[0]["group_id"] is None
+    assert watchlist.list_symbols()[0]["group_ids"] == []
 
 
 def test_group_lifecycle_preserves_watchlist_entries(monkeypatch, tmp_path):
@@ -37,7 +37,7 @@ def test_group_lifecycle_preserves_watchlist_entries(monkeypatch, tmp_path):
 
     watchlist.add("600000.SH", group_id=created["id"])
     watchlist.add("000001.SZ")
-    assert watchlist.list_symbols()[1]["group_id"] == created["id"]
+    assert watchlist.list_symbols()[1]["group_ids"] == [created["id"]]
 
     renamed = watchlist.rename_group(created["id"], "观察", "fuchsia")
     assert renamed[0]["name"] == "观察"
@@ -46,7 +46,7 @@ def test_group_lifecycle_preserves_watchlist_entries(monkeypatch, tmp_path):
     remaining, rows = watchlist.delete_group(created["id"])
     assert remaining == []
     assert {row["symbol"] for row in rows} == {"600000.SH", "000001.SZ"}
-    assert all(row["group_id"] is None for row in rows)
+    assert all(row["group_ids"] == [] for row in rows)
 
 
 def test_group_validation_and_assignment_errors(monkeypatch, tmp_path):
@@ -66,9 +66,9 @@ def test_group_validation_and_assignment_errors(monkeypatch, tmp_path):
         watchlist.set_group("000001.SZ", created["id"])
 
     rows = watchlist.set_group("600000.SH", created["id"])
-    assert rows[0]["group_id"] == created["id"]
+    assert rows[0]["group_ids"] == [created["id"]]
     rows = watchlist.set_group("600000.SH", None)
-    assert rows[0]["group_id"] is None
+    assert rows[0]["group_ids"] == []
 
 
 def test_reorder_groups(monkeypatch, tmp_path):
@@ -122,14 +122,14 @@ def test_group_api_contract(monkeypatch, tmp_path):
         watchlist_api.AddRequest(symbol="600000.SH", group_id=group_id),
         request,
     )
-    assert added["symbols"][0]["group_id"] == group_id
+    assert added["symbols"][0]["group_ids"] == [group_id]
 
     moved = watchlist_api.assign_group(
         "600000.SH",
         watchlist_api.GroupAssignRequest(group_id=None),
         request,
     )
-    assert moved["symbols"][0]["group_id"] is None
+    assert moved["symbols"][0]["group_ids"] == []
 
     with pytest.raises(HTTPException) as exc_info:
         watchlist_api.rename_group("missing", watchlist_api.GroupNameRequest(name="无效"))
@@ -163,7 +163,7 @@ def test_clear_group_moves_members_to_ungrouped(monkeypatch, tmp_path):
     rows = watchlist.clear_group(group["id"])
     # 3 只都还在,group_id 全部为 None
     assert len(rows) == 3
-    assert all(r["group_id"] is None for r in rows)
+    assert all(r["group_ids"] == [] for r in rows)
     # 分组定义仍在
     assert any(g["id"] == group["id"] for g in watchlist.list_groups())
 
@@ -183,9 +183,98 @@ def test_clear_group_api(monkeypatch, tmp_path):
     watchlist.add("000001.SZ", group_id=group_id)
 
     result = watchlist_api.clear_group(group_id, request)
-    assert all(s["group_id"] is None for s in result["symbols"])
+    assert all(s["group_ids"] == [] for s in result["symbols"])
 
     # 不存在的分组 → 404
     with pytest.raises(HTTPException) as exc:
         watchlist_api.clear_group("missing", request)
     assert exc.value.status_code == 404
+
+
+# ── 多组成员关系 (M:N) ──────────────────────────────────────
+
+
+def test_multi_group_membership(monkeypatch, tmp_path):
+    """一股可同时属于多个分组; 移出一个不影响其他。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, ga = watchlist.create_group("半导体")
+    _, gb = watchlist.create_group("反包备选")
+    watchlist.add("600118.SH", group_id=ga["id"])
+
+    rows = watchlist.add_to_group("600118.SH", gb["id"])
+    got = next(r for r in rows if r["symbol"] == "600118.SH")
+    assert got["group_ids"] == [ga["id"], gb["id"]]      # 两组并存
+
+    # 重复加入幂等
+    rows = watchlist.add_to_group("600118.SH", gb["id"])
+    got = next(r for r in rows if r["symbol"] == "600118.SH")
+    assert got["group_ids"] == [ga["id"], gb["id"]]
+
+    # 移出一个, 另一个保留
+    rows = watchlist.remove_from_group("600118.SH", ga["id"])
+    got = next(r for r in rows if r["symbol"] == "600118.SH")
+    assert got["group_ids"] == [gb["id"]]
+
+    # 移出最后一个 → 未分组(仍在自选)
+    rows = watchlist.remove_from_group("600118.SH", gb["id"])
+    got = next(r for r in rows if r["symbol"] == "600118.SH")
+    assert got["group_ids"] == []
+    assert any(r["symbol"] == "600118.SH" for r in rows)
+
+    # 不存在的分组/标的
+    with pytest.raises(ValueError, match="不存在"):
+        watchlist.add_to_group("600118.SH", "missing")
+    with pytest.raises(KeyError):
+        watchlist.remove_from_group("000001.SZ", ga["id"])
+
+
+def test_set_group_exclusive_keeps_only_one(monkeypatch, tmp_path):
+    """互斥设定: 已在多组的标的被 set 后只保留指定组。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, ga = watchlist.create_group("一")
+    _, gb = watchlist.create_group("二")
+    watchlist.add("600000.SH", group_id=ga["id"])
+    watchlist.add_to_group("600000.SH", gb["id"])
+
+    rows = watchlist.set_group("600000.SH", ga["id"])
+    assert rows[0]["group_ids"] == [ga["id"]]
+
+
+def test_clear_group_strips_only_that_group(monkeypatch, tmp_path):
+    """清空分组只摘该组标签, 其他组成员关系保留。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, ga = watchlist.create_group("一")
+    _, gb = watchlist.create_group("二")
+    watchlist.add("600000.SH", group_id=ga["id"])
+    watchlist.add_to_group("600000.SH", gb["id"])
+    watchlist.add("000001.SZ", group_id=ga["id"])
+
+    rows = watchlist.clear_group(ga["id"])
+    a = next(r for r in rows if r["symbol"] == "600000.SH")
+    b = next(r for r in rows if r["symbol"] == "000001.SZ")
+    assert a["group_ids"] == [gb["id"]]   # 二组保留
+    assert b["group_ids"] == []
+
+
+def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
+    """旧 schema(单值 group_id 列)读取迁移 + 首次写回前自动备份 .bak。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    path = tmp_path / "user_data" / "watchlist.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH", "000001.SZ"],
+        "added_at": ["2026-08-08T10:00:00"] * 2,
+        "note": ["", ""],
+        "group_id": ["g1", None],
+    }).write_parquet(path)
+
+    rows = watchlist.list_symbols()
+    assert rows[0]["group_ids"] == ["g1"]
+    assert rows[1]["group_ids"] == []
+    assert not (tmp_path / "user_data" / "watchlist.parquet.bak").exists()  # 只读不备份
+
+    # 触发写入 → 备份生成, 文件落新 schema
+    watchlist.add("300750.SZ")
+    assert (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
+    df = pl.read_parquet(path)
+    assert "group_ids" in df.columns and "group_id" not in df.columns

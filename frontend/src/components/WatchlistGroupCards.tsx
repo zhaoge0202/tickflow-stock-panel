@@ -172,8 +172,8 @@ interface WatchlistGroupCardsProps {
   groups: WatchlistGroup[]
   /** enriched 全量行 (未经过分组/板块筛选) */
   rows: any[]
-  /** symbol -> group_id (null = 未分组), 来自自选列表查询 */
-  groupBySymbol: Map<string, string | null>
+  /** symbol -> 所属分组 id 列表 (空数组 = 未分组), 来自自选列表查询 */
+  groupBySymbol: Map<string, string[]>
   /** 分组等权涨跌幅统计 */
   pcts: GroupPctMap
   onPreview: (symbol: string, name: string) => void
@@ -211,8 +211,13 @@ export function WatchlistGroupCards({
     for (const group of groups) buckets.set(group.id, [])
     buckets.set('ungrouped', [])
     for (const r of rows) {
-      const bucket = buckets.get(groupBySymbol.get(r.symbol) ?? 'ungrouped')
-      if (bucket) bucket.push(r)
+      // 多组并存: 一股可同时出现在多个分组卡片中
+      const gids = groupBySymbol.get(r.symbol)
+      if (!gids || gids.length === 0) {
+        buckets.get('ungrouped')?.push(r)
+      } else {
+        for (const gid of gids) buckets.get(gid)?.push(r)
+      }
     }
     const sorted = new Map<string, any[]>()
     for (const [key, list] of buckets) {

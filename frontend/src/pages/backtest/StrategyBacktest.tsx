@@ -749,10 +749,12 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
   })
   const watchlistEntries = watchlist.data?.symbols ?? []
   const watchlistCounts = useMemo(() => {
+    // 多组并存: 一股计入每个所属分组
     const counts: Record<string, number> = { ungrouped: 0 }
     for (const entry of watchlistEntries) {
-      const groupId = entry.group_id ?? 'ungrouped'
-      counts[groupId] = (counts[groupId] ?? 0) + 1
+      const gids = entry.group_ids ?? []
+      if (gids.length === 0) counts.ungrouped += 1
+      else for (const gid of gids) counts[gid] = (counts[gid] ?? 0) + 1
     }
     return counts
   }, [watchlistEntries])
@@ -784,11 +786,13 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     setOpen(false)
   }
   const removeSymbol = (symbol: string) => setSymbols(symbols.filter(s => s !== symbol))
-  // 按分组导入自选: 合并去重, 顺带回填股票名
+  // 按分组导入自选: 合并去重, 顺带回填股票名 ('all'=全部, null=未分组)
   const importFromWatchlist = (groupId: string | null) => {
     const entries = groupId === 'all'
       ? watchlistEntries
-      : watchlistEntries.filter(entry => (entry.group_id ?? null) === groupId)
+      : groupId == null
+        ? watchlistEntries.filter(entry => !(entry.group_ids?.length))
+        : watchlistEntries.filter(entry => !!entry.group_ids?.includes(groupId))
     if (entries.length === 0) return
     setSymbolNames(prev => {
       const next = { ...prev }

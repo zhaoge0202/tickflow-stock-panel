@@ -1,13 +1,19 @@
 """自选股与分组服务。
 
 自选存储于 ``data/user_data/watchlist.parquet``，分组定义存储于同目录的
-``watchlist_groups.json``。历史 Parquet 缺少 ``group_id`` 时按未分组读取。
+``watchlist_groups.json``。
+
+成员关系为多值 (M:N): 每条自选带 ``group_ids: list[str]``, 同一标的可同时
+属于多个分组; 移出分组只摘标签(标的仍在自选), 移出自选才删除实体。
+旧 schema (单值 ``group_id`` 列) 读取时自动迁移为 ``[group_id]``, 首次写回
+新 schema 前留一份 ``watchlist.parquet.bak`` 备份。
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +51,7 @@ _ENTRY_SCHEMA = {
     "symbol": pl.Utf8,
     "added_at": pl.Utf8,
     "note": pl.Utf8,
-    "group_id": pl.Utf8,
+    "group_ids": pl.List(pl.Utf8),
 }
 
 
@@ -70,15 +76,30 @@ def _read_entries() -> pl.DataFrame:
     if not p.exists():
         return _empty_entries()
     df = pl.read_parquet(p)
-    defaults = {"symbol": "", "added_at": "", "note": "", "group_id": None}
-    for column, dtype in _ENTRY_SCHEMA.items():
-        if column not in df.columns:
-            df = df.with_columns(pl.lit(defaults[column], dtype=dtype).alias(column))
+    # 旧 schema 兼容: 单值 group_id → group_ids=[gid]; 两列都缺 → 空列表
+    if "group_ids" not in df.columns:
+        old = df["group_id"].to_list() if "group_id" in df.columns else [None] * df.height
+        df = df.with_columns(
+            pl.Series("group_ids", [[g] if g else [] for g in old], dtype=pl.List(pl.Utf8))
+        ).drop("group_id", strict=False)
+    if "symbol" not in df.columns:
+        df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias("symbol"))
+    if "added_at" not in df.columns:
+        df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias("added_at"))
+    if "note" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("note"))
     return df.select(list(_ENTRY_SCHEMA))
 
 
 def _write_entries(df: pl.DataFrame) -> None:
     p = _path()
+    # 首次从旧 schema 迁移到 group_ids 前, 备份原文件(一次性)
+    if p.exists():
+        try:
+            if "group_ids" not in pl.read_parquet_schema(p).names():
+                shutil.copy(p, p.with_suffix(p.suffix + ".bak"))
+        except OSError as e:
+            logger.warning("watchlist backup before migration failed: %s", e)
     tmp = p.with_suffix(p.suffix + ".tmp")
     df.select(list(_ENTRY_SCHEMA)).write_parquet(tmp)
     os.replace(tmp, p)
@@ -151,7 +172,11 @@ def add_batch(
     note: str = "",
     group_id: str | None = None,
 ) -> tuple[list[dict], int]:
-    """批量添加并保持既有语义：每个新处理的标的移动到列表最前面。"""
+    """批量添加并保持既有语义：每个新处理的标的移动到列表最前面。
+
+    group_id 为可选的初始分组(如从某分组页添加时); 重复添加的标的保留
+    既有全部分组, 仅在显式传入 group_id 且尚未属于该组时并入。
+    """
     with _LOCK:
         groups = _read_groups()
         _validate_group_id(group_id, groups)
@@ -162,14 +187,14 @@ def add_batch(
             if existing is None:
                 added += 1
             rows = [row for row in rows if row["symbol"] != symbol]
-            resolved_group_id = (
-                group_id if group_id is not None else (existing or {}).get("group_id")
-            )
+            gids = list((existing or {}).get("group_ids") or [])
+            if group_id is not None and group_id not in gids:
+                gids.append(group_id)
             rows.insert(0, {
                 "symbol": symbol,
                 "added_at": datetime.utcnow().isoformat(timespec="seconds"),
                 "note": note,
-                "group_id": resolved_group_id,
+                "group_ids": gids,
             })
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()
         _write_entries(out)
@@ -259,17 +284,12 @@ def reorder_groups(ordered_ids: list[str]) -> list[dict]:
 
 
 def delete_group(group_id: str) -> tuple[list[dict], list[dict]]:
-    """删除分组定义，原分组内的自选保留并转为未分组。"""
+    """删除分组定义，原分组内的自选保留并转为未分组(仅摘掉该组标签)。"""
     with _LOCK:
         groups = _read_groups()
         if not any(group["id"] == group_id for group in groups):
             raise KeyError(group_id)
-        df = _read_entries().with_columns(
-            pl.when(pl.col("group_id") == group_id)
-            .then(None)
-            .otherwise(pl.col("group_id"))
-            .alias("group_id")
-        )
+        df = _strip_group(_read_entries(), group_id)
         remaining = [group for group in groups if group["id"] != group_id]
         _write_entries(df)
         _write_groups(remaining)
@@ -277,34 +297,77 @@ def delete_group(group_id: str) -> tuple[list[dict], list[dict]]:
 
 
 def set_group(symbol: str, group_id: str | None) -> list[dict]:
+    """互斥设定: 该标的只保留这一个分组(group_id=None 即全部移出, 变未分组)。
+
+    多组模型的日常操作走 add_to_group / remove_from_group; 本函数服务于
+    「仅保留此组」的显式场景。
+    """
     with _LOCK:
         groups = _read_groups()
         _validate_group_id(group_id, groups)
-        df = _read_entries()
-        if symbol not in df["symbol"].to_list():
+        rows = _read_entries().to_dicts()
+        if not any(row["symbol"] == symbol for row in rows):
             raise KeyError(symbol)
-        df = df.with_columns(
-            pl.when(pl.col("symbol") == symbol)
-            .then(pl.lit(group_id, dtype=pl.Utf8))
-            .otherwise(pl.col("group_id"))
-            .alias("group_id")
-        )
-        _write_entries(df)
-        return df.to_dicts()
+        for row in rows:
+            if row["symbol"] == symbol:
+                row["group_ids"] = [group_id] if group_id is not None else []
+        out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA)
+        _write_entries(out)
+        return out.to_dicts()
+
+
+def add_to_group(symbol: str, group_id: str) -> list[dict]:
+    """把标的加入一个分组(多组成员关系: 不影响已属于的其他分组)。"""
+    with _LOCK:
+        groups = _read_groups()
+        _validate_group_id(group_id, groups)
+        rows = _read_entries().to_dicts()
+        if not any(row["symbol"] == symbol for row in rows):
+            raise KeyError(symbol)
+        for row in rows:
+            if row["symbol"] == symbol:
+                gids = row["group_ids"] or []
+                if group_id not in gids:
+                    gids.append(group_id)
+                    row["group_ids"] = gids
+        out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA)
+        _write_entries(out)
+        return out.to_dicts()
+
+
+def remove_from_group(symbol: str, group_id: str) -> list[dict]:
+    """把标的移出一个分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
+    with _LOCK:
+        groups = _read_groups()
+        _validate_group_id(group_id, groups)
+        rows = _read_entries().to_dicts()
+        if not any(row["symbol"] == symbol for row in rows):
+            raise KeyError(symbol)
+        for row in rows:
+            if row["symbol"] == symbol:
+                row["group_ids"] = [g for g in (row["group_ids"] or []) if g != group_id]
+        out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA)
+        _write_entries(out)
+        return out.to_dicts()
+
+
+def _strip_group(df: pl.DataFrame, group_id: str) -> pl.DataFrame:
+    """从所有条目的 group_ids 中摘掉指定分组(删除分组/清空分组共用)。"""
+    rows = df.to_dicts()
+    for row in rows:
+        gids = row.get("group_ids") or []
+        if group_id in gids:
+            row["group_ids"] = [g for g in gids if g != group_id]
+    return pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()
 
 
 def clear_group(group_id: str) -> list[dict]:
-    """清空分组成员:把该分组内所有条目 group_id 置 null(变未分组),保留分组定义。"""
+    """清空分组成员:把该分组标签从所有条目摘掉(变未分组),保留分组定义。"""
     with _LOCK:
         groups = _read_groups()
         if not any(group["id"] == group_id for group in groups):
             raise KeyError(group_id)
-        df = _read_entries().with_columns(
-            pl.when(pl.col("group_id") == group_id)
-            .then(None)
-            .otherwise(pl.col("group_id"))
-            .alias("group_id")
-        )
+        df = _strip_group(_read_entries(), group_id)
         _write_entries(df)
         return df.to_dicts()
 

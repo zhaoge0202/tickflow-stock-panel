@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, ChevronUp, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
 import { Modal } from '@/components/Modal'
@@ -535,37 +536,138 @@ function GroupManagerDialog({
 
 interface GroupPickerProps {
   groups: WatchlistGroup[]
-  groupId?: string | null
+  /** 该标的当前所属分组 id 列表 */
+  groupIds: string[]
   symbol: string
   disabled?: boolean
-  onChange: (symbol: string, groupId: string | null) => void
+  /** 勾选=加入该分组, 取消勾选=仅移出该分组 (标的保留在自选中) */
+  onToggleMember: (symbol: string, groupId: string, member: boolean) => void
 }
 
-export function WatchlistGroupPicker({ groups, groupId, symbol, disabled, onChange }: GroupPickerProps) {
-  const group = groups.find(item => item.id === groupId)
-  const groupName = group?.name ?? '未分组'
-  const color = resolveWatchlistGroupColor(group?.color)
+export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onToggleMember }: GroupPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState({ top: 0, left: 0, flipUp: false })
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+
+  const POP_WIDTH = 176
+  const openMenu = () => {
+    const rect = btnRef.current?.getBoundingClientRect()
+    if (rect) {
+      // 面板右对齐按钮 (视口边界保护); 底部放不下时翻转到按钮上方
+      const estHeight = groups.length * 28 + 44
+      const flipUp = rect.bottom + estHeight > window.innerHeight && rect.top > estHeight
+      setPos({
+        top: flipUp ? rect.top - 4 : rect.bottom + 4,
+        left: Math.max(8, Math.min(rect.right - POP_WIDTH, window.innerWidth - POP_WIDTH - 8)),
+        flipUp,
+      })
+    }
+    setOpen(true)
+  }
+
+  // 外部点击 / Esc 关闭 (按钮与面板自身除外)
+  useEffect(() => {
+    if (!open) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDocMouseDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const memberSet = new Set(groupIds)
+  const memberGroups = groupIds
+    .map(gid => groups.find(g => g.id === gid))
+    .filter((g): g is WatchlistGroup => !!g)
+  const dots = memberGroups.slice(0, 3)
+  const titleNames = memberGroups.map(g => g.name).join('、')
+
   return (
-    <label
-      className={`relative inline-flex h-5 w-5 items-center justify-center rounded border transition-colors ${
-        group
-          ? `${color.text} ${color.border} ${color.background}`
-          : 'border-transparent text-muted hover:border-accent/30 hover:text-accent'
-      } ${disabled ? 'opacity-40' : ''}`}
-      title={`分组：${groupName}`}
-    >
-      <FolderInput className="h-3.5 w-3.5" />
-      <select
-        value={groupId ?? ''}
+    <>
+      <button
+        ref={btnRef}
+        type="button"
         disabled={disabled}
+        onClick={event => { event.stopPropagation(); open ? setOpen(false) : openMenu() }}
+        className={`relative inline-flex h-5 items-center justify-center gap-0.5 rounded border border-transparent px-1 transition-colors ${
+          memberGroups.length > 0
+            ? 'hover:border-accent/30'
+            : 'text-muted hover:border-accent/30 hover:text-accent'
+        } ${disabled ? 'opacity-40' : ''}`}
+        title={memberGroups.length === 0 ? '未分组 — 点击设置分组' : `分组：${titleNames}`}
         aria-label={`${symbol} 的分组`}
-        onClick={event => event.stopPropagation()}
-        onChange={event => onChange(symbol, event.target.value || null)}
-        className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
-        <option value="">未分组</option>
-        {groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
-      </select>
-    </label>
+        {dots.length === 0 ? (
+          <FolderInput className="h-3.5 w-3.5" />
+        ) : (
+          <span className="flex items-center gap-0.5">
+            {dots.map(g => <span key={g.id} className={`h-2 w-2 rounded-full ${resolveWatchlistGroupColor(g.color).dot}`} />)}
+            {memberGroups.length > 3 && (
+              <span className="font-mono text-[9px] leading-none text-muted">+{memberGroups.length - 3}</span>
+            )}
+          </span>
+        )}
+      </button>
+      {open && createPortal(
+        <div
+          ref={popRef}
+          role="menu"
+          aria-label={`${symbol} 的分组`}
+          style={{
+            position: 'fixed',
+            top: pos.flipUp ? undefined : pos.top,
+            bottom: pos.flipUp ? window.innerHeight - pos.top : undefined,
+            left: pos.left,
+            width: POP_WIDTH,
+          }}
+          className="z-50 rounded-card border border-border bg-base p-1 shadow-xl"
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="px-2 pb-1 pt-1.5 text-[10px] text-muted">加入分组（可多选）</div>
+          {groups.length === 0 ? (
+            <div className="px-2 py-2 text-xs text-muted">暂无分组，请先新建</div>
+          ) : groups.map(group => {
+            const color = resolveWatchlistGroupColor(group.color)
+            const member = memberSet.has(group.id)
+            return (
+              <button
+                key={group.id}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={member}
+                onClick={() => onToggleMember(symbol, group.id, !member)}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-elevated ${
+                  member ? color.text : 'text-secondary'
+                }`}
+              >
+                <span className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border ${
+                  member ? `${color.border} ${color.background}` : 'border-border'
+                }`}>
+                  {member && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color.dot}`} />
+                <span className="min-w-0 flex-1 truncate">{group.name}</span>
+              </button>
+            )
+          })}
+          {groups.length > 0 && groupIds.length === 0 && (
+            <div className="border-t border-border/60 px-2 pb-1 pt-1.5 text-[10px] text-muted">
+              未加入任何分组 — 标的仍在自选中
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }
