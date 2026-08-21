@@ -1,11 +1,16 @@
 """异动边缘统计测试 — 偏离列附着 + 规则口径 + 快照接近度。"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
-from app.indicators.pipeline import attach_deviation_columns, load_benchmark_momentum
+from app.indicators.pipeline import (
+    attach_deviation_columns,
+    attach_deviation_columns_today,
+    benchmark_momentum_today,
+    load_benchmark_momentum,
+)
 from app.services.abnormal_moves import (
     _hist_cache,
     _hist_cache_lock,
@@ -69,6 +74,99 @@ def test_attach_deviation_columns_missing_benchmark(tmp_path) -> None:
     assert out["deviate_3d"][0] is None
 
 
+# ── 盘中路径: 今日基准动量外推 + 单日帧偏离附着 ──────────────────
+
+_BENCH_DAYS = [date(2026, 8, 11), date(2026, 8, 12), date(2026, 8, 13),
+               date(2026, 8, 14), date(2026, 8, 15), date(2026, 8, 18)]
+
+
+def _write_sh_bench(tmp_path) -> None:
+    # 上证指数 6 日收盘 10..15, 末值 15 为昨收
+    _write_index_daily(tmp_path, [("000001.SH", d, 10.0 + i) for i, d in enumerate(_BENCH_DAYS)])
+
+
+def test_benchmark_momentum_today_math(tmp_path) -> None:
+    _write_sh_bench(tmp_path)
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+
+    out = benchmark_momentum_today(tmp_path, quotes)
+    row = out.row(0, named=True)
+    # 今收 = 15 x 1.10 = 16.5; 3 个交易日前的收盘 = 13 (与全量路径 shift(3) 同口径)
+    # mom3d = 16.5/13 - 1
+    assert abs(row["bench_mom3d"] - (16.5 / 13 - 1)) < 1e-9
+    # 10/30 日窗口收盘数不足 → null
+    assert row["bench_mom10d"] is None
+    assert row["bench_mom30d"] is None
+
+    # 无实时行情 → rt 按 0 处理: mom3d = 15/13 - 1
+    out0 = benchmark_momentum_today(tmp_path, None)
+    assert abs(out0.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9
+
+
+def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
+    # 指数监控盘写入的今日行不能当昨收 (否则实时涨跌被重复叠加)
+    today = date.today()
+    rows = [("000001.SH", d, 10.0 + i) for i, d in enumerate(_BENCH_DAYS)]
+    rows.append(("000001.SH", today, 99.0))  # 今日脏行
+    _write_index_daily(tmp_path, rows)
+
+    out = benchmark_momentum_today(tmp_path, None)
+    assert abs(out.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9
+
+
+def test_attach_deviation_columns_today(tmp_path) -> None:
+    _write_sh_bench(tmp_path)
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+    # 单日帧: 增量路径产出的 momentum 列 (无 date 历史, 无法 shift 补算)
+    today_df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "momentum_3d": [0.5, 0.2],
+            "momentum_10d": [0.2, None],
+            "momentum_30d": [1.0, None],
+        }
+    )
+    out = attach_deviation_columns_today(today_df, tmp_path, quotes)
+    # SH: 0.5 - (16.5/13 - 1)
+    assert abs(out["deviate_3d"][0] - (0.5 - (16.5 / 13 - 1))) < 1e-9
+    # SZ 无深证基准 → 按选基设计回退上证基准 (rt=0): 0.2 - (15/13 - 1)
+    assert abs(out["deviate_3d"][1] - (0.2 - (15.0 / 13 - 1))) < 1e-9
+    assert "bench_close" not in out.columns
+
+
+def test_attach_deviation_columns_today_missing_momentum(tmp_path) -> None:
+    # 全量回退路径可能缺 momentum_3d: 该窗口置 null, 其余窗口正常
+    days = [date(2026, 7, 1) + timedelta(days=i) for i in range(35)]
+    _write_index_daily(tmp_path, [("000001.SH", d, 10.0 + i) for i, d in enumerate(days)])
+    df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "momentum_10d": [0.2],
+            "momentum_30d": [1.0],
+        }
+    )
+    out = attach_deviation_columns_today(df, tmp_path, None)
+    assert out["deviate_3d"][0] is None
+    assert out["deviate_10d"][0] is not None
+    assert out["deviate_30d"][0] is not None
+
+
+def test_attach_deviation_columns_no_bench_close_leak(tmp_path) -> None:
+    # load_benchmark_momentum 新增 bench_close 列后, 冷路径输出不应泄漏该列
+    _write_sh_bench(tmp_path)
+    stock = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "date": [date(2026, 8, 18)],
+            "close": [15.0],
+        }
+    )
+    out = attach_deviation_columns(stock, tmp_path)
+    assert "bench_close" not in out.columns
+    frame = load_benchmark_momentum(tmp_path)
+    assert "bench_close" in frame.columns
+
+
 def test_board_and_st_rules() -> None:
     assert board_of("600000.SH") == "主板"
     assert board_of("000001.SZ") == "主板"
@@ -79,13 +177,17 @@ def test_board_and_st_rules() -> None:
     assert is_st_name("正常股") is False
 
     main = rule_for("600000.SH", "正常股")
-    assert main.thresholds == {3: 0.20, 10: 1.00, 30: 2.00}
+    # 3日对称 ±20%; 严重异动负向更严: 10日+100%(-50%), 30日+200%(-70%)
+    assert main.thresholds == {3: (0.20, 0.20), 10: (1.00, 0.50), 30: (2.00, 0.70)}
+    # 2026-07-06 起主板风险警示股票与普通股票同标准 (原±15%特别规定已废止)
     st = rule_for("600000.SH", "ST 某某")
-    assert st.thresholds == {3: 0.15, 10: 0.50, 30: 1.00}
+    assert st.thresholds == main.thresholds
+    assert st.st is True
     gem = rule_for("301123.SZ", "正常股")
-    assert gem.thresholds[3] == 0.30
+    assert gem.thresholds[3] == (0.30, 0.30)
+    assert gem.thresholds[10] == (1.00, 0.50)
     bse = rule_for("920001.BJ", "正常股")
-    assert bse.thresholds[3] == 0.40
+    assert bse.thresholds[3] == (0.40, 0.40)
 
 
 class _FakeRepo:
@@ -159,6 +261,44 @@ def test_build_overview_cache_date_today_no_double_count() -> None:
     result = build_overview(_TodayRepo(df), _FakeQuotes(), min_closeness=0.5)
     row = result["rows"][0]
     assert abs(row["windows"]["3d"]["value"] - 0.19) < 1e-9
+
+
+def test_build_overview_negative_side_stricter_threshold() -> None:
+    """严重异动负向阈值更严 (10日-50%/30日-70%), 跌方向更早触发。"""
+    with _hist_cache_lock:
+        _hist_cache.clear()
+
+    class _TodayRepo(_FakeRepo):
+        def get_enriched_latest(self):
+            return self._df, date.today()
+
+    df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600001.SH"],
+            "name": ["跌一", "跌二"],
+            "close": [10.0, 20.0],
+            "change_pct": [-0.05, -0.05],
+            # -0.55: 旧对称口径 0.55/1.00=0.55 (观察); 新口径 0.55/0.50=1.1 (触发)
+            # -0.75: 30日 0.75/0.70≈1.07 (触发)
+            "deviate_3d": [None, None],
+            "deviate_10d": [-0.55, None],
+            "deviate_30d": [None, -0.75],
+        }
+    )
+    result = build_overview(_TodayRepo(df), None, min_closeness=0.5)
+    by_symbol = {r["symbol"]: r for r in result["rows"]}
+    a = by_symbol["600000.SH"]
+    assert a["windows"]["10d"]["threshold"] == 0.50
+    assert abs(a["windows"]["10d"]["closeness"] - 1.1) < 1e-9
+    assert a["status"] == "triggered"
+    b = by_symbol["600001.SH"]
+    assert b["windows"]["30d"]["threshold"] == 0.70
+    assert abs(b["windows"]["30d"]["closeness"] - round(0.75 / 0.7, 4)) < 1e-9
+    assert b["status"] == "triggered"
+    # 正向阈值不变: +100%/+200% (在正偏离用例中覆盖, 这里验证规则表)
+    main = rule_for("600000.SH", "正常股")
+    assert main.thresholds[10] == (1.00, 0.50)
+    assert main.thresholds[30] == (2.00, 0.70)
 
 
 # ── 监控规则接入 (type=abnormal) ────────────────────────

@@ -1,13 +1,19 @@
 """异动边缘统计 — 按交易所异动规则口径实时计算个股接近度。
 
-规则 (近似口径, 与交易所《交易规则》的异常波动/严重异常波动披露阈值对齐):
-- 主板:     连续3日收盘价涨跌幅偏离值累计 ±20% (风险警示 ±15%)
-- 创业板/科创板: 3日 ±30%
+规则 (近似口径, 与交易所《交易规则》的异常波动/严重异常波动披露阈值对齐;
+主板/科创板条款号指上交所《交易规则(2026年修订)》, 2026-07-06 施行):
+- 主板:     连续3日收盘价涨跌幅偏离值累计 ±20% (5.4.2)
+- 创业板/科创板: 3日 ±30% (科创板 6.10)
 - 北交所:   3日 ±40%
-- 严重异常波动: 10日累计偏离 +100% (风险警示 +50%), 30日 +200% (风险警示 +100%)
+- 严重异常波动 (5.4.3/6.11): 10日累计偏离 +100%(-50%), 30日 +200%(-70%) —
+  负向阈值显著严于正向 (跌方向更早触发), 各板块相同。
+  「10日内4次同向异常波动」情形 (科创板3次) 需事件计数, 暂未实现。
+- 风险警示 (ST/*ST): 2026-07-06 起主板风险警示股票涨跌幅限制调整为 10%,
+  异常波动特别规定 (原 3日±15% / 10日+50% / 30日+100%) 同步废止,
+  与主板普通股票适用同一套标准 (见 price_limits.MAIN_BOARD_ST_LIMIT_CHANGE_DATE)。
 
 偏离值 = 个股 N 日累计涨跌幅 - 对应指数同期涨跌幅 (enriched 运行时列 deviate_Nd)。
-「接近度」= |实时偏离| / 阈值: ≥1 已触发, ≥0.7 边缘, ≥0.5 观察。
+「接近度」= |实时偏离| / 该方向阈值: ≥1 已触发, ≥0.7 边缘, ≥0.5 观察。
 盘中实时叠加: 历史偏离 (已完成交易日) + 今日实时涨跌 - 基准指数今日涨跌。
 """
 
@@ -29,23 +35,22 @@ from app.indicators.pipeline import DEVIATION_WINDOWS
 class AbnormalRule:
     board: str
     st: bool
-    # 各窗口阈值 (小数): {3: 0.20, 10: 1.00, 30: 2.00}
-    thresholds: dict[int, float]
+    # 各窗口阈值 (小数): {窗口: (正向, 负向)} — 严重异动负向阈值更严 (见模块 docstring)
+    thresholds: dict[int, tuple[float, float]]
 
 
-_MAIN = {3: 0.20, 10: 1.00, 30: 2.00}
-_MAIN_ST = {3: 0.15, 10: 0.50, 30: 1.00}
-_GEM_STAR = {3: 0.30, 10: 1.00, 30: 2.00}
-_BSE = {3: 0.40, 10: 1.00, 30: 2.00}
+# 3日异常波动阈值各板块对称; 10/30日严重异动各板块一致且不对称 (+100%/-50%, +200%/-70%)
+_MAIN = {3: (0.20, 0.20), 10: (1.00, 0.50), 30: (2.00, 0.70)}
+_GEM_STAR = {3: (0.30, 0.30), 10: (1.00, 0.50), 30: (2.00, 0.70)}
+_BSE = {3: (0.40, 0.40), 10: (1.00, 0.50), 30: (2.00, 0.70)}
 
 RULES_META: list[dict[str, Any]] = [
-    {"board": "主板", "st": False, "thresholds": {f"{k}d": v for k, v in _MAIN.items()},
-     "note": "3日±20% 异常波动; 10日+100%/30日+200% 严重异常波动"},
-    {"board": "主板", "st": True, "thresholds": {f"{k}d": v for k, v in _MAIN_ST.items()},
-     "note": "风险警示股票 (ST/*ST) 阈值从严"},
-    {"board": "创业板/科创板", "st": False, "thresholds": {f"{k}d": v for k, v in _GEM_STAR.items()},
+    {"board": "主板", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _MAIN.items()},
+     "note": "3日±20% 异常波动; 严重异常波动 10日+100%(-50%) / 30日+200%(-70%), "
+             "负向更严; 2026-07-06 起风险警示(ST)股票同口径 (原±15%特别规定已废止)"},
+    {"board": "创业板/科创板", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _GEM_STAR.items()},
      "note": "20%涨跌幅板块, 3日±30%"},
-    {"board": "北交所", "st": False, "thresholds": {f"{k}d": v for k, v in _BSE.items()},
+    {"board": "北交所", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _BSE.items()},
      "note": "30%涨跌幅板块, 3日±40%"},
 ]
 
@@ -71,11 +76,13 @@ def is_st_name(name: str | None) -> bool:
 def rule_for(symbol: str, name: str | None) -> AbnormalRule:
     board = board_of(symbol)
     st = is_st_name(name)
+    # 主板风险警示股票 2026-07-06 起与普通股票同标准 (涨跌幅 10%,
+    # 异常波动特别规定废止); st 仅为展示标记。创业板/科创板/北交所本就不区分。
     if board == "北交所":
         return AbnormalRule(board, st, _BSE)
     if board in ("创业板", "科创板"):
         return AbnormalRule(board, st, _GEM_STAR)
-    return AbnormalRule(board, st, _MAIN_ST if st else _MAIN)
+    return AbnormalRule(board, st, _MAIN)
 
 
 # ── 快照计算 ──────────────────────────────────────────────
@@ -178,7 +185,8 @@ def build_overview(
             if hist_dev is None:
                 continue
             live = hist_dev + rt_delta
-            threshold = rule.thresholds[n]
+            up_t, down_t = rule.thresholds[n]
+            threshold = up_t if live >= 0 else down_t
             closeness = abs(live) / threshold if threshold > 0 else 0.0
             windows[f"{n}d"] = {
                 "value": round(live, 4),

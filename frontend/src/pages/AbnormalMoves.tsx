@@ -194,7 +194,7 @@ export function AbnormalMoves() {
             口径说明: 偏离值 = 个股 N 日累计涨跌幅 − 对应指数同期涨跌幅 (沪: 上证A指/上证指数,
             深: 深证A指/深证成指, 北: 北证50)。阈值为交易所异常波动披露标准的近似值, 仅供风险提示,
             不构成监管认定。每只股票在 3日/10日/30日 三档各算一个接近度 (|偏离值| ÷ 该档阈值,
-            阈值随板块与 ST 身份不同), 表格「接近度」列与状态取三档中的最高值,
+            阈值随板块不同; 2026-07-06 起主板风险警示股票与普通股票同口径), 表格「接近度」列与状态取三档中的最高值,
             来源窗口的偏离值颜色加重显示、其余窗口淡化; ≥100% 已触发、≥70% 边缘、≥50% 观察。
             偏离列亦可在自选/选股的「异动」列组中启用, 并可作为监控规则与自定义信号的阈值字段。
           </p>
@@ -388,7 +388,12 @@ export function AbnormalMoves() {
 
   function ruleChips() {
     return (view?.rules ?? FALLBACK_RULES).map((rule, i) => {
-      const thr = WINDOW_KEYS.map(w => `${w.replace('d', '日')}±${fmtThreshold(rule.thresholds[w])}`).join(' / ')
+      // 对称窗口 (3日) 显示 ±X%; 严重异动窗口正负阈值不同, 显示 +X%/−Y%
+      const thr = WINDOW_KEYS.map(w => {
+        const t = rule.thresholds[w]
+        const s = t.up === t.down ? `±${fmtThreshold(t.up)}` : `+${fmtThreshold(t.up)}/−${fmtThreshold(t.down)}`
+        return `${w.replace('d', '日')}${s}`
+      }).join(' / ')
       return (
         <div key={i} className="rounded border border-border bg-base px-2.5 py-2">
           <div className="text-[11px] font-medium text-foreground">
@@ -465,15 +470,17 @@ function AbnormalRowView({ row, rank, onPreview }: {
         const info = row.windows[w]
         // 接近度取最高档: 来源窗口颜色加重 (加粗), 其余窗口淡化, 以此区分「哪一档」
         const isDominant = dominant?.key === w
+        // 后端 threshold 已按偏离方向取对应侧 (严重异动负向阈值更严)
+        const sign = info && info.value >= 0 ? '+' : '−'
         return (
           <td key={w} className="px-2 py-1.5 text-right">
             {info ? (
               <span
                 className={`font-mono text-xs tabular-nums ${priceColorClass(info.value)} ${isDominant ? 'font-semibold' : 'opacity-45'}`}
-                title={`阈值 ±${fmtThreshold(info.threshold)} · 接近度 ${(info.closeness * 100).toFixed(0)}%${isDominant ? ' · 本行接近度来源' : ''}`}
+                title={`阈值 ${sign}${fmtThreshold(info.threshold)} · 接近度 ${(info.closeness * 100).toFixed(0)}%${isDominant ? ' · 本行接近度来源' : ''}`}
               >
                 {fmtPct(info.value)}
-                <span className="ml-1 text-[9px] text-muted/60">/{fmtThreshold(info.threshold)}</span>
+                <span className="ml-1 text-[9px] text-muted/60">/{sign}{fmtThreshold(info.threshold)}</span>
               </span>
             ) : (
               <span className="text-muted/40">—</span>
@@ -543,10 +550,11 @@ function SegmentedControl<T extends string>({ value, onChange, options }: {
   )
 }
 
-/** 后端数据未到时的规则表兜底 (与后端 RULES_META 同步维护) */
-const FALLBACK_RULES: Array<{ board: string; st: boolean; thresholds: Record<string, number>; note: string }> = [
-  { board: '主板', st: false, thresholds: { '3d': 0.2, '10d': 1.0, '30d': 2.0 }, note: '' },
-  { board: '主板', st: true, thresholds: { '3d': 0.15, '10d': 0.5, '30d': 1.0 }, note: '' },
-  { board: '创业板/科创板', st: false, thresholds: { '3d': 0.3, '10d': 1.0, '30d': 2.0 }, note: '' },
-  { board: '北交所', st: false, thresholds: { '3d': 0.4, '10d': 1.0, '30d': 2.0 }, note: '' },
+/** 后端数据未到时的规则表兜底 (与后端 RULES_META 同步维护)
+ *  阈值为 {正, 负} 双侧: 3日对称, 严重异动 10日+100%/−50%、30日+200%/−70% (负向更严)
+ *  2026-07-06 起主板风险警示(ST)股票与普通股票同标准 (原±15%特别规定已废止) */
+const FALLBACK_RULES: Array<{ board: string; st: boolean; thresholds: Record<string, { up: number; down: number }>; note: string }> = [
+  { board: '主板', st: false, thresholds: { '3d': { up: 0.2, down: 0.2 }, '10d': { up: 1.0, down: 0.5 }, '30d': { up: 2.0, down: 0.7 } }, note: '' },
+  { board: '创业板/科创板', st: false, thresholds: { '3d': { up: 0.3, down: 0.3 }, '10d': { up: 1.0, down: 0.5 }, '30d': { up: 2.0, down: 0.7 } }, note: '' },
+  { board: '北交所', st: false, thresholds: { '3d': { up: 0.4, down: 0.4 }, '10d': { up: 1.0, down: 0.5 }, '30d': { up: 2.0, down: 0.7 } }, note: '' },
 ]

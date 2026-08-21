@@ -1593,10 +1593,26 @@ class QuoteService:
                         else None
                     ),
                 )
+                # momentum_3d 不在指标全集里, 但 deviate_3d 需要; 多日帧上 shift 补算
+                enriched_full = enriched_full.sort(["symbol", "date"]).with_columns(
+                    (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1).alias("momentum_3d")
+                )
                 enriched_today = enriched_full.filter(pl.col("date") == today)
 
             if enriched_today.is_empty():
                 return
+
+            # 异动偏离列: 盘中路径不经过 _refresh_enriched 冷刷新,
+            # 需在此附着 (基准 = 历史帧 + 指数实时外推), 否则盘中异动列表为空
+            if asset_type == "stock":
+                from app.indicators.pipeline import attach_deviation_columns_today
+                try:
+                    index_quotes = self.get_index_quotes()
+                except Exception:
+                    index_quotes = None
+                enriched_today = attach_deviation_columns_today(
+                    enriched_today, self._repo.store.data_dir, index_quotes
+                )
 
             # ---- 写盘 + 更新缓存 ----
             if merge:

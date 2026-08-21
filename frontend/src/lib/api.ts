@@ -738,7 +738,7 @@ export interface SectorMonitorTarget {
 export interface AbnormalWindowInfo {
   /** 实时偏离值 (小数) */
   value: number
-  /** 该窗口阈值 (小数) */
+  /** 该窗口阈值 (小数) — 后端已按偏离方向取对应侧 (严重异动负向更严) */
   threshold: number
   /** 接近度 |value|/threshold */
   closeness: number
@@ -766,7 +766,8 @@ export interface AbnormalOverview {
   rules: Array<{
     board: string
     st: boolean
-    thresholds: Record<string, number>
+    /** 各窗口双侧阈值 {up: 正向, down: 负向} (小数) */
+    thresholds: Record<string, { up: number; down: number }>
     note: string
   }>
   counts: { triggered: number; edge: number; watch: number }
