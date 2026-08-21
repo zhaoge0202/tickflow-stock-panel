@@ -35,6 +35,36 @@ def _normalize_regime_point(value: Any) -> RegimePoint:
     raise ValueError("市场环境数据格式无效")
 
 
+def clamp_formal_start_for_regime(
+    labels: Sequence[str],
+    required_start: date | None,
+    regime_filter: Mapping[str, Any] | None,
+) -> date | None:
+    """正式首日无前驱交易日时, 把首日让渡为预热, 返回顺延后的正式起点。
+
+    触发条件: 环境过滤实际启用, 且面板首日 >= 正式起点 (数据边界即正式起点,
+    典型如「全部」范围从本地数据第一天开始)。此时首日的 T-1 环境所需的
+    上一交易日不在面板内, fail-closed 校验会直接拒绝; 把首日降级为预热、
+    正式起点顺延到第二个交易日, 首日环境即成为次日的 T-1。
+    其余情况 (有预热日 / 过滤未启用 / 标签不足两天) 原样返回 required_start,
+    无法顺延时由后续校验给出明确报错。
+    """
+    if not regime_filter or required_start is None:
+        return required_start
+    has_states = bool(regime_filter.get("states") or [])
+    has_score = regime_filter.get("min_score") is not None
+    if not (has_states or has_score):
+        return required_start
+    if len(labels) < 2:
+        return required_start
+    if _date_text(labels[0]) < str(required_start):
+        return required_start
+    try:
+        return date.fromisoformat(_date_text(labels[1]))
+    except ValueError:
+        return required_start
+
+
 def align_regime_t_minus_one(
     labels: Sequence[str],
     regime_by_date: Mapping[object, Any],

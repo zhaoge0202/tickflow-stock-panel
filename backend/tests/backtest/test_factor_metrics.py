@@ -389,3 +389,31 @@ def test_align_regime_t_minus_one_is_pure_and_fail_closed_in_required_range():
             required_start=date(2026, 1, 6),
             required_end=date(2026, 1, 7),
         )
+
+
+def test_clamp_formal_start_for_regime():
+    from app.backtest.regime_alignment import clamp_formal_start_for_regime
+
+    # 复现「全部」范围: 正式起点 = 面板首日 (数据边界), 环境过滤启用 → 顺延到次日
+    labels = ("2025-08-18", "2025-08-19", "2025-08-20")
+    filt = {"states": ["strong", "lean_strong"]}
+    assert clamp_formal_start_for_regime(labels, date(2025, 8, 18), filt) == date(2025, 8, 19)
+    # 正式起点早于面板首日 (用户选的日期早于数据) 同样顺延
+    assert clamp_formal_start_for_regime(labels, date(2025, 1, 1), filt) == date(2025, 8, 19)
+
+    # 面板首日早于正式起点 (已有预热日) → 不动
+    assert clamp_formal_start_for_regime(labels, date(2025, 8, 19), filt) == date(2025, 8, 19)
+
+    # 过滤未启用 / 空 filter (无 states 无 min_score) / 起点 None → 不动
+    assert clamp_formal_start_for_regime(labels, date(2025, 8, 18), None) == date(2025, 8, 18)
+    assert clamp_formal_start_for_regime(labels, date(2025, 8, 18), {}) == date(2025, 8, 18)
+    assert clamp_formal_start_for_regime(labels, None, filt) is None
+
+    # 面板只有一天, 无法顺延 → 原样返回 (由 fail-closed 校验兜底)
+    assert clamp_formal_start_for_regime(("2025-08-18",), date(2025, 8, 18), filt) == date(2025, 8, 18)
+
+    # 顺延后 T-1 对齐不再报「正式首日」错误: 首日环境成为次日 T-1
+    regimes = {"2025-08-18": ("weak", 20), "2025-08-19": ("strong", 80)}
+    clamped = clamp_formal_start_for_regime(labels, date(2025, 8, 18), filt)
+    aligned = align_regime_t_minus_one(labels, regimes, required_start=clamped, required_end=None)
+    assert aligned[0] is None and aligned[1] == ("weak", 20.0)
