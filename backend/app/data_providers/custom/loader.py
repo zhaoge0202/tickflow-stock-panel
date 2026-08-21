@@ -131,8 +131,14 @@ def install_plugin(name: str) -> tuple[bool, str]:
                 timeout=300,
             )
         elif runtime == "python":
+            import sys
             # Python 型插件: 优先用 uv pip install (uv 管理的 venv 无 pip 模块),
             # 回退 python -m pip。都装进当前后端虚拟环境。
+            # 关键: uv 分支必须显式传 --python sys.executable。dev.ps1 直接跑
+            # .venv/Scripts/python.exe 而不 activate, 后端进程 VIRTUAL_ENV 为空,
+            # uv pip 会默认选 PATH 上的基础解释器 (如 conda base, 常为只读) →
+            # 装错环境并 exit 2 (访问拒绝)。--python 锁定后端自身 venv, 与 pip
+            # 回退路径 (sys.executable -m pip) 的目标一致。
             # uv 容错: 用户全局 uv.toml 配置错误时 exit 2, 回退 --no-config 重试。
             # UV_HTTP_TIMEOUT=300: akshare 等含大包(如 mini-racer 14MB), 默认 30s 不够。
             req = pdir / "requirements.txt"
@@ -141,7 +147,7 @@ def install_plugin(name: str) -> tuple[bool, str]:
             uv_bin = shutil.which("uv")
             if uv_bin:
                 result = subprocess.run(
-                    [uv_bin, "pip", "install", "-r", str(req)],
+                    [uv_bin, "pip", "install", "--python", sys.executable, "-r", str(req)],
                     capture_output=True, text=True, timeout=300,
                     env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
                 )
@@ -151,12 +157,12 @@ def install_plugin(name: str) -> tuple[bool, str]:
                     result = subprocess.run(
                         [uv_bin, "pip", "install", "--no-config",
                          "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                         "--python", sys.executable,
                          "-r", str(req)],
                         capture_output=True, text=True, timeout=300,
                         env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
                     )
             else:
-                import sys
                 result = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "-r", str(req)],
                     capture_output=True, text=True, timeout=300,
@@ -217,11 +223,12 @@ def uninstall_plugin(name: str) -> tuple[bool, str]:
                 if l.strip() and not l.startswith("#")]
         if not pkgs:
             return True, "requirements.txt 无有效包名"
+        import sys
         uv_bin = _shutil.which("uv")
-        cmd = [uv_bin, "pip", "uninstall", *pkgs] if uv_bin else None
-        if cmd is None:
-            import sys
-            cmd = [sys.executable, "-m", "pip", "uninstall", "-y", *pkgs]
+        # 与 install 一致: uv 分支显式 --python 锁定后端 venv (无 VIRTUAL_ENV 时
+        # 会默认落到 PATH 基础解释器), 与 pip 回退 (sys.executable -m pip) 目标一致。
+        cmd = ([uv_bin, "pip", "uninstall", "--python", sys.executable, *pkgs]
+               if uv_bin else [sys.executable, "-m", "pip", "uninstall", "-y", *pkgs])
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:

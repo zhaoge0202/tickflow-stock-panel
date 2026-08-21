@@ -110,6 +110,51 @@ def current_ai_model() -> str:
     return secrets_store.get_ai_config("ai_model", settings.ai_model)
 
 
+def current_ai_max_output_tokens() -> int:
+    """当前 AI 输出上限 (max_tokens): secrets.json 优先, 否则 config 默认。"""
+    return secrets_store.get_ai_config_int("ai_max_output_tokens", settings.ai_max_output_tokens)
+
+
+def current_ai_context_window() -> int:
+    """当前 AI 输入上下文窗口上限 (约 token): secrets.json 优先, 否则 config 默认。"""
+    return secrets_store.get_ai_config_int("ai_context_window", settings.ai_context_window)
+
+
+def _resolve_max_tokens(max_tokens: int | None) -> int:
+    """任务请求的 max_tokens 钳制到配置输出上限; 未传时用配置上限。"""
+    cap = current_ai_max_output_tokens()
+    if max_tokens is None:
+        return cap
+    return max(1, min(int(max_tokens), cap))
+
+
+def _estimate_input_tokens(messages: Sequence[Message]) -> int:
+    """粗略估算输入 token 数: 中文按 1 字 1 token, 其余按 4 字符 1 token。"""
+    total = 0
+    for m in messages:
+        text = str(m.get("content") or "")
+        cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+        total += cjk + (len(text) - cjk) // 4 + 1
+    return max(1, total)
+
+
+def _check_input_budget(messages: Sequence[Message], *, max_tokens: int) -> None:
+    """输入估算超出上下文窗口时给出明确报错, 避免上游 400 或静默截断。
+
+    token 计数不精确, 仅作安全网: 用中/英文混合估算, 只有明显超窗才拒绝;
+    用户可在 AI 设置里调大『上下文窗口』。
+    """
+    context_window = current_ai_context_window()
+    if context_window <= 0:
+        return
+    est = _estimate_input_tokens(messages)
+    if est + max_tokens > context_window:
+        raise ValueError(
+            f"输入过长: 估算输入约 {est} tokens, 加上输出预算 {max_tokens} tokens, "
+            f"超过上下文窗口 {context_window}。请缩短输入, 或在 AI 设置中调大『上下文窗口』。"
+        )
+
+
 def current_codex_command() -> str:
     return normalize_codex_command(
         secrets_store.get_ai_config("ai_codex_command", settings.ai_codex_command),
@@ -193,10 +238,15 @@ async def generate_ai_text(
     messages: Sequence[Message],
     *,
     temperature: float | None = 0.3,
-    max_tokens: int = 3000,
+    max_tokens: int | None = None,
     timeout: float = 180.0,
 ) -> str:
-    """Return a complete AI response from the currently configured provider."""
+    """Return a complete AI response from the currently configured provider.
+
+    max_tokens 未传时取配置的输出上限; 显式传入也会被钳制到配置上限。
+    """
+    max_tokens = _resolve_max_tokens(max_tokens)
+    _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
         return await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
     return await _run_openai_once(
@@ -211,7 +261,7 @@ async def stream_ai_text(
     messages: Sequence[Message],
     *,
     temperature: float | None = 0.5,
-    max_tokens: int = 4000,
+    max_tokens: int | None = None,
     timeout: float = 180.0,
 ) -> AsyncIterator[str]:
     """Yield text deltas from the configured provider.
@@ -219,6 +269,8 @@ async def stream_ai_text(
     Codex CLI only exposes the final assistant message for this use case, so it
     yields one complete chunk after the command exits.
     """
+    max_tokens = _resolve_max_tokens(max_tokens)
+    _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
         yield await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
         return

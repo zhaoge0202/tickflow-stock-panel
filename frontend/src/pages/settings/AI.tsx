@@ -13,6 +13,12 @@ import { QK } from '@/lib/queryKeys'
 const INPUT_CLS =
   'w-full h-9 px-2.5 rounded-lg bg-base border-0 ring-1 ring-border/30 text-xs font-mono text-foreground placeholder:text-muted/30 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow'
 
+// 空/非法输入 → undefined (后端保持原值), 合法正整数 → int
+const toPositiveInt = (v: string) => {
+  const n = parseInt(v, 10)
+  return Number.isInteger(n) && n > 0 ? n : undefined
+}
+
 const CODEX_PROVIDER = 'codex_cli'
 const OPENAI_PROVIDER = 'openai_compat'
 const CODEX_COMMAND = 'codex'
@@ -65,6 +71,8 @@ export function SettingsAIPanel() {
   const [codexCommand, setCodexCommand] = useState(CODEX_COMMAND)
   const [customUa, setCustomUa] = useState(false)
   const [userAgent, setUserAgent] = useState('')
+  const [maxOutputTokens, setMaxOutputTokens] = useState('')
+  const [contextWindow, setContextWindow] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -114,6 +122,8 @@ export function SettingsAIPanel() {
     const ua = s.ai_user_agent ?? ''
     setCustomUa(!!ua)
     setUserAgent(ua)
+    setMaxOutputTokens(String(s?.ai_max_output_tokens ?? 8192))
+    setContextWindow(String(s?.ai_context_window ?? 64000))
   }, [s])
 
   const payload = () => ({
@@ -124,6 +134,8 @@ export function SettingsAIPanel() {
     codex_command: isCodexProvider ? CODEX_COMMAND : codexCommand,
     codex_reasoning_effort: isCodexProvider ? codexReasoningEffort : '',
     user_agent: customUa ? userAgent : '',
+    max_output_tokens: toPositiveInt(maxOutputTokens),
+    context_window: toPositiveInt(contextWindow),
   })
 
   const save = useMutation({
@@ -139,6 +151,8 @@ export function SettingsAIPanel() {
         ai_codex_command: result.ai_codex_command ?? (isCodexProvider ? CODEX_COMMAND : codexCommand),
         ai_codex_reasoning_effort: result.ai_codex_reasoning_effort ?? (isCodexProvider ? codexReasoningEffort : ''),
         ai_configured: result.ai_configured ?? (isCodexProvider ? true : (apiKey ? true : prev.ai_configured)),
+        ai_max_output_tokens: result.ai_max_output_tokens ?? toPositiveInt(maxOutputTokens),
+        ai_context_window: result.ai_context_window ?? toPositiveInt(contextWindow),
         ...(apiKey ? {
           has_ai_key: true,
           ai_api_key_masked: `${apiKey.slice(0, 4)}......${apiKey.slice(-4)}`,
@@ -159,6 +173,8 @@ export function SettingsAIPanel() {
       setModel('')
       setCodexReasoningEffort('')
       setCodexCommand(CODEX_COMMAND)
+      setMaxOutputTokens('8192')
+      setContextWindow('64000')
       setTestResult(null)
       qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
         ...prev,
@@ -167,6 +183,8 @@ export function SettingsAIPanel() {
         ai_model: '',
         ai_codex_command: CODEX_COMMAND,
         ai_codex_reasoning_effort: '',
+        ai_max_output_tokens: 8192,
+        ai_context_window: 64000,
         has_ai_key: false,
         ai_configured: false,
         ai_api_key_masked: '',
@@ -361,6 +379,17 @@ export function SettingsAIPanel() {
               </div>
             </>
           )}
+
+          <div className="border-t border-border/20 pt-4">
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="输出上限 max_tokens" hint="所有 AI 任务的输出 token 上限, 任务请求会被钳制到此值; 默认 8192">
+                <input type="number" min={1} value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} placeholder="8192" className={INPUT_CLS} />
+              </Field>
+              <Field label="上下文窗口 (输入上限)" hint="输入估算超出此窗口时会报错并提示调大; 默认 64000">
+                <input type="number" min={1} value={contextWindow} onChange={e => setContextWindow(e.target.value)} placeholder="64000" className={INPUT_CLS} />
+              </Field>
+            </div>
+          </div>
         </div>
       </Card>
 

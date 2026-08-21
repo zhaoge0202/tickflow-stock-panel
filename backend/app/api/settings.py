@@ -59,6 +59,8 @@ def get_settings() -> dict:
         current_ai_model,
         current_codex_command,
         current_codex_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
     )
 
     key = secrets_store.get_tickflow_key()
@@ -84,6 +86,8 @@ def get_settings() -> dict:
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -243,6 +247,8 @@ class AiSettingsIn(BaseModel):
     codex_command: str = ""
     codex_reasoning_effort: str = ""
     user_agent: str = ""
+    max_output_tokens: int | None = None   # 输出上限, 钳制所有任务的 max_tokens
+    context_window: int | None = None      # 输入上下文窗口上限 (约 token)
 
 
 @router.post("/ai")
@@ -255,6 +261,8 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         current_ai_provider,
         current_codex_command,
         current_codex_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         normalize_codex_command,
         normalize_codex_reasoning_effort,
     )
@@ -293,6 +301,18 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
 
+    # 输出上限 / 输入上下文窗口 (数值配置, 缺省保持原值)
+    if req.max_output_tokens is not None:
+        if req.max_output_tokens <= 0:
+            raise HTTPException(status_code=400, detail="输出上限必须为正整数")
+        updates["ai_max_output_tokens"] = req.max_output_tokens
+        settings.ai_max_output_tokens = req.max_output_tokens
+    if req.context_window is not None:
+        if req.context_window <= 0:
+            raise HTTPException(status_code=400, detail="上下文窗口必须为正整数")
+        updates["ai_context_window"] = req.context_window
+        settings.ai_context_window = req.context_window
+
     if updates:
         secrets_store.save(updates)
 
@@ -304,6 +324,8 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_configured": ai_configured(provider),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -315,7 +337,7 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort")
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort", "ai_max_output_tokens", "ai_context_window")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
@@ -323,6 +345,8 @@ def clear_ai_settings() -> dict:
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
     settings.ai_codex_reasoning_effort = ""
+    settings.ai_max_output_tokens = 8192
+    settings.ai_context_window = 64000
 
     return {"ok": True}
 
