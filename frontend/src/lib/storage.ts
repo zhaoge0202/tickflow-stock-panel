@@ -60,6 +60,9 @@ export const storage = {
   /** 自选列表板块筛选 */
   watchlistBoardFilter: kv<string[]>('watchlist_boardFilter'),
 
+  /** 自选列表排除 ST 标的 (默认不排除) */
+  watchlistExcludeST:    kv<boolean>('watchlist_excludeST'),
+
   /** 自选分组统计条配置 (metric: 统计指标, sort: 排序方式, card*: 分组卡片显示项) */
   watchlistGroupStats: kv<{ metric: string; sort: string; cardTopN?: number; cardColorBar?: boolean; cardRank?: boolean }>('watchlist_groupStats'),
 

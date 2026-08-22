@@ -31,6 +31,14 @@ from app.tickflow.rate_limits import chunked, resolve_limit
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
+# 数据版本号: 每次写盘 +1 (在 _LOCK 内递增, 读取免锁)。供监控引擎等进程内
+# 消费方做缓存失效判断 —— 版本没变就不必重读文件, 版本一变立即拿到新成员。
+_REVISION = 0
+
+
+def revision() -> int:
+    """自选/分组数据版本号, 每次写操作递增。"""
+    return _REVISION
 _MAX_GROUP_NAME_LENGTH = 24
 DEFAULT_GROUP_COLOR = "sky"
 GROUP_COLORS = frozenset({
@@ -92,6 +100,7 @@ def _read_entries() -> pl.DataFrame:
 
 
 def _write_entries(df: pl.DataFrame) -> None:
+    global _REVISION
     p = _path()
     # 首次从旧 schema 迁移到 group_ids 前, 备份原文件(一次性)
     if p.exists():
@@ -103,6 +112,7 @@ def _write_entries(df: pl.DataFrame) -> None:
     tmp = p.with_suffix(p.suffix + ".tmp")
     df.select(list(_ENTRY_SCHEMA)).write_parquet(tmp)
     os.replace(tmp, p)
+    _REVISION += 1
 
 
 def _read_groups() -> list[dict]:
@@ -129,10 +139,12 @@ def _read_groups() -> list[dict]:
 
 
 def _write_groups(groups: list[dict]) -> None:
+    global _REVISION
     p = _groups_path()
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, p)
+    _REVISION += 1
 
 
 def _normalize_group_name(name: str) -> str:

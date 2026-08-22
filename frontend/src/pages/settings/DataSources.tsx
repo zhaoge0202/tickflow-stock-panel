@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, Database, Plus, RefreshCw, Zap, FileWarning } from 'lucide-react'
+import { Check, Database, Plus, RefreshCw, Zap, FileWarning, Puzzle } from 'lucide-react'
 import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -199,10 +199,10 @@ export function SettingsDataSourcesPanel() {
                     {item.display_name}
                   </span>
                   {item.name === 'tickflow' && (
-                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">内置</span>
+                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">第三方</span>
                   )}
                   {pluginNames.has(item.name) && (
-                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">插件</span>
+                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">第三方</span>
                   )}
                   {/* 右侧操作区: 插件未安装→安装按钮; 已激活→使用中; 否则→使用/卸载 */}
                   {pluginUnavailable ? (
@@ -310,6 +310,23 @@ export function SettingsDataSourcesPanel() {
           <span>点「使用」切换为当前数据源</span>
           <span className="text-muted/30">·</span>
           <span>未启用的数据集自动回退 TickFlow</span>
+        </div>
+
+        {/* 插件化说明 + 第三方数据源配置文档指引 (与引导页同口径) */}
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-border/60 bg-elevated/20 px-3 py-2.5">
+          <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
+          <div className="text-[11px] leading-relaxed text-muted">
+            <span className="text-secondary">数据源已插件化</span>
+            ,接入自有行情有两条路径:用 YAML 描述自有 HTTP 接口,放入
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">data/data_sources/*.yaml</span>
+            (也可用「新增数据源」表单配置);或开发插件源,放入
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">backend/app/plugins/</span>
+            目录。接入方法与字段映射详见
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
+            与
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
+            。
+          </div>
         </div>
       </section>
 
@@ -441,7 +458,7 @@ function TickFlowDetail({ active, onSwitch, switching }: { active: boolean; onSw
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
-              <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">内置默认</span>
+              <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">第三方</span>
               {active && (
                 <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
                   <Check className="h-2.5 w-2.5" /> 当前使用

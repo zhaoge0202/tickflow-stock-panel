@@ -610,10 +610,17 @@ export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onTog
         {dots.length === 0 ? (
           <FolderInput className="h-3.5 w-3.5" />
         ) : (
-          <span className="flex items-center gap-0.5">
-            {dots.map(g => <span key={g.id} className={`h-2 w-2 rounded-full ${resolveWatchlistGroupColor(g.color).dot}`} />)}
+          // 叠瓦式圆点: 先加的分组在最上层完整显示, 后加的从其右侧露出半圆, 紧凑不撑宽
+          <span className="flex items-center">
+            {dots.map((g, i) => (
+              <span
+                key={g.id}
+                style={{ zIndex: dots.length - i }}
+                className={`relative h-2 w-2 rounded-full ring-1 ring-border/50 ${resolveWatchlistGroupColor(g.color).dot} ${i > 0 ? '-ml-1' : ''}`}
+              />
+            ))}
             {memberGroups.length > 3 && (
-              <span className="font-mono text-[9px] leading-none text-muted">+{memberGroups.length - 3}</span>
+              <span className="ml-0.5 font-mono text-[9px] leading-none text-muted">+{memberGroups.length - 3}</span>
             )}
           </span>
         )}

@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2 } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
+import { fmtPct } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
@@ -63,6 +64,21 @@ function boardTag(symbol: string): { label: string; color: string } | null {
   return null
 }
 
+// ===== 异动边缘 (与异动页同口径) =====
+
+const AB_STATUS_META: Record<string, { label: string; cls: string; bar: string; icon: string }> = {
+  triggered: { label: '已触发', cls: 'bg-danger/20 text-danger font-semibold', bar: 'border-b border-danger/30 bg-danger/[0.08]', icon: 'text-danger' },
+  edge: { label: '异动边缘', cls: 'bg-warning/20 text-warning font-semibold', bar: 'border-b border-warning/30 bg-warning/[0.07]', icon: 'text-warning' },
+  watch: { label: '观察', cls: 'bg-elevated text-secondary font-semibold', bar: 'border-b border-border bg-surface', icon: 'text-secondary' },
+}
+
+/** 异动引擎计算时间 (服务端 asof 秒级时间戳 → 月-日 时:分:秒) */
+function fmtAbnormalCalcTime(asofSec: number): string {
+  const d = new Date(asofSec * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState(loadIntradayDays)
@@ -83,6 +99,22 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     queryFn: api.monitorRulesList,
     enabled: !!symbol,
   })
+  // 异动边缘: 与异动页同 queryKey 共享缓存; 该股处于观察/边缘/触发状态时在图表上方显示信息条
+  const abnormal = useQuery({
+    queryKey: QK.abnormalOverview(0.5, 300),
+    queryFn: () => api.abnormalOverview(0.5, 300),
+    enabled: !!symbol,
+  })
+  const abRow = symbol
+    ? abnormal.data?.rows.find(r => r.symbol === symbol)
+    : undefined
+  // 接近度最高的窗口 (信息条中高亮)
+  const abDominantWindow = abRow
+    ? Object.entries(abRow.windows).reduce(
+        (best, [k, w]) => (!best || w.closeness > best[1].closeness ? [k, w] as const : best),
+        undefined as undefined | readonly [string, { value: number; threshold: number; closeness: number }],
+      )
+    : undefined
   const monitorPriceLines = useMemo(
     () => symbol ? buildMonitorPriceLines(monitorRules.data?.rules ?? [], symbol) : [],
     [monitorRules.data?.rules, symbol],
@@ -393,6 +425,49 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 </div>
               </div>
             )}
+
+            {/* 异动边缘信息条 (与异动页同源; 该股无异动数据时不显示)。整条按状态着色提升辨识度 */}
+            {abRow && (() => {
+              const meta = AB_STATUS_META[abRow.status] ?? AB_STATUS_META.watch
+              return (
+                <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2 shrink-0 ${meta.bar}`}>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <Activity className={`h-3.5 w-3.5 ${meta.icon}`} />
+                    <span className={`text-[11px] font-bold ${meta.icon}`}>异动</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${meta.cls}`}>
+                      {meta.label}
+                    </span>
+                  </span>
+                  {Object.entries(abRow.windows)
+                    .sort((a, b) => parseInt(a[0], 10) - parseInt(b[0], 10))
+                    .map(([w, info]) => {
+                      const dominant = abDominantWindow?.[0] === w
+                      return (
+                        <span
+                          key={w}
+                          title={`近${parseInt(w, 10)}日累计偏离(含实时) / 交易所规则阈值 · 接近度=|偏离|/阈值`}
+                          className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[11px] ${
+                            dominant
+                              ? 'border-border bg-elevated font-semibold text-foreground'
+                              : 'border-border/60 bg-base/40 text-secondary'
+                          }`}
+                        >
+                          {parseInt(w, 10)}日{' '}
+                          <span className={info.value >= 0 ? 'text-bull' : 'text-bear'}>{fmtPct(info.value, 1)}</span>
+                          <span className="text-muted"> / ±{(info.threshold * 100).toFixed(0)}%</span>
+                          <span className="text-muted"> · 接近{(info.closeness * 100).toFixed(0)}%</span>
+                        </span>
+                      )
+                    })}
+                  <span
+                    className="ml-auto shrink-0 font-mono text-[10px] text-muted"
+                    title="异动引擎上次计算时间"
+                  >
+                    计算于 {fmtAbnormalCalcTime(abnormal.data?.asof ?? 0)}
+                  </span>
+                </div>
+              )
+            })()}
 
             {/* 图表内容 */}
             <div className="flex-1 overflow-auto p-4">

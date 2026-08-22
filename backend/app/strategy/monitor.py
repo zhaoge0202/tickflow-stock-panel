@@ -222,6 +222,58 @@ class StrategyMonitorService:
 _SIGNAL_PREFIXES = ("signal_", "csg_")
 
 
+# ── 自选分组作用域: group_id → 成员集合解析 (进程内缓存) ────
+# 缓存按 watchlist 数据版本号失效: 版本不变时零磁盘 IO; 自选页任何增删
+# 分组/成员的操作都会 bump 版本号, 下一轮评估立即拿到新成员 (无需等 TTL)。
+_group_cache_lock = threading.Lock()
+_group_cache: dict[str, Any] = {}
+# 已告警过的「分组已删除」(rule_id, group_id), 防止每轮评估刷日志
+_warned_missing_groups: set[tuple[str, str]] = set()
+
+
+def _watchlist_groups_snapshot() -> dict[str, frozenset[str]]:
+    """返回 {group_id: 成员symbol集}。读前后版本一致才写缓存, 避免缓存住写竞态下的旧数据。"""
+    from app.services import watchlist
+
+    rev_before = watchlist.revision()
+    with _group_cache_lock:
+        cached = _group_cache.get("groups")
+        if cached is not None and _group_cache.get("_rev") == rev_before:
+            return cached
+    groups: dict[str, set[str]] = {g["id"]: set() for g in watchlist.list_groups()}
+    for row in watchlist.list_symbols():
+        for gid in row.get("group_ids") or []:
+            members = groups.get(gid)
+            if members is not None:
+                members.add(str(row["symbol"]))
+    frozen = {gid: frozenset(syms) for gid, syms in groups.items()}
+    if watchlist.revision() == rev_before:
+        with _group_cache_lock:
+            _group_cache["_rev"] = rev_before
+            _group_cache["groups"] = frozen
+    return frozen
+
+
+def _group_members_or_none(rule: dict) -> frozenset[str] | None:
+    """解析规则绑定的分组成员; 分组已删除返回 None, 解析异常返回 None 并记日志。"""
+    group_id = str(rule.get("group_id") or "")
+    try:
+        groups = _watchlist_groups_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("自选分组数据读取失败, 规则 %s 本轮跳过: %s", rule.get("id"), exc)
+        return None
+    members = groups.get(group_id)
+    if members is None:
+        key = (str(rule.get("id") or ""), group_id)
+        if key not in _warned_missing_groups:
+            _warned_missing_groups.add(key)
+            logger.warning(
+                "监控规则 %s 绑定的自选分组 %s 已删除, 本轮跳过 (fail-closed, 恢复分组后自动生效)",
+                rule.get("id"), group_id,
+            )
+    return members
+
+
 def _is_signal_field(field: str) -> bool:
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
@@ -821,10 +873,16 @@ class MonitorRuleEngine:
             threshold = 0.7
         direction = rule.get("direction", "both")
         window_filter = str(rule.get("abnormal_window", "any"))
-        scope_symbols = (
-            {str(s) for s in rule.get("symbols", []) if s}
-            if rule.get("scope") == "symbols" else None
-        )
+        if rule.get("scope") == "symbols":
+            scope_symbols = {str(s) for s in rule.get("symbols", []) if s}
+        elif rule.get("scope") == "watchlist_group":
+            # 异动规则同样支持动态分组; 分组已删除返回 None → 本轮整体跳过
+            members = _group_members_or_none(rule)
+            if members is None:
+                return events
+            scope_symbols = set(members)
+        else:
+            scope_symbols = None
 
         seen: set[str] = set()
         for row in rows:
@@ -1000,6 +1058,13 @@ class MonitorRuleEngine:
             if not syms:
                 return df.head(0)
             return df.filter(pl.col("symbol").is_in(syms))
+        if scope == "watchlist_group":
+            # 动态绑定自选分组: 每轮评估按分组当前成员过滤 (带版本号缓存)。
+            # 分组已删除/暂时为空 → fail-closed 返回空, 绝不退化为全市场。
+            members = _group_members_or_none(rule)
+            if not members:
+                return df.head(0)
+            return df.filter(pl.col("symbol").is_in(list(members)))
         if scope == "sector":
             # sector 过滤需 df 含板块列 (后续接入 ext_data JOIN)。在 JOIN 落地前
             # fail-closed 返回空 —— 绝不退化为「全市场」误触发 (旧行为 return df 会让

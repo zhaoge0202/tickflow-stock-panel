@@ -44,7 +44,6 @@ import {
   RadioTower,
   CheckCircle2,
   BookOpenCheck,
-  ExternalLink,
   ChevronRight,
   ChevronDown,
   Sun,
@@ -67,7 +66,6 @@ import { getFrontendExtensionNavigation } from '@/extensions/registry'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
-const TICKFLOW_REGISTER_URL = 'https://tickflow.org/auth/register?ref=V3KDKGXPEA'
 
 const CORE_INDEXES = [
   { symbol: '000001.SH', name: '上证指数' },
@@ -746,22 +744,19 @@ export function Layout() {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-secondary truncate">实时行情</span>
-                <span className="text-[10px] text-accent/70 font-medium bg-accent/10 px-1.5 py-0.5 rounded">
-                  Free+
+                <span className="text-[10px] text-muted/80 bg-elevated px-1.5 py-0.5 rounded">
+                  不可用
                 </span>
               </div>
               <div className="mt-1.5 text-[10px] leading-snug text-muted">
-                免费注册
-                <a
-                  href={TICKFLOW_REGISTER_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mx-1 inline-flex items-baseline gap-0.5 text-accent/80 hover:text-accent hover:underline"
+                当前数据源无实时行情权限,
+                <button
+                  type="button"
+                  onClick={() => navigate('/settings?tab=data-sources')}
+                  className="mx-0.5 text-accent/80 hover:text-accent hover:underline"
                 >
-                  TickFlow
-                  <ExternalLink className="h-2.5 w-2.5 self-center" />
-                </a>
-                开启个股监控
+                  去配置数据源
+                </button>
               </div>
             </div>
           ) : (

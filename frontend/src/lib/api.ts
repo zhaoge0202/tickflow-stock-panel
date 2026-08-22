@@ -780,8 +780,10 @@ export interface MonitorRule {
   enabled: boolean
   type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal'
   asset_type?: 'stock' | 'etf' | 'index'
-  scope: 'symbols' | 'all' | 'sector'
+  scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
+  /** scope=watchlist_group 时绑定的自选分组 id (成员动态解析, 增删自选自动生效) */
+  group_id?: string | null
   sector?: string | null
   sector_kind?: SectorKind | null
   sector_targets?: SectorMonitorTarget[]

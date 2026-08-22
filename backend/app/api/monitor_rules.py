@@ -79,8 +79,10 @@ class RuleModel(BaseModel):
     enabled: bool = True
     type: str          # strategy | signal | price | market | sector | abnormal
     asset_type: str = "stock"   # stock | etf (etf: strategy 型走 ETF 历史加载器)
-    scope: str = "symbols"   # symbols | all | sector
+    scope: str = "symbols"   # symbols | all | sector | watchlist_group
     symbols: list[str] = []
+    # watchlist_group 作用域: 绑定的自选分组 id (成员动态解析, 增删自选自动生效)
+    group_id: str | None = None
     sector: str | None = None
     sector_kind: str | None = None  # index | concept | industry
     sector_targets: list[SectorTargetModel] = []
@@ -161,6 +163,7 @@ def get_options(request: Request):
         ],
         "scopes": [
             {"key": "symbols", "label": "指定标的"},
+            {"key": "watchlist_group", "label": "自选分组"},
             {"key": "all", "label": "全市场"},
             {"key": "sector", "label": "板块"},
         ],
@@ -227,6 +230,18 @@ def list_rules(request: Request):
                 rule["runtime_warning"] = "部分板块数据已不存在, 请重新选择监控对象"
             elif unavailable:
                 rule["runtime_warning"] = "所选指数未加入实时指数池, 请先在实时监控设置中启用"
+    # 分组作用域规则: 绑定的分组被删除 → 标注运行时警告 (引擎侧已 fail-closed 跳过)
+    group_rules = [rule for rule in rules if rule.get("scope") == "watchlist_group"]
+    if group_rules:
+        from app.services import watchlist as watchlist_service
+
+        try:
+            existing_ids = {g["id"] for g in watchlist_service.list_groups()}
+            for rule in group_rules:
+                if rule.get("group_id") not in existing_ids:
+                    rule["runtime_warning"] = "绑定的自选分组已删除, 规则已暂停监控, 编辑可重新选择"
+        except Exception:  # noqa: BLE001
+            pass
     # 按 created_at 倒序
     rules.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return {"rules": rules}
@@ -273,6 +288,17 @@ def save_rule(req: RuleModel, request: Request):
         monitor_rules.validate(rule)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if rule.get("scope") == "watchlist_group":
+        # 绑定的分组必须存在 (strategy 层校验形状, 存在性在本层校验)
+        from app.services import watchlist as watchlist_service
+
+        group_id = str(rule.get("group_id") or "")
+        try:
+            group_ids = {g["id"] for g in watchlist_service.list_groups()}
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=f"自选分组读取失败: {e}") from e
+        if group_id not in group_ids:
+            raise HTTPException(status_code=400, detail="自选分组不存在或已被删除, 请重新选择")
     if rule.get("type") == "sector":
         sector_service = getattr(request.app.state, "sector_monitor_service", None)
         if sector_service is None:

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -314,7 +314,7 @@ function StockSearchBox({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute right-0 top-full mt-1 z-50 w-64 max-h-[320px] overflow-y-auto rounded-card border border-border bg-base shadow-xl"
+            className="absolute right-0 top-full mt-1 z-50 w-72 max-h-[320px] overflow-y-auto rounded-card border border-border bg-base shadow-xl"
           >
             {results.map((r, i) => {
               const entryGids = existingBySymbol.get(r.symbol)
@@ -332,19 +332,22 @@ function StockSearchBox({
                     className="flex items-center gap-2.5 flex-1 min-w-0 text-left"
                   >
                     <span className="font-mono shrink-0 w-[80px]">{r.symbol}</span>
-                    <span className="truncate text-secondary flex-1">{r.name}</span>
-                    {r.asset_type === 'etf' && (
-                      <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
-                    )}
-                    {r.asset_type === 'index' && (
-                      <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
-                    )}
-                    {(() => {
-                      const b = boardTag(r.symbol)
-                      return b && (
-                        <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
-                      )
-                    })()}
+                    {/* 名称+标签组: 标签紧贴名称文字, 而不是被 flex-1 推到行尾 */}
+                    <span className="flex min-w-0 flex-1 items-center gap-1">
+                      <span className="truncate text-secondary">{r.name}</span>
+                      {r.asset_type === 'etf' && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
+                      )}
+                      {r.asset_type === 'index' && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
+                      )}
+                      {(() => {
+                        const b = boardTag(r.symbol)
+                        return b && (
+                          <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
+                        )
+                      })()}
+                    </span>
                   </button>
                   {inWatchlist ? (
                     // 已加自选: 对勾标识 + 分组勾选面板, 可继续加入/移出其他分组
@@ -366,14 +369,33 @@ function StockSearchBox({
                       />
                     </span>
                   ) : (
-                    <WatchlistAddMenu
-                      onSelect={groupId => onAdd(r.symbol, groupId)}
-                      preferredGroupId={preferredGroupId}
-                      disabled={addPending}
-                      triggerClassName="shrink-0 rounded p-1 text-muted transition-colors hover:bg-accent/10 hover:text-accent disabled:opacity-50"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                    </WatchlistAddMenu>
+                    // 未加自选: + 一键加入当前分组页签 (全部/未分组页签下加为未分组);
+                    // 文件夹图标展开分组菜单, 显式选择目标分组
+                    <span className="flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={event => { event.stopPropagation(); onAdd(r.symbol, preferredGroupId ?? null) }}
+                        disabled={addPending}
+                        className="shrink-0 rounded p-1 text-muted transition-colors hover:bg-accent/10 hover:text-accent disabled:opacity-50 cursor-pointer"
+                        title={
+                          preferredGroupId
+                            ? `加入自选 · 当前分组「${groups.find(g => g.id === preferredGroupId)?.name ?? ''}」`
+                            : '加入自选 (未分组)'
+                        }
+                        aria-label={`快速加入自选 ${r.symbol}`}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                      <WatchlistAddMenu
+                        onSelect={groupId => onAdd(r.symbol, groupId)}
+                        preferredGroupId={preferredGroupId}
+                        disabled={addPending}
+                        triggerClassName="shrink-0 rounded p-1 text-muted transition-colors hover:bg-accent/10 hover:text-accent disabled:opacity-50"
+                        title="展开分组, 选择要加入的自选分组"
+                      >
+                        <FolderPlus className="h-3.5 w-3.5" />
+                      </WatchlistAddMenu>
+                    </span>
                   )}
                 </div>
               )
@@ -1066,6 +1088,15 @@ export function Watchlist() {
     })
   }, [persistBoardFilter])
 
+  // 排除 ST (含 *ST/S*ST 等变体, 按简称含 "ST" 判定), 默认关闭并持久化
+  const [excludeST, setExcludeST] = useState(() => storage.watchlistExcludeST.get(false))
+  const toggleExcludeST = useCallback(() => {
+    setExcludeST(prev => {
+      storage.watchlistExcludeST.set(!prev)
+      return !prev
+    })
+  }, [])
+
   const updateFilter = useCallback((colId: string, patch: { min?: string; max?: string; text?: string }) => {
     setFilters(prev => {
       const next = { ...prev }
@@ -1083,6 +1114,8 @@ export function Watchlist() {
   const resetAllFilters = useCallback(() => {
     setFilters({})
     persistBoardFilter(new Set(BOARDS))
+    setExcludeST(false)
+    storage.watchlistExcludeST.set(false)
   }, [persistBoardFilter])
 
   // 可筛选的内置列
@@ -1116,6 +1149,10 @@ export function Watchlist() {
         return board != null && boardFilter.has(board)
       })
     }
+    // 排除 ST: 按简称判定 (ST/*ST/S*ST 均含 "ST"); 非股票名称不含该标记, 天然不受影响
+    if (excludeST) {
+      result = result.filter(r => !((r.rt_name ?? r.name ?? '').toUpperCase().includes('ST')))
+    }
     // 数值/文本筛选
     const activeFilters = Object.entries(filters).filter(([, v]) => v.min || v.max || v.text)
     if (activeFilters.length > 0) {
@@ -1136,11 +1173,11 @@ export function Watchlist() {
       })
     }
     return result
-  }, [rowsInSelectedGroup, filters, columns, boardFilter])
+  }, [rowsInSelectedGroup, filters, columns, boardFilter, excludeST])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
   const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
-  const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter
+  const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter || excludeST
 
   // 排序（复用共享三态排序 hook）。分时列按「最新分钟收盘 vs 昨收」排序（分时图最后一点同口径），
   // 其余列走共享取值；眼睛关闭时不拉分钟数据，取值为 null → 保持原序。
@@ -1428,6 +1465,23 @@ export function Watchlist() {
                   </button>
                 )
               })}
+            </div>
+          </div>
+          {/* 排除 ST */}
+          <div className="mb-2">
+            <div className="text-[10px] text-muted uppercase tracking-wider mb-0.5">风险警示</div>
+            <div className="flex flex-wrap gap-1">
+              <button
+                onClick={toggleExcludeST}
+                className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                  excludeST
+                    ? 'bg-accent/15 text-accent'
+                    : 'bg-elevated text-secondary hover:text-foreground hover:bg-elevated/80'
+                }`}
+                title="勾选后隐藏简称含 ST 标记的标的 (ST/*ST/S*ST)"
+              >
+                排除ST
+              </button>
             </div>
           </div>
           {COLUMN_GROUPS.map(cat => {

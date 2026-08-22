@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal"}
-SCOPES = {"symbols", "all", "sector"}
+SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
 STRATEGY_NOTIFY_EVENTS = {"buy_signal", "sell_signal", "pool_entry", "pool_exit"}
@@ -224,6 +224,14 @@ def validate(rule: dict) -> None:
         syms = rule.get("symbols")
         if not isinstance(syms, list) or len(syms) == 0:
             raise ValueError("scope=symbols 时 symbols 不能为空")
+    if rule.get("scope") == "watchlist_group":
+        # 动态绑定自选分组: 评估时实时解析成员 (分组后续增删自动生效)。
+        # 分组存在性由 API 层在保存时校验 (strategy 层不依赖 services)。
+        gid = rule.get("group_id")
+        if not isinstance(gid, str) or not gid.strip():
+            raise ValueError("scope=watchlist_group 时必须选择自选分组")
+        if rule.get("asset_type", "stock") != "stock":
+            raise ValueError("自选分组作用域仅支持个股")
     if uses_intraday_signals(rule) and rule.get("scope") != "symbols":
         raise ValueError("分时穿越信号仅支持指定标的")
     # sector 作用域的板块 JOIN 尚未实现: _apply_scope 目前会退化为「全市场」,
@@ -248,6 +256,12 @@ def normalize(rule: dict) -> dict:
     # sector/abnormal 默认全市场 (sector 随后强制 all; abnormal 支持指定标的)
     r.setdefault("scope", "all" if r.get("type") in {"sector", "abnormal"} else "symbols")
     r.setdefault("symbols", [])
+    r.setdefault("group_id", None)
+    # watchlist_group 作用域: 成员动态来自分组, symbols 不参与; 其他作用域清掉残留 group_id
+    if r.get("scope") == "watchlist_group":
+        r["symbols"] = []
+    else:
+        r["group_id"] = None
     r.setdefault("sector", None)
     r.setdefault("sector_kind", None)
     r.setdefault("sector_targets", [])
@@ -279,6 +293,7 @@ def normalize(rule: dict) -> dict:
     if r.get("type") == "sector":
         r["scope"] = "all"
         r["symbols"] = []
+        r["group_id"] = None
     # abnormal 专属默认字段 (异动边缘监控)
     r.setdefault("abnormal_window", "any")
     r.setdefault("logic", "and")

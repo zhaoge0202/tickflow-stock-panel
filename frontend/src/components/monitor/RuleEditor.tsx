@@ -56,6 +56,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   asset_type: 'stock',
   scope: 'symbols',
   symbols: [],
+  group_id: null,
   sector: null,
   sector_kind: 'index',
   sector_targets: [],
@@ -112,19 +113,34 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   })
   const [error, setError] = useState('')
   const [symbolQuery, setSymbolQuery] = useState('')
-  // 「自选导入」下拉: 从自选/自选分组批量并入标的 (与自选页共用查询缓存)
+  const isGroupScope = draft.scope === 'watchlist_group'
+  // 「自选导入」下拉: 从自选/自选分组批量并入标的 (与自选页共用查询缓存)。
+  // 分组作用域模式同样需要分组/成员数据 (选择分组 + 成员预览)。
   const [watchMenuOpen, setWatchMenuOpen] = useState(false)
   const watchMenuRef = useRef<HTMLDivElement>(null)
   const watchlistQ = useQuery({
     queryKey: QK.watchlist,
     queryFn: api.watchlistList,
-    enabled: watchMenuOpen,
+    enabled: watchMenuOpen || isGroupScope,
   })
   const watchGroupsQ = useQuery({
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
-    enabled: watchMenuOpen,
+    enabled: watchMenuOpen || isGroupScope,
   })
+  // 分组选择下拉 (scope=watchlist_group)
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false)
+  const groupMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!groupMenuOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (groupMenuRef.current && !groupMenuRef.current.contains(e.target as Node)) {
+        setGroupMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [groupMenuOpen])
   useEffect(() => {
     if (!watchMenuOpen) return
     const handleClick = (e: MouseEvent) => {
@@ -161,6 +177,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           ? `${base} · ${d.sector_targets[0].name}${d.sector_targets.length > 1 ? ` 等${d.sector_targets.length}个` : ''}`
           : d.type === 'abnormal'
           ? `${base} · 接近度≥${d.threshold_pct ?? 70}%${d.abnormal_window && d.abnormal_window !== 'any' ? ` (${d.abnormal_window.toUpperCase()})` : ''}`
+          : d.scope === 'watchlist_group' && selectedGroup
+          ? `${base} · 分组「${selectedGroup.name}」`
           : d.scope === 'symbols' && d.symbols.length > 0
           ? `${base} · ${d.symbols[0]}${d.symbols.length > 1 ? ` 等${d.symbols.length}只` : ''}`
           : base
@@ -204,6 +222,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         }
       }
       if (d.type !== 'sector' && d.scope === 'symbols' && d.symbols.length === 0) throw new Error('请选择至少一只标的')
+      if (d.type !== 'sector' && d.scope === 'watchlist_group' && !d.group_id) throw new Error('请选择一个自选分组')
       return api.monitorRuleSave(d)
     },
     onSuccess: () => {
@@ -292,6 +311,32 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     return options
   })()
 
+  // ── 自选分组作用域 (scope=watchlist_group): 分组选择 + 只读成员预览 ──
+  const groupList = watchGroupsQ.data?.groups ?? []
+  const watchEntries = watchlistQ.data?.symbols ?? []
+  const groupCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const entry of watchEntries) {
+      for (const gid of entry.group_ids ?? []) counts[gid] = (counts[gid] ?? 0) + 1
+    }
+    return counts
+  }, [watchEntries])
+  const selectedGroup = groupList.find(g => g.id === draft.group_id)
+  const selectedGroupSymbols = useMemo(
+    () => selectedGroup
+      ? watchEntries.filter(e => e.group_ids?.includes(selectedGroup.id)).map(e => e.symbol)
+      : [],
+    [selectedGroup, watchEntries],
+  )
+  // 预览区名称补齐 (分组成员通常不在 draft.symbols 里, 单独批量查询)
+  const groupNamesQ = useQuery({
+    queryKey: ['instrument-names', selectedGroupSymbols.join(',')],
+    queryFn: () => api.instrumentNames(selectedGroupSymbols),
+    enabled: isGroupScope && selectedGroupSymbols.length > 0,
+    staleTime: 5 * 60_000,
+  })
+  const groupNameBySymbol = groupNamesQ.data?.names ?? {}
+
   const selectSectorKind = (kind: SectorKind) => {
     setDraft(d => ({ ...d, sector_kind: kind, sector_targets: [] }))
     setSectorQuery('')
@@ -341,13 +386,20 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const pickerSignals = assetType === 'index'
     ? monitorBuiltinSignals.filter(o => !INDEX_HIDDEN_SIGNALS(o.key))
     : monitorBuiltinSignals
+  // 分时穿越信号: 数据按标的清单订阅且有上限, 自选分组是动态集合 (静默超限风险) → 禁用
+  const intradayDisabledSignals =
+    intradaySupport?.available === false || isGroupScope ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []
+  const intradayDisabledHint = isGroupScope
+    ? '分时穿越信号需逐股订阅, 暂不支持自选分组作用域'
+    : intradaySupport?.reason
   // 指数: 监控类型仅 signal/price (无涨跌停/策略/封单语义)
   const visibleTypes = (options.data?.types ?? []).filter(
     t => assetType !== 'index' || t.key === 'signal' || t.key === 'price',
   )
-  // 指数: 作用范围仅 symbols (无全市场/板块语义)
+  // 指数: 作用范围仅 symbols (无全市场/板块语义); ETF: 不支持自选分组 (分组为个股)
   const visibleScopes = (options.data?.scopes ?? []).filter(
-    s => assetType !== 'index' || s.key === 'symbols',
+    s => (assetType !== 'index' || s.key === 'symbols')
+      && (assetType === 'stock' || s.key !== 'watchlist_group'),
   )
   const sectorKind = draft.sector_kind ?? 'index'
   const sectorTargets = options.data?.sector_targets?.[sectorKind] ?? []
@@ -504,7 +556,10 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     strategy_id: null,
                     symbols: [],
                     type: t === 'index' && d.type !== 'signal' && d.type !== 'price' ? 'signal' : d.type,
-                    scope: t === 'index' ? 'symbols' : d.scope,
+                    // 指数仅指定标的; ETF 不支持分组作用域 (自选分组为个股)
+                    scope: t === 'index' || (t !== 'stock' && d.scope === 'watchlist_group')
+                      ? 'symbols'
+                      : d.scope,
                   }))
                   setStrategyQuery('')
                   setStrategyCategory('all')
@@ -855,7 +910,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   <button
                     type="button"
                     onClick={() => setWatchMenuOpen(v => !v)}
-                    title="从自选 / 自选分组导入标的 (导入当前成员, 后续增删自选不影响本规则)"
+                    title="从自选 / 自选分组导入当前成员 (一次性拷贝, 后续增删自选不影响本规则); 需要动态跟随分组请把作用范围切到「自选分组」"
                     className={`inline-flex h-7 shrink-0 items-center gap-1 rounded border px-2 text-[11px] transition-colors cursor-pointer ${
                       watchMenuOpen
                         ? 'border-accent/40 bg-accent/10 text-accent'
@@ -964,6 +1019,87 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               )}
             </div>
           )}
+          {draft.scope === 'watchlist_group' && (
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="relative" ref={groupMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setGroupMenuOpen(v => !v)}
+                  title="选择要监控的自选分组 (动态绑定, 分组内增删标的自动生效)"
+                  className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded border px-2 text-[11px] transition-colors cursor-pointer ${
+                    groupMenuOpen
+                      ? 'border-accent/40 bg-accent/10 text-accent'
+                      : 'border-border bg-base text-secondary hover:border-accent/30 hover:text-foreground'
+                  }`}
+                >
+                  {selectedGroup ? (
+                    <>
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(selectedGroup.color).dot}`} />
+                      <span className="max-w-32 truncate">{selectedGroup.name}</span>
+                      <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted">{groupCounts[selectedGroup.id] ?? 0}只</span>
+                    </>
+                  ) : (
+                    <span className="text-muted">{watchGroupsQ.isLoading ? '加载分组中...' : '选择自选分组...'}</span>
+                  )}
+                  {groupMenuOpen ? <ChevronUp className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                </button>
+                {groupMenuOpen && (
+                  <div className="absolute z-10 mt-1 max-h-56 w-56 overflow-y-auto rounded border border-border bg-surface py-1 shadow-lg">
+                    {watchGroupsQ.isLoading ? (
+                      <div className="px-2.5 py-2 text-[11px] text-muted">正在加载分组...</div>
+                    ) : groupList.length === 0 ? (
+                      <div className="px-2.5 py-2 text-[11px] text-muted">
+                        还没有自选分组,<Link to="/watchlist" className="text-accent hover:text-accent/80">去自选页创建 →</Link>
+                      </div>
+                    ) : groupList.map(g => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => {
+                          setDraft(d => ({ ...d, group_id: g.id }))
+                          setGroupMenuOpen(false)
+                        }}
+                        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-secondary transition-colors hover:bg-elevated hover:text-foreground cursor-pointer"
+                      >
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(g.color).dot}`} />
+                        <span className="min-w-0 flex-1 truncate">{g.name}</span>
+                        <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted">{groupCounts[g.id] ?? 0}</span>
+                        {draft.group_id === g.id && <Check className="h-3 w-3 shrink-0 text-accent" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {/* 成员预览 (只读): 让用户明确当前监控哪些标的; 与手动选标的的可编辑标签区分 */}
+              {selectedGroup && (
+                <div className="space-y-1">
+                  {selectedGroupSymbols.length > 0 ? (
+                    <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto rounded border border-border/60 bg-base/40 p-1.5">
+                      {selectedGroupSymbols.map(sym => {
+                        const b = boardTag(sym)
+                        return (
+                          <span key={sym} className="inline-flex items-center gap-1 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-secondary">
+                            <span className="max-w-24 truncate text-foreground/90" title={groupNameBySymbol[sym] ? `${groupNameBySymbol[sym]} ${sym}` : sym}>
+                              {groupNameBySymbol[sym] ?? sym}
+                            </span>
+                            {b && <span className={`inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span>}
+                            <span className="font-mono text-[9px] tabular-nums text-muted">{sym}</span>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded border border-dashed border-border px-2 py-1.5 text-[10px] text-muted">
+                      该分组当前没有标的, 后续在分组内添加自选会自动纳入监控
+                    </div>
+                  )}
+                  <div className="text-[10px] text-muted/70">
+                    动态绑定: 分组内增删标的自动同步监控范围, 无需修改本规则
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有标的生效</span>}
           {draft.scope === 'sector' && <span className="text-[11px] text-muted/60">板块精确过滤(开发中,当前等同全市场)</span>}
         </div>
@@ -995,8 +1131,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 onChange={onSignalPickerChange}
                 kind="entry"
                 builtinSignals={pickerSignals}
-                disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
-                disabledSignalHint={intradaySupport?.reason}
+                disabledSignals={intradayDisabledSignals}
+                disabledSignalHint={intradayDisabledHint}
               />
               {hasIntradaySignal && (
                 <div className={`mt-2 text-[10px] ${intradaySupport?.available === false ? 'text-danger' : 'text-muted'}`}>

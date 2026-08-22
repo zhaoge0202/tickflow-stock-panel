@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags } from 'lucide-react'
@@ -14,6 +14,7 @@ import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
+import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -632,6 +633,31 @@ function RulesList({ rulesQuery, onEdit }: {
 
   const rules: MonitorRule[] = (rulesQuery.data as any)?.rules ?? []
 
+  // 分组作用域规则: 拉取分组定义与成员, 展示分组名/成员数 chip (点击跳转自选页对应分组)
+  const hasGroupRules = rules.some(r => r.scope === 'watchlist_group')
+  const groupsQ = useQuery({
+    queryKey: QK.watchlistGroups,
+    queryFn: api.watchlistGroups,
+    enabled: hasGroupRules,
+  })
+  const watchlistQ = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: api.watchlistList,
+    enabled: hasGroupRules,
+  })
+  const groupMeta = useMemo(() => {
+    const meta: Record<string, { name: string; color: string; count: number }> = {}
+    for (const g of groupsQ.data?.groups ?? []) {
+      meta[g.id] = { name: g.name, color: g.color, count: 0 }
+    }
+    for (const entry of watchlistQ.data?.symbols ?? []) {
+      for (const gid of entry.group_ids ?? []) {
+        if (meta[gid]) meta[gid].count += 1
+      }
+    }
+    return meta
+  }, [groupsQ.data, watchlistQ.data])
+
   // 收集所有规则的股票代码, 批量查名称
   const allSymbols = useMemo(() => {
     const set = new Set<string>()
@@ -716,7 +742,7 @@ function RulesList({ rulesQuery, onEdit }: {
                   {r.asset_type === 'index' && (
                     <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-sky-500/10 text-sky-400">指数</span>
                   )}
-                  {/* 个股类型: 直接显示可点击的代码+名称; 其他类型显示规则名 */}
+                  {/* 个股类型: 直接显示可点击的代码+名称; 分组类型: 分组chip跳自选页; 其他类型显示规则名 */}
                   {r.scope === 'symbols' && r.symbols.length > 0 ? (
                     <button
                       onClick={() => setPreviewSymbol(r.symbols[0])}
@@ -726,6 +752,25 @@ function RulesList({ rulesQuery, onEdit }: {
                       <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{r.symbols[0]}</span>
                       {symbolNames[r.symbols[0]] && <span className="text-xs text-secondary truncate">{symbolNames[r.symbols[0]]}</span>}
                     </button>
+                  ) : r.scope === 'watchlist_group' && r.group_id ? (
+                    (() => {
+                      const meta = groupMeta[r.group_id]
+                      if (!meta) {
+                        return <span className="text-xs text-warning truncate" title={r.name}>分组已删除</span>
+                      }
+                      return (
+                        <Link
+                          to={`/watchlist?group=${r.group_id}`}
+                          className="inline-flex min-w-0 items-center gap-1.5 rounded px-0.5 transition-colors hover:bg-elevated/50 cursor-pointer"
+                          title={`「${meta.name}」分组 · 当前 ${meta.count} 只 · 点击查看分组`}
+                        >
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(meta.color).dot}`} />
+                          <span className="truncate text-xs font-medium text-foreground hover:text-accent">{meta.name}</span>
+                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">{meta.count}只</span>
+                          <span className="shrink-0 text-[9px] text-muted/60">· 分组作用域</span>
+                        </Link>
+                      )
+                    })()
                   ) : (
                     <h3 className={cn('text-xs font-medium truncate', r.enabled ? 'text-foreground' : 'text-muted')}>{displayName}</h3>
                   )}
