@@ -70,8 +70,15 @@ def align_regime_t_minus_one(
     regime_by_date: Mapping[object, Any],
     required_start: date | None,
     required_end: date | None,
+    *,
+    first_day_boundary_ok: bool = False,
 ) -> list[RegimePoint | None]:
-    """Align each label with the preceding label's regime without any I/O."""
+    """Align each label with the preceding label's regime without any I/O.
+
+    first_day_boundary_ok: 统计类调用方 (因子环境分组) 允许首日无前驱环境 ——
+    数据边界即正式首日 (本地数据从正式首日开始) 时首日没有 T-1 环境属正常,
+    跳过首日不参与分组即可, 不应阻断整个回测。内部缺口仍 fail-closed。
+    """
     regime_map = {
         _date_text(key): _normalize_regime_point(value)
         for key, value in regime_by_date.items()
@@ -83,7 +90,7 @@ def align_regime_t_minus_one(
     required_start_text = str(required_start) if required_start is not None else None
     required_end_text = str(required_end) if required_end is not None else None
     missing_dates: list[str] = []
-    if labels and required_start_text is not None:
+    if labels and required_start_text is not None and not first_day_boundary_ok:
         first_label = _date_text(labels[0])
         if first_label >= required_start_text and (
             required_end_text is None or first_label <= required_end_text

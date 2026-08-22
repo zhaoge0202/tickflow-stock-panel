@@ -305,6 +305,68 @@ def test_factor_regime_stats_accept_injected_t_minus_one_mapping(tmp_path):
     assert {item["state"] for item in result.regime_stats} == {"range", "strong", "weak"}
 
 
+def test_factor_regime_stats_tolerates_boundary_formal_start(tmp_path):
+    """数据边界=正式首日 (如「全部」/「1年」范围起点=本地数据首日) 时不再报错。
+
+    首日无 T-1 环境 → 首日不参与环境分组, 其余日期正常分组, 回测不阻断;
+    与策略回测 clamp_formal_start_for_regime 的「首日让渡为预热」同口径。
+    """
+    panel = _daily_panel(days=4)
+    market_dates = panel["date"].unique().sort().to_list()  # 日历从正式首日开始, 无预热日
+    for current in market_dates:
+        partition = tmp_path / "kline_daily_enriched" / f"date={current.isoformat()}"
+        partition.mkdir(parents=True)
+        pl.DataFrame({"date": [current]}).write_parquet(partition / "part.parquet")
+    regimes = {
+        date(2026, 1, 5): {"state": "weak", "score": 20},
+        date(2026, 1, 6): {"state": "strong", "score": 80},
+        date(2026, 1, 7): {"state": "strong", "score": 85},
+    }
+
+    result = FactorBacktestService(_Engine(panel, tmp_path)).run(
+        _config(end=date(2026, 1, 8)),
+        regime_by_date=regimes,
+    )
+
+    assert result.error is None
+    stats = {item["state"]: item for item in result.regime_stats}
+    assert set(stats) == {"strong", "weak"}
+    # 首日 (01-05, 无 T-1 环境) 被跳过: weak 桶只含以 01-05 为 T-1 的 01-06
+    assert stats["weak"]["n_dates"] == 1
+    # strong 桶 = 01-07 (T-1=01-06) + 01-08 (T-1=01-07)
+    assert stats["strong"]["n_dates"] == 2
+
+
+def test_align_first_day_boundary_flag_only_tolerates_first_day():
+    labels = ("2026-01-05", "2026-01-06", "2026-01-07")
+    regimes = {
+        "2026-01-05": ("weak", 20),
+        "2026-01-06": ("strong", 80),
+    }
+
+    # 默认 (过滤场景): 正式首日=labels[0] 无前驱 → fail-closed
+    with pytest.raises(ValueError, match="正式首日"):
+        align_regime_t_minus_one(
+            labels, regimes, required_start=date(2026, 1, 5), required_end=None,
+        )
+
+    # 统计场景: 首日容差 → 首日 None, 其余正常 T-1 对齐
+    aligned = align_regime_t_minus_one(
+        labels, regimes,
+        required_start=date(2026, 1, 5), required_end=None,
+        first_day_boundary_ok=True,
+    )
+    assert aligned == [None, ("weak", 20.0), ("strong", 80.0)]
+
+    # 统计场景内部缺口仍 fail-closed (次日 T-1 缺环境)
+    with pytest.raises(ValueError, match="缺少前一交易日环境"):
+        align_regime_t_minus_one(
+            labels, {"2026-01-05": ("weak", 20)},
+            required_start=date(2026, 1, 5), required_end=None,
+            first_day_boundary_ok=True,
+        )
+
+
 def test_factor_regime_stats_reject_missing_actual_market_predecessor(tmp_path):
     panel = _daily_panel(days=3)
     market_dates = [date(2026, 1, 2), *panel["date"].unique().sort().to_list()]

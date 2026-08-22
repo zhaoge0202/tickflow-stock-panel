@@ -856,6 +856,11 @@ class FactorBacktestService:
             regime_by_date,
             required_start,
             required_end,
+            # 统计场景: 数据边界即正式首日 (如「全部」/「1年」范围起点=本地数据首日) 时,
+            # 首日无 T-1 环境属正常, 跳过首日不参与环境分组即可, 不阻断回测;
+            # 与策略回测 clamp_formal_start_for_regime 的「首日让渡」同口径。
+            # 内部缺口 (次日 T-1 缺环境) 仍 fail-closed 报错。
+            first_day_boundary_ok=True,
         )
         ic_by_date = {
             str(row["date"])[:10]: float(row["ic"])
