@@ -121,7 +121,14 @@ def _parse_days(c: dict, key: str, i: int) -> int:
 
 
 def _parse_right(right: str) -> tuple[str, object]:
-    """解析右值。返回 ('field', colname) 或 ('const', float)。"""
+    """解析右值。返回 ('field', colname) 或 ('const', float)。
+
+    接受三种形式:
+      - 数字 (int / float / 数字字符串) → 常量
+      - "field:字段名" → 字段引用
+      - 裸字段名 (在白名单内) → 自动视为字段引用
+        (AI 生成偶尔漏写 field: 前缀; 白名单字段名不可能是数字, 无歧义)
+    """
     if isinstance(right, (int, float)):
         return ("const", float(right))
     if not isinstance(right, str):
@@ -135,7 +142,11 @@ def _parse_right(right: str) -> tuple[str, object]:
     try:
         return ("const", float(right))
     except ValueError:
-        raise ValueError(f"非法右值（应为 field:xxx 或数字）: {right!r}")
+        pass
+    # 裸字段名 — 兜底容错, 仍受白名单约束
+    if right in ALLOWED_FIELDS:
+        return ("field", right)
+    raise ValueError(f"非法右值（应为 field:xxx 或数字）: {right!r}")
 
 
 def validate(sig: dict) -> None:

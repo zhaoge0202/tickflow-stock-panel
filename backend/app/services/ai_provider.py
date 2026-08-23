@@ -133,6 +133,57 @@ def current_openai_reasoning_effort() -> str:
     return str(stored.get("ai_reasoning_effort") or "").strip()
 
 
+def current_ai_max_output_tokens() -> int:
+    """当前 AI 输出上限 (max_tokens): secrets.json 优先, 否则 config 默认。"""
+    return secrets_store.get_ai_config_int("ai_max_output_tokens", settings.ai_max_output_tokens)
+
+
+def current_ai_context_window() -> int:
+    """当前 AI 输入上下文窗口上限 (约 token): secrets.json 优先, 否则 config 默认。"""
+    return secrets_store.get_ai_config_int("ai_context_window", settings.ai_context_window)
+
+
+def _resolve_max_tokens(max_tokens: int | None) -> int | None:
+    """显式传入的 max_tokens 钳制到配置输出上限; None 保持 None。
+
+    None = 不传该参数(推理型模型的思考 token 计入 max_tokens 预算,
+    显式限制会挤占正文, 语义见 generate_ai_text), 不能映射成配置上限。
+    """
+    if max_tokens is None:
+        return None
+    cap = current_ai_max_output_tokens()
+    return max(1, min(int(max_tokens), cap))
+
+
+def _estimate_input_tokens(messages: Sequence[Message]) -> int:
+    """粗略估算输入 token 数: 中文按 1 字 1 token, 其余按 4 字符 1 token。"""
+    total = 0
+    for m in messages:
+        text = str(m.get("content") or "")
+        cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+        total += cjk + (len(text) - cjk) // 4 + 1
+    return max(1, total)
+
+
+def _check_input_budget(messages: Sequence[Message], *, max_tokens: int | None) -> None:
+    """输入估算超出上下文窗口时给出明确报错, 避免上游 400 或静默截断。
+
+    token 计数不精确, 仅作安全网: 用中/英文混合估算, 只有明显超窗才拒绝;
+    用户可在 AI 设置里调大『上下文窗口』。max_tokens=None(输出放开)时用
+    配置上限作输出预留估计。
+    """
+    context_window = current_ai_context_window()
+    if context_window <= 0:
+        return
+    output_reserve = max_tokens if max_tokens is not None else current_ai_max_output_tokens()
+    est = _estimate_input_tokens(messages)
+    if est + output_reserve > context_window:
+        raise ValueError(
+            f"输入过长: 估算输入约 {est} tokens, 加上输出预算 {max_tokens} tokens, "
+            f"超过上下文窗口 {context_window}。请缩短输入, 或在 AI 设置中调大『上下文窗口』。"
+        )
+
+
 def current_codex_command() -> str:
     return normalize_codex_command(
         secrets_store.get_ai_config("ai_codex_command", settings.ai_codex_command),
@@ -224,7 +275,10 @@ async def generate_ai_text(
     max_tokens=None 表示不传该参数(输出上限交给服务端默认) — 推理型模型
     (如 deepseek reasoner 系)的思考 token 计入 max_tokens 预算, 显式限制
     会挤占正文甚至全部吃光(正文 0 字 + finish=length), 长分析类调用应放开。
+    显式传入的数值会被钳制到配置的输出上限 (AI 设置可调)。
     """
+    max_tokens = _resolve_max_tokens(max_tokens)
+    _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
         return await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
     return await _run_openai_once(
@@ -249,6 +303,8 @@ async def stream_ai_text(
 
     max_tokens=None 表示不限制输出(同 generate_ai_text 的说明)。
     """
+    max_tokens = _resolve_max_tokens(max_tokens)
+    _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
         yield await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
         return

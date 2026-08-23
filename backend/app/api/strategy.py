@@ -73,6 +73,22 @@ def _invalidate_strategy_runtime(request: Request) -> None:
         monitor_engine.invalidate_strategy_state()
 
 
+def _missing_custom_signals(data_dir: Path, required_features) -> list[str]:
+    """required_features 中 csg_ 列对应信号未定义的部分 (保存策略前校验)。
+
+    自定义信号列 (csg_ 前缀) 只有在 data/user_data/custom_signals/*.json
+    有对应定义时才会被注入; 引用不存在的信号运行必报缺列错, 保存时早失败。
+    """
+    from app.strategy import custom_signals
+
+    defined = {s.get("id") for s in custom_signals.load_all(data_dir)}
+    return [
+        name for name in (required_features or ())
+        if isinstance(name, str) and name.startswith(custom_signals.PREFIX)
+        and name[len(custom_signals.PREFIX):] not in defined
+    ]
+
+
 def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
     """尽力清理删除后的派生状态, 清理失败不应把已成功的源文件删除变成 500。"""
     from app.services import preferences
@@ -726,6 +742,14 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
             raise ValueError("策略加载到了非预期文件，请检查是否存在重复 strategy_id")
         if loaded.source != expected_source:
             raise ValueError(f"策略来源异常: 期望 {expected_source}, 实际 {loaded.source}")
+        # 自定义信号存在性校验: REQUIRED_FEATURES 里 csg_ 列必须已有定义,
+        # 否则运行必报缺列错。早失败并恢复文件, 提示用户先创建信号。
+        missing = _missing_custom_signals(data_dir, loaded.required_features)
+        if missing:
+            raise ValueError(
+                "策略引用了未定义的自定义信号: " + ", ".join(sorted(missing))
+                + " — 请先在「自定义信号」管理中创建对应信号后再保存"
+            )
     except Exception as e:
         _restore_strategy_file(path, previous_code)
         engine.reload()

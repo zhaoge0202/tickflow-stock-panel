@@ -96,6 +96,11 @@ class Settings(BaseSettings):
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     )
+    # AI 输出上限 (max_tokens) 与输入上下文窗口上限 (约 token)。
+    # 任务级 max_tokens 会被钳制到 ai_max_output_tokens; 输入估算超出上下文窗口时给出明确报错。
+    # 默认 8192 高于所有现有任务 (最多 4500), 避免默认配置反而截断长报告; 可在 AI 设置里调整。
+    ai_max_output_tokens: int = 8192
+    ai_context_window: int = 64000
 
     # Server
     host: str = "0.0.0.0"
@@ -131,6 +136,10 @@ class Settings(BaseSettings):
             raise ValueError("backtest_matrix_cache_max_mb must be positive")
         if self.backtest_matrix_cache_prewarm_years <= 0:
             raise ValueError("backtest_matrix_cache_prewarm_years must be positive")
+        if self.ai_max_output_tokens <= 0:
+            raise ValueError("ai_max_output_tokens must be positive")
+        if self.ai_context_window <= 0:
+            raise ValueError("ai_context_window must be positive")
         return self
 
     @property

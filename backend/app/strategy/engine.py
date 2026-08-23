@@ -688,7 +688,20 @@ class StrategyEngine:
                     self.required_history_bars(child_ids, params_map=params_map),
                 )
             elif strategy.filter_history_fn:
-                required = max(required, int(strategy.lookback_days))
+                # lookback_days 优先取自解析后的参数(默认值/保存覆盖/本次调用),
+                # 静态 LOOKBACK_DAYS 兜底。策略可能只把窗口声明为参数
+                # (如 AI 生成策略), 此时 strategy.lookback_days 回退到 1,
+                # 不解析参数会低估历史需求 → build_strategy_context 跳过加载 → 运行时报错。
+                params = self.resolve_params(
+                    strategy,
+                    params_map.get(strategy_id),
+                    overrides_map.get(strategy_id),
+                )
+                lookback = int(strategy.lookback_days)
+                param_lookback = params.get("lookback_days")
+                if isinstance(param_lookback, (int, float)) and param_lookback > 0:
+                    lookback = max(lookback, int(param_lookback))
+                required = max(required, lookback)
         return required
 
     def prepare_realtime_matrix(
@@ -881,6 +894,19 @@ class StrategyEngine:
                     as_of=as_of,
                     strategy_id=strategy_id,
                     exit_signal_hits=exit_signal_hits,
+                )
+            # 自定义信号前置校验: REQUIRED_FEATURES 引用的 csg_ 列未注入时,
+            # 给出明确指引, 而不是让策略代码抛 polars 缺列错 (500)。
+            # 盘中单日路径不在此校验 (该路径对带偏移信号本就优雅降级)。
+            missing_csg = [
+                name for name in s.required_features
+                if name.startswith("csg_") and name not in df.columns
+            ]
+            if missing_csg:
+                raise ValueError(
+                    "策略引用了未定义的自定义信号: "
+                    + ", ".join(sorted(missing_csg))
+                    + " — 请先在「自定义信号」管理中创建对应信号后再运行"
                 )
             df = s.filter_history_fn(df, params)
             if "date" in df.columns:
