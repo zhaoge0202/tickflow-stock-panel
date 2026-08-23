@@ -3,7 +3,7 @@
 
 # 📈 A股智能量化工作台
 
-[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tickflow-stock-panel)
+[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tick-stock-panel)
 
 
 
@@ -16,7 +16,7 @@
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Data: TickFlow](https://img.shields.io/badge/Data-TickFlow-00b386.svg)](https://tickflow.org/auth/register?ref=V3KDKGXPEA)
 [![Deploy: Docker](https://img.shields.io/badge/Deploy-Docker-2496ed.svg)](./Dockerfile)
-[![GitHub stars](https://img.shields.io/github/stars/shy3130/tickflow-stock-panel?style=social)](https://github.com/shy3130/tickflow-stock-panel/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/shy3130/tick-stock-panel?style=social)](https://github.com/shy3130/tick-stock-panel/stargazers)
 
 </div>
 
@@ -269,7 +269,7 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ## 📄 License
 
-[MIT](./LICENSE) © tickflow-stock-panel contributors 
+[MIT](./LICENSE) © tick-stock-panel contributors 
 
 本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款
 
