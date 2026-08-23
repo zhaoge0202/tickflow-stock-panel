@@ -74,7 +74,7 @@ export function JobTimeoutCard() {
           <div>
             <h2 className="text-sm font-medium text-foreground">超时设置</h2>
             <p className="text-[11px] text-muted mt-1 leading-relaxed">
-              后台任务运行超过对应时间后将判定为疑似卡死。保存时自动换算为秒，修改后对新建任务生效。
+              后台任务超过对应时间<b>没有任何进度</b>才判定卡死并自动终止；只要任务仍在推进（如慢带宽下的冷启动全市场拉取），无论总时长多久都不会被中断。保存时自动换算为秒，修改后对新建任务生效。
             </p>
           </div>
         </div>
@@ -89,7 +89,7 @@ export function JobTimeoutCard() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="rounded-lg border border-border/60 bg-elevated/20 px-3.5 py-3">
-          <span className="block text-xs font-medium text-foreground mb-1">普通任务超时</span>
+          <span className="block text-xs font-medium text-foreground mb-1">普通任务停滞超时</span>
           <span className="block text-[10px] text-muted mb-2">日 K 管道、扩展、修正与重算任务</span>
           <div className="flex items-center gap-2">
             <input
@@ -117,11 +117,11 @@ export function JobTimeoutCard() {
               <option value="hour">小时</option>
             </select>
           </div>
-          <span className="block text-[10px] text-muted/60 mt-1.5">默认 20 分钟，最小 1 分钟</span>
+          <span className="block text-[10px] text-muted/60 mt-1.5">默认 20 分钟无进度，最小 1 分钟</span>
         </label>
 
         <label className="rounded-lg border border-border/60 bg-elevated/20 px-3.5 py-3">
-          <span className="block text-xs font-medium text-foreground mb-1">长任务超时</span>
+          <span className="block text-xs font-medium text-foreground mb-1">长任务停滞超时</span>
           <span className="block text-[10px] text-muted mb-2">分钟 K 全市场同步任务</span>
           <div className="flex items-center gap-2">
             <input
@@ -149,7 +149,7 @@ export function JobTimeoutCard() {
               <option value="hour">小时</option>
             </select>
           </div>
-          <span className="block text-[10px] text-muted/60 mt-1.5">默认 30 分钟，最小 1 分钟</span>
+          <span className="block text-[10px] text-muted/60 mt-1.5">默认 30 分钟无进度，最小 1 分钟</span>
         </label>
       </div>
     </section>

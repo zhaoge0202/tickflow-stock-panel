@@ -8,7 +8,12 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from app.jobs import daily_pipeline
-from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+from app.services.pipeline_jobs import (
+    JobCancelledError,
+    job_store,
+    release_run_slot,
+    try_acquire_run_slot,
+)
 from app.api.data import invalidate_storage_cache
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
@@ -24,7 +29,7 @@ async def run_now(request: Request) -> dict:
     """异步触发盘后管道,立即返回 job_id。客户端轮询 /jobs/{id} 拿进度。
 
     若已有任务在跑,**返回该任务 id 而不是开新任务**(防止并发拉数据撞限流)。
-    但如果该任务已运行超过 10 分钟 (可能因 reload 卡死), 强制标记为失败后重新创建。
+    卡死判定按「进度停滞」而非总时长(慢带宽下长任务不会被误杀), 见 reap_stale。
     """
     repo = request.app.state.repo
     capset = request.app.state.capabilities
@@ -41,7 +46,7 @@ async def run_now(request: Request) -> dict:
     # 在 executor 里跑同步任务(pipeline 内部都是阻塞 IO + CPU)
     async def task() -> None:
         # 重任务执行槽: 防僵尸并发(reap 后线程仍活时新任务不得并行写 parquet)
-        if not try_acquire_run_slot():
+        if not try_acquire_run_slot(job_id):
             job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
             return
         # 管道运行期间暂停实时行情取数, 防止覆写同一批 parquet 竞态
@@ -64,12 +69,16 @@ async def run_now(request: Request) -> dict:
             job_store.succeed(job_id, result)
             invalidate_storage_cache()
             repo.refresh_cache()  # 刷新 Polars 缓存
+        except JobCancelledError:
+            # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
+            # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。
+            logger.warning("pipeline job %s cancelled", job_id)
         except Exception as e:  # noqa: BLE001
             logger.exception("pipeline failed")
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
-            release_run_slot()
+            release_run_slot(job_id)
 
     asyncio.create_task(task())
     return {"job_id": job_id, "reused": False}
@@ -77,7 +86,7 @@ async def run_now(request: Request) -> dict:
 
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
-    # 每次轮询都检查卡死 job — 前端每秒轮询,STALE_JOB_TIMEOUT_S(10min)后必定自愈,
+    # 每次轮询都检查卡死 job — 前端持续轮询, 进度停滞超阈值后必定自愈,
     # 无需用户再次手动点「同步」。
     job_store.reap_stale()
     j = job_store.get(job_id)
@@ -88,13 +97,13 @@ def get_job(job_id: str) -> dict:
 
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str) -> dict:
-    """手动取消一个 running 的 job。"""
+    """手动取消一个 running 的 job(协作式: 拉取线程在当前分块完成后自行退出)。"""
     j = job_store.get(job_id)
     if not j:
         raise HTTPException(status_code=404, detail="job not found")
     if j["status"] not in ("running", "pending"):
         raise HTTPException(status_code=400, detail=f"job status is {j['status']}, cannot cancel")
-    job_store.fail(job_id, "用户手动取消")
+    job_store.terminate(job_id, "用户手动取消")
     return {"cancelled": job_id}
 
 

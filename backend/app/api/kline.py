@@ -918,7 +918,7 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
@@ -946,7 +946,7 @@ async def sync_minute(request: Request):
         return {"status": "reused", "job_id": job_id}
 
     async def task() -> None:
-        if not try_acquire_run_slot():
+        if not try_acquire_run_slot(job_id):
             job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
             return
         loop = asyncio.get_event_loop()
@@ -997,11 +997,14 @@ async def sync_minute(request: Request):
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
             job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
             invalidate_storage_cache()
+        except JobCancelledError:
+            # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+            invalidate_storage_cache()
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
-            release_run_slot()
+            release_run_slot(job_id)
 
     asyncio.create_task(task())
     return {"status": "started", "job_id": job_id}
@@ -1119,7 +1122,7 @@ async def extend_history(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1127,7 +1130,7 @@ async def extend_history(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1148,12 +1151,15 @@ async def extend_history(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("extend_history failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1198,7 +1204,7 @@ async def repair_daily(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.repair_daily import run_repair_daily
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1206,7 +1212,7 @@ async def repair_daily(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1232,12 +1238,15 @@ async def repair_daily(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("repair_daily failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1258,7 +1267,7 @@ async def rebuild_enriched(request: Request):
     try:
         repo = request.app.state.repo
 
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1266,7 +1275,7 @@ async def rebuild_enriched(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1314,12 +1323,15 @@ async def rebuild_enriched(request: Request):
                     "enriched_rows": written,
                 })
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("rebuild_enriched failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}

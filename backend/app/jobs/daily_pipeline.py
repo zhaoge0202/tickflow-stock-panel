@@ -690,13 +690,13 @@ def _run_tracked(fn, job_label: str) -> bool:
     重任务执行槽: 再挡一层僵尸并发(reap 后线程仍活时不得并行写 parquet)。
     返回 True 仅表示任务已成功并且执行槽已释放。
     """
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
 
     job_id, is_new = job_store.create()
     if not is_new:
         logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
         return False
-    if not try_acquire_run_slot():
+    if not try_acquire_run_slot(job_id):
         logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
         job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
         return False
@@ -712,11 +712,14 @@ def _run_tracked(fn, job_label: str) -> bool:
         job_store.succeed(job_id, result)
         succeeded = True
         logger.info("scheduled %s completed: job_id=%s", job_label, job_id)
+    except JobCancelledError:
+        # 已由 terminate() 标记失败(卡死/手动取消), 拉取线程在分块回调处自行退出
+        logger.warning("scheduled %s cancelled: job_id=%s", job_label, job_id)
     except Exception:
         logger.exception("scheduled %s failed: job_id=%s", job_label, job_id)
         job_store.fail(job_id, f"scheduled {job_label} failed")
     finally:
-        release_run_slot()
+        release_run_slot(job_id)
     return succeeded
 
 
