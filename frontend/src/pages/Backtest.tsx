@@ -53,7 +53,7 @@ export function Backtest() {
   return (
     <div className="flex min-h-full flex-col bg-base">
       <PageHeader
-        title="量化研究"
+        title="回测"
         subtitle={<span className="hidden md:inline">{MODES[activeTab].subtitle}</span>}
         className="shrink-0 flex-wrap gap-x-4 gap-y-2 bg-base/95 px-3 lg:flex-nowrap lg:px-5"
         right={(
@@ -69,7 +69,7 @@ export function Backtest() {
               <span>候选方案</span>
             </button>
             <span className="h-5 w-px shrink-0 bg-border" aria-hidden="true" />
-            <nav className="min-w-0 flex-1 overflow-x-auto lg:flex-none" aria-label="量化研究视图">
+            <nav className="min-w-0 flex-1 overflow-x-auto lg:flex-none" aria-label="回测视图">
               <div className="inline-flex min-w-max items-center gap-0.5 rounded-btn border border-border bg-surface/80 p-0.5">
                 {(Object.keys(MODES) as Tab[]).map(tab => {
                   const mode = MODES[tab]
