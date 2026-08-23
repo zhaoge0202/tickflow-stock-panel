@@ -622,9 +622,12 @@ def clear_data(request: Request):
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
     deleted = 0
+    # recover=True: 清空语义就是接管一切 — 外部进程(崩掉的脚本/中断的管道)
+    # 残留的 publishing 标记(owner pid 已死)不应永久阻塞清空; 活进程的发布
+    # 仍会被拦(another publication is active), 写盘竞态保护不受影响。
     publications = {
-        "kline_daily_enriched": EnrichedPublication(data_dir, "stock"),
-        "kline_etf_enriched": EnrichedPublication(data_dir, "etf"),
+        "kline_daily_enriched": EnrichedPublication(data_dir, "stock", recover=True),
+        "kline_etf_enriched": EnrichedPublication(data_dir, "etf", recover=True),
     }
 
     for sub in (

@@ -198,3 +198,30 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
 
     assert result is market
     assert calls == ["generation-a", "generation-b"]
+
+
+def test_live_flush_write_recovers_stale_marker_from_dead_process(
+    tmp_path, monkeypatch
+) -> None:
+    """实时 enriched 落盘(repository 路径)遇到僵死 publishing 标记应接管自愈,
+    而非持续抛错直到下一次盘后管道。"""
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    (tmp_path / ".matrix_generation_stock.json").write_text(
+        json.dumps({
+            "state": "publishing",
+            "generation": "stale-generation",
+            "publication_id": "stale-publication",
+            "owner_pid": 999999999,
+            "updated_at_ns": 0,
+        }),
+        encoding="utf-8",
+    )
+
+    repo = KlineRepository(DataStore(tmp_path))
+    repo.append_enriched(_frame(10.0))
+
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "ready"

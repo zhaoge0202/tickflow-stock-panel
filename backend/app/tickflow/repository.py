@@ -2107,8 +2107,10 @@ class KlineRepository:
             "kline_daily_enriched": "stock",
             "kline_etf_enriched": "etf",
         }.get(table)
+        # recover=True: 外部进程残留的僵死 publishing 标记不应阻塞实时/管道
+        # enriched 落盘, 首次写入即接管自愈; 活进程的发布仍会抛错保护竞态。
         publication = (
-            EnrichedPublication(self.store.data_dir, generation_asset)
+            EnrichedPublication(self.store.data_dir, generation_asset, recover=True)
             if generation_asset is not None
             else None
         )
@@ -2210,7 +2212,7 @@ class KlineRepository:
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         publication = (
-            EnrichedPublication(self.store.data_dir, asset_type)
+            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
             if asset_type in {"stock", "etf"}
             else None
         )
@@ -2295,7 +2297,7 @@ class KlineRepository:
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         publication = (
-            EnrichedPublication(self.store.data_dir, asset_type)
+            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
             if asset_type in {"stock", "etf"}
             else None
         )

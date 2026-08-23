@@ -152,3 +152,36 @@ def test_clear_data_keeps_generation_publishing_after_partial_delete(
     assert marker["state"] == "publishing"
     with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
         get_enriched_generation(tmp_path, "stock")
+
+
+def test_clear_data_recovers_stale_publishing_marker_from_dead_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外部进程(崩掉的脚本/中断的管道)残留 publishing 标记且 owner pid 已死时,
+    清空不应 500 — clear 语义就是接管一切 (用户实测场景: POST /api/data/clear
+    报 another enriched publication is incomplete)。"""
+    _stub_clear_side_effects(monkeypatch)
+    repo = _RepoStub(tmp_path)
+    target = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    _write_parquet_placeholder(target)
+    (tmp_path / ".matrix_generation_stock.json").write_text(
+        json.dumps({
+            "state": "publishing",
+            "generation": "stale-generation",
+            "publication_id": "stale-publication",
+            "owner_pid": 999999999,  # 不存在的 pid → 探测判定已死
+            "updated_at_ns": 0,
+        }),
+        encoding="utf-8",
+    )
+
+    result = data_api.clear_data(_request(repo))
+
+    assert result == {"deleted_files": 1}
+    assert not target.exists()
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "ready"
+    assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
