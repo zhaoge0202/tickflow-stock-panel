@@ -147,6 +147,31 @@ def run_now(
     today = _date.today()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
+
+    # 完整性自愈: 检测最近交易日的盘中快照/缺口 (盘中停机后次日开实时会留下
+    # 中午快照, 而下方"今天已有数据→只刷今天"分支会让它永久留存)。
+    # 命中 → 本次管道放弃实时覆写分支, 降级为从最早坏日起的范围拉取。
+    integrity_issues: list = []
+    stale_day: _date | None = None
+    etf_stale_day: _date | None = None
+    index_stale_day: _date | None = None
+    if override_start_date is None:
+        try:
+            from app.services import data_integrity
+            integrity_issues = data_integrity.scan_recent_integrity(
+                repo.store.data_dir, today=today,
+            )
+            if integrity_issues:
+                stale_day = data_integrity.earliest_issue_day(integrity_issues, ("kline_daily",))
+                etf_stale_day = data_integrity.earliest_issue_day(integrity_issues, ("kline_etf_daily",))
+                index_stale_day = data_integrity.earliest_issue_day(integrity_issues, ("kline_index_daily",))
+                logger.warning(
+                    "integrity: 检测到 %d 个不完整分区(%s), 本次管道改走范围拉取修复",
+                    len(integrity_issues), data_integrity.describe_issues(integrity_issues),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("integrity scan failed (soft, 按无坏数据处理): %s", e)
+            integrity_issues = []
     # 日K范围拉取的起点(分支3补缺口/分支4首次/数据修正); 实时增量/跳过时为 None。
     # 供 Step 1.5 除权因子回溯范围对齐: 范围拉取→用日K范围, 非范围→最近N天兜底。
     daily_range_start: _date | None = None
@@ -177,8 +202,15 @@ def run_now(
         new_daily_days = gap_days
         emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
         logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
-    elif today_exists and capset.has(Cap.QUOTE_POOL) and _prefs.get_daily_data_provider() == "tickflow":
+    elif (
+        today_exists
+        and stale_day is None
+        and capset.has(Cap.QUOTE_POOL)
+        and _prefs.get_daily_data_provider() == "tickflow"
+    ):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
+        # stale_day 非空时禁用本分支: "只刷今天"会让停机日的盘中快照永久留存,
+        # 降级到下方 batch 路径从坏日起重拉。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
         # 也降级到下方 batch 路径刷新,避免调用无权限的实时行情接口。
         emit("sync_daily", 12, f"获取日K [{today} ~ {today}] 实时行情…")
@@ -186,11 +218,13 @@ def run_now(
         new_daily_days = 1
         emit("sync_daily", 45, f"日K 完成,{written_daily} 只标的")
         logger.info("sync_daily: [%s ~ %s] live quotes, %d symbols", today, today, written_daily)
-    elif latest_daily:
+    elif latest_daily or stale_day:
         # 有历史 → batch 补齐缺口。
         # 也覆盖"今天已有数据但无实时行情权限(free/none)"的降级场景:
         #   此时 start_date = latest_daily = today,batch 刷新当天日K。
-        start_date = latest_daily
+        # 完整性修复场景: start_date = min(本地最新日, 最早坏日) —
+        #   today_exists 时 latest_daily=今天, 不取 min 会漏掉坏日。
+        start_date = min(d for d in (latest_daily, stale_day) if d is not None)
         daily_range_start = start_date
         emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
         logger.info("sync_daily: [%s ~ %s] %s", start_date, today,
@@ -229,6 +263,22 @@ def run_now(
         emit("sync_daily", 45, "日K 完成")
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
+
+    # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
+    # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
+    # Step 2 把这些日期当"新日期"重算 (剩余分区最近 60 天做历史前缀, 窗口 ≤5 天回看充足)。
+    repair_start = override_start_date if override_start_date is not None else stale_day
+    if repair_start is not None:
+        try:
+            from app.services.data_integrity import prune_enriched_partitions
+            pruned = prune_enriched_partitions(
+                repo.store.data_dir, repair_start, "kline_daily_enriched",
+            )
+            if pruned:
+                logger.info("integrity: 已删除 %d 个待重算的 enriched 分区 (≥ %s)", pruned, repair_start)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("enriched prune failed (soft): %s", e)
+
 
     # 单标的新鲜度: 全局 max(date) 会被任一有今日数据的标的"拉高", 掩盖停牌/复牌/
     # 一直拉失败而掉队的个股缺口(全局判据只刷"今天", 永不回补掉队标的的历史缺口)。
@@ -391,11 +441,15 @@ def run_now(
                     d.name[5:] for d in index_dir.glob("date=*")
                     if d.is_dir() and d.name.startswith("date=")
                 ) if index_dir.exists() else []
-                # 数据修正模式下用传入起点; 否则用本地指数最新日期补到今天
+                # 数据修正模式下用传入起点; 否则用本地指数最新日期补到今天;
+                # 完整性修复时起点再提前到最早坏日 (实时写过今天的指数分区时,
+                # "最新日期=今天"会让停机日的快照/缺口永久留存)
                 if override_start_date:
                     index_start = override_start_date
                 else:
                     index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
+                if index_stale_day is not None and index_start > index_stale_day:
+                    index_start = index_stale_day
 
                 def _index_chunk(cur: int, tot: int) -> None:
                     emit("sync_index", 88, f"指数日K批次 {cur}/{tot}",
@@ -456,6 +510,9 @@ def run_now(
                     if d.is_dir() and d.name.startswith("date=")
                 ) if etf_dir.exists() else []
                 etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
+                # 同指数: 完整性修复时把 ETF 起点提前到最早坏日
+                if etf_stale_day is not None and etf_start > etf_stale_day:
+                    etf_start = etf_stale_day
 
                 def _etf_chunk(cur: int, tot: int) -> None:
                     emit("sync_index", 88, f"ETF 日K批次 {cur}/{tot}",
@@ -592,6 +649,8 @@ def run_now(
         "regime_days": regime_days,
         "mainline_rows": mainline_rows,
         "lagging_symbols": len(lagging_symbols),
+        "integrity_repair_from": repair_start.isoformat() if repair_start else None,
+        "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
     }
