@@ -129,8 +129,10 @@ class StrategyDependencyResolver:
         exit_signals: list[str],
         overrides: dict | None = None,
         minute_fill: bool = False,
+        asset_type: str = "stock",
     ) -> ResolvedFeaturePlan:
         overrides = overrides or {}
+        basic_filter = _basic_filter_for_asset(basic_filter, asset_type)
         if strategy.execution_backend == "matrix_native":
             return self._resolve_matrix_native(
                 strategy,
@@ -329,6 +331,7 @@ def build_matrix_cache_profile(
             exit_signals=strategy.exit_signals,
             overrides={},
             minute_fill=False,
+            asset_type=asset_type,
         ))
         forward_bars = max(forward_bars, int(strategy.max_hold_days or 0))
 
@@ -468,6 +471,31 @@ def _basic_filter_dependencies(config: dict) -> set[str]:
     if config.get("exclude_st"):
         dependencies.add("name")
     return dependencies
+
+
+_SHARE_CAP_FILTER_KEYS = (
+    "market_cap_min",
+    "market_cap_max",
+    "float_cap_min",
+    "float_cap_max",
+)
+
+
+def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
+    """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值与流通
+    市值界对它们既无意义也不可满足: 依赖解析前先置 None, 避免解析出
+    total_shares/float_shares 字段需求导致矩阵加载直接失败。
+
+    运行期过滤无需同步修改 —— polars 侧有列守卫 (engine._basic_filter_expr),
+    矩阵侧 _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN
+    界, 二者对缺失股本列本就降级为 no-op。
+    """
+    if asset_type == "stock" or not basic_filter:
+        return basic_filter
+    sanitized = dict(basic_filter)
+    for key in _SHARE_CAP_FILTER_KEYS:
+        sanitized[key] = None
+    return sanitized
 
 
 def _resolve_base_columns(features: set[str]) -> frozenset[str]:
@@ -648,6 +676,7 @@ class StrategyBacktestService:
         params: dict,
         basic_filter: dict,
         overrides: dict,
+        asset_type: str = "stock",
     ) -> tuple[ResolvedFeaturePlan, list[tuple[StrategyDef, dict, dict]]]:
         """解析 composite 回测的特征计划: 所有子策略 feature_plan 的并集。
 
@@ -696,6 +725,7 @@ class StrategyBacktestService:
                 entry_signals=[],
                 exit_signals=[],
                 overrides=child_override,
+                asset_type=asset_type,
             )
             plans.append(child_plan)
             # pipeline 用 composite 统一的 basic_filter; scoring 用子策略自己的
@@ -812,6 +842,7 @@ class StrategyBacktestService:
                 exit_signals=exit_signals,
                 overrides=overrides,
                 minute_fill=config.minute_fill,
+                asset_type=config.asset_type,
             ))
         feature_plan = _merge_resolved_feature_plans(plans)
 
@@ -1018,7 +1049,11 @@ class StrategyBacktestService:
                 # composite 回测: 子策略必须全为 matrix_native(否则 fail-closed),
                 # feature_plan 取所有子策略计划的并集(_merge_resolved_feature_plans)。
                 feature_plan, composite_children_resolved = self._resolve_composite_feature_plan(
-                    s, params=params, basic_filter=basic_filter, overrides=overrides
+                    s,
+                    params=params,
+                    basic_filter=basic_filter,
+                    overrides=overrides,
+                    asset_type=config.asset_type,
                 )
             else:
                 composite_children_resolved = None
@@ -1030,6 +1065,7 @@ class StrategyBacktestService:
                     exit_signals=exit_signals,
                     overrides=overrides,
                     minute_fill=config.minute_fill,
+                    asset_type=config.asset_type,
                 )
         except ValueError as e:
             return _err(str(e))

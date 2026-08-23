@@ -926,6 +926,7 @@ def _prepare_base_market(
             entry_signals=research.entry_signals,
             exit_signals=research.exit_signals,
             overrides={},
+            asset_type=request.asset_type,
         ))
     for strategy_id in request.strategy_ids:
         strategy = strategy_engine.get(strategy_id)
@@ -942,6 +943,7 @@ def _prepare_base_market(
                 overrides, "exit_signals", strategy.exit_signals
             ),
             overrides=overrides,
+            asset_type=request.asset_type,
         ))
     merged = _merge_resolved_feature_plans(plans)
     profile = build_matrix_cache_profile(
