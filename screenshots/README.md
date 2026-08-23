@@ -2,27 +2,43 @@
 
 ### 看板 Dashboard
 
-![看板页面](./dashboard.png)
+![看板页面](./看板.png)
+
+### 自选 Watchlist
+
+![自选页](./自选.png)
 
 ### 策略 Screener
 
-![策略页](./screener.png)
+![策略页](./策略.png)
 
 ### 回测 Backtest
 
-![回测页](./backtest.png)
+![回测页](./回测.png)
+
+### 挖掘 Mining
+
+![挖掘页](./挖掘因子.png)
+
+### 市场环境 Regime
+
+![市场环境页](./市场环境分析.png)
+
+### 异动监控 Abnormal Moves
+
+![异动监控页](./异动监控.png)
 
 ### 监控中心 Monitor
 
-![监控中心](./monitor.png)
+![监控中心](./监控中心.png)
 
 ### 连板梯队 Limit Ladder
 
-![连板梯队页](./limit-ladder.png)
+![连板梯队页](./连板梯队.png)
 
 ### 概念分析 Concept
 
-![概念分析](./concept-analysis.png)
+![概念分析](./概念分析.png)
 
 ### 财务分析
 
@@ -40,9 +56,9 @@
 
 ![个股分析报告](./个股分析报告.png)
 
-### 复盘
+### 复盘 Review
 
-![复盘](./复盘.png)
+![AI 复盘](./AI复盘.png)
 
 ### 飞书推送-自动复盘
 
@@ -51,5 +67,3 @@
 ### 飞书推送-个股监控
 
 ![推送飞书-个股监控](./推送飞书-个股监控.png)
-
-
