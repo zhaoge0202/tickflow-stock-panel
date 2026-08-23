@@ -36,7 +36,6 @@ def _filter_history_strategy(
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        alerts=[],
         filter_fn=None,
         filter_history_fn=lambda df, params: df,
         lookback_days=lookback_days,

@@ -281,9 +281,10 @@ def test_ai_settings_keep_provider_models_separate(monkeypatch):
 # ── 输出上限 / 上下文窗口配置 ─────────────────────────────────
 
 
-def test_resolve_max_tokens_defaults_to_config_cap(monkeypatch):
+def test_resolve_max_tokens_none_stays_unlimited(monkeypatch):
+    """None = 不传上限(推理模型放开) — 不能被映射成配置上限, 见 main 语义。"""
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 8192)
-    assert ai_provider._resolve_max_tokens(None) == 8192
+    assert ai_provider._resolve_max_tokens(None) is None
 
 
 def test_resolve_max_tokens_clamps_above_cap(monkeypatch):
@@ -339,7 +340,8 @@ async def test_generate_ai_text_clamps_max_tokens_to_config_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_ai_text_defaults_to_config_cap(monkeypatch):
+async def test_generate_ai_text_default_cap_and_none_passthrough(monkeypatch):
+    """默认 3000 且被钳制; 显式 None 贯穿为不限制。"""
     captured: dict = {}
     monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda: False)
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 4000)
@@ -351,7 +353,11 @@ async def test_generate_ai_text_defaults_to_config_cap(monkeypatch):
 
     monkeypatch.setattr(ai_provider, "_run_openai_once", fake_run)
     await ai_provider.generate_ai_text([{"role": "user", "content": "hi"}])
-    assert captured["max_tokens"] == 4000
+    assert captured["max_tokens"] == 3000  # 默认值, 未超 cap 原样下发
+    await ai_provider.generate_ai_text(
+        [{"role": "user", "content": "hi"}], max_tokens=None,
+    )
+    assert captured["max_tokens"] is None  # None = 推理模型放开, 不钳制
 
 
 def test_save_ai_settings_persists_token_sizes(monkeypatch):

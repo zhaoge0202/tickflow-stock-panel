@@ -31,8 +31,21 @@ def _patch_uv_install(monkeypatch, returncodes):
     return calls
 
 
-def test_install_plugin_uv_targets_running_interpreter(monkeypatch):
+def _fake_python_plugin(monkeypatch, tmp_path):
+    """在临时目录铺设最小 python 插件, 并把 plugins_dir 指过去 (自包含)。"""
+    pdir = tmp_path / "baostock"
+    pdir.mkdir()
+    (pdir / "plugin.yaml").write_text(
+        "name: baostock\nruntime: python\nentry: p:provider\n", encoding="utf-8",
+    )
+    (pdir / "requirements.txt").write_text("baostock\n", encoding="utf-8")
+    monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path)
+    return pdir
+
+
+def test_install_plugin_uv_targets_running_interpreter(monkeypatch, tmp_path):
     """uv 分支必须传 --python sys.executable, 不能留给 uv 自动探测。"""
+    _fake_python_plugin(monkeypatch, tmp_path)
     calls = _patch_uv_install(monkeypatch, [0])
 
     ok, msg = loader.install_plugin("baostock")
@@ -45,8 +58,9 @@ def test_install_plugin_uv_targets_running_interpreter(monkeypatch):
     assert uv_cmd[idx + 1] == sys.executable
 
 
-def test_install_plugin_uv_retry_keeps_python_target(monkeypatch):
+def test_install_plugin_uv_retry_keeps_python_target(monkeypatch, tmp_path):
     """exit 2 → --no-config 重试时也必须保持 --python 目标。"""
+    _fake_python_plugin(monkeypatch, tmp_path)
     calls = _patch_uv_install(monkeypatch, [2, 0])
 
     ok, msg = loader.install_plugin("baostock")
@@ -58,7 +72,7 @@ def test_install_plugin_uv_retry_keeps_python_target(monkeypatch):
         assert cmd[idx + 1] == sys.executable
 
 
-def test_uninstall_plugin_uv_targets_running_interpreter(monkeypatch):
+def test_uninstall_plugin_uv_targets_running_interpreter(monkeypatch, tmp_path):
     """uv 卸载同样必须传 --python sys.executable, 否则会动到基础解释器。"""
     calls: list[list[str]] = []
 
@@ -69,6 +83,7 @@ def test_uninstall_plugin_uv_targets_running_interpreter(monkeypatch):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0)
 
+    _fake_python_plugin(monkeypatch, tmp_path)
     monkeypatch.setattr(loader.shutil, "which", fake_which)
     monkeypatch.setattr(loader.subprocess, "run", fake_run)
 
