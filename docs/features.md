@@ -108,9 +108,11 @@
 
 ## 🧰 数据与扩展
 
-### TickFlow 多源数据
+### 数据源插件化
 
-日 K / 分钟 K / 指数 / 财务 / 实时行情,基于 [TickFlow](https://tickflow.org) 官方 SDK。
+内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 镜像已内置)。五个数据集(daily / adj_factor / realtime / minute / financial)按源声明自由组合,在「设置 → 数据源」切换。
+
+详见 [custom-data-source.md](./custom-data-source.md) 与 [plugin-development.md](./plugin-development.md)。
 
 ### 🔌 第三方数据接入(重点)
 

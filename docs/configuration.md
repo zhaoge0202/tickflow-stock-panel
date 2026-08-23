@@ -12,7 +12,7 @@
 TICKFLOW_API_KEY=              # 留空 = None 模式(历史日K免费);填 Key = 按订阅档位解锁
 ```
 
-本项目基于 [TickFlow](https://tickflow.org) 数据源。
+TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(YAML 声明自有接口见 [custom-data-source.md](./custom-data-source.md),插件开发见 [plugin-development.md](./plugin-development.md)),在面板 **设置 → 数据源** 切换。
 
 - **留空(None 模式)**:通过 free-api 使用历史日 K(当日数据盘后 1-2 小时可用),**无需付费**即可体验核心选股/回测功能
 - **填入 API Key**:按你的订阅档位解锁更多能力
