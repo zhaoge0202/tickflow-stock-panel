@@ -3,7 +3,7 @@
 
 # 📈 A股智能量化工作台
 
-[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tick-stock-panel)
+[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_第三方_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tick-stock-panel)
 
 
 
@@ -42,7 +42,7 @@
 >
 > **明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
 
-有问题可以邮件415333856@qq.com,交流群二维码在文末。
+有问题可以邮件415333856@qq.com。
 
 觉得有用可以点个 Star
 
