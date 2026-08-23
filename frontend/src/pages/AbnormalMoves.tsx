@@ -54,6 +54,8 @@ export function AbnormalMoves() {
   const [minCloseness, setMinCloseness] = useState(0.5)
   const [query, setQuery] = useState('')
   const [watchlistOnly, setWatchlistOnly] = useState(false)
+  // 默认过滤 ST/*ST 风险警示股票 (口径与后端 is_st_name 一致: 名称含 ST)
+  const [excludeSt, setExcludeSt] = useState(true)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
 
   const overview = useQuery({
@@ -110,12 +112,13 @@ export function AbnormalMoves() {
     }
     if (boardFilter !== 'all') list = list.filter(r => r.board === boardFilter)
     if (watchlistOnly) list = list.filter(r => watchSymbols.has(r.symbol))
+    if (excludeSt) list = list.filter(r => !(r.name ?? '').toUpperCase().includes('ST'))
     const q = query.trim().toLowerCase()
     if (q) {
       list = list.filter(r => `${r.symbol} ${r.name ?? ''}`.toLowerCase().includes(q))
     }
     return list
-  }, [view, windowFilter, direction, boardFilter, watchlistOnly, watchSymbols, query, minCloseness])
+  }, [view, windowFilter, direction, boardFilter, watchlistOnly, excludeSt, watchSymbols, query, minCloseness])
 
   const counts = view?.counts
   const updating = overview.isFetching
@@ -297,6 +300,15 @@ export function AbnormalMoves() {
                 className="h-3 w-3 accent-accent"
               />
               只看自选
+            </label>
+            <label className="flex items-center gap-1.5 text-[11px] text-secondary" title="过滤 ST/*ST 风险警示股票">
+              <input
+                type="checkbox"
+                checked={excludeSt}
+                onChange={e => setExcludeSt(e.target.checked)}
+                className="h-3 w-3 accent-accent"
+              />
+              过滤ST
             </label>
             <label className="flex items-center gap-1.5 text-[11px] text-secondary" title="接近度下限 (|偏离|/阈值)">
               接近度 ≥ {(minCloseness * 100).toFixed(0)}%
