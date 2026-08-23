@@ -259,7 +259,7 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   const hasTags = conceptTags.length > 0 || industryTags.length > 0
 
   // 齿轮始终可见: 让免费用户也能看到功能入口, 点开后在菜单内提示权限不足。
-  // Pro+ 用户正常设置; 免费用户保存按钮禁用 + 显示升级提示。
+  // 有五档盘口能力的用户正常设置; 无能力时保存按钮禁用 + 显示能力提示。
   return (
     <div className="relative group w-full">
       {/* 监控设置按钮 (右上角): 不能嵌在卡片 button 内 */}
@@ -615,10 +615,10 @@ function MonitorMenu({ stock, direction, sealMode, monitorRule, anchorRect, hasD
           <button
             onClick={handleSave}
             disabled={saving || !threshold || !hasDepth}
-            title={!hasDepth ? '需 Pro+ 套餐 (批量五档能力)' : ''}
+            title={!hasDepth ? '五档盘口(批量)数据不可用' : ''}
             className="flex-1 h-7 rounded text-[11px] font-medium transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-accent text-white hover:bg-accent/90 active:scale-[0.98] disabled:active:scale-100"
           >
-            {saving ? '保存中…' : !hasDepth ? '需 Pro+ 套餐' : existing ? '更新监控' : '开启监控'}
+            {saving ? '保存中…' : !hasDepth ? '五档盘口不可用' : existing ? '更新监控' : '开启监控'}
           </button>
         </div>
       </div>
@@ -1517,7 +1517,10 @@ export function LimitUpLadder() {
   const extColumnsParam = useMemo(() => buildExtColumnsParam(extFields), [extFields])
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: [QK.limitLadder(asOf || undefined), extColumnsParam, direction],
+    // key 必须拍平 (spread 展开): key[0] 为字符串 'limit-ladder' 才能被 SSE 前缀失效
+    // 命中实现实时刷新, depth_updated 事件 (invalidate ['limit-ladder']) 也才能匹配本查询。
+    // 嵌套数组 key 会导致前者靠 String() 侥幸命中、后者永远失配。
+    queryKey: [...QK.limitLadder(asOf || undefined), extColumnsParam, direction],
     queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction),
     staleTime: 5 * 60_000,
   })

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { MissingCapChip } from '@/lib/capability-labels'
 import { DatePicker } from '@/components/DatePicker'
 
 function pad(n: number) { return String(n).padStart(2, '0') }
@@ -98,8 +99,8 @@ export function RepairDailyPanel({ caps, isRunning, latestDate, onStart }: {
       </button>
 
       {!hasBatchCap && (
-        <span className="block text-[10px] text-warning/80 bg-warning/8 rounded px-1.5 py-px font-medium text-center">
-          需 Pro+ 权限
+        <span className="block text-center">
+          <MissingCapChip capKey="kline.daily.batch" />
         </span>
       )}
     </div>

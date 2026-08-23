@@ -24,6 +24,11 @@ from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
+from app.strategy.scoring import (
+    SCORING_DIRECTIONS,
+    effective_scoring,
+    effective_scoring_directions,
+)
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 logger = logging.getLogger(__name__)
@@ -36,6 +41,16 @@ def _get_engine(request: Request) -> StrategyEngine:
     if not engine:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
     return engine
+
+
+def _get_public_strategy(engine: StrategyEngine, strategy_id: str) -> StrategyDef:
+    try:
+        strategy = engine.get(strategy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if strategy.meta.get("research_only"):
+        raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
+    return strategy
 
 
 def _get_monitor(request: Request) -> StrategyMonitorService:
@@ -136,14 +151,13 @@ def _strategy_detail(
 ) -> dict:
     """策略详情（含用户覆盖）"""
     bf = {**s.basic_filter}
-    scoring = dict(s.meta.get("scoring", {}))
+    scoring = effective_scoring(s.meta.get("scoring"), overrides)
+    scoring_directions = effective_scoring_directions(overrides)
     params_defaults = {p["id"]: p["default"] for p in s.meta.get("params", [])}
 
     if overrides:
         if overrides.get("basic_filter"):
             bf.update(overrides["basic_filter"])
-        if overrides.get("scoring"):
-            scoring.update(overrides["scoring"])
         # 用户保存的参数覆盖默认值: 合并进 params_defaults, 前端据此回显
         if overrides.get("params"):
             params_defaults.update(overrides["params"])
@@ -166,6 +180,11 @@ def _strategy_detail(
         "params": s.meta.get("params", []),
         "params_defaults": params_defaults,
         "scoring": scoring,
+        "scoring_directions": {
+            name: direction
+            for name, direction in scoring_directions.items()
+            if name in scoring
+        },
         "entry_signals": overrides.get("entry_signals", s.entry_signals) if overrides else s.entry_signals,
         "exit_signals": overrides.get("exit_signals", s.exit_signals) if overrides else s.exit_signals,
         "minute_exit_trigger_supported_signals": sorted(MINUTE_EXIT_TRIGGER_SIGNALS),
@@ -175,7 +194,6 @@ def _strategy_detail(
         "trailing_take_profit_activate": getattr(s, "trailing_take_profit_activate", None),
         "trailing_take_profit_drawdown": getattr(s, "trailing_take_profit_drawdown", None),
         "max_hold_days": overrides.get("max_hold_days", s.max_hold_days) if overrides else s.max_hold_days,
-        "alerts": s.alerts,
         "order_by": s.meta.get("order_by", "score"),
         "descending": s.meta.get("descending", True),
         "limit": s.meta.get("limit", 30),
@@ -280,6 +298,8 @@ def list_strategies(
 
     result = []
     for meta in engine.list_strategies():
+        if meta.get("research_only"):
+            continue
         if asset_type and asset_type not in meta.get("asset_types", ["stock"]):
             continue
         if timeframe and timeframe not in meta.get("timeframes", ["1d"]):
@@ -294,10 +314,7 @@ def list_strategies(
 @router.get("/{strategy_id}")
 def get_strategy(strategy_id: str, request: Request):
     engine = _get_engine(request)
-    try:
-        s = engine.get(strategy_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    s = _get_public_strategy(engine, strategy_id)
     overrides = strategy_config.load_override(_data_dir(request), strategy_id)
     return _strategy_detail(s, overrides or None, engine)
 
@@ -308,6 +325,7 @@ def get_strategy(strategy_id: str, request: Request):
 @router.post("/run")
 def run_strategy(req: RunRequest, request: Request):
     engine = _get_engine(request)
+    _get_public_strategy(engine, req.strategy_id)
     data_dir = _data_dir(request)
 
     # 读取用户覆盖配置
@@ -369,7 +387,8 @@ def run_all(req: RunAllRequest, request: Request):
     strategy_ids = [
         meta["id"]
         for meta in engine.list_strategies()
-        if req.asset_type in meta.get("asset_types", ["stock"])
+        if not meta.get("research_only")
+        and req.asset_type in meta.get("asset_types", ["stock"])
         and req.timeframe in meta.get("timeframes", ["1d"])
     ]
     from app.services.screener import ScreenerService
@@ -404,14 +423,51 @@ def run_all(req: RunAllRequest, request: Request):
 @router.post("/config")
 def save_config(req: SaveConfigRequest, request: Request):
     engine = _get_engine(request)
-    if not engine.has(req.strategy_id):
-        raise HTTPException(status_code=404, detail=f"策略 {req.strategy_id} 不存在")
+    _get_public_strategy(engine, req.strategy_id)
 
+    _validate_scoring_config(req.overrides)
     # 剥离与策略默认值相同的字段，只保存用户真正修改过的值
     overrides = _strip_defaults(req.strategy_id, req.overrides, engine)
 
     strategy_config.save_override(_data_dir(request), req.strategy_id, overrides)
     return {"ok": True}
+
+
+@router.patch("/config")
+def patch_config(req: SaveConfigRequest, request: Request):
+    engine = _get_engine(request)
+    _get_public_strategy(engine, req.strategy_id)
+    data_dir = _data_dir(request)
+    overrides = strategy_config.load_override(data_dir, req.strategy_id)
+    overrides.update(req.overrides)
+    _validate_scoring_config(overrides)
+    strategy_config.save_override(
+        data_dir,
+        req.strategy_id,
+        _strip_defaults(req.strategy_id, overrides, engine),
+    )
+    return {"ok": True}
+
+
+def _validate_scoring_config(overrides: dict) -> None:
+    scoring = overrides.get("scoring")
+    if scoring is not None:
+        if not isinstance(scoring, dict):
+            raise HTTPException(status_code=400, detail="评分权重必须是对象")
+        for name, weight in scoring.items():
+            if not isinstance(name, str) or not name:
+                raise HTTPException(status_code=400, detail="评分因子名称无效")
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight < 0:
+                raise HTTPException(status_code=400, detail=f"评分因子 {name} 的权重必须是非负数")
+    directions = overrides.get("scoring_directions")
+    if directions is not None:
+        if not isinstance(directions, dict):
+            raise HTTPException(status_code=400, detail="评分方向必须是对象")
+        invalid = [name for name, direction in directions.items() if direction not in SCORING_DIRECTIONS]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"评分因子 {invalid[0]} 的方向无效")
+    if "scoring_replace" in overrides and not isinstance(overrides["scoring_replace"], bool):
+        raise HTTPException(status_code=400, detail="scoring_replace 必须是布尔值")
 
 
 def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
@@ -444,6 +500,7 @@ def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
 
 @router.delete("/config/{strategy_id}")
 def reset_config(strategy_id: str, request: Request):
+    _get_public_strategy(_get_engine(request), strategy_id)
     strategy_config.delete_override(_data_dir(request), strategy_id)
     return {"ok": True}
 
@@ -708,10 +765,7 @@ def get_strategy_source(strategy_id: str, request: Request):
 
     # 先查 StrategyEngine 获取文件路径
     engine = _get_engine(request)
-    try:
-        s = engine.get(strategy_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在")
+    s = _get_public_strategy(engine, strategy_id)
 
     path = s.file_path
     if not path or not path.exists():
@@ -917,14 +971,12 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
     children = [{"strategy_id": c.strategy_id, "weight": c.weight} for c in req.children]
     # 子策略存在性预检(给出清晰错误, 而非等到 reload 后孤儿移除的笼统报错)。
     for c in children:
-        if not engine.has(c["strategy_id"]):
-            raise ValueError(f"子策略 {c['strategy_id']!r} 不存在")
         try:
-            child_def = engine.get(c["strategy_id"])
-            if child_def.execution_backend == "composite":
-                raise ValueError(f"子策略 {c['strategy_id']!r} 也是叠加策略; 首版禁止嵌套叠加")
-        except ValueError:
-            raise
+            child_def = _get_public_strategy(engine, c["strategy_id"])
+        except HTTPException as exc:
+            raise ValueError(f"子策略 {c['strategy_id']!r} 不存在") from exc
+        if child_def.execution_backend == "composite":
+            raise ValueError(f"子策略 {c['strategy_id']!r} 也是叠加策略; 首版禁止嵌套叠加")
 
     code = _render_composite_code(
         sid, req.name, req.description, children, req.merge_mode, req.min_confirm

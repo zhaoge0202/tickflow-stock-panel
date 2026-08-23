@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
-from app.db_safe import is_valid_ext_ident, quote_ident
+from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
 
 logger = logging.getLogger(__name__)
@@ -175,21 +175,28 @@ def instruments_names(request: Request, symbols: list[str]):
 
 
 def _get_stock_info(repo, symbol: str) -> dict:
-    """从 instruments 视图查标的名称 + 股本。"""
+    """从 instruments 内存缓存查标的名称 + 股本。
+
+    该接口在个股弹窗打开时每秒被调用 (SSE invalidate 触发重拉), 走
+    repo.get_instruments() 的 Polars 内存缓存按 symbol 过滤, 不再每请求
+    DuckDB 扫 instruments parquet。列缺失时返回空 dict, 与旧 SQL 报错路径一致。
+    """
+    import polars as pl
     try:
-        row = repo.execute_one(
-            "SELECT name, total_shares, float_shares FROM instruments WHERE symbol = ? LIMIT 1",
-            [symbol],
-        )
+        df = repo.get_instruments()
+        needed = ("symbol", "name", "total_shares", "float_shares")
+        if df.is_empty() or not all(c in df.columns for c in needed):
+            return {}
+        hit = df.filter(pl.col("symbol") == symbol).head(1)
+        if hit.is_empty():
+            return {}
+        return {
+            "name": hit["name"][0],
+            "total_shares": hit["total_shares"][0],
+            "float_shares": hit["float_shares"][0],
+        }
     except Exception:  # noqa: BLE001
         return {}
-    if not row:
-        return {}
-    return {
-        "name": row[0],
-        "total_shares": row[1],
-        "float_shares": row[2],
-    }
 
 
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
@@ -268,6 +275,47 @@ def _get_price_limit_info(
     return info
 
 
+def _get_previous_closes(
+    repo,
+    symbol: str,
+    trade_dates: list[date],
+    asset_type: str,
+) -> dict[date, float | None]:
+    """Return the previous trading day's adjusted close for each session."""
+    if not trade_dates:
+        return {}
+    start = min(trade_dates) - timedelta(days=45)
+    end = max(trade_dates)
+    try:
+        daily = repo.get_daily_asset(
+            asset_type,
+            symbol,
+            start,
+            end,
+            columns=["date", "close"],
+        ).sort("date")
+    except Exception:
+        daily = None
+    if daily is None or daily.is_empty():
+        return {trade_date: None for trade_date in trade_dates}
+
+    closes: list[tuple[date, float]] = []
+    for daily_date, close in daily.select(["date", "close"]).iter_rows():
+        if close is None:
+            continue
+        numeric = float(close)
+        if math.isfinite(numeric) and numeric > 0:
+            closes.append((daily_date, numeric))
+
+    result: dict[date, float | None] = {}
+    for trade_date in trade_dates:
+        result[trade_date] = next(
+            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
+            None,
+        )
+    return result
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -336,7 +384,8 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
     key 形如 "{config_id}__{field_name}"，与自选列表 enriched 接口保持一致。
-    JOIN 逻辑参考 watchlist.watchlist_enriched；任何 ext 表/字段缺失都静默跳过。
+    委托 screener._load_ext_value_maps 取值: 复用其 (路径,mtime) 签名缓存,
+    个股弹窗每秒重拉时不再重复读 ext parquet; 任何 ext 表/字段缺失都静默跳过。
     """
     if not ext_columns or not ext_columns.strip():
         return resp
@@ -353,43 +402,17 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     if not specs:
         return resp
 
-    import polars as pl
-    data_dir = repo.store.data_dir
     try:
-        from app.services.ext_data import ExtConfigStore
-        from app.api.ext_data import _read_ext_dataframe
-        ext_store = ExtConfigStore(data_dir)
-        configs = {c.id: c for c in ext_store.load_all()}
+        from app.api.screener import _load_ext_value_maps
+        value_maps = _load_ext_value_maps(repo, ext_columns)
     except Exception:  # noqa: BLE001
-        configs = {}
+        value_maps = {}
 
     ext_values: dict = {}
     for config_id, field_name in specs:
         ext_col_name = f"{config_id}__{field_name}"
-        value = None
-        try:
-            cfg = configs.get(config_id)
-            if cfg:
-                ext_df, _ = _read_ext_dataframe(cfg, data_dir)
-            else:
-                ext_df = pl.from_arrow(
-                    repo.store.db.query(
-                        f"SELECT symbol, {quote_ident(field_name)} FROM ext_{config_id}"
-                    ).arrow()
-                )
-            if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                # 时序表取最新分区，避免一个 symbol 多行
-                row = (
-                    ext_df
-                    .select(["symbol", field_name])
-                    .unique(subset=["symbol"], keep="last")
-                    .filter(pl.col("symbol") == symbol)
-                )
-                if not row.is_empty():
-                    value = row[field_name][0]
-        except Exception as e:  # noqa: BLE001
-            logger.debug("kline ext join failed for %s.%s: %s", config_id, field_name, e)
-        ext_values[ext_col_name] = value
+        vmap = value_maps.get(ext_col_name) or {}
+        ext_values[ext_col_name] = vmap.get(symbol)
 
     stock_info = dict(resp.get("stock_info") or {})
     stock_info["ext"] = ext_values
@@ -534,12 +557,13 @@ def get_daily_batch(request: Request, body: dict):
         return {"data": {}}
     df = pl.concat(frames, how="diagonal_relaxed")
 
-    # 按 symbol 分组, 每只取最近 N 条
+    # 按 symbol 分组, 每只取最近 N 条。
+    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
     result: dict[str, list[dict]] = {}
-    for sym in symbols:
-        sub = df.filter(pl.col("symbol") == sym).sort("date").tail(days)
+    for part in df.partition_by("symbol", maintain_order=True):
+        sub = part.sort("date").tail(days)
         if not sub.is_empty():
-            result[sym] = sub.to_dicts()
+            result[sub["symbol"][0]] = sub.to_dicts()
 
     return {"data": result}
 
@@ -621,14 +645,15 @@ def get_minute_batch(request: Request, body: dict):
     else:
         expected = 240
 
-    # 按 symbol 分组, 判定哪些不完整需要补拉
+    # 按 symbol 分组, 判定哪些不完整需要补拉 (partition_by 一次切分, 同 daily-batch)
     result: dict[str, list[dict]] = {}
     incomplete: list[str] = []
+    local_parts: dict[str, pl.DataFrame] = {}
+    if not df_local.is_empty():
+        for part in df_local.partition_by("symbol", maintain_order=True):
+            local_parts[part["symbol"][0]] = part.sort("datetime")
     for sym in symbols:
-        if df_local.is_empty():
-            sub = pl.DataFrame()
-        else:
-            sub = df_local.filter(pl.col("symbol") == sym).sort("datetime")
+        sub = local_parts.get(sym, pl.DataFrame())
         if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
             incomplete.append(sym)
         elif not sub.is_empty():
@@ -671,12 +696,83 @@ def get_minute_batch(request: Request, body: dict):
                 live_parts.append(df_e)
         if live_parts:
             live_df = pl.concat(live_parts, how="diagonal_relaxed")
+            live_map: dict[str, pl.DataFrame] = {
+                part["symbol"][0]: part.sort("datetime")
+                for part in live_df.partition_by("symbol", maintain_order=True)
+            }
             for sym in incomplete:
-                sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
-                if not sub.is_empty():
+                sub = live_map.get(sym)
+                if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
     return {"data": result}
+
+
+@router.get("/minute-range")
+def get_minute_range(
+    request: Request,
+    symbol: str = Query(..., description="标的代码"),
+    days: int = Query(10, ge=1, le=20, description="最近交易日数量"),
+):
+    """读取单只标的最近 N 个已落库交易日的分钟 K。"""
+    import polars as pl
+
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
+    base_response = {
+        "symbol": symbol,
+        "name": stock_info.get("name"),
+        "asset_type": asset_type,
+        "requested_days": days,
+    }
+
+    # 指数分钟 K 不落本地仓库, 最新分时仍由 /api/index/minute 实时读取。
+    if asset_type == "index":
+        return {**base_response, "sessions": [], "source": "none"}
+
+    end = cn_today()
+    start = end - timedelta(days=days * 3 + 20)
+    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    if minute.is_empty() or "datetime" not in minute.columns:
+        return {**base_response, "sessions": [], "source": "none"}
+
+    minute = minute.with_columns(
+        pl.col("datetime").dt.date().alias("_trade_date"),
+    )
+    trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
+    previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    row_columns = [
+        column
+        for column in (
+            "datetime", "open", "high", "low", "close", "volume", "amount"
+        )
+        if column in minute.columns
+    ]
+    sessions = []
+    for trade_date in trade_dates:
+        rows = (
+            minute.filter(pl.col("_trade_date") == trade_date)
+            .sort("datetime")
+            .select(row_columns)
+            .to_dicts()
+        )
+        if rows:
+            sessions.append({
+                "date": trade_date.isoformat(),
+                "prev_close": previous_closes.get(trade_date),
+                "rows": rows,
+            })
+
+    return {
+        **base_response,
+        "sessions": sessions,
+        "source": "local" if sessions else "none",
+    }
 
 
 @router.get("/minute")
@@ -721,13 +817,20 @@ def get_minute(
         price_limit = _get_price_limit_info(
             repo, symbol, trade_date, asset_type, stock_name,
         )
+        prev_close = _get_previous_closes(
+            repo, symbol, [trade_date], asset_type,
+        ).get(trade_date)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
+    prev_close = _get_previous_closes(
+        repo, symbol, [trade_date], asset_type,
+    ).get(trade_date)
     price_limit = _get_price_limit_info(
         repo, symbol, trade_date, asset_type, stock_name,
     )
@@ -758,6 +861,7 @@ def get_minute(
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
@@ -768,6 +872,7 @@ def get_minute(
         "source": "live" if not live_df.is_empty() else "none",
         "asset_type": asset_type,
         "price_limit": price_limit,
+        "prev_close": prev_close,
     }
 
 
@@ -813,7 +918,7 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot, LONG_JOB_TIMEOUT_S
+    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
@@ -836,7 +941,7 @@ async def sync_minute(request: Request):
     extend_flag = body.get("extend")
 
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
-    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    job_id, is_new = job_store.create(long_running=True)
     if not is_new:
         return {"status": "reused", "job_id": job_id}
 
@@ -909,12 +1014,20 @@ async def sync_minute_single(request: Request, body: dict):
     body: { "symbol": "000001.SZ" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
     """
+    import asyncio
+
     from app.services.preferences import get_minute_sync_days
-    from app.tickflow.capabilities import Cap
 
     symbol = body.get("symbol", "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol 不能为空")
+
+    requested_days = body.get("days")
+    if requested_days is not None:
+        if isinstance(requested_days, bool) or not isinstance(requested_days, int):
+            raise HTTPException(status_code=400, detail="days 必须是整数")
+        if requested_days < 1 or requested_days > 30:
+            raise HTTPException(status_code=400, detail="days 必须在 1 到 30 之间")
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
@@ -927,11 +1040,11 @@ async def sync_minute_single(request: Request, body: dict):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    days = get_minute_sync_days()
+    days = requested_days if requested_days is not None else get_minute_sync_days()
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days)
+        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 

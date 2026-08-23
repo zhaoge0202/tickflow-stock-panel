@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, Database, Plus, RefreshCw, Zap, FileWarning } from 'lucide-react'
+import { Check, Database, Plus, RefreshCw, Zap, FileWarning, Puzzle } from 'lucide-react'
 import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
+import { TickFlowKeyConfig } from './Keys'
 
 const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
@@ -26,6 +27,9 @@ export function SettingsDataSourcesPanel() {
     mutationFn: api.reloadDataSources,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
+      // 重载可能改变数据集声明 → 能力与实时模式随之变化
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       toast('配置已重新加载', 'success')
     },
   })
@@ -35,6 +39,8 @@ export function SettingsDataSourcesPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       setSelected('tickflow')
       setConfirmDelete(null)
       toast('数据源已删除', 'success')
@@ -70,6 +76,9 @@ export function SettingsDataSourcesPanel() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      // 切换会改变实时行情 provider → 模式(none/watchlist/full_market)立即刷新
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       toast('数据源已切换', 'success')
     },
   })
@@ -83,6 +92,8 @@ export function SettingsDataSourcesPanel() {
     mutationFn: (name: string) => api.installPlugin(name),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.install_ok) {
         toast('插件依赖安装成功', 'success')
       } else {
@@ -97,6 +108,8 @@ export function SettingsDataSourcesPanel() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.uninstall_ok) {
         toast(data.uninstall_message || '已卸载', 'success')
       } else {
@@ -153,6 +166,19 @@ export function SettingsDataSourcesPanel() {
           </button>
         </div>
 
+        {/* 插件化说明 (置顶黄色提示条): 接入自有行情 → 把文档交给 AI */}
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5">
+          <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+          <div className="text-[11px] leading-relaxed text-muted">
+            <span className="text-secondary">数据源已插件化</span>
+            ,接入自有行情?把文档发给 AI 即可自动接入:
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
+            (自有 HTTP 接口) ·
+            <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
+            (插件开发)
+          </div>
+        </div>
+
         {/* 当前数据源状态 */}
         <div className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded-lg bg-elevated/30">
           <span className="text-[10px] uppercase tracking-widest text-muted">当前</span>
@@ -198,10 +224,10 @@ export function SettingsDataSourcesPanel() {
                     {item.display_name}
                   </span>
                   {item.name === 'tickflow' && (
-                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">内置</span>
+                    <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
                   )}
                   {pluginNames.has(item.name) && (
-                    <span className="text-[9px] text-muted/50 uppercase tracking-wider shrink-0">插件</span>
+                    <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
                   )}
                   {/* 右侧操作区: 插件未安装→安装按钮; 已激活→使用中; 否则→使用/卸载 */}
                   {pluginUnavailable ? (
@@ -256,7 +282,8 @@ export function SettingsDataSourcesPanel() {
                   )}
                 </div>
                 {item.name !== 'tickflow' && item.datasets.length > 0 && (
-                  <div className="flex flex-wrap gap-1 ml-3.5">
+                  <div className="flex flex-wrap items-center gap-1 ml-3.5">
+                    <span className="text-[9px] font-medium text-accent bg-accent/10 px-1 py-0.5 rounded">已适配</span>
                     {item.datasets.map(ds => (
                       <span key={ds} className="text-[9px] text-muted/60 bg-elevated/60 px-1 py-0.5 rounded">
                         {DATASET_LABEL[ds] || ds}
@@ -265,7 +292,10 @@ export function SettingsDataSourcesPanel() {
                   </div>
                 )}
                 {item.name === 'tickflow' && (
-                  <div className="text-[10px] text-muted/60 ml-3.5">日K · 除权 · 实时 · 分钟K</div>
+                  <div className="flex flex-wrap items-center gap-1 ml-3.5">
+                    <span className="text-[9px] font-medium text-accent bg-accent/10 px-1 py-0.5 rounded">已适配</span>
+                    <span className="text-[10px] text-muted/60">日K · 除权 · 实时 · 分钟K</span>
+                  </div>
                 )}
                 {/* 未安装插件显示安装命令提示 */}
                 {pluginUnavailable && plugin?.install_hint && (
@@ -310,6 +340,7 @@ export function SettingsDataSourcesPanel() {
           <span className="text-muted/30">·</span>
           <span>未启用的数据集自动回退 TickFlow</span>
         </div>
+
       </section>
 
       {/* ===== 下方: 编辑区 ===== */}
@@ -334,6 +365,10 @@ export function SettingsDataSourcesPanel() {
               onCancel={() => setSelected('tickflow')}
               onSaved={() => {
                 qc.invalidateQueries({ queryKey: QK.dataSources })
+                // 数据集声明变化 → 能力增广与实时模式立即刷新
+                qc.invalidateQueries({ queryKey: QK.preferences })
+                qc.invalidateQueries({ queryKey: QK.capabilities })
+                qc.invalidateQueries({ queryKey: QK.quoteStatus })
                 // 强制清除该源的详情缓存, 下次编辑重新拉取最新配置
                 if (selected !== '__new__') {
                   qc.removeQueries({ queryKey: ['data-source-detail', selected] })
@@ -412,15 +447,16 @@ function PluginDetail({ plugin, isActive, onSwitch, switching }: {
       </div>
       <div className="flex items-center gap-3">
         {isActive ? (
-          <span className="inline-flex items-center gap-1.5 text-xs text-accent">
-            <Check className="h-3.5 w-3.5" /> 当前使用中
+          <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-2 py-1 rounded">
+            <Check className="h-2.5 w-2.5" /> 使用中
           </span>
         ) : (
           <button
             onClick={onSwitch}
             disabled={switching}
-            className="px-3 py-1.5 rounded-btn bg-accent/10 text-accent hover:bg-accent/20 text-xs font-medium transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
           >
+            <Zap className="h-3.5 w-3.5" />
             切换为当前数据源
           </button>
         )}
@@ -431,51 +467,56 @@ function PluginDetail({ plugin, isActive, onSwitch, switching }: {
 
 function TickFlowDetail({ active, onSwitch, switching }: { active: boolean; onSwitch: () => void; switching: boolean }) {
   return (
-    <section className="rounded-card border border-border bg-surface p-6">
-      <div className="flex items-start gap-4 mb-5">
-        <div className="h-11 w-11 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
-          <Database className="h-5 w-5 text-accent" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
-            <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">内置默认</span>
-            {active && (
-              <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
-                <Check className="h-2.5 w-2.5" /> 当前使用
-              </span>
-            )}
+    <div className="space-y-5">
+      <section className="rounded-card border border-border bg-surface p-6">
+        <div className="flex items-start gap-4 mb-5">
+          <div className="h-11 w-11 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
+            <Database className="h-5 w-5 text-accent" />
           </div>
-          <p className="text-xs text-secondary mt-1.5 leading-relaxed">
-            项目默认数据源。日K、除权因子、实时行情、分钟K均由 TickFlow 提供,无需额外配置。
-          </p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
-        {[
-          { label: '日K', desc: '历史 + 实时覆写' },
-          { label: '除权因子', desc: 'Starter+ 能力' },
-          { label: '实时行情', desc: '全市场快照' },
-          { label: '分钟K', desc: 'Pro+ 能力' },
-        ].map(f => (
-          <div key={f.label} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5">
-            <div className="text-xs font-medium text-foreground">{f.label}</div>
-            <div className="text-[10px] text-muted mt-0.5">{f.desc}</div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
+              <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">第三方</span>
+              {active && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-2 py-1 rounded">
+                  <Check className="h-2.5 w-2.5" /> 使用中
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-secondary mt-1.5 leading-relaxed">
+              项目默认数据源。日K、除权因子、实时行情、分钟K均由 TickFlow 提供,无需额外配置。
+            </p>
           </div>
-        ))}
-      </div>
+        </div>
 
-      {!active && (
-        <button
-          onClick={onSwitch}
-          disabled={switching}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-btn bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors"
-        >
-          <Zap className="h-3.5 w-3.5" />
-          切换为当前数据源
-        </button>
-      )}
-    </section>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
+          {[
+            { label: '日K', desc: '历史 + 实时覆写' },
+            { label: '除权因子', desc: '复权计算' },
+            { label: '实时行情', desc: '全市场快照' },
+            { label: '分钟K', desc: '分时图 · 回测' },
+          ].map(f => (
+            <div key={f.label} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5">
+              <div className="text-xs font-medium text-foreground">{f.label}</div>
+              <div className="text-[10px] text-muted mt-0.5">{f.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        {!active && (
+          <button
+            onClick={onSwitch}
+            disabled={switching}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            切换为当前数据源
+          </button>
+        )}
+      </section>
+
+      {/* TickFlow API Key 配置 + 订阅档位 + 可用功能 (原 account tab 内容) */}
+      <TickFlowKeyConfig />
+    </div>
   )
 }

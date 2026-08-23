@@ -11,15 +11,24 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import polars as pl
 
-from app.strategy.scoring import scoring_dependencies, scoring_value_expr
+from app.strategy.scoring import (
+    SCORING_DIRECTION_LOW,
+    effective_scoring,
+    effective_scoring_directions,
+    materialize_scoring_columns,
+    scoring_dependencies,
+    scoring_value_expr,
+    scoring_warmup_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +190,6 @@ class StrategyDef:
     trailing_take_profit_activate: float | None
     trailing_take_profit_drawdown: float | None
     max_hold_days: int | None
-    alerts: list[dict]
     filter_fn: Callable[[pl.DataFrame, dict], pl.Expr] | None
     filter_history_fn: Callable[[pl.DataFrame, dict], pl.DataFrame] | None
     lookback_days: int
@@ -520,7 +528,6 @@ class StrategyEngine:
             trailing_take_profit_activate=getattr(mod, "TRAILING_TAKE_PROFIT_ACTIVATE", None),
             trailing_take_profit_drawdown=getattr(mod, "TRAILING_TAKE_PROFIT_DRAWDOWN", None),
             max_hold_days=getattr(mod, "MAX_HOLD_DAYS", None),
-            alerts=getattr(mod, "ALERTS", []),
             filter_fn=filter_fn,
             filter_history_fn=filter_history_fn,
             required_features=frozenset(meta.get("required_features", []) or [])
@@ -547,10 +554,12 @@ class StrategyEngine:
     # 查询
     # ================================================================
 
-    def list_strategies(self) -> list[dict]:
-        """返回所有策略的元信息"""
+    def list_strategies(self, *, include_research: bool = False) -> list[dict]:
+        """Return public strategy metadata unless research templates are requested."""
         result = []
         for s in self._strategies.values():
+            if s.meta.get("research_only") and not include_research:
+                continue
             result.append({
                 **s.meta,
                 "source": s.source,
@@ -655,11 +664,14 @@ class StrategyEngine:
         required = 1
         for strategy_id in strategy_ids:
             strategy = self.get(strategy_id)
+            overrides = overrides_map.get(strategy_id) or {}
+            scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
+            required = max(required, scoring_warmup_bars(scoring))
             if strategy.execution_backend == "matrix_native":
                 params = self.resolve_params(
                     strategy,
                     params_map.get(strategy_id),
-                    overrides_map.get(strategy_id),
+                    overrides,
                 )
                 required = max(
                     required,
@@ -714,9 +726,19 @@ class StrategyEngine:
             max_warmup = max(
                 max_warmup,
                 int(strategy.matrix_strategy.required_warmup_bars(params)) + 1,
+                scoring_warmup_bars(
+                    effective_scoring(
+                        strategy.meta.get("scoring"),
+                        overrides_map.get(strategy_id),
+                    )
+                ),
             )
             field_columns.update(
-                self._matrix_field_columns(strategy, overrides_map.get(strategy_id))
+                self._matrix_field_columns(
+                    strategy,
+                    overrides_map.get(strategy_id),
+                    params,
+                )
             )
         if not matrix_ids:
             return None
@@ -832,7 +854,15 @@ class StrategyEngine:
                 started_at=t0,
             )
 
-        signal_df = context.current if context.current is not None else context.history
+        scoring = effective_scoring(s.meta.get("scoring"), overrides)
+        scoring_directions = effective_scoring_directions(overrides)
+        current, history = self._materialize_scoring_frames(
+            context.current,
+            context.history,
+            scoring,
+        )
+
+        signal_df = current if current is not None else history
         if signal_df is None:
             signal_df = pl.DataFrame()
         if not signal_df.is_empty() and "date" in signal_df.columns:
@@ -843,9 +873,9 @@ class StrategyEngine:
 
         # 普通策略只读目标日期；历史策略读取调用方注入的历史窗口。
         if s.filter_history_fn:
-            if context.history is None:
+            if history is None:
                 raise ValueError(f"strategy {strategy_id} requires history data")
-            df = context.history
+            df = history
             if df.is_empty():
                 return StrategyResult(
                     as_of=as_of,
@@ -856,9 +886,9 @@ class StrategyEngine:
             if "date" in df.columns:
                 df = df.filter(pl.col("date") == as_of)
         else:
-            if context.current is None:
+            if current is None:
                 raise ValueError(f"strategy {strategy_id} requires current data")
-            df = context.current
+            df = current
 
         if df.is_empty():
             return StrategyResult(
@@ -887,11 +917,7 @@ class StrategyEngine:
             df = df.filter(expr)
 
         # Stage 3: 评分
-        scoring = s.meta.get("scoring", {})
-        scoring_overrides = overrides.get("scoring")
-        if scoring_overrides:
-            scoring = {**scoring, **scoring_overrides}
-        df = self._apply_scoring(df, scoring)
+        df = self._apply_scoring(df, scoring, scoring_directions)
         entry_signal_hits = self._collect_signal_hits(df, entry_signals)
         if not entry_signals and (s.filter_history_fn or s.filter_fn):
             entry_signal_hits = [
@@ -1007,7 +1033,11 @@ class StrategyEngine:
             field_columns: set[str] = set()
             for sid, strategy in matrix_strats:
                 field_columns.update(
-                    self._matrix_field_columns(strategy, overrides_map.get(sid))
+                    self._matrix_field_columns(
+                        strategy,
+                        overrides_map.get(sid),
+                        params_map.get(sid),
+                    )
                 )
             shared_matrix = build_market_data_matrix(
                 shared_history,
@@ -1032,8 +1062,26 @@ class StrategyEngine:
         return results
 
     @staticmethod
-    def _matrix_field_columns(strategy: StrategyDef, overrides: dict | None = None) -> set[str]:
+    def _matrix_field_columns(
+        strategy: StrategyDef,
+        overrides: dict | None = None,
+        params: dict | None = None,
+    ) -> set[str]:
         fields = set(strategy.matrix_strategy.required_fields())
+        # 参数评分字段 (如挖掘策略的因子组合) 需展开为实际数据依赖,
+        # 与 backtest._resolve_matrix_native 保持同一语义, 否则虚拟因子
+        # (limit_up_count_* -> consecutive_limit_ups) 在矩阵里缺字段。
+        parameter_fields = getattr(
+            strategy.matrix_strategy,
+            "required_fields_for_params",
+            None,
+        )
+        if callable(parameter_fields):
+            fields.update(
+                scoring_dependencies(
+                    {str(name): 1.0 for name in parameter_fields(params or {})}
+                )
+            )
         basic_filter = dict(strategy.basic_filter or {})
         if (overrides or {}).get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
@@ -1048,8 +1096,7 @@ class StrategyEngine:
                 or basic_filter.get(f"{prefix}_max") is not None
             ):
                 fields.add(field_name)
-        scoring = dict(strategy.meta.get("scoring", {}) or {})
-        scoring.update((overrides or {}).get("scoring") or {})
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         fields.update(scoring_dependencies(scoring))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
@@ -1083,7 +1130,7 @@ class StrategyEngine:
                 return StrategyResult(as_of=as_of, strategy_id=strategy_id)
             market = build_market_data_matrix(
                 source_panel,
-                field_columns=self._matrix_field_columns(strategy, overrides),
+                field_columns=self._matrix_field_columns(strategy, overrides, params),
             )
 
         if source_panel is None or source_panel.is_empty():
@@ -1094,8 +1141,7 @@ class StrategyEngine:
         basic_filter = dict(strategy.basic_filter or {})
         if overrides.get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
-        scoring = dict(strategy.meta.get("scoring", {}) or {})
-        scoring.update(overrides.get("scoring") or {})
+        scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         asset_mask = None
         if pool:
             pool_set = set(pool)
@@ -1112,6 +1158,7 @@ class StrategyEngine:
             MatrixPipelineConfig(
                 basic_filter=basic_filter,
                 scoring=scoring,
+                scoring_directions=effective_scoring_directions(overrides),
                 order_by=strategy.meta.get("order_by"),
                 descending=bool(strategy.meta.get("descending", True)),
                 asset_mask=asset_mask,
@@ -1398,28 +1445,34 @@ class StrategyEngine:
     # ================================================================
 
     @staticmethod
-    def _apply_scoring(df: pl.DataFrame, weights: dict) -> pl.DataFrame:
+    def _apply_scoring(
+        df: pl.DataFrame,
+        weights: dict,
+        directions: Mapping[str, str] | None = None,
+    ) -> pl.DataFrame:
         """通用评分: min-max 归一化 → 加权求和 → 0~100 分"""
         if not weights:
             return df
 
         executable = [
-            (value, weight)
+            (str(col), value, weight)
             for col, weight in weights.items()
             if weight and (value := scoring_value_expr(df.columns, str(col))) is not None
         ]
-        total_weight = sum(weight for _, weight in executable)
+        total_weight = sum(weight for _, _, weight in executable)
         if total_weight <= 0:
             return df
 
         score_parts: list[pl.Expr] = []
-        for value, weight in executable:
+        for name, value, weight in executable:
             w = weight / total_weight
             col_min = value.min()
             col_range = value.max() - col_min
             normalized = pl.when(col_range > 0).then(
                 (value - col_min) / col_range
             ).otherwise(pl.lit(0.5))
+            if (directions or {}).get(name) == SCORING_DIRECTION_LOW:
+                normalized = 1.0 - normalized
             score_parts.append(normalized * w)
 
         if not score_parts:
@@ -1429,6 +1482,31 @@ class StrategyEngine:
         for part in score_parts[1:]:
             score_expr = score_expr + part
         return df.with_columns((score_expr * 100).alias("score"))
+
+    @staticmethod
+    def _materialize_scoring_frames(
+        current: pl.DataFrame | None,
+        history: pl.DataFrame | None,
+        scoring: Mapping[str, Any],
+    ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
+        names = [str(name) for name, weight in scoring.items() if weight]
+        if not names:
+            return current, history
+        if history is None or history.is_empty():
+            return (
+                materialize_scoring_columns(current, names) if current is not None else None,
+                history,
+            )
+
+        scored_history = materialize_scoring_columns(history, names)
+        if current is None or current.is_empty():
+            return current, scored_history
+        join_keys = [key for key in ("symbol", "date", "datetime") if key in current.columns and key in scored_history.columns]
+        added = [name for name in names if name not in current.columns and name in scored_history.columns]
+        if not join_keys or not added:
+            return materialize_scoring_columns(current, names), scored_history
+        values = scored_history.select([*join_keys, *added]).unique(subset=join_keys, keep="last")
+        return current.join(values, on=join_keys, how="left"), scored_history
 
 
 def _sanitize(rows: list[dict]) -> list[dict]:

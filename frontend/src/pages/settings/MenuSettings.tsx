@@ -35,11 +35,13 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/watchlist', label: '自选', type: 'builtin', visible: true },
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
+  { id: '/mining', label: '挖掘', type: 'builtin', visible: true },
   { id: '/limit-ladder', label: '连板梯队', type: 'builtin', visible: true },
   { id: '/concept-analysis', label: '概念分析', type: 'builtin', visible: true },
   { id: '/industry-analysis', label: '行业分析', type: 'builtin', visible: true },
   { id: '/stock-analysis', label: '个股分析', type: 'builtin', visible: true },
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
+  { id: '/abnormal', label: '异动监控', type: 'builtin', visible: true },
   { id: '/review', label: '复盘', type: 'builtin', visible: true },
   { id: '/financials', label: '财务分析', type: 'builtin', visible: true },
   { id: '/indices', label: '指数', type: 'builtin', visible: true },
@@ -187,7 +189,18 @@ export function SettingsMenuSettingsPanel() {
       }
     }
     for (const e of [...BUILTIN_PAGES, ...analysisEntries]) {
-      if (!seen.has(e.id)) ordered.push(e)
+      if (seen.has(e.id)) continue
+      // 未保存过排序的新条目: 内置页插回默认位置, 分析菜单追加到末尾
+      const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
+      let anchor = -1
+      if (defaultIndex > 0) {
+        for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
+          anchor = ordered.findIndex(o => o.id === BUILTIN_PAGES[i].id)
+        }
+      }
+      if (anchor >= 0) ordered.splice(anchor + 1, 0, e)
+      else if (defaultIndex >= 0) ordered.unshift(e)
+      else ordered.push(e)
     }
     return ordered
   }, [prefs?.nav_order, analysisEntries])
@@ -207,7 +220,18 @@ export function SettingsMenuSettingsPanel() {
       if (e) { result.push(e); seen.add(id) }
     }
     for (const e of allEntries) {
-      if (!seen.has(e.id)) result.push(e)
+      if (seen.has(e.id)) continue
+      // 与 allEntries 同一语义: 未保存的新内置页插回默认位置而非追加到末尾
+      const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
+      let anchor = -1
+      if (defaultIndex > 0) {
+        for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
+          anchor = result.findIndex(o => o.id === BUILTIN_PAGES[i].id)
+        }
+      }
+      if (anchor >= 0) result.splice(anchor + 1, 0, e)
+      else if (defaultIndex >= 0) result.unshift(e)
+      else result.push(e)
     }
     return result
   }, [localOrder, prefs?.nav_order, allEntries])

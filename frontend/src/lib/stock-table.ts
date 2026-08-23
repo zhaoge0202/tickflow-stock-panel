@@ -5,6 +5,7 @@
  * 自选页 13 个，缺一个均线金叉/死叉变体）。
  */
 import type { ColumnConfig } from '@/lib/list-columns'
+import type { MinuteKlineRow } from '@/lib/api'
 
 // ===== 信号 =====
 
@@ -95,11 +96,24 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'momentum_20d':  return r.momentum_20d
     case 'momentum_30d':  return r.momentum_30d
     case 'momentum_60d':  return r.momentum_60d
+    case 'deviate_3d':   return r.deviate_3d
+    case 'deviate_10d':  return r.deviate_10d
+    case 'deviate_30d':  return r.deviate_30d
     case 'limit_ups':     return r.consecutive_limit_ups ?? 0
     case 'limit_downs':   return r.consecutive_limit_downs ?? 0
     case 'score':         return r.score
     default: return null
   }
+}
+
+/**
+ * 分时列排序标量: 最新一根分钟收盘相对昨收的涨跌幅 (小数), 与分时图最后一点同口径。
+ * 无分钟数据或昨收缺失时返回 null (排序时排在最后)。
+ */
+export function getIntradaySortValue(r: any, minuteRows: MinuteKlineRow[] | undefined): number | null {
+  if (!minuteRows?.length || !r.prev_close) return null
+  const last = minuteRows[minuteRows.length - 1]
+  return last.close / r.prev_close - 1
 }
 
 // ===== 共享样式 =====

@@ -7,7 +7,7 @@ import { DatePicker } from '@/components/DatePicker'
 import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
-import { useDataStatus, useCapabilities, useSettings } from '@/lib/useSharedQueries'
+import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { SettingsModal } from '@/components/data/SettingsModal'
@@ -102,7 +102,6 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
     queryKey: ['alerts', ''],
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
     refetchInterval: 10000,
-    refetchIntervalInBackground: true,
   })
   const events: AlertEvent[] = alerts.data?.alerts ?? []
 
@@ -556,8 +555,22 @@ export function Dashboard() {
   const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
   const sealedReady = !!data?.limit?.sealed_ready
   const isSealedDegrade = !hasDepth || !sealedReady
-  // none 档(无 key / 无效 key): 不再阻断功能, 仅实时行情等扩展能力受限
-  const isNoKey = settings.data?.mode === 'none'
+  // 空态引导文案按当前数据源分流: TickFlow 源提"免费服务器", 其他源提"当前数据源",
+  // 弱化与默认 TickFlow 的隐式绑定 (None 档/免费 Key 等 TickFlow 概念仅在其被选中时出现)
+  const prefs = usePreferences()
+  const dataSourceList = useQuery({
+    queryKey: QK.dataSources,
+    queryFn: api.dataSources,
+    staleTime: 60_000,
+  })
+  const activeProvider = prefs.data?.daily_data_provider || 'tickflow'
+  const isTickflowProvider = activeProvider === 'tickflow'
+  const providerLabel = [
+    ...(dataSourceList.data?.builtin ?? []),
+    ...(dataSourceList.data?.plugins ?? []),
+    ...(dataSourceList.data?.custom ?? []),
+  ].find(s => s.name === activeProvider)?.display_name
+    ?.replace(/（.*?）|\(.*?\)/g, '').trim() || activeProvider
   // 无本地数据(enriched/daily 都没有)→ 常驻引导卡片
   // 注: 后端 status 的 rows 为性能刻意返回 0, 用 trading_days 判断是否有数据
   const ds = dataStatus.data
@@ -655,7 +668,7 @@ export function Dashboard() {
   const currentDate = selectedDate ?? data.as_of ?? ''
   const quoteRunning = (!selectedDate || selectedDate === latestDate) && data.quote_status?.running
   // 实时模式: none / watchlist / full_market。
-  // watchlist (Free 档) 仅自选 ≤5 只实时, 看板呈现的大盘数据实为盘后快照, 需提示避免误读。
+  // watchlist 模式仅自选 ≤5 只实时, 看板呈现的大盘数据实为盘后快照, 需提示避免误读。
   const quoteMode = data.quote_status?.mode as ('none' | 'watchlist' | 'full_market') | undefined
 
   return (
@@ -669,14 +682,16 @@ export function Dashboard() {
           stage={fetchStatus.data?.stage}
           fetchPct={fetchStatus.data?.progress}
           onStart={() => startFetch.mutate()}
-          isNoKey={isNoKey}
+          isTickflowProvider={isTickflowProvider}
+          providerLabel={providerLabel}
         />
       )}
       {/* 首次使用自动弹窗(同会话仅一次) */}
       <AnimatePresence>
         {showWelcomeModal && (
           <WelcomeFetchModal
-            isNoKey={isNoKey}
+            isTickflowProvider={isTickflowProvider}
+            providerLabel={providerLabel}
             onClose={() => setShowWelcomeModal(false)}
             onStart={() => {
               startFetch.mutate()
@@ -725,14 +740,14 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* Free 档提示: 大盘看板为盘后数据, 仅自选股实时。避免用户误读为全市场实时。 */}
+      {/* 自选实时模式提示: 大盘看板为盘后数据, 仅自选股实时。避免用户误读为全市场实时。 */}
       {quoteMode === 'watchlist' && (
         <div className="mb-1.5 flex items-start gap-2 rounded-card border border-amber-500/30 bg-amber-500/8 px-3 py-1.5 text-[11px] leading-relaxed">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
           <div className="min-w-0 flex-1 text-secondary">
             当前为「自选实时」模式,看板展示的大盘数据为<strong className="text-foreground">盘后快照</strong>(最新有数据日),并非盘中实时;
             仅自选股({data.quote_status?.watchlist_symbol_count ?? 0} 只)支持实时监控。
-            <span className="ml-1 text-accent">全市场实时需 Starter+</span>
+            <span className="ml-1 text-accent">全市场实时依赖数据源支持</span>
           </div>
         </div>
       )}
@@ -858,7 +873,8 @@ export function Dashboard() {
 
 // ===== 无数据常驻引导卡片: 一键触发盘后管道获取行情数据(无 Key 也可) =====
 function FetchDataCard({
-  isFetching, isStarting, fetchFailed, stage, fetchPct, onStart, isNoKey,
+  isFetching, isStarting, fetchFailed, stage, fetchPct, onStart,
+  isTickflowProvider, providerLabel,
 }: {
   isFetching: boolean
   isStarting: boolean
@@ -866,7 +882,8 @@ function FetchDataCard({
   stage?: string
   fetchPct?: number
   onStart: () => void
-  isNoKey: boolean
+  isTickflowProvider: boolean
+  providerLabel: string
 }) {
   const stageText = stage ? (STAGE_LABELS[stage] ?? stage) : '正在同步行情数据…'
   return (
@@ -878,11 +895,13 @@ function FetchDataCard({
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-foreground">当前暂无数据</div>
           <p className="mt-1 text-xs text-secondary leading-relaxed">
-            首次使用需获取行情数据后才能查看看板。系统将从免费数据源拉取近 1 年全 A 股日K(约 5500 只),预计 1-3 分钟,期间可继续浏览其他页面。
+            首次使用需获取行情数据后才能查看看板。{isTickflowProvider
+              ? '可通过 TickFlow 免费服务器拉取近 1 年全 A 股日K'
+              : `将从当前数据源「${providerLabel}」拉取近 1 年全 A 股日K`}(约 5500 只),预计 1-3 分钟,期间可继续浏览其他页面。
           </p>
-          {isNoKey && (
+          {isTickflowProvider && (
             <p className="mt-1 text-[11px] text-warning/80 leading-relaxed">
-              ⓘ 无需 API Key,当前为 None 档即可获取历史日K,可制定策略+回测。配置免费 Key 可解锁实时行情监控能力。
+              ⓘ 获取数据后即可进行策略定制、回测验证、选股扫描等本地分析功能。
             </p>
           )}
 
@@ -941,9 +960,10 @@ function FetchDataCard({
 
 // ===== 首次使用自动弹窗: 询问用户后触发盘后管道 =====
 function WelcomeFetchModal({
-  isNoKey, onClose, onStart,
+  onClose, onStart, isTickflowProvider, providerLabel,
 }: {
-  isNoKey: boolean
+  isTickflowProvider: boolean
+  providerLabel: string
   onClose: () => void
   onStart: () => void
 }) {
@@ -960,12 +980,14 @@ function WelcomeFetchModal({
         </motion.div>
         <h3 className="mt-4 text-base font-semibold text-foreground">首次使用,需先获取行情数据</h3>
         <p className="mt-2 text-xs text-secondary leading-relaxed">
-          系统将从免费数据源拉取近 1 年全 A 股日K(约 5500 只),预计 1-3 分钟。
+          {isTickflowProvider
+            ? '可通过 TickFlow 免费服务器拉取近 1 年全 A 股日K'
+            : `将从当前数据源「${providerLabel}」拉取近 1 年全 A 股日K`}(约 5500 只),预计 1-3 分钟。
           同步期间可继续浏览其他页面,完成后看板自动刷新。
         </p>
-        {isNoKey && (
+        {isTickflowProvider && (
           <div className="mt-3 rounded-btn bg-elevated/60 px-3 py-2 text-[11px] text-muted leading-relaxed">
-            ⓘ 当前无需 API Key,None 档即可获取历史日K数据。
+            ⓘ 获取数据后即可进行策略定制、回测验证等本地分析功能。
           </div>
         )}
         <div className="mt-5 flex items-center justify-center gap-2.5">

@@ -130,16 +130,36 @@ class QuoteSubscriber:
             self._event.set()
 
 
+# 落盘节流间隔: last_fetch_ms 仅在进程重启后用于显示"最后获取时间"(运行中读内存值),
+# 每 30s 持久化一次足够, 避免 expert 档每秒一轮的全量 preferences 重写磁盘。
+_LAST_FETCH_WRITE_INTERVAL_MS = 30_000.0
+_last_fetch_written_at_ms: float = 0.0
+
+
 def _persist_last_fetch(fetched_at_ms: float) -> None:
     """把"最后获取"时间戳持久化到 preferences, 使进程重启后仍可显示。
 
     放在锁外调用 (IO); 失败不影响主流程 (内存值已更新, 下次 fetch 再写)。
+    距上次成功落盘不足 30s 时跳过 (节流只影响落盘频率, 内存值不受影响)。
     """
+    global _last_fetch_written_at_ms
+    if (fetched_at_ms - _last_fetch_written_at_ms) < _LAST_FETCH_WRITE_INTERVAL_MS:
+        return
     try:
         from app.services import preferences
         preferences.save({"last_fetch_ms": round(fetched_at_ms, 0)})
+        _last_fetch_written_at_ms = fetched_at_ms
     except Exception as e:  # noqa: BLE001
         logger.debug("last_fetch_ms 持久化失败 (不影响行情): %s", e)
+
+
+def _monitor_name_map(repo) -> dict[str, str]:
+    """监控回填用的 symbol → name 映射 (股票 + ETF + 指数, 股票优先)。
+
+    走 repo.get_name_map() 的进程内 memo (三份 instruments 维表刷新时失效),
+    避免每轮监控对 ~7000 行维表 iter_rows 重建。过滤空名称与旧行为一致。
+    """
+    return {s: n for s, n in repo.get_name_map().items() if n}
 
 
 class QuoteService:
@@ -175,6 +195,9 @@ class QuoteService:
         self._subscribers: set[QuoteSubscriber] = set()
         self._strategy_monitor = None            # 延迟注入
         self._app_state = None                   # 延迟注入 (FastAPI app.state)
+        # 异动边缘规则上次评估时间戳 (秒)。异动快照历史部分有 60s 缓存,
+        # 但每次构建仍有全市场循环, 轮询线程里限频到 30s 一次。
+        self._abnormal_last_eval = 0.0
 
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
@@ -1081,28 +1104,10 @@ class QuoteService:
                 engine = getattr(self._app_state, "monitor_engine", None)
                 if engine and engine.rule_count > 0:
                     # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)。
-                    # 含股票 + ETF 维表, 保证 ETF 监控告警也能回填名称。
+                    # 股票 + ETF + 指数三表合并走 _monitor_name_map -> repo.get_name_map()
+                    # 的进程内 memo, 避免每轮监控对 ~7000 行维表 iter_rows 重建。
                     try:
-                        name_map: dict[str, str] = {}
-                        inst_df = self._app_state.repo.get_instruments()
-                        if not inst_df.is_empty() and "symbol" in inst_df.columns and "name" in inst_df.columns:
-                            for row in inst_df.select(["symbol", "name"]).iter_rows(named=True):
-                                if row.get("name"):
-                                    name_map[row["symbol"]] = row["name"]
-                        # 仅当存在 ETF 规则时补 ETF 维表 (股票名优先, setdefault 不覆盖股票)
-                        if engine.has_asset_rules("etf"):
-                            etf_inst = self._app_state.repo.get_etf_instruments()
-                            if not etf_inst.is_empty() and "symbol" in etf_inst.columns and "name" in etf_inst.columns:
-                                for row in etf_inst.select(["symbol", "name"]).iter_rows(named=True):
-                                    if row.get("name"):
-                                        name_map.setdefault(row["symbol"], row["name"])
-                        # 仅当存在指数规则时补指数维表 (setdefault 不覆盖股票/ETF)
-                        if engine.has_asset_rules("index"):
-                            idx_inst = self._app_state.repo.get_instruments_asset("index")
-                            if not idx_inst.is_empty() and "symbol" in idx_inst.columns and "name" in idx_inst.columns:
-                                for row in idx_inst.select(["symbol", "name"]).iter_rows(named=True):
-                                    if row.get("name"):
-                                        name_map.setdefault(row["symbol"], row["name"])
+                        name_map = _monitor_name_map(self._app_state.repo)
                         if name_map:
                             engine.set_name_map(name_map)
                     except Exception as e:  # noqa: BLE001
@@ -1121,6 +1126,23 @@ class QuoteService:
                             enriched_today if stock_ready else pl.DataFrame(),
                             self.get_index_quotes(),
                         )
+                    # 异动边缘规则轮: 快照 (enriched 偏离列 + 实时叠加) 由
+                    # abnormal_moves.build_overview 统一构建, 引擎只做边缘触发判定。
+                    # 30s 限频 —— 快照历史部分 60s 缓存, 无需跟行情轮询同频重算。
+                    if engine.has_rule_type("abnormal") and self._repo is not None:
+                        _now_ts = time.time()
+                        if _now_ts - self._abnormal_last_eval >= 30.0:
+                            self._abnormal_last_eval = _now_ts
+                            try:
+                                from app.services import abnormal_moves
+                                _overview = abnormal_moves.build_overview(
+                                    self._repo, self,
+                                    min_closeness=engine.min_abnormal_closeness(),
+                                    limit=1000,
+                                )
+                                rule_events += engine.evaluate_abnormal(_overview.get("rows") or [])
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("异动监控规则评估失败 (不影响其他告警): %s", e)
                     # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
                     # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
@@ -1149,6 +1171,7 @@ class QuoteService:
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
                     if rule_events:
+                        rule_events = self._format_extension_notifications(rule_events)
                         # 落盘到 alerts.jsonl
                         try:
                             from app.services import alert_store
@@ -1179,6 +1202,8 @@ class QuoteService:
                                 "sector_source_field", "sector_value", "sector_level",
                                 "window_change_pct", "coverage_ratio", "valid_count",
                                 "total_count", "up_count", "down_count", "leader",
+                                "abnormal_window", "abnormal_value", "abnormal_threshold",
+                                "abnormal_closeness",
                             ):
                                 if key in ev:
                                     alert[key] = ev[key]
@@ -1206,6 +1231,42 @@ class QuoteService:
 
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
+
+    def _format_extension_notifications(self, events: list[dict]) -> list[dict]:
+        """Apply optional copy formatters after evaluation and before every output channel."""
+        registry = (
+            getattr(self._app_state, "extension_registry", None)
+            if self._app_state is not None
+            else None
+        )
+        if registry is None or not registry.has_notification_formatters:
+            return events
+
+        from app.extensions.contracts import (
+            BACKEND_EXTENSION_API_VERSION,
+            NotificationFormatContext,
+        )
+
+        formatted_events: list[dict] = []
+        for event in events:
+            formatted = dict(event)
+            context = NotificationFormatContext(
+                api_version=BACKEND_EXTENSION_API_VERSION,
+            )
+            for registered in registry.notification_formatters():
+                try:
+                    message = registered.implementation.format_message(dict(formatted), context)
+                    if not isinstance(message, str):
+                        raise TypeError("notification formatter must return str")
+                    formatted["message"] = message
+                except Exception as exc:
+                    logger.warning(
+                        "notification formatter failed %s: %s",
+                        registered.implementation_id,
+                        exc,
+                    )
+            formatted_events.append(formatted)
+        return formatted_events
 
     def _enrich_alerts_ext(self, alerts: list[dict]) -> None:
         """就地给告警事件按 symbol 追加行业/概念 ext 字段。
@@ -1532,10 +1593,26 @@ class QuoteService:
                         else None
                     ),
                 )
+                # momentum_3d 不在指标全集里, 但 deviate_3d 需要; 多日帧上 shift 补算
+                enriched_full = enriched_full.sort(["symbol", "date"]).with_columns(
+                    (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1).alias("momentum_3d")
+                )
                 enriched_today = enriched_full.filter(pl.col("date") == today)
 
             if enriched_today.is_empty():
                 return
+
+            # 异动偏离列: 盘中路径不经过 _refresh_enriched 冷刷新,
+            # 需在此附着 (基准 = 历史帧 + 指数实时外推), 否则盘中异动列表为空
+            if asset_type == "stock":
+                from app.indicators.pipeline import attach_deviation_columns_today
+                try:
+                    index_quotes = self.get_index_quotes()
+                except Exception:
+                    index_quotes = None
+                enriched_today = attach_deviation_columns_today(
+                    enriched_today, self._repo.store.data_dir, index_quotes
+                )
 
             # ---- 写盘 + 更新缓存 ----
             if merge:

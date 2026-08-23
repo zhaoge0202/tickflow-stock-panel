@@ -118,3 +118,17 @@ def test_builtin_custom_and_ai_files_share_one_registry_and_run_path(tmp_path):
     results = engine.run_all(context, overrides_map=overrides)
     assert set(results) == set(strategy_ids.values())
     assert all(result.total == 1 for result in results.values())
+
+
+def test_legacy_alerts_global_is_ignored(tmp_path):
+    path = tmp_path / "legacy_alerts.py"
+    path.write_text(
+        _strategy_code("legacy_alerts")
+        + '\nALERTS = [{"field": "rsi_14", "op": "<", "value": 25}]\n',
+        encoding="utf-8",
+    )
+
+    engine = StrategyEngine(strategy_dirs=[tmp_path])
+
+    assert engine.has("legacy_alerts")
+    assert not hasattr(engine.get("legacy_alerts"), "alerts")

@@ -57,9 +57,6 @@ ENTRY_SIGNALS = ["signal_n_day_high"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.08
 MAX_HOLD_DAYS = 20
-ALERTS = [
-    {"field": "signal_volume_surge", "message": "放量异动"},
-]
 
 
 class TrendBreakoutMatrixStrategy:

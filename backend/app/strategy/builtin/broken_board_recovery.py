@@ -53,7 +53,6 @@ ENTRY_SIGNALS = ["signal_limit_up"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 10
-ALERTS = []
 
 
 class BrokenBoardRecoveryMatrixStrategy:

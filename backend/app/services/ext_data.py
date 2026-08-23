@@ -1,6 +1,7 @@
 """扩展数据服务 — 配置管理 + 文件解析 + Parquet 存储。"""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -39,7 +40,7 @@ class PullConfig:
         "url", "method", "headers", "body", "response_path",
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
-        "next_run",
+        "next_run", "time_window_start", "time_window_end",
     )
 
     def __init__(
@@ -57,6 +58,8 @@ class PullConfig:
         last_message: str | None = None,
         last_rows: int | None = None,
         next_run: str | None = None,
+        time_window_start: str | None = None,
+        time_window_end: str | None = None,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -71,6 +74,8 @@ class PullConfig:
         self.last_message = last_message
         self.last_rows = last_rows
         self.next_run = next_run            # 下次预计运行 (ISO, 调度器写入)
+        self.time_window_start = time_window_start  # 每日拉取窗口起始 "HH:MM", None=不限
+        self.time_window_end = time_window_end      # 每日拉取窗口结束 "HH:MM", None=不限
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +92,8 @@ class PullConfig:
             "last_message": self.last_message,
             "last_rows": self.last_rows,
             "next_run": self.next_run,
+            "time_window_start": self.time_window_start,
+            "time_window_end": self.time_window_end,
         }
 
     @classmethod
@@ -107,6 +114,8 @@ class PullConfig:
             last_message=d.get("last_message"),
             last_rows=d.get("last_rows"),
             next_run=d.get("next_run"),
+            time_window_start=d.get("time_window_start"),
+            time_window_end=d.get("time_window_end"),
         )
 
 
@@ -179,17 +188,48 @@ class ExtConfig:
 # 配置持久化
 # ---------------------------------------------------------------------------
 
+# load_all 进程内缓存: kline/screener/watchlist 等热路径每请求调用, 每次都
+# iterdir + 逐 config.json read_text+parse 纯重复; 以配置目录的
+# (目录名, mtime_ns, size) 签名失效 (新增/编辑/删除配置都会改变签名)。
+_load_all_cache: dict[str, tuple[tuple, list[ExtConfig]]] = {}
+
+
+def _ext_config_dir_signature(base: Path) -> tuple | None:
+    """配置目录下所有 config.json 的 (目录名, mtime_ns, size) 签名; 出错返回 None (禁用缓存)。"""
+    try:
+        sig = []
+        for d in sorted(base.iterdir()):
+            cp = d / "config.json"
+            if d.is_dir() and cp.exists():
+                st = cp.stat()
+                sig.append((d.name, st.st_mtime_ns, st.st_size))
+        return tuple(sig)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class ExtConfigStore:
     """扩展数据配置文件读写 — 每个表独立目录 data/ext/{config_id}/config.json。"""
+
+    # 与创建端点 CreateExtReq.id 的 pattern 一致; load_all 之外的 config_id
+    # 来自 URL path 参数, 必须先过白名单再拼路径, 防止 ../ 穿越删除。
+    _VALID_ID = re.compile(r"^[a-zA-Z0-9_]+$")
 
     def __init__(self, data_dir: Path) -> None:
         self._base = data_dir / "ext_data"
 
     def _config_path(self, config_id: str) -> Path:
+        if not self._VALID_ID.match(config_id):
+            raise ValueError(f"非法 config_id: {config_id!r}")
         return self._base / config_id / "config.json"
 
     def load_all(self) -> list[ExtConfig]:
         # 兼容旧版: 如果目录为空且旧配置文件存在则迁移
+        sig = _ext_config_dir_signature(self._base)
+        if sig is not None:
+            cached = _load_all_cache.get(str(self._base))
+            if cached is not None and cached[0] == sig:
+                return copy.deepcopy(cached[1])
         if not self._base.exists() or not any(self._base.iterdir()):
             old = self._base.parent / "ext_configs.json"
             if not old.exists():
@@ -207,10 +247,16 @@ class ExtConfigStore:
                     configs.append(ExtConfig.from_dict(raw))
                 except Exception as e:
                     logger.warning("扩展表配置解析失败 %s: %s", cp, e)
+        if sig is not None and configs:
+            # 缓存存私有副本, 命中时返回深拷贝, 调用方改配置对象不会污染缓存。
+            _load_all_cache[str(self._base)] = (sig, copy.deepcopy(configs))
         return configs
 
     def get(self, config_id: str) -> ExtConfig | None:
-        cp = self._config_path(config_id)
+        try:
+            cp = self._config_path(config_id)
+        except ValueError:
+            return None
         if not cp.exists():
             return None
         try:
@@ -230,7 +276,10 @@ class ExtConfigStore:
 
     def delete(self, config_id: str) -> bool:
         import shutil
-        cp = self._config_path(config_id)
+        try:
+            cp = self._config_path(config_id)
+        except ValueError:
+            return False
         if not cp.exists():
             return False
         shutil.rmtree(cp.parent, ignore_errors=True)

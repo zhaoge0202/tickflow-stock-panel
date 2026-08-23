@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector"}
-SCOPES = {"symbols", "all", "sector"}
+RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal"}
+SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
 STRATEGY_NOTIFY_EVENTS = {"buy_signal", "sell_signal", "pool_entry", "pool_exit"}
@@ -41,6 +42,9 @@ LADDER_DIRECTIONS = {"up", "down"}
 SECTOR_KINDS = {"index", "concept", "industry"}
 SECTOR_TRIGGERS = {"change_pct", "momentum"}
 SECTOR_WINDOWS = {1, 3, 5, 10, 15}
+# abnormal 规则 (异动边缘): 接近度方向 / 关注窗口
+ABNORMAL_DIRECTIONS = {"up", "down", "both"}
+ABNORMAL_WINDOWS = {"any", "3d", "10d", "30d"}
 
 # 布尔信号列前缀 (op=truth 时 field 取这些)
 _SIGNAL_PREFIXES = ("signal_", "csg_")
@@ -132,6 +136,17 @@ def validate(rule: dict) -> None:
         invalid_events = set(notify_events) - STRATEGY_NOTIFY_EVENTS
         if invalid_events:
             raise ValueError(f"notify_events 包含非法事件: {sorted(invalid_events)}")
+        score_min = rule.get("score_min")
+        score_max = rule.get("score_max")
+        for label, value in (("评分下限", score_min), ("评分上限", score_max)):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+            if value < 0 or value > 100:
+                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+        if score_min is not None and score_max is not None and score_min > score_max:
+            raise ValueError("评分下限不能大于评分上限")
     elif rule.get("type") == "ladder":
         # 连板梯队封单监控: 需 metric + threshold + direction(up/down), 不用 conditions
         if rule.get("metric", "sealed_vol") not in LADDER_METRICS:
@@ -164,6 +179,17 @@ def validate(rule: dict) -> None:
             raise ValueError("板块监控阈值必须大于 0 且不超过 20%")
         if rule.get("sector_trigger") == "momentum" and rule.get("window_minutes") not in SECTOR_WINDOWS:
             raise ValueError(f"板块异动窗口必须是 {sorted(SECTOR_WINDOWS)} 分钟之一")
+    elif rule.get("type") == "abnormal":
+        # 异动边缘监控: threshold_pct = 接近度阈值% (|偏离值|/规则阈值), 不用 conditions
+        if rule.get("asset_type", "stock") != "stock":
+            raise ValueError("异动监控仅支持个股 (偏离值仅对个股计算)")
+        if rule.get("direction", "both") not in ABNORMAL_DIRECTIONS:
+            raise ValueError(f"异动监控 direction 必须是 {ABNORMAL_DIRECTIONS} 之一")
+        if rule.get("abnormal_window", "any") not in ABNORMAL_WINDOWS:
+            raise ValueError(f"异动监控窗口必须是 {sorted(ABNORMAL_WINDOWS)} 之一")
+        threshold_pct = rule.get("threshold_pct")
+        if not isinstance(threshold_pct, (int, float)) or not 1 <= threshold_pct <= 150:
+            raise ValueError("异动接近度阈值必须是 1 到 150 之间的百分比数字")
     else:
         # 信号/价格/市场类型: 需要 conditions
         conds = rule.get("conditions")
@@ -198,6 +224,14 @@ def validate(rule: dict) -> None:
         syms = rule.get("symbols")
         if not isinstance(syms, list) or len(syms) == 0:
             raise ValueError("scope=symbols 时 symbols 不能为空")
+    if rule.get("scope") == "watchlist_group":
+        # 动态绑定自选分组: 评估时实时解析成员 (分组后续增删自动生效)。
+        # 分组存在性由 API 层在保存时校验 (strategy 层不依赖 services)。
+        gid = rule.get("group_id")
+        if not isinstance(gid, str) or not gid.strip():
+            raise ValueError("scope=watchlist_group 时必须选择自选分组")
+        if rule.get("asset_type", "stock") != "stock":
+            raise ValueError("自选分组作用域仅支持个股")
     if uses_intraday_signals(rule) and rule.get("scope") != "symbols":
         raise ValueError("分时穿越信号仅支持指定标的")
     # sector 作用域的板块 JOIN 尚未实现: _apply_scope 目前会退化为「全市场」,
@@ -219,18 +253,30 @@ def normalize(rule: dict) -> dict:
     r = dict(rule)
     r.setdefault("enabled", True)
     r.setdefault("asset_type", "stock")
-    r.setdefault("scope", "symbols")
+    # sector/abnormal 默认全市场 (sector 随后强制 all; abnormal 支持指定标的)
+    r.setdefault("scope", "all" if r.get("type") in {"sector", "abnormal"} else "symbols")
     r.setdefault("symbols", [])
+    r.setdefault("group_id", None)
+    # watchlist_group 作用域: 成员动态来自分组, symbols 不参与; 其他作用域清掉残留 group_id
+    if r.get("scope") == "watchlist_group":
+        r["symbols"] = []
+    else:
+        r["group_id"] = None
     r.setdefault("sector", None)
     r.setdefault("sector_kind", None)
     r.setdefault("sector_targets", [])
     r.setdefault("sector_trigger", "change_pct")
-    r.setdefault("threshold_pct", 1.0)
+    r.setdefault("threshold_pct", 70.0 if r.get("type") == "abnormal" else 1.0)
     r.setdefault("window_minutes", 5)
     r.setdefault("strategy_id", None)
-    # direction 默认值: ladder/sector 用 "up", 其余用 "entry"
-    r.setdefault("direction", "up" if r.get("type") in {"ladder", "sector"} else "entry")
+    # direction 默认值: ladder/sector 用 "up", abnormal 用 "both", 其余用 "entry"
+    r.setdefault(
+        "direction",
+        "up" if r.get("type") in {"ladder", "sector"} else "both" if r.get("type") == "abnormal" else "entry",
+    )
     if r.get("type") == "strategy":
+        r.setdefault("score_min", None)
+        r.setdefault("score_max", None)
         if r.get("notify_events") is None:
             # 兼容统一监控上线后的旧规则: 当时实际行为是同时通知进入和移出。
             r["notify_events"] = ["pool_entry", "pool_exit"]
@@ -238,6 +284,8 @@ def normalize(rule: dict) -> dict:
             r["notify_events"] = list(dict.fromkeys(r["notify_events"]))
     else:
         r.pop("notify_events", None)
+        r.pop("score_min", None)
+        r.pop("score_max", None)
     r.setdefault("conditions", [])
     # ladder 专属默认字段
     r.setdefault("metric", "sealed_vol")
@@ -245,6 +293,9 @@ def normalize(rule: dict) -> dict:
     if r.get("type") == "sector":
         r["scope"] = "all"
         r["symbols"] = []
+        r["group_id"] = None
+    # abnormal 专属默认字段 (异动边缘监控)
+    r.setdefault("abnormal_window", "any")
     r.setdefault("logic", "and")
     r.setdefault("cooldown_seconds", 3600)
     r.setdefault("severity", "info")

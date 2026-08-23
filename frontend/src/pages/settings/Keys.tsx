@@ -21,9 +21,9 @@ import { useCapabilities, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
 import { CAP_LABELS, tierTextStyle, tierStyle, tierBaseName, ALL_TIERS, TierTag } from '@/lib/capability-labels'
 
-// ===== 导出为 Panel 组件 (由 Settings.tsx 嵌入) =====
+// ===== TickFlow Key 配置主体 (可嵌入 DataSources 的 TickFlow 详情区) =====
 
-export function SettingsKeysPanel() {
+export function TickFlowKeyConfig() {
   const qc = useQueryClient()
 
   const settings = useSettings()
@@ -40,6 +40,8 @@ export function SettingsKeysPanel() {
       setKeyInput('')
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      // 档位变化会改变实时行情模式(none/watchlist/full_market), 立即刷新侧边栏状态
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.ok) {
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
@@ -53,6 +55,7 @@ export function SettingsKeysPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
     },
   })
 
@@ -61,6 +64,7 @@ export function SettingsKeysPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
     },
   })
 

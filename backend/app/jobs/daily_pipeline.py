@@ -537,10 +537,39 @@ def run_now(
                 invalidate_regime_cache()
                 logger.info("compute_regime: %d days", regime_days)
             emit("compute_regime", 92, f"市场环境 {regime_days} 天")
+            # 阶段切换推送监控通知 (软失败, 不影响管道): 末两日阶段不同 = 今日发生切换。
+            # 切入退潮/冰点为风险信号, 用 warn 级别; 其余 info。
+            if regime_days:
+                try:
+                    _push_phase_change_alert(repo.store.data_dir)
+                except Exception as e:
+                    logger.warning("phase change alert failed (soft): %s", e)
         except Exception as e:  # noqa: BLE001
             logger.warning("compute_regime failed (soft): %s", e)
             stage_errors.append(f"compute_regime: {e}")
             skipped.append("regime")
+
+    # Step 2.7: 市场主线(概念/行业涨停梯队聚合) 增量计算 — regime 同开关。
+    # 只窄扫连板 >=1 的行, 增量通常 1 天, 开销可忽略。软失败: 不阻断主管道。
+    mainline_rows = 0
+    if not _prefs_regime.get_pipeline_regime_enabled():
+        skipped.append("mainline")
+    else:
+        try:
+            emit("compute_mainline", 93, "计算市场主线…")
+            from app.services import market_mainline
+            for _kind in ("concept", "industry"):
+                rows = market_mainline.compute_mainline_incremental(
+                    repo, repo.store.data_dir, kind=_kind
+                )
+                mainline_rows += rows.height if not rows.is_empty() else 0
+            if mainline_rows:
+                logger.info("compute_mainline: %d rows", mainline_rows)
+            emit("compute_mainline", 94, f"市场主线 {mainline_rows} 行")
+        except Exception as e:
+            logger.warning("compute_mainline failed (soft): %s", e)
+            stage_errors.append(f"compute_mainline: {e}")
+            skipped.append("mainline")
 
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
@@ -561,6 +590,7 @@ def run_now(
         "etf_adj_factor_symbols": etf_adj_symbols,
         "minute_rows": written_minute,
         "regime_days": regime_days,
+        "mainline_rows": mainline_rows,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
@@ -626,37 +656,81 @@ def _refresh_instruments_view(repo: KlineRepository) -> None:
         logger.warning("refresh instruments view failed: %s", e)
 
 
-def _run_tracked(fn, job_label: str) -> None:
+def _push_phase_change_alert(data_dir) -> None:
+    """情绪周期阶段切换 → 推送监控通知(SSE toast + 监控中心)。
+
+    阶段切换(如 退潮→冰点)是重要的市场信号, 原先只有打开市场环境页才能看到。
+    复用 quote_service.push_alerts 广播通道; 未发生切换静默返回。
+    """
+    from app.services.market_phase import PHASE_LABELS
+    from app.services.regime_builder import latest_phase_transition
+
+    tr = latest_phase_transition(data_dir)
+    if not tr:
+        return
+    prev, cur, d = tr
+    msg = f"情绪周期阶段切换: {PHASE_LABELS.get(prev, prev)} → {PHASE_LABELS.get(cur, cur)} ({d})"
+    severity = "warn" if cur in ("ebb", "ice") else "info"
+    app_state = _get_app_state()
+    qs = getattr(app_state, "quote_service", None) if app_state else None
+    if qs:
+        qs.push_alerts([{
+            "source": "market",
+            "type": "phase_change",
+            "message": msg,
+            "severity": severity,
+        }])
+    logger.info("phase change alert: %s (severity=%s)", msg, severity)
+
+
+def _run_tracked(fn, job_label: str) -> bool:
     """调度触发时包装 JobStore 跟踪，确保同步历史有记录。
 
     单飞: 若已有活跃(pending∨running)任务(手动同步中), 本次调度直接跳过, 不并发。
     重任务执行槽: 再挡一层僵尸并发(reap 后线程仍活时不得并行写 parquet)。
+    返回 True 仅表示任务已成功并且执行槽已释放。
     """
     from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
 
     job_id, is_new = job_store.create()
     if not is_new:
         logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
-        return
+        return False
     if not try_acquire_run_slot():
         logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
         job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
-        return
+        return False
 
     def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
                  skip_log: bool = False) -> None:
         job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
+    succeeded = False
     try:
         job_store.start(job_id)
         result = fn(on_progress=progress)
         job_store.succeed(job_id, result)
+        succeeded = True
         logger.info("scheduled %s completed: job_id=%s", job_label, job_id)
     except Exception:
         logger.exception("scheduled %s failed: job_id=%s", job_label, job_id)
         job_store.fail(job_id, f"scheduled {job_label} failed")
     finally:
         release_run_slot()
+    return succeeded
+
+
+def _scheduled_pipeline_task(pipeline_fn) -> None:
+    """Run weekly mining only after the tracked daily pipeline has fully succeeded."""
+    if not _run_tracked(pipeline_fn, "daily_pipeline"):
+        return
+    try:
+        from app.services.mining_schedule import run_weekly_mining
+
+        result = run_weekly_mining(_get_app_state())
+        logger.info("scheduled mining result: %s", result)
+    except Exception:
+        logger.exception("scheduled mining enqueue failed; daily pipeline remains succeeded")
 
 
 # ================================================================
@@ -916,7 +990,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         return result
 
     scheduler.add_job(
-        lambda: _run_tracked(_pipeline_then_refresh, "daily_pipeline"),
+        lambda: _scheduled_pipeline_task(_pipeline_then_refresh),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),

@@ -3,12 +3,12 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences, useCapabilities } from '@/lib/useSharedQueries'
-import { isExpertOrAbove } from '@/lib/capability-labels'
+import { MissingCapChip } from '@/lib/capability-labels'
 
 /**
  * 五档盘口 sealed(真假涨停) 配置内容(纯内容, 无外框, 由父级 Card 包裹)。
  *
- * - 轮询间隔: Pro 10~120s / Expert 3~120s
+ * - 轮询间隔: 常规 10~120s · 数据源具备实时推送能力时 3~120s
  * - 盘后定版时间: 15:01~18:00, 默认 15:02
  * - disabled 时(监控关闭)输入框禁用
  */
@@ -19,8 +19,9 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
   const caps = useCapabilities()
 
   const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
-  const tierLabel = caps.data?.label ?? ''
-  const range = isExpertOrAbove(tierLabel) ? { lo: 3, hi: 120 } : { lo: 10, hi: 120 }
+  // 能力判定(非档位): 具备实时推送能力的数据源允许更快的盘口轮询
+  const fastPolling = !!caps.data?.capabilities?.['websocket']
+  const range = fastPolling ? { lo: 3, hi: 120 } : { lo: 10, hi: 120 }
 
   const interval = prefs.data?.depth_polling_interval ?? 10
   const finalizeTime = prefs.data?.depth_finalize_time ?? { hour: 15, minute: 2 }
@@ -45,13 +46,16 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
-  // 无能力: 显示升级提示
+  // 无能力: 显示能力缺失说明 + 去数据源配置入口
   if (!hasDepth) {
     return (
-      <p className="text-xs text-muted leading-relaxed">
-        真假涨停判定依赖五档盘口实时快照,需 <span className="text-accent">Pro 及以上套餐</span>。
-        升级后连板梯队将自动区分真封板(显示封单量)与假涨停(归入炸板)。
-      </p>
+      <div className="space-y-2">
+        <p className="text-xs text-muted leading-relaxed">
+          真假涨停判定依赖五档盘口实时快照,该数据当前不可用。
+          配置提供五档盘口的数据源后,连板梯队将自动区分真封板(显示封单量)与假涨停(归入炸板)。
+        </p>
+        <MissingCapChip capKey="depth5.batch" />
+      </div>
     )
   }
 

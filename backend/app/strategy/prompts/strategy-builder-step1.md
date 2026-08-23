@@ -35,9 +35,8 @@
 1. **META**：id(name, description, tags, params, scoring, basic_filter, limit 等)
 2. **ENTRY_SIGNALS / EXIT_SIGNALS**：根据策略逻辑自行选择合适的信号列（参考下方可用信号表），不要照抄示例
 3. **STOP_LOSS / MAX_HOLD_DAYS**：根据策略类型合理设定，做多止损一般为 -5%~-8%，短线持有 5~20 天
-4. **ALERTS**：列出需要监控提醒的条件
-5. **RULES**：中文逐条列出核心筛选逻辑（至少 3 条），准确完整
-6. **EXECUTION_BACKEND + filter() 或 filter_history()**：只选择一个后端和一份核心筛选逻辑
+4. **RULES**：中文逐条列出核心筛选逻辑（至少 3 条），准确完整
+5. **EXECUTION_BACKEND + filter() 或 filter_history()**：只选择一个后端和一份核心筛选逻辑
 
 ## 性能原则
 
@@ -83,8 +82,6 @@ EXIT_SIGNALS = []
 # 根据策略类型设定
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-
-ALERTS = []
 
 RULES = """
 1. 规则一
@@ -135,8 +132,6 @@ EXIT_SIGNALS = []
 
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-
-ALERTS = []
 
 RULES = """
 1. 规则一（包含时序逻辑）

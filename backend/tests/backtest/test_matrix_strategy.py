@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import threading
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ import polars as pl
 import pytest
 
 from app.backtest import matrix as matrix_module
+from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService
 from app.backtest.matrix import (
     MatrixPipelineConfig,
     MatrixStrategyPipeline,
@@ -78,6 +80,62 @@ def test_common_matrix_features_match_polars_indicator_pipeline():
         atol=2e-5,
         equal_nan=True,
     )
+
+
+def test_research_factor_catalog_matches_matrix_features():
+    rows = []
+    start = date(2024, 1, 1)
+    for offset in range(120):
+        for asset_id, symbol in enumerate(("000001.SZ", "600000.SH")):
+            close = 10.0 + asset_id * 5.0 + offset * (0.02 + asset_id * 0.01) + np.sin(offset / 5.0)
+            volume = 1000.0 + asset_id * 250.0 + (offset % 9) * 80.0
+            rows.append({
+                "symbol": symbol,
+                "date": start + timedelta(days=offset),
+                "open": close - 0.15 + (offset % 3) * 0.02,
+                "high": close + 0.35 + asset_id * 0.03,
+                "low": close - 0.3,
+                "close": close,
+                "volume": volume,
+                "amount": volume * close,
+                "turnover_rate": 1.0 + asset_id * 0.2 + (offset % 7) * 0.05,
+                "consecutive_limit_ups": (
+                    (offset % 17) + 1 if (asset_id == 0 and offset % 17 == 0)
+                    else (2 if (asset_id == 1 and offset % 23 == 0) else 0)
+                ),
+            })
+    panel = pl.DataFrame(rows)
+    factor_names = {item["id"] for item in FACTOR_COLUMNS}
+    expected = FactorBacktestService._compute_missing_factors(panel, factor_names)
+    from app.backtest.fundamentals import (
+        FUNDAMENTAL_FACTOR_NAMES,
+        attach_matrix_fundamental_fields,
+    )
+
+    fundamental_names = sorted(factor_names & FUNDAMENTAL_FACTOR_NAMES)
+    if fundamental_names:
+        # 夹具无财务数据: 两条路径都应得到全 null/NaN 列, 而不是报错。
+        expected = expected.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(name)
+            for name in fundamental_names
+            if name not in expected.columns
+        ])
+    market = build_market_data_matrix(
+        panel,
+        field_columns={"amount", "turnover_rate", "consecutive_limit_ups"},
+    )
+    market = attach_matrix_fundamental_fields(market, None, fundamental_names)
+
+    for name in sorted(factor_names):
+        expected_values = expected.sort(["date", "symbol"])[name].to_numpy().reshape(market.shape)
+        np.testing.assert_allclose(
+            matrix_feature(market, name),
+            expected_values,
+            rtol=2e-4,
+            atol=2e-4,
+            equal_nan=True,
+            err_msg=name,
+        )
 
 
 def _panel_with_missing_asset_bar() -> pl.DataFrame:
@@ -261,7 +319,7 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
 
-    assert len(strategy_files) == 18
+    assert len(strategy_files) == 19
     for strategy_path in strategy_files:
         strategy = StrategyEngine._load_file(strategy_path)
         assert strategy.execution_backend == "matrix_native"
@@ -568,6 +626,61 @@ def test_matrix_cache_can_be_disabled(tmp_path):
     assert not isinstance(market.close, np.memmap)
 
 
+def test_matrix_cache_cancellation_removes_staging_output(tmp_path, monkeypatch):
+    market_root = tmp_path / "kline_daily_enriched"
+    current = date(2024, 3, 2)
+    partition = market_root / f"date={current.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [current],
+        "open": [10.0],
+        "high": [10.0],
+        "low": [10.0],
+        "close": [10.0],
+        "volume": [1_000.0],
+    }).write_parquet(partition / "part.parquet")
+    cache_root = tmp_path / "matrix_cache"
+    cancel_event = threading.Event()
+    original_scan = matrix_module._scan_matrix_values
+
+    def cancel_after_scan(*args, **kwargs):
+        original_scan(*args, **kwargs)
+        cancel_event.set()
+
+    monkeypatch.setattr(matrix_module, "_scan_matrix_values", cancel_after_scan)
+
+    with pytest.raises(
+        matrix_module.MatrixPrewarmCancelledError,
+        match="prewarm cancelled",
+    ):
+        load_market_data_matrix_from_parquet(
+            market_root,
+            current,
+            current,
+            field_columns=set(),
+            cache_root=cache_root,
+            cancel_event=cancel_event,
+        )
+
+    assert list(cache_root.glob("v*-*")) == []
+    assert list(cache_root.glob(".*.tmp")) == []
+
+
+def test_matrix_cache_can_be_cancelled_before_scan(tmp_path):
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(matrix_module.MatrixPrewarmCancelledError):
+        load_market_data_matrix_from_parquet(
+            tmp_path / "missing",
+            date(2024, 3, 1),
+            date(2024, 3, 1),
+            field_columns=set(),
+            cancel_event=cancel_event,
+        )
+
+
 def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     market_root = tmp_path / "kline_daily_enriched"
     current = date(2024, 3, 4)
@@ -673,7 +786,7 @@ def test_registered_builtin_matrix_strategies_share_one_cache_profile():
     profile = build_matrix_cache_profile(engine, "stock")
     strategies = engine.strategy_definitions()
 
-    assert len(strategies) == 18
+    assert len(strategies) == 19
     assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
     assert profile.warmup_bars > 0
     assert profile.forward_bars == max(int(strategy.max_hold_days or 0) for strategy in strategies)
@@ -739,6 +852,22 @@ def test_chunked_matrix_score_matches_previous_full_matrix_formula():
         fallback=np.zeros(market.shape, dtype=np.float32),
     )
     np.testing.assert_array_equal(actual, expected)
+
+    inverted = build_matrix_score(
+        market,
+        universe,
+        weights,
+        "score",
+        True,
+        fallback=np.zeros(market.shape, dtype=np.float32),
+        directions={"feature_a": "low", "feature_b": "low"},
+    )
+    np.testing.assert_allclose(
+        inverted[universe],
+        np.float32(100.0) - expected[universe],
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def test_signal_slice_is_zero_copy_and_masking_only_allocates_final_flags():

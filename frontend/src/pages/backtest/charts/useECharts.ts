@@ -21,12 +21,13 @@ export function useECharts(
   // 初始化 / 销毁
   useEffect(() => {
     if (!chartRef.current) return
-    instanceRef.current = echarts.init(chartRef.current, undefined, { renderer: 'canvas' })
-    const handleResize = () => instanceRef.current?.resize()
-    window.addEventListener('resize', handleResize)
+    const container = chartRef.current
+    instanceRef.current = echarts.init(container, undefined, { renderer: 'canvas' })
+    const resizeObserver = new ResizeObserver(() => instanceRef.current?.resize())
+    resizeObserver.observe(container)
 
     return () => {
-      window.removeEventListener('resize', handleResize)
+      resizeObserver.disconnect()
       instanceRef.current?.dispose()
       instanceRef.current = null
     }

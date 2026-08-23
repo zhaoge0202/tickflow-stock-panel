@@ -44,6 +44,11 @@ class _CapturingStrategyEngine:
     def has(self, strategy_id):
         return strategy_id == "builtin_strategy"
 
+    def get(self, strategy_id):
+        if not self.has(strategy_id):
+            raise ValueError(f"unknown strategy: {strategy_id}")
+        return types.SimpleNamespace(meta={"id": strategy_id})
+
     def run(self, strategy_id, context, *, pool=None, params=None, overrides=None):
         self.calls.append({
             "kind": "run",

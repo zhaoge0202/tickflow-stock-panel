@@ -19,6 +19,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
     pull?.field_map ? JSON.stringify(pull.field_map, null, 2) : ''
   )
   const [schedule, setSchedule] = useState(pull?.schedule_minutes ?? 1440)
+  const [timeWindowStart, setTimeWindowStart] = useState(pull?.time_window_start ?? '')
+  const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -44,6 +46,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
       url, method, headers, body: body || undefined,
       response_path: responsePath, field_map,
       schedule_minutes: schedule, enabled: enabledOverride ?? enabled,
+      time_window_start: timeWindowStart || null,
+      time_window_end: timeWindowEnd || null,
     }
   }
 
@@ -177,6 +181,23 @@ export function ExtDataPullPanel({ config, onSaved }: {
             <div className="text-[10px] text-muted mb-1">调度间隔 (分钟)</div>
             <input
               type="number" min={1} value={schedule} onChange={e => setSchedule(Number(e.target.value))}
+              className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="text-[10px] text-muted mb-1">拉取起始时间 (留空=不限)</div>
+            <input
+              type="time" value={timeWindowStart} onChange={e => setTimeWindowStart(e.target.value)}
+              className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
+            />
+          </div>
+          <div>
+            <div className="text-[10px] text-muted mb-1">拉取结束时间 (留空=不限)</div>
+            <input
+              type="time" value={timeWindowEnd} onChange={e => setTimeWindowEnd(e.target.value)}
               className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
             />
           </div>

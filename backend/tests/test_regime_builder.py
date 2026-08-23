@@ -13,6 +13,7 @@ import time
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.services import regime_builder
 
@@ -143,6 +144,43 @@ def test_aggregate_daily_ma20_above():
 
 def test_aggregate_empty_returns_empty():
     assert regime_builder._aggregate_daily(pl.DataFrame()).is_empty()
+
+
+def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
+    """run_regime_batch 默认剔除风险警示股: A(*ST) 的涨停/涨幅不进入统计。
+
+    宽度类指标(涨跌家数)同样只统计非 ST 标的 — 同一 df 统一过滤。
+    关闭开关(preferences)后恢复全市场口径。
+    """
+    from app.services import market_mainline, preferences
+
+    instruments = tmp_path / "instruments" / "part.parquet"
+    instruments.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["A", "B"], "name": ["*ST甲", "正常乙"]}).write_parquet(instruments)
+    monkeypatch.setattr(market_mainline, "_ST_SYMBOLS_CACHE", None)
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
+    monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *a, **k: {})
+
+    class _FakeRepo:
+        class store:
+            data_dir = tmp_path
+
+        def get_enriched_range(self, start, end):
+            return _enriched_df()
+
+    out = regime_builder.run_regime_batch(_FakeRepo(), date(2026, 1, 2), date(2026, 1, 3))
+    r1 = out.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
+    r2 = out.filter(pl.col("date") == date(2026, 1, 3)).row(0, named=True)
+    assert r1["limit_up"] == 0          # A(ST) 涨停被剔除
+    assert r1["up_count"] == 1          # 剩 B/C/D 中仅 C 上涨
+    assert r1["down_count"] == 2
+    assert r2["max_consecutive"] == 1   # A 的 2板不计, C=1板
+
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: False)
+    out_all = regime_builder.run_regime_batch(_FakeRepo(), date(2026, 1, 2), date(2026, 1, 3))
+    r1_all = out_all.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
+    assert r1_all["limit_up"] == 1      # A 计入
+    assert r1_all["up_count"] == 2      # A,C 上涨
 
 
 # ───────────────────────── 持久化(upsert) ─────────────────────────
@@ -312,28 +350,58 @@ def test_build_regime_mask_none_when_no_filter():
     assert StrategyBacktestService._build_regime_mask(("2026-01-01",), None, None) is None
 
 
-def test_build_regime_mask_none_when_no_data(tmp_path):
-    """无 regime 历史数据 → 返回 None(不阻断回测)。"""
+def test_build_regime_mask_fails_when_no_data(tmp_path):
+    """启用过滤但无 regime 历史数据时必须阻止回测。"""
     from app.backtest.strategy import StrategyBacktestService
 
-    mask = StrategyBacktestService._build_regime_mask(
-        ("2026-01-01", "2026-01-02"), {"states": ["strong"]}, tmp_path,
-    )
-    assert mask is None
+    with pytest.raises(ValueError, match="市场环境数据为空"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02"), {"states": ["strong"]}, tmp_path,
+        )
 
 
-def test_build_regime_mask_first_day_allowed(tmp_path):
-    """首日无前一日环境数据 → 默认允许(不阻断)。"""
+def test_build_regime_mask_fails_when_required_t1_date_is_missing(tmp_path):
+    """正式区间内任一入场日缺少 T-1 环境时必须阻止回测。"""
     from app.backtest.strategy import StrategyBacktestService
 
     regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
         "date": [date(2026, 1, 1)],
-        "state": ["weak"], "score": [10],
+        "state": ["strong"],
+        "score": [85],
     }))
-    labels = ("2026-01-01", "2026-01-02")
-    mask = StrategyBacktestService._build_regime_mask(
-        labels, {"states": ["strong"]}, tmp_path,
-    )
-    # 1/1 首日 → True; 1/2 由 1/1(weak) → False
-    assert mask.tolist() == [True, False]
 
+    with pytest.raises(ValueError, match="缺少前一交易日环境"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02", "2026-01-03"),
+            {"states": ["strong"]},
+            tmp_path,
+        )
+
+
+def test_build_regime_mask_first_formal_day_requires_warmup_predecessor(tmp_path):
+    """正式首日缺少前一交易标签时必须阻断; warmup 前缀可安全对齐。"""
+    from app.backtest.strategy import StrategyBacktestService
+
+    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+        "date": [date(2026, 1, 1), date(2026, 1, 2)],
+        "state": ["weak", "strong"],
+        "score": [10, 85],
+    }))
+    with pytest.raises(ValueError, match="正式首日"):
+        StrategyBacktestService._build_regime_mask(
+            ("2026-01-01", "2026-01-02"),
+            {"states": ["strong"]},
+            tmp_path,
+            required_start=date(2026, 1, 1),
+            required_end=date(2026, 1, 2),
+        )
+
+    mask = StrategyBacktestService._build_regime_mask(
+        ("2026-01-01", "2026-01-02", "2026-01-03"),
+        {"states": ["strong"]},
+        tmp_path,
+        required_start=date(2026, 1, 2),
+        required_end=date(2026, 1, 3),
+    )
+    assert mask is not None
+    assert mask.tolist() == [True, False, True]

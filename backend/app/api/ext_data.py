@@ -79,6 +79,8 @@ class PullConfigReq(BaseModel):
     field_map: dict[str, str] | None = None  # external → internal field name
     schedule_minutes: int = Field(1440, ge=1)
     enabled: bool = False
+    time_window_start: str | None = None   # "HH:MM", None=不限
+    time_window_end: str | None = None     # "HH:MM", None=不限
 
 
 class DetectUrlReq(BaseModel):
@@ -608,6 +610,8 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         field_map=body.field_map,
         schedule_minutes=body.schedule_minutes,
         enabled=body.enabled,
+        time_window_start=body.time_window_start,
+        time_window_end=body.time_window_end,
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,

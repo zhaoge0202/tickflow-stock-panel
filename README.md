@@ -3,7 +3,7 @@
 
 # 📈 A股智能量化工作台
 
-[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tickflow-stock-panel)
+[![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tick-stock-panel)
 
 
 
@@ -16,7 +16,7 @@
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Data: TickFlow](https://img.shields.io/badge/Data-TickFlow-00b386.svg)](https://tickflow.org/auth/register?ref=V3KDKGXPEA)
 [![Deploy: Docker](https://img.shields.io/badge/Deploy-Docker-2496ed.svg)](./Dockerfile)
-[![GitHub stars](https://img.shields.io/github/stars/shy3130/tickflow-stock-panel?style=social)](https://github.com/shy3130/tickflow-stock-panel/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/shy3130/tick-stock-panel?style=social)](https://github.com/shy3130/tick-stock-panel/stargazers)
 
 </div>
 
@@ -54,11 +54,14 @@
 | :--------------- | :--------------------------------------------------------------------- | :-------------------------------- |
 | 🔍 **选股引擎**   | 18 个内置策略 + 自定义信号 + AI 生成 + 代码迁移,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等,一次扫表落盘 enriched Parquet          | [features.md](./docs/features.md) |
-| 🧪 **回测引擎**   | 三种模式(个股/策略组合/自由信号),T+1/手续费/滑点/止损,SSE 流式进度     | [features.md](./docs/features.md) |
+| 🧪 **回测研究**   | 因子/策略回测 + 财务快照因子(点时口径),T+1/费用/滑点约束,SSE 持久任务  | [features.md](./docs/features.md) |
+| ⛏️ **因子挖掘**   | 嵌套样本外搜索多因子排名组合,与自有策略对照,候选库显式发布、永不自动上线 | [mining.md](./docs/mining.md) |
+| 🌡️ **市场环境**   | 情绪周期 6 阶段(连板梯队驱动)+ 概念/行业主线排名,与 5 档环境分并存    | [market-phase.md](./docs/market-phase.md) |
+| 🚨 **异动监控**   | 交易所异动规则口径(3/10/30 日偏离值),盘中实时接近度,系统告警与推送接入 | — |
 | 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
 | 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
 | 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警             | [features.md](./docs/features.md) |
-| 🧰 **数据扩展**   | TickFlow 多源 + 第三方接入(接口/推送/CSV/JSON)同台分析                   | [features.md](./docs/features.md) |
+| 🧰 **数据扩展**   | 数据源插件化(stock-sdk 示例 + YAML 自定义源),扩展字段配成一级页面同台分析 | [custom-data-source.md](./docs/custom-data-source.md) |
 
 
 
@@ -69,7 +72,7 @@
 
 **📊 行情总览**
 - **看板** Dashboard — 市场情绪评分 + 涨跌/成交额榜单 + 概念领涨领跌 + 大盘异动事件流,一日全貌
-- **自选** Watchlist — 自选股池,表格/卡片双视图,换手/量比/RSI 等实时指标
+- **自选** Watchlist — 自选股池,多分组管理(M:N),表格/卡片双视图,换手/量比/RSI 等实时指标
 - **指数** Indices — 沪深指数浏览与同步
 
 **🔍 选股与回测**
@@ -77,22 +80,25 @@
 - **回测** Backtest — 两种模式:
   - **因子回测** — IC/IR、分层收益、多空组合,先筛掉无效指标
   - **策略回测** — 净值曲线、回撤、夏普、胜率,支持 T+1/手续费/滑点/止损,SSE 流式进度
+- **挖掘** Mining — 嵌套样本外因子与策略挖掘:训练区间因子方向重估 + 相关性去重 + 多因子排名组合搜索,自有策略作对照轨;候选入库,显式确认后才发布,永不自动上线
 
 **📈 个股与板块分析**
 - **个股分析** Stock Analysis (Beta) — 日K + 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)
 - **财务分析** Financials — 利润表/资负表/现金流/关键指标 + AI 解读
 - **概念分析** Concept Analysis — ths 概念涨幅轮动矩阵 + 领涨/领跌主线 + 个股穿透
 - **行业分析** Industry Analysis — 行业分层涨幅轮动 + 领涨/领跌主线 + 成分股
+- **市场环境** Regime — 情绪周期 6 阶段(冰点/启动/主升/高潮/退潮/修复,连板梯队驱动,EMA 平滑 + 2 日确认)+ 概念/行业主线排名,与 5 档环境分并存
 - **连板梯队** Limit Up Ladder — 连板层级统计 + 概念/行业分布 + 封单监控(可切换连跌梯队)
 
 **🔔 监控与复盘**
-- **监控中心** Monitor — 策略/个股信号/价格/异动四类规则,盘中实时弹窗 + 语音播报(播报个股名称与信号) + 触发记录持久化
+- **监控中心** Monitor — 策略/个股信号/价格/异动四类规则,支持自选分组作用域,盘中实时弹窗 + 语音播报(播报个股名称与信号) + 触发记录持久化
+- **异动监控** Abnormal Moves — 按交易所异动规则口径(3日 ±20%/±30%/±40% · 10日 +100% · 30日 +200%)实时计算个股偏离值接近度,盯住异动边缘名单;触发记录 + 站内通知/飞书·企微推送
 - **复盘** Review (Beta) — 盘后 AI 自动生成市场复盘,可定时执行、推送飞书、下载 Markdown
 
 **🗄️ 数据与扩展**
 - **数据** Data — 本地数据画像与同步状态(维表/日K/除权/Enriched/指数/ETF/分钟K/财务),盘后管道与历史扩展
 - **扩展分析** (动态菜单) — 把任意第三方/扩展数据字段配成一级菜单,与内置数据同台分析
-- **设置** Settings — TickFlow Key 与订阅档位、AI 接口、实时监控、扩展页面、信号库、菜单与系统设置
+- **设置** Settings — 数据源与能力检测、AI 接口、实时监控、扩展页面、信号库、菜单与系统设置
 
 </details>
 
@@ -210,7 +216,7 @@ PORT=3018                      # 服务端口
 | **后端**     | FastAPI · Pydantic v2 · APScheduler · sse-starlette                                               |
 | **数据**     | Polars(计算)· DuckDB(查询)· Parquet(存储)                                                         |
 | **回测**     | vectorbt(全项目唯一 pandas 边界)                                                                  |
-| **数据源**   | [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方 SDK · 其他数据源后续迭代实装   |
+| **数据源**   | [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方 SDK · 插件化扩展(stock-sdk 示例插件 · YAML 自定义源) |
 | **AI**(可选) | OpenAI 兼容接口(DeepSeek / 通义 / Ollama 等)                                                      |
 | **前端**     | React 18 · Vite · TypeScript · Tailwind · Tanstack Query · Lightweight Charts · ECharts · dnd-kit |
 | **部署**     | Docker 两阶段构建,前端 dist 拷进后端镜像,**单容器**                                               |
@@ -225,6 +231,7 @@ PORT=3018                      # 服务端口
 | 2-3    | Polars enriched 流水线 · Screener · vectorbt 回测(T+1/手续费/止损) | ✅    |
 | 4-5    | 监控引擎 · 四类监控规则 · 实时 SSE 推送 · 持久化记录               | ✅    |
 | 6      | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析)                    | ✅    |
+| **v0.2** | 因子挖掘全链路 · 市场阶段与主线识别 · 异动监控 · 数据源插件化     | ✅    |
 | **v2** | Webhook 推送· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
 
 ---
@@ -238,6 +245,10 @@ PORT=3018                      # 服务端口
 | [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
 | [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、YAML 配置与 mock 联调示例                         |
 | [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(18 内置策略 + 三种扩展方式 + 文件结构)                      |
+| [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
+| [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
+| [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk 为参考实现)                         |
+| [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 fork同时请点个star哦,欢迎 Issue 和 PR。
@@ -258,7 +269,7 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ## 📄 License
 
-[MIT](./LICENSE) © tickflow-stock-panel contributors 
+[MIT](./LICENSE) © tick-stock-panel contributors 
 
 本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款
 

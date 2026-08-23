@@ -11,8 +11,8 @@
 由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
 
 ```bash
-git clone https://github.com/shy3130/tickflow-stock-panel.git
-cd tickflow-stock-panel
+git clone https://github.com/shy3130/tick-stock-panel.git
+cd tick-stock-panel
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
@@ -123,7 +123,7 @@ git pull
 在 `.env` 文件(或 Docker / 系统环境变量)里设置 `AUTH_PASSWORD`:
 
 ```bash
-AUTH_PASSWORD=你的密码
+AUTH_PASSWORD='你的密码'
 ```
 
 然后重启服务。启动时会自动:
@@ -138,6 +138,7 @@ AUTH_PASSWORD=你的密码
 
 - **密码至少 6 位**,否则会被跳过并记一条 warning 日志
 - **仅在未设过密码时生效**。已设过密码后,改这里不会覆盖(避免重启时重置你在 UI 改的密码)
+- 密码建议使用单引号包裹，避免 Docker Compose 插值 `$VAR`；启动时也会从只读挂载的原始 `.env` 初始化，兼容已有的未加引号配置
 - `.env` 文件权限保持 `600`,**不要提交到 Git**
 - 明文密码只存在于 `.env` / 环境变量中,落盘的是哈希,安全性等同 `auth.json`
 

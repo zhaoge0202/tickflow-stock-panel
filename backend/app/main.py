@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-import threading
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,10 +12,43 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import (
+    abnormal,
+    alerts,
+    analysis,
+    backtest,
+    data,
+    ext_data,
+    financials,
+    indices,
+    intraday,
+    kline,
+    market_recap,
+    mining,
+    monitor_rules,
+    overview,
+    pipeline,
+    regime,
+    rps,
+    screener,
+    signals,
+    stock_analysis,
+    strategy,
+    watchlist,
+)
+from app.api import auth as auth_api
+from app.api import settings as settings_api
 from app.api.routes import router as core_router
 from app.config import settings
+from app.enriched_generation import EnrichedGenerationUnavailableError
+from app.extensions.loader import (
+    configure_backend_extensions,
+    current_extension_context,
+    start_backend_extensions,
+)
 from app.jobs import daily_pipeline
+from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
+from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
@@ -27,11 +60,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 追加文件日志: uvicorn (含 --reload 开发模式) 默认只有 StreamHandler, 同步/管道等
+# 运行时日志仅出现在 dev 终端, 关掉或滚屏后即丢失, 排查「同步后日志没落」时无处可查。
+# 落盘到 data/backend.log 与桌面版 (desktop.py:_setup_logging → desktop.log) 行为对齐,
+# 事后可查。桌面版 (frozen) 已由 desktop.py 写 desktop.log, 此处跳过避免重复落盘。
+# RotatingFileHandler 防止长期运行/频繁 reload 导致文件无限增长。
+if not getattr(sys, "frozen", False):
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        _log_path = settings.data_dir / "backend.log"
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _file_handler = RotatingFileHandler(
+            _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
+            mode="a", encoding="utf-8", errors="replace",
+        )
+        _file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(_file_handler)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     logger.info(
-        "TickFlow Stock Panel v%s starting (mode=%s)",
+        "Tick Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
@@ -48,9 +103,19 @@ async def lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    from app.services.mining_manager import MiningJobManager
+
+    mining_manager = MiningJobManager(store.data_dir)
+    recovered_mining_runs = mining_manager.recover_interrupted()
+    app.state.mining_manager = mining_manager
+    if recovered_mining_runs:
+        logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
-        repo.get_matrix_data_generation("stock")
+        try:
+            repo.get_matrix_data_generation("stock")
+        except EnrichedGenerationUnavailableError as exc:
+            logger.warning("enriched generation requires a full rebuild: %s", exc)
     # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
     app.state.indicators_ready = False
     repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
@@ -160,51 +225,50 @@ async def lifespan(app: FastAPI):
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
 
-    matrix_prewarm_lock = threading.Lock()
-    matrix_prewarm_running = False
+    matrix_prewarm_owner = MatrixCachePrewarmOwner()
 
     def _schedule_matrix_cache_prewarm() -> None:
-        nonlocal matrix_prewarm_running
         if (
             not settings.backtest_matrix_disk_cache_enabled
             or not settings.backtest_matrix_cache_prewarm
         ):
             return
-        with matrix_prewarm_lock:
-            if matrix_prewarm_running:
-                logger.info("matrix cache prewarm already in progress, skip")
-                return
-            matrix_prewarm_running = True
 
         def _prewarm() -> None:
-            nonlocal matrix_prewarm_running
+            from app.backtest.engine import BacktestEngine
+            from app.backtest.matrix import MatrixPrewarmCancelledError
+            from app.backtest.strategy import prewarm_matrix_cache
+            from app.services.heavy_job_limiter import (
+                HeavyJobCancelledError,
+                shared_heavy_job_limiter,
+            )
+
             try:
                 latest = repo.latest_enriched_date("stock")
                 if latest is None:
                     logger.info("matrix cache prewarm skipped: no stock enriched data")
                     return
-                from app.backtest.engine import BacktestEngine
-                from app.backtest.strategy import prewarm_matrix_cache
 
-                result = prewarm_matrix_cache(
-                    BacktestEngine(repo),
-                    strategy_engine,
-                    asset_type="stock",
-                    latest_date=latest,
-                    years=settings.backtest_matrix_cache_prewarm_years,
-                )
+                with shared_heavy_job_limiter.slot(
+                    "normal",
+                    cancel_event=matrix_prewarm_owner.cancel_event,
+                ):
+                    result = prewarm_matrix_cache(
+                        BacktestEngine(repo),
+                        strategy_engine,
+                        asset_type="stock",
+                        latest_date=latest,
+                        years=settings.backtest_matrix_cache_prewarm_years,
+                        cancel_event=matrix_prewarm_owner.cancel_event,
+                    )
                 logger.info("matrix cache prewarm done: %s", result)
+            except (HeavyJobCancelledError, MatrixPrewarmCancelledError):
+                logger.info("matrix cache prewarm cancelled")
             except Exception:  # noqa: BLE001
                 logger.exception("matrix cache prewarm failed")
-            finally:
-                with matrix_prewarm_lock:
-                    matrix_prewarm_running = False
 
-        threading.Thread(
-            target=_prewarm,
-            name="matrix-cache-prewarm",
-            daemon=True,
-        ).start()
+        if not matrix_prewarm_owner.schedule(_prewarm):
+            logger.info("matrix cache prewarm already running or shutting down, skip")
 
     repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
     if repo.enriched_ready:
@@ -246,30 +310,55 @@ async def lifespan(app: FastAPI):
     app.state.monitor_engine = monitor_engine
     app.state.sector_monitor_service = sector_monitor_service
 
-    yield
+    # 源码内二次开发启动钩子: 仅暴露稳定只读上下文, 单个扩展失败不影响核心启动。
+    extension_registry = app.state.extension_registry
+    start_backend_extensions(
+        current_extension_context(data_dir=store.data_dir, repository=repo),
+        extension_registry,
+    )
 
-    if app.state.scheduler:
-        app.state.scheduler.shutdown(wait=False)
-    ps = getattr(app.state, "pull_scheduler", None)
-    if ps:
-        ps.stop()
-    fsc = getattr(app.state, "financial_scheduler", None)
-    if fsc:
-        fsc.stop()
-    qs = getattr(app.state, "quote_service", None)
-    if qs:
-        qs.stop()
-    dsvc = getattr(app.state, "depth_service", None)
-    if dsvc:
-        dsvc.stop_polling()
-    wbot = getattr(app.state, "wecom_bot_service", None)
-    if wbot:
-        wbot.stop()
-    logger.info("shutdown")
+    try:
+        yield
+    finally:
+        repo._on_refresh_done = None  # noqa: SLF001
+        if not matrix_prewarm_owner.shutdown(timeout=5.0):
+            logger.warning("matrix cache prewarm did not stop within 5 seconds")
+        mmanager = getattr(app.state, "mining_manager", None)
+        if mmanager:
+            mmanager.shutdown()
+        if app.state.scheduler:
+            app.state.scheduler.shutdown(wait=False)
+        ps = getattr(app.state, "pull_scheduler", None)
+        if ps:
+            ps.stop()
+        fsc = getattr(app.state, "financial_scheduler", None)
+        if fsc:
+            fsc.stop()
+        qs = getattr(app.state, "quote_service", None)
+        if qs:
+            qs.stop()
+        dsvc = getattr(app.state, "depth_service", None)
+        if dsvc:
+            dsvc.stop_polling()
+        wbot = getattr(app.state, "wecom_bot_service", None)
+        if wbot:
+            wbot.stop()
+        logger.info("shutdown")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mining_process_lock = MiningProcessLock(settings.data_dir)
+    mining_process_lock.acquire()
+    try:
+        async with _application_lifespan(app):
+            yield
+    finally:
+        mining_process_lock.release()
 
 
 app = FastAPI(
-    title="TickFlow Stock Panel",
+    title="Tick Stock Panel",
     version=__version__,
     description="A 股选股 + 回测面板 — TickFlow 适配",
     lifespan=lifespan,
@@ -339,9 +428,11 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
+app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
+app.include_router(abnormal.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
@@ -356,6 +447,11 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
+
+# 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。
+extension_registry, extension_load_errors = configure_backend_extensions(app)
+app.state.extension_registry = extension_registry
+app.state.extension_load_errors = extension_load_errors
 
 
 # 能力门控异常 → 403(而非默认 500)

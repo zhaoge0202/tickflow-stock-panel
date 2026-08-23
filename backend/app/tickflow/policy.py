@@ -285,11 +285,11 @@ def _load_cached_capset(cache_path: Path) -> CapabilitySet | None:
 
 
 def detect_capabilities(force: bool = False) -> CapabilitySet:
-    """探测当前可用的能力集 (TickFlow API Key 档位 + 自定义数据源)。
+    """探测当前可用的能力集 (TickFlow API Key 档位 + 自定义/插件数据源)。
 
-    自定义数据源补能力: 用户配了自定义分钟数据源时, 即使无 TickFlow Pro+
-    也补上 KLINE_MINUTE_BATCH, 使分时图/自动同步/回测等功能不再被权限门拦。
-    取数函数内部会按 preferences.get_minute_data_provider() 分流到自定义源,
+    能力标准对所有数据源一致: 自定义源被选为某数据集的当前 provider 且声明了
+    该数据集时, 补上对应能力 (见 _DATASET_CAP_MAP), 使功能不再被权限门拦。
+    取数函数内部会按 preferences.get_*_data_provider() 分流到对应数据源,
     不会错误调用 TickFlow。
     """
     capset = _detect_tickflow_caps(force)
@@ -297,16 +297,41 @@ def detect_capabilities(force: bool = False) -> CapabilitySet:
     return capset
 
 
+# 数据集 → 能力映射: 第三方源声明某数据集且被选为当前 provider 时补授的能力。
+# 实时行情无对应能力键 (权限由 QuoteService.is_realtime_allowed 判定);
+# 五档盘口/WebSocket 暂无第三方数据集契约, 不增广。
+_DATASET_CAP_MAP: tuple[tuple[str, Cap], ...] = (
+    ("daily", Cap.KLINE_DAILY_BATCH),
+    ("adj_factor", Cap.ADJ_FACTOR),
+    ("minute", Cap.KLINE_MINUTE_BATCH),
+    ("financial", Cap.FINANCIAL),
+)
+
+
 def _augment_custom_sources(capset: CapabilitySet) -> None:
-    """根据用户配置的自定义数据源, 补充对应能力 (不覆盖 TickFlow 已有的)。"""
+    """根据用户配置的数据源, 补充对应能力 (不覆盖 TickFlow 已有的)。"""
     try:
         from app.services import preferences
-        provider = preferences.get_minute_data_provider()
-        if provider != "tickflow":
-            from app.data_providers import custom as custom_sources
-            if custom_sources.provider_has_dataset(provider, "minute"):
-                capset.grant(Cap.KLINE_MINUTE_BATCH)
-                logger.info("custom minute source '%s' detected: granted KLINE_MINUTE_BATCH", provider)
+        from app.data_providers import custom as custom_sources
+
+        daily_provider = preferences.get_daily_data_provider()
+        adj_provider = preferences.get_adj_factor_provider()
+        if adj_provider == "same_as_daily":
+            adj_provider = daily_provider
+        active_providers = {
+            "daily": daily_provider,
+            "adj_factor": adj_provider,
+            "minute": preferences.get_minute_data_provider(),
+            "financial": preferences.get_financial_provider(),
+        }
+        for dataset, cap in _DATASET_CAP_MAP:
+            provider = active_providers[dataset]
+            if provider != "tickflow" and custom_sources.provider_has_dataset(provider, dataset):
+                capset.grant(cap)
+                logger.info(
+                    "custom source '%s' provides dataset '%s': granted %s",
+                    provider, dataset, cap.value,
+                )
     except Exception as e:  # noqa: BLE001
         logger.debug("custom source augment skipped: %s", e)
 

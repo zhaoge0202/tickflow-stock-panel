@@ -15,7 +15,7 @@ import polars as pl
 
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
-from app.market_time import cn_now
+from app.market_time import CN_TZ, cn_now, cn_today
 from app.services import preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
@@ -266,7 +266,9 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     if df.is_empty():
         return 0
 
-    today = _date.today()
+    # 分区日期用北京交易日 (与 quote_service._build_daily 的 cn_today 一致),
+    # 避免 UTC 服务器在盘中把日分区写成服务器本地日期。
+    today = cn_today()
     daily_df = df.with_columns(pl.lit(today).cast(pl.Date).alias("date"))
 
     # 过滤停牌 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)
@@ -833,8 +835,10 @@ def fetch_minute_single(
 ) -> pl.DataFrame:
     """实时拉取单股单日分钟 K(不写入本地)。优先自定义分钟源, 回退 TickFlow。"""
     from datetime import datetime
-    start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
-    end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+    # 北京时间窗口必须带时区: naive datetime 会被 .timestamp() 按服务器本地时区解释,
+    # UTC 容器上窗口整体偏移 8 小时, 分时补拉必然为空。
+    start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0, tzinfo=CN_TZ)
+    end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0, tzinfo=CN_TZ)
 
     # 自定义数据源分流: 与 sync_minute_batch 一致, 配了自定义分钟源时走 custom provider,
     # 避免无 TickFlow Pro+ 权限的用户分时图首次打开(本地无数据)时补拉失败返回空。
@@ -998,11 +1002,13 @@ def sync_and_persist_minute(
     days: int = 5,
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
+    force_full_days: bool = False,
 ) -> int:
     """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
     使用 start_time / end_time 区间拉取, 确保所有标的覆盖同一时间段。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
+    force_full_days=True 时强制回溯 days 自然日 (不增量补, 用于个股补齐历史)。
     """
     minute_provider = preferences.get_minute_data_provider()
     # resolver 调用统一走 _resolve_minute_provider, 与 _try_custom_minute 共用异常边界。
@@ -1042,8 +1048,13 @@ def sync_and_persist_minute(
             end_time = now
     else:
         # 默认增量模式: 首次拉取回溯 N 天, 已有数据则从最新时间增量补到今天
+        # force_full_days=True: 强制回溯 days 自然日 (个股补齐历史, 不增量)
         last_dt = _latest_minute_datetime(repo)
-        if last_dt:
+        if force_full_days:
+            # 按交易日换算自然日 (7/5 系数), 确保覆盖足够交易日
+            calendar_days = int(days * 7 / 5) + 5
+            start_time = now - timedelta(days=calendar_days)
+        elif last_dt:
             start_time = last_dt
         else:
             start_time = now - timedelta(days=days)
@@ -1063,7 +1074,10 @@ def sync_and_persist_minute(
     written_box = [0]  # list 闭包, 绕过 Python 闭包外层赋值
 
     def _persist(seg_df: pl.DataFrame) -> None:
-        written_box[0] += _write_minute_partition(seg_df, minute_dir)
+        # 单股自动补齐可能与另一个补齐请求同时写同一日期分区。Windows 不允许
+        # 替换仍被另一写入占用的临时文件,因此读-改-写必须复用仓库写锁。
+        with repo._write_lock:
+            written_box[0] += _write_minute_partition(seg_df, minute_dir)
 
     segment_days = preferences.get_minute_sync_segment_days()
     sync_minute_batch(

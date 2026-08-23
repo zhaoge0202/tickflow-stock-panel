@@ -36,11 +36,26 @@ _OCR_LIMITER = anyio.CapacityLimiter(2)
 class AddRequest(BaseModel):
     symbol: str
     note: str = ""
+    group_id: str | None = None
 
 
 class BatchAddRequest(BaseModel):
     symbols: list[str]
     note: str = ""
+    group_id: str | None = None
+
+
+class GroupNameRequest(BaseModel):
+    name: str
+    color: str | None = None
+
+
+class GroupReorderRequest(BaseModel):
+    ordered_ids: list[str]
+
+
+class GroupAssignRequest(BaseModel):
+    group_id: str | None = None
 
 
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
@@ -64,20 +79,74 @@ def list_all(request: Request):
 
 @router.post("")
 def add_one(req: AddRequest, request: Request):
-    rows = watchlist.add(req.symbol, req.note)
+    try:
+        rows = watchlist.add(req.symbol, req.note, req.group_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"symbols": _with_names(rows, request)}
 
 
 @router.post("/batch")
 def add_batch(req: BatchAddRequest, request: Request):
-    existing = {r["symbol"] for r in watchlist.list_symbols()}
-    added = 0
-    for sym in req.symbols:
-        if sym not in existing:
-            added += 1
-            existing.add(sym)
-        watchlist.add(sym, req.note)
-    return {"symbols": _with_names(watchlist.list_symbols(), request), "added": added}
+    try:
+        rows, added = watchlist.add_batch(req.symbols, req.note, req.group_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request), "added": added}
+
+
+@router.get("/groups")
+def list_groups():
+    return {"groups": watchlist.list_groups()}
+
+
+@router.post("/groups")
+def create_group(req: GroupNameRequest):
+    try:
+        groups, group = watchlist.create_group(req.name, req.color)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"groups": groups, "group": group}
+
+
+@router.put("/groups/reorder")
+def reorder_groups(req: GroupReorderRequest):
+    """重排分组前后顺序 (json 数组顺序即定义顺序, 侧边栏/标签栏/分组视图共用)。"""
+    try:
+        groups = watchlist.reorder_groups(req.ordered_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"groups": groups}
+
+
+@router.put("/groups/{group_id}")
+def rename_group(group_id: str, req: GroupNameRequest):
+    try:
+        groups = watchlist.rename_group(group_id, req.name, req.color)
+    except KeyError as e:
+        raise HTTPException(404, "自选分组不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"groups": groups}
+
+
+@router.delete("/groups/{group_id}")
+def delete_group(group_id: str, request: Request):
+    try:
+        groups, rows = watchlist.delete_group(group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选分组不存在") from e
+    return {"groups": groups, "symbols": _with_names(rows, request)}
+
+
+@router.post("/groups/{group_id}/clear")
+def clear_group(group_id: str, request: Request):
+    """清空分组成员:把该分组内所有股票转为未分组,保留分组定义。"""
+    try:
+        rows = watchlist.clear_group(group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选分组不存在") from e
+    return {"symbols": _with_names(rows, request)}
 
 
 @router.get("/ocr-status")
@@ -131,6 +200,42 @@ def move_one_to_top(symbol: str, request: Request):
     return {"symbols": _with_names(rows, request)}
 
 
+@router.put("/{symbol}/group")
+def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
+    """互斥设定分组(仅保留此组; None=移出全部分组)。多组操作用 members 端点。"""
+    try:
+        rows = watchlist.set_group(symbol, req.group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.post("/groups/{group_id}/members/{symbol}")
+def add_member(group_id: str, symbol: str, request: Request):
+    """把标的加入分组(多组成员关系: 不影响其他分组)。"""
+    try:
+        rows = watchlist.add_to_group(symbol, group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.delete("/groups/{group_id}/members/{symbol}")
+def remove_member(group_id: str, symbol: str, request: Request):
+    """把标的移出分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
+    try:
+        rows = watchlist.remove_from_group(symbol, group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
 @router.delete("/{symbol}")
 def remove_one(symbol: str, request: Request):
     rows = watchlist.remove(symbol)
@@ -146,7 +251,7 @@ def clear_all():
 
 # 自选页需要的列
 _WATCHLIST_COLS = [
-    "symbol", "close", "change_pct", "change_amount", "amount",
+    "symbol", "close", "open", "high", "low", "change_pct", "change_amount", "amount",
     "turnover_rate",
     "amplitude", "annual_vol_20d",
     "vol_ratio_5d",
@@ -159,6 +264,7 @@ _WATCHLIST_COLS = [
     "boll_upper", "boll_lower",
     "atr_14",
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "deviate_3d", "deviate_10d", "deviate_30d",
     "consecutive_limit_ups", "consecutive_limit_downs",
     "signal_limit_up", "signal_limit_down", "signal_volume_surge",
     "signal_ma_golden_5_20", "signal_macd_golden", "signal_n_day_high",

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
+import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
@@ -22,28 +23,11 @@ interface Props {
   date?: string
   priceLimit?: PriceLimitInfo
   onPriceHover?: (price: number | null) => void
+  onPriceDoubleClick?: (price: number, currentPrice: number) => void
+  currentPrice?: number
+  priceLines?: { value: number; label?: string; color?: string }[]
   showLimitLines?: boolean
   showAvgLine?: boolean
-}
-
-function fmtTime(dt: string): string {
-  const match = dt.match(/(\d{2}):(\d{2})/)
-  if (!match) return dt.slice(11, 16)
-  const h = (parseInt(match[1]) + 8) % 24
-  return `${String(h).padStart(2, '0')}:${match[2]}`
-}
-
-function computeAvgPrice(data: MinuteKlineRow[]): number[] {
-  // 分时均线 = 累计成交额 / 累计成交量(手→股)
-  const result: number[] = []
-  let sumAmt = 0
-  let sumVol = 0
-  for (const d of data) {
-    sumAmt += d.amount
-    sumVol += d.volume * 100
-    result.push(sumVol > 0 ? sumAmt / sumVol : d.close)
-  }
-  return result
 }
 
 function fmtAmt(v: number): string {
@@ -55,29 +39,6 @@ function fmtAmt(v: number): string {
 function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
-
-/** 生成全天分时时间刻度 9:30 ~ 11:30, 13:00 ~ 15:00, 每分钟一个点 (共242个) */
-function generateFullDayTimes(): string[] {
-  const times: string[] = []
-  // 上午 9:30 ~ 11:30 (121 分钟)
-  for (let h = 9; h <= 11; h++) {
-    const startM = h === 9 ? 30 : 0
-    const endM = h === 11 ? 30 : 59
-    for (let m = startM; m <= endM; m++) {
-      times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-    }
-  }
-  // 下午 13:00 ~ 15:00 (121 分钟)
-  for (let h = 13; h <= 15; h++) {
-    const endM = h === 15 ? 0 : 59
-    for (let m = 0; m <= endM; m++) {
-      times.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
-    }
-  }
-  return times
-}
-
-const FULL_DAY_TIMES = generateFullDayTimes()
 
 /** 计算实际涨跌停价 (四舍五入到2位小数) 和实际涨跌停幅度 */
 function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
@@ -101,7 +62,7 @@ function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
   // 将数据映射到全天时间轴上的正确位置
   const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
   const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
@@ -112,7 +73,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
-    const timeKey = fmtTime(data[i].datetime)
+    const timeKey = formatMinuteTime(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
     if (idx !== undefined) {
       closes[idx] = data[i].close
@@ -148,6 +109,25 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       symbol: 'none',
     })
   }
+  for (const line of priceLines) {
+    if (!Number.isFinite(line.value) || line.value <= 0) continue
+    markLineData.push({
+      yAxis: line.value,
+      lineStyle: { color: line.color ?? ct.text, type: 'dashed', width: 1, opacity: 0.92 },
+      label: {
+        show: !!line.label,
+        formatter: line.label ?? '',
+        position: 'insideEndTop',
+        color: line.color ?? ct.text,
+        backgroundColor: ct.tooltipBg,
+        borderRadius: 4,
+        padding: [2, 6],
+        fontSize: 10,
+        fontFamily: 'JetBrains Mono, monospace',
+      },
+      symbol: 'none',
+    })
+  }
 
   let yMin: number | undefined
   let yMax: number | undefined
@@ -162,13 +142,19 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       }
     }
 
+    const monitoredDiff = priceLines.reduce((largest, line) => (
+      Number.isFinite(line.value) && line.value > 0
+        ? Math.max(largest, Math.abs(line.value - prevClose))
+        : largest
+    ), 0) * 1.05
+
     if (showLimitLines && yMode === 'limit') {
       const { limitUp, limitDown } = getLimitPrices(prevClose, priceLimit)
       const limitDiffUp = limitUp - prevClose
       const limitDiffDown = prevClose - limitDown
       const limitDiff = Math.max(limitDiffUp, limitDiffDown)
       // 涨跌停模式: Y 轴按实际涨跌停价
-      maxDiff = limitDiff
+      maxDiff = Math.max(limitDiff, monitoredDiff)
       yMin = prevClose - maxDiff
       yMax = prevClose + maxDiff
       // 加 markLine 标注涨停价和跌停价 (仅虚线, 不显示文字)
@@ -199,6 +185,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       // 至少保证一个可视范围 (防止数据平时 maxDiff=0)。指数不使用涨跌停范围，最小范围要更紧，否则低波动指数会被压成横线。
       const minDiff = showLimitLines ? prevClose * 0.01 : prevClose * 0.001
       if (maxDiff < minDiff) maxDiff = minDiff
+      maxDiff = Math.max(maxDiff, monitoredDiff)
       yMin = prevClose - maxDiff
       yMax = prevClose + maxDiff
     }
@@ -246,8 +233,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       link: [{ xAxisIndex: 'all' }],
     },
     grid: [
-      { left: 60, right: 55, top: 24, bottom: '28%' },
-      { left: 60, right: 55, top: '74%', bottom: 20 },
+      { left: 60, right: 55, top: 24, bottom: '34%' },
+      { left: 60, right: 55, top: '69%', bottom: 20 },
     ],
     xAxis: [
       {
@@ -399,22 +386,39 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   }
 }
 
-export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimit, onPriceHover, showLimitLines = true, showAvgLine = true }: Props) {
+export function EChartsIntraday({
+  data,
+  height = 320,
+  prevClose,
+  date,
+  priceLimit,
+  onPriceHover,
+  onPriceDoubleClick,
+  currentPrice,
+  priceLines,
+  showLimitLines = true,
+  showAvgLine = true,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const roRef = useRef<ResizeObserver | null>(null)
   const moRef = useRef<MutationObserver | null>(null)
+  const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
   const dataRef = useRef(data)
   dataRef.current = data
+  const currentPriceRef = useRef(currentPrice)
+  currentPriceRef.current = currentPrice
   const onPriceHoverRef = useRef(onPriceHover)
   onPriceHoverRef.current = onPriceHover
+  const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
+  onPriceDoubleClickRef.current = onPriceDoubleClick
   // 全日索引 → 数据数组索引 的映射 (ref 避免重建 chart)
   const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
 
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
-  const avgPrices = useMemo(() => computeAvgPrice(data), [data])
+  const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
 
   // 分时线颜色：基于最新价 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -473,6 +477,19 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
       chart.on('globalout', () => {
         onPriceHoverRef.current?.(null)
       })
+
+      const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
+        const pixel: [number, number] = [event.offsetX, event.offsetY]
+        if (!chart!.containPixel({ gridIndex: 0 }, pixel)) return
+        const coordinate = chart!.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, pixel)
+        const clickedPrice = Array.isArray(coordinate) ? Number(coordinate[1]) : NaN
+        const latestPrice = currentPriceRef.current ?? dataRef.current[dataRef.current.length - 1]?.close
+        if (Number.isFinite(clickedPrice) && clickedPrice > 0 && Number.isFinite(latestPrice) && latestPrice > 0) {
+          onPriceDoubleClickRef.current?.(clickedPrice, latestPrice)
+        }
+      }
+      priceDoubleClickHandlerRef.current = handlePriceDoubleClick
+      chart.getZr().on('dblclick', handlePriceDoubleClick)
     }
 
     if (data.length > 0) {
@@ -480,7 +497,7 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
       const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
       const mapping = new Map<number, number>()
       for (let i = 0; i < data.length; i++) {
-        const timeKey = fmtTime(data[i].datetime)
+        const timeKey = formatMinuteTime(data[i].datetime)
         const fullDayIdx = timeIndexMap.get(timeKey)
         if (fullDayIdx !== undefined) {
           mapping.set(fullDayIdx, i)
@@ -488,16 +505,19 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
 
   useEffect(() => {
     return () => {
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
+      if (priceDoubleClickHandlerRef.current) {
+        chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
+      }
       moRef.current?.disconnect()
       roRef.current?.disconnect()
       chartRef.current?.dispose()

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags } from 'lucide-react'
@@ -14,6 +14,7 @@ import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
+import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -22,6 +23,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
+  abnormal: '异动监控',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -36,16 +38,17 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   price:    'bg-emerald-400/10 text-emerald-400 border-emerald-400/20',
   market:   'bg-purple-500/10 text-purple-400 border-purple-500/20',
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
+  abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
 }
 
 /**
- * 渲染策略类消息 — 策略名黄色、新入选绿、移出红、其余白色。
+ * 渲染策略类消息 — 策略名黄色、进入红/移出绿 (A 股红涨绿跌惯例)、其余白色。
  */
 function renderMessage(source: string, message: string) {
   if (source !== 'strategy') {
     return <span className="text-secondary">{message}</span>
   }
-  const m = message.match(/^(策略「)([^」]+)(」)(新入选|移出)( .*)$/)
+  const m = message.match(/^(策略「)([^」]+)(」)(新入选|进入|移出)( .*)$/)
   if (!m) return <span className="text-foreground">{message}</span>
   const [, pre, strategyName, mid, direction, post] = m
   return (
@@ -53,7 +56,7 @@ function renderMessage(source: string, message: string) {
       <span className="text-foreground/80">{pre}</span>
       <span className="text-amber-400 font-medium">{strategyName}</span>
       <span className="text-foreground/80">{mid}</span>
-      <span className={direction === '新入选' ? 'text-emerald-400 font-medium' : 'text-danger font-medium'}>{direction}</span>
+      <span className={direction === '移出' ? 'text-bear font-medium' : 'text-danger font-medium'}>{direction}</span>
       <span className="text-foreground/80">{post}</span>
     </>
   )
@@ -114,9 +117,22 @@ export function Monitor() {
   const qc = useQueryClient()
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingRule, setEditingRule] = useState<MonitorRule | null>(null)
+  const [editorPreset, setEditorPreset] = useState<Partial<MonitorRule> | null>(null)
+
+  // 深链: /monitor?new=abnormal (异动监控页「告警规则」入口) → 直接弹出预置类型的编辑器
+  const [searchParams, setSearchParams] = useSearchParams()
+  useEffect(() => {
+    const kind = searchParams.get('new')
+    if (kind === 'abnormal') {
+      setEditingRule(null)
+      setEditorPreset({ type: 'abnormal', threshold_pct: 70, direction: 'both', abnormal_window: 'any', scope: 'all' })
+      setEditorOpen(true)
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   // 触发记录: 过滤 + 统计 (提升到主组件, 供 header 行使用)
-  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector'>('all')
+  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal'>('all')
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
@@ -135,8 +151,8 @@ export function Monitor() {
   const alertsQuery = useQuery({
     queryKey: [...QK.alerts(filter === 'all' ? undefined : filter), extColumnsParam ?? ''],
     queryFn: () => api.alertsList({ days: 7, limit: 500, source: filter === 'all' ? undefined : filter, extColumns: extColumnsParam }),
+    // 10s 轮询仅作 SSE strategy_alert 事件的兜底; 后台标签页不再拉 500 条全量
     refetchInterval: 10000,
-    refetchIntervalInBackground: true,
   })
   const total = alertsQuery.data?.total ?? 0
 
@@ -177,7 +193,7 @@ export function Monitor() {
               <SectionHeader icon={BellRing} title="触发记录" />
               {/* 过滤标签 */}
               <div className="flex flex-wrap items-center gap-0.5">
-                {(['all', 'strategy', 'signal', 'price', 'market', 'sector'] as const).map(f => (
+                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setFilter(f)}
@@ -225,7 +241,7 @@ export function Monitor() {
               <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">{rulesCount}</span>
               <div className="ml-auto flex items-center gap-1">
                 <button
-                  onClick={() => { setEditingRule(null); setEditorOpen(true) }}
+                  onClick={() => { setEditingRule(null); setEditorPreset(null); setEditorOpen(true) }}
                   title="新建规则"
                   className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/60 bg-surface text-muted transition-all hover:border-accent/40 hover:text-accent hover:shadow-sm cursor-pointer"
                 >
@@ -254,7 +270,8 @@ export function Monitor() {
       <RuleEditorDialog
         open={editorOpen}
         rule={editingRule}
-        onClose={() => { setEditorOpen(false); setEditingRule(null) }}
+        preset={editorPreset}
+        onClose={() => { setEditorOpen(false); setEditingRule(null); setEditorPreset(null) }}
       />
 
       <ConfirmDialog
@@ -351,7 +368,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
             const isNew = ev.ts > enterTs
             return (
               <motion.div
-                key={`${ev.ts}-${i}`}
+                key={`${ev.ts}-${ev.symbol ?? ''}-${ev.rule_name ?? ''}`}
                 initial={isNew ? { opacity: 0, y: -8, scale: 0.98 } : { opacity: 0, y: 4 }}
                 animate={isNew ? {
                   opacity: [0, 1, 1, 0.85, 1],
@@ -616,6 +633,31 @@ function RulesList({ rulesQuery, onEdit }: {
 
   const rules: MonitorRule[] = (rulesQuery.data as any)?.rules ?? []
 
+  // 分组作用域规则: 拉取分组定义与成员, 展示分组名/成员数 chip (点击跳转自选页对应分组)
+  const hasGroupRules = rules.some(r => r.scope === 'watchlist_group')
+  const groupsQ = useQuery({
+    queryKey: QK.watchlistGroups,
+    queryFn: api.watchlistGroups,
+    enabled: hasGroupRules,
+  })
+  const watchlistQ = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: api.watchlistList,
+    enabled: hasGroupRules,
+  })
+  const groupMeta = useMemo(() => {
+    const meta: Record<string, { name: string; color: string; count: number }> = {}
+    for (const g of groupsQ.data?.groups ?? []) {
+      meta[g.id] = { name: g.name, color: g.color, count: 0 }
+    }
+    for (const entry of watchlistQ.data?.symbols ?? []) {
+      for (const gid of entry.group_ids ?? []) {
+        if (meta[gid]) meta[gid].count += 1
+      }
+    }
+    return meta
+  }, [groupsQ.data, watchlistQ.data])
+
   // 收集所有规则的股票代码, 批量查名称
   const allSymbols = useMemo(() => {
     const set = new Set<string>()
@@ -700,7 +742,7 @@ function RulesList({ rulesQuery, onEdit }: {
                   {r.asset_type === 'index' && (
                     <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-sky-500/10 text-sky-400">指数</span>
                   )}
-                  {/* 个股类型: 直接显示可点击的代码+名称; 其他类型显示规则名 */}
+                  {/* 个股类型: 直接显示可点击的代码+名称; 分组类型: 分组chip跳自选页; 其他类型显示规则名 */}
                   {r.scope === 'symbols' && r.symbols.length > 0 ? (
                     <button
                       onClick={() => setPreviewSymbol(r.symbols[0])}
@@ -710,6 +752,25 @@ function RulesList({ rulesQuery, onEdit }: {
                       <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{r.symbols[0]}</span>
                       {symbolNames[r.symbols[0]] && <span className="text-xs text-secondary truncate">{symbolNames[r.symbols[0]]}</span>}
                     </button>
+                  ) : r.scope === 'watchlist_group' && r.group_id ? (
+                    (() => {
+                      const meta = groupMeta[r.group_id]
+                      if (!meta) {
+                        return <span className="text-xs text-warning truncate" title={r.name}>分组已删除</span>
+                      }
+                      return (
+                        <Link
+                          to={`/watchlist?group=${r.group_id}`}
+                          className="inline-flex min-w-0 items-center gap-1.5 rounded px-0.5 transition-colors hover:bg-elevated/50 cursor-pointer"
+                          title={`「${meta.name}」分组 · 当前 ${meta.count} 只 · 点击查看分组`}
+                        >
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(meta.color).dot}`} />
+                          <span className="truncate text-xs font-medium text-foreground hover:text-accent">{meta.name}</span>
+                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">{meta.count}只</span>
+                          <span className="shrink-0 text-[9px] text-muted/60">· 分组作用域</span>
+                        </Link>
+                      )
+                    })()
                   ) : (
                     <h3 className={cn('text-xs font-medium truncate', r.enabled ? 'text-foreground' : 'text-muted')}>{displayName}</h3>
                   )}
@@ -778,8 +839,25 @@ function RulesList({ rulesQuery, onEdit }: {
                     {r.direction === 'down' ? ' ≤ -' : ' ≥ '}{r.threshold_pct ?? 1}%
                   </span>
                 </div>
+              ) : r.type === 'abnormal' ? (
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
+                  <span className="rounded bg-orange-500/8 px-1.5 py-0.5 text-[9px] text-orange-500 dark:text-orange-400">
+                    接近度 ≥ {r.threshold_pct ?? 70}%
+                  </span>
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                    {r.abnormal_window && r.abnormal_window !== 'any' ? `${r.abnormal_window.toUpperCase()} 窗口` : '全部窗口'}
+                  </span>
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                    {r.direction === 'up' ? '涨势偏离' : r.direction === 'down' ? '跌势偏离' : '涨跌双向'}
+                  </span>
+                </div>
               ) : r.type === 'strategy' && r.strategy_id ? (
                 <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
+                  {(r.score_min != null || r.score_max != null) && (
+                    <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-mono text-amber-500 dark:text-amber-300">
+                      评分 {r.score_min ?? 0}–{r.score_max ?? 100}
+                    </span>
+                  )}
                   {(r.notify_events ?? LEGACY_STRATEGY_NOTIFY_EVENTS).map(event => {
                     const option = STRATEGY_NOTIFY_EVENT_OPTIONS.find(item => item.key === event)
                     return option ? (
@@ -822,7 +900,12 @@ function RulesList({ rulesQuery, onEdit }: {
 }
 
 // ── 规则编辑对话框 ────────────────────────────────────
-function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: MonitorRule | null; onClose: () => void }) {
+function RuleEditorDialog({ open, rule, preset, onClose }: {
+  open: boolean
+  rule: MonitorRule | null
+  preset?: Partial<MonitorRule> | null
+  onClose: () => void
+}) {
   const backdrop = useDialogBackdrop(onClose)
   return (
     <AnimatePresence>
@@ -844,6 +927,7 @@ function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: Monito
           >
             <RuleEditor
               rule={rule}
+              preset={preset ?? undefined}
               onClose={onClose}
               onSaved={onClose}
             />

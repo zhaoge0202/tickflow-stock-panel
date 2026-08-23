@@ -5,6 +5,12 @@ import { Onboarding } from './pages/Onboarding'
 import { Auth } from './pages/Auth'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
+import { ExtensionBoundary } from './extensions/ExtensionBoundary'
+import {
+  finalizeFrontendExtensions,
+  getFrontendExtensionLoadErrors,
+  getFrontendExtensionRoutes,
+} from './extensions/registry'
 
 // 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / lightweight-charts /
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
@@ -12,6 +18,7 @@ import { Logo } from './components/Logo'
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
+const Mining = lazy(() => import('./pages/Mining').then(m => ({ default: m.Mining })))
 const Financials = lazy(() => import('./pages/Financials').then(m => ({ default: m.Financials })))
 const Data = lazy(() => import('./pages/Data').then(m => ({ default: m.Data })))
 const Monitor = lazy(() => import('./pages/Monitor').then(m => ({ default: m.Monitor })))
@@ -26,7 +33,45 @@ const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.B
 const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })))
 const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Indices })))
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
+const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
+
+const CORE_ROUTE_PATHS = new Set([
+  '/',
+  '/onboarding',
+  '/login',
+  '/overview',
+  '/analysis',
+  '/analysis/:menuId',
+  '/concept-analysis',
+  '/industry-analysis',
+  '/stock-analysis',
+  '/review',
+  '/watchlist',
+  '/screener',
+  '/backtest',
+  '/mining',
+  '/financials',
+  '/data',
+  '/monitor',
+  '/limit-ladder',
+  '/indices',
+  '/regime',
+  '/abnormal',
+  '/branding',
+  '/settings',
+  '/dev',
+  '/settings/keys',
+  '/settings/ai',
+  '/settings/queries',
+])
+
+finalizeFrontendExtensions(CORE_ROUTE_PATHS)
+const frontendExtensionRoutes = getFrontendExtensionRoutes()
+const frontendExtensionErrors = getFrontendExtensionLoadErrors()
+if (frontendExtensionErrors.length > 0) {
+  console.error('部分前端扩展加载失败', frontendExtensionErrors)
+}
 
 // 首次使用守卫 —— 未完成向导则重定向到 /onboarding
 // 只挂在根路由上;/onboarding 本身不被守卫,避免循环重定向。
@@ -78,20 +123,33 @@ export const router = createBrowserRouter([
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
+      { path: 'mining', element: <Mining /> },
       { path: 'financials', element: <Financials /> },
       { path: 'data', element: <Data /> },
       { path: 'monitor', element: <Monitor /> },
       { path: 'limit-ladder', element: <LimitUpLadder /> },
       { path: 'indices', element: <Indices /> },
     { path: 'regime', element: <Regime /> },
+      { path: 'abnormal', element: <AbnormalMoves /> },
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },
       // 隐藏路由：开发者工具（不暴露在菜单，仅供调试）
       { path: 'dev', element: <Dev /> },
       // 旧路由兼容重定向
-      { path: 'settings/keys', element: <Navigate to="/settings?tab=account" replace /> },
+      { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
       { path: 'settings/queries', element: <Navigate to="/settings?tab=queries" replace /> },
+      ...frontendExtensionRoutes.map(route => {
+        const ExtensionPage = route.component
+        return {
+          path: route.path.slice(1),
+          element: (
+            <ExtensionBoundary extensionId={route.extensionId}>
+              <ExtensionPage />
+            </ExtensionBoundary>
+          ),
+        }
+      }),
     ],
   },
 ])

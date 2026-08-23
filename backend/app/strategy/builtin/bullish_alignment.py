@@ -44,7 +44,6 @@ ENTRY_SIGNALS = ["signal_ma_golden_5_20", "signal_ma_golden_20_60"]
 EXIT_SIGNALS = ["signal_ma_dead_5_20", "signal_ma20_breakdown"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 
 class BullishAlignmentMatrixStrategy:
