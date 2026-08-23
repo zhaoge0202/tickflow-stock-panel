@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
-import { ToastContainer } from '@/components/Toast'
+import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
@@ -20,7 +20,6 @@ import {
   useToggleRealtimeQuotes,
 } from '@/lib/useSharedMutations'
 import { QK } from '@/lib/queryKeys'
-import { tierRank } from '@/lib/capability-labels'
 import {
   Siren,
   Star,
@@ -364,7 +363,7 @@ export function Layout() {
   const navigate = useNavigate()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
-  // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
+  // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
   useEffect(() => {
     const compact = window.matchMedia('(max-width: 767px)')
@@ -408,9 +407,10 @@ export function Layout() {
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
   const isPaused = quoteStatus?.paused ?? false
-  const tier = tierRank(caps?.label ?? '')
-  const isNoneTier = tier < 0
-  const isWatchlistMode = tier === 0
+  // 实时模式以 quote_status 为准 (数据源无关): none=不可用 / watchlist=自选实时 / full_market=全市场
+  const quoteMode = quoteStatus?.mode ?? 'none'
+  const realtimeUnavailable = quoteMode === 'none'
+  const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeModeLabel = isWatchlistMode ? '自选股' : '全市场'
   // 当前实时行情数据源名称 (custom 时显示源名, tickflow 时不显示)
   const realtimeProvider = prefs?.realtime_data_provider
@@ -512,15 +512,17 @@ export function Layout() {
   const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
 
   const handleToggle = async (enabled: boolean) => {
-    // 开启时重新校验档位
+    // 开启时重新校验实时权限 (以 quote_status 的数据源无关判定为准)
     if (enabled) {
       const fresh = await qc.fetchQuery({
-        queryKey: QK.capabilities,
-        queryFn: api.capabilities,
+        queryKey: QK.quoteStatus,
+        queryFn: api.quoteStatus,
       })
-      const freshTier = tierRank(fresh.label ?? '')
-      if (freshTier < 0) return
-      if (freshTier === 0 && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
+      if (!fresh.realtime_allowed) {
+        toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
+        return
+      }
+      if (fresh.mode === 'watchlist' && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
         navigate('/watchlist')
         return
       }
@@ -740,7 +742,7 @@ export function Layout() {
           </div>
         ) : (
         <div className="border-t border-border px-3 py-2.5 shrink-0">
-          {isNoneTier && !realtimeProviderName ? (
+          {realtimeUnavailable && !realtimeProviderName ? (
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-secondary truncate">实时行情</span>
@@ -760,7 +762,7 @@ export function Layout() {
               </div>
             </div>
           ) : (
-            /* Starter+ — 开关 + 跳转设置 */
+            /* 实时可用 — 开关 + 跳转设置 */
             <div className="flex items-center gap-2">
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${realtimeIndicatorClass}`} />
@@ -810,13 +812,13 @@ export function Layout() {
 
           {/* 状态提示 */}
           {realtimeEnabled
-            && (!isNoneTier || realtimeProviderName)
+            && (!realtimeUnavailable || realtimeProviderName)
             && (isPaused || (isWatchlistMode && !dismissFreeHint && !realtimeProviderName))
             && (
               <div className="mt-1.5 text-[10px] leading-snug space-y-0.5">
                 {isWatchlistMode && !dismissFreeHint && !realtimeProviderName && (
                   <div className="flex items-start gap-1 text-amber-400/80">
-                    <span className="flex-1">监控自选股前 5 只，全市场监控需 Starter+</span>
+                    <span className="flex-1">自选实时模式监控前 5 只，全市场实时依赖数据源支持</span>
                     <button
                       onClick={() => setDismissFreeHint(true)}
                       className="text-amber-400/50 hover:text-amber-400 shrink-0 transition-colors"
@@ -831,7 +833,7 @@ export function Layout() {
                 )}
               </div>
             )}
-          {showSidebarQuotes && !isWatchlistMode && (!isNoneTier || !!realtimeProviderName) && (
+          {showSidebarQuotes && !isWatchlistMode && (!realtimeUnavailable || !!realtimeProviderName) && (
             <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
           )}
         </div>

@@ -78,7 +78,7 @@ export function StockPanel({
     saveInfoFields(next)
   }, [])
 
-  // 财务指标：仅当信息条配置含可见的财务字段且用户具备 FINANCIAL 能力 (Expert) 时才请求
+  // 财务指标：仅当信息条配置含可见的财务字段且用户具备财务数据能力 (financial) 时才请求
   // 无能力时跳过请求, 避免后端抛 CapabilityDenied (403) 导致 free/starter 档弹错误提示
   const { data: caps } = useCapabilities()
   const hasFinancialCap = !!caps?.capabilities?.['financial']

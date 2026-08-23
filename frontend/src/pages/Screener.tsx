@@ -7,7 +7,6 @@ import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
 import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
-import { isExpertOrAbove } from '@/lib/capability-labels'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
@@ -399,13 +398,13 @@ export function Screener() {
     columns.find(c => c.source.type === 'builtin' && c.source.key === 'intraday' && c.visible),
     [columns],
   )
-  // 分时图需 Pro+ (kline.minute.batch), 低档用户开了列也不拉数据
+  // 分时图依赖分钟K批量数据 (kline.minute.batch), 无数据时开了列也不拉
   const caps = useCapabilities()
   const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
   const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
 
   // 分时数据加载策略 (与自选页一致, 简洁优先):
-  //  - 全量加载当前列表 symbol, 但按套餐 batch 上限截断 (Pro=100 / Expert=200),
+  //  - 全量加载当前列表 symbol, 但按数据源 batch 上限截断,
   //    超出时只取前 batch 只并提示用户, 避免一次性发太多请求打爆 rpm 配额
   //  - 刷新: minute_intraday_refresh 偏好开启时按用户设定间隔轮询; 否则仅首次加载,
   //    用户可点表头刷新按钮手动更新
@@ -420,9 +419,7 @@ export function Screener() {
     [displayRows],
   )
   const intradayTruncated = intradayVisible && allIntradaySymbols.length > minuteBatchCap
-  // 是否已是最高档 (Expert+): 最高档时截断提示不再建议"升级套餐"
-  const isMaxTier = isExpertOrAbove(caps.data?.label ?? '')
-  // 截断到 batch 上限 (Pro=100 / Expert=200), 一次请求 = 一次 TickFlow 调用
+  // 截断到 batch 上限, 一次请求 = 一次数据源调用
   const intradaySymbols = useMemo(
     () => intradayTruncated ? allIntradaySymbols.slice(0, minuteBatchCap) : allIntradaySymbols,
     [allIntradaySymbols, intradayTruncated, minuteBatchCap],
@@ -866,11 +863,10 @@ export function Screener() {
                       <span className="num">{result.elapsed_ms.toFixed(1)} ms</span>
                     </div>
                   )}
-                  {/* 分时截断提示: 超套餐上限时在工具栏内联显示, 可关闭 */}
+                  {/* 分时截断提示: 超数据源批量上限时在工具栏内联显示, 可关闭 */}
                   {intradayTruncated && !intradayCapDismissed && (
                     <span className="inline-flex items-center gap-1 text-xs text-warning/90">
-                      分时仅前 {minuteBatchCap}/{allIntradaySymbols.length}
-                      {!isMaxTier && ', 可升级'}
+                      分时仅前 {minuteBatchCap}/{allIntradaySymbols.length} · 受数据源批量上限限制
                       <button
                         type="button"
                         onClick={() => setIntradayCapDismissed(true)}

@@ -590,7 +590,7 @@ def save_data_source(req: CustomSourceIn) -> dict:
 
 
 @router.delete("/data-sources/{name}")
-def delete_data_source(name: str) -> dict:
+def delete_data_source(name: str, request: Request) -> dict:
     """删除一个自定义数据源 yaml, 保存后自动 reload。
 
     若当前总开关选中的就是被删的源, 回退到 tickflow。
@@ -615,6 +615,8 @@ def delete_data_source(name: str) -> dict:
         updates["adj_factor_provider"] = "same_as_daily"
     if updates:
         preferences.save(updates)
+    # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
+    request.app.state.capabilities = detect_capabilities()
     return list_data_sources()
 
 
@@ -644,12 +646,14 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
 
 
 @router.put("/preferences/data-providers")
-def update_data_providers(req: DataProvidersIn) -> dict:
+def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
     if updates:
         preferences.save(updates)
+    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
+    request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),

@@ -412,7 +412,7 @@ function StockSearchBox({
 // 视觉: 内圈实心点 + 外圈 animate-ping 扩散晕, 语义=「在线/活动」。
 // 配色用 accent (电光蓝) 而非绿/红: 项目设计规范规定红绿仅用于价格/K线,
 // UI 状态用 accent, 避免与 A 股涨跌色混淆。
-// 全市场模式 (Starter+) 不显示 —— 全部都在监控, 标记无信息量。
+// 全市场模式不显示 —— 全部都在监控, 标记无信息量。
 function RealtimeDot({ title = '实时监控中' }: { title?: string }) {
   return (
     <span
@@ -731,7 +731,7 @@ export function Watchlist() {
   )
   // 分时列渲染配置（宽高, 来自列定制, 已钳制边界）
   const intradayResolved = useMemo(() => resolveIntradayConfig(intradayColumn?.intradayConfig), [intradayColumn])
-  // 分时图需 Pro+ (kline.minute.batch), 低档用户开了列也不拉数据
+  // 分时图依赖分钟K批量数据 (kline.minute.batch), 无数据时开了列也不拉
   const caps = useCapabilities()
   const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
   const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
@@ -872,7 +872,7 @@ export function Watchlist() {
     return patched
   }, [dailyKVisible, klineBatch.data, enriched.data])
 
-  // 批量分时数据 (Pro+ 用户, 列可见时才拉)
+  // 批量分时数据 (有分钟K批量能力时, 列可见才拉)
   // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
   // 按用户设定的间隔轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流); 与 Screener / 设置卡片描述一致。
   const { data: prefsData } = usePreferences()
@@ -1053,8 +1053,8 @@ export function Watchlist() {
   const watchlistContentLoading = list.isLoading || (allSymbols.length > 0 && enriched.isLoading)
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
-  // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
-  // 后端 Free 档实际只监控自选页前 N 个 (N = watchlist_symbol_count), 顺序与 allSymbols 一致。
+  // 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
+  // 后端自选实时模式实际只监控自选页前 N 个 (N = watchlist_symbol_count), 顺序与 allSymbols 一致。
   const realtimeMode = quoteStatus.data?.mode
   const watchlistMonitoredCount = quoteStatus.data?.watchlist_symbol_count ?? 0
   const showRealtimeDot = realtimeRunning && realtimeMode === 'watchlist'
