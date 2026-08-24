@@ -99,8 +99,11 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
     fi
 
 # Backend deps
-COPY README.md /README.md
+# hatchling 要求 readme 必须在项目目录内; 开发布局是 backend/pyproject → ../README.md,
+# 容器 WORKDIR=/app, 把 README 拷进 /app 并把 readme 字段改成同目录相对路径。
+COPY README.md ./README.md
 COPY backend/pyproject.toml backend/uv.lock* ./
+RUN sed -i 's|readme = "../README.md"|readme = "README.md"|' pyproject.toml
 # uv 原生支持同时挂多个 index(主源 + 备用源),会自动在两源中查找,
 # 比逐个重试更稳健 —— 任一源缺包时另一源补位。
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then \

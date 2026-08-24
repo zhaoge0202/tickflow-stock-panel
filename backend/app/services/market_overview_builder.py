@@ -18,6 +18,7 @@ from typing import Any
 
 import polars as pl
 
+from app.services.equity_premium import build_equity_premium
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.screener import ScreenerService
 
@@ -392,6 +393,13 @@ def build_market_overview(
             "activity": {"avg_turnover": 0, "high_turnover": 0, "high_vol_ratio": 0, "vol_ratio": 1},
             "radar": [],
             "emotion": {"score": 50, "label": "暂无"},
+            "equity_premium": {
+                "value": None, "pe": None, "earnings_yield": None, "bond_yield_10y": None,
+                "bond_as_of": None, "sample_count": 0, "label": "暂无", "tone": "neutral",
+                "hint": "暂无行情数据", "formula": "1/PE − 10Y国债收益率",
+                "price_as_of": None, "price_source": "eod", "freshness": "unavailable",
+                "quality_warning": None,
+            },
             "top_gainers": [],
             "top_losers": [],
             "turnover_leaders": [],
@@ -551,6 +559,77 @@ def build_market_overview(
     else:
         emotion_label = "冰点"
 
+    # 股权溢价:
+    #   - 默认用 enriched 最新交易日收盘价 (eod), 不是假实时
+    #   - 仅当 quote_service 处于全市场实时且缓存有价时, 用 last_price 覆盖 close
+    #   - 财务净利润/股本是季报口径; 国债是日频
+    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+    price_source = "eod"
+    price_as_of = str(effective_as_of) if effective_as_of is not None else None
+    quote_age_ms = status.get("quote_age_ms") if isinstance(status, dict) else None
+    erp_rows = rows
+    if (
+        data_dir is not None
+        and quote_service is not None
+        and requested_as_of is None
+        and rows
+        and str(status.get("mode") or "") == "full_market"
+        and bool(status.get("running"))
+        and quote_age_ms is not None
+        and float(quote_age_ms) >= 0
+        and float(quote_age_ms) < 120_000  # 超过 2 分钟视为非实时, 退回收盘价
+    ):
+        try:
+            live_df = quote_service.get_quotes_compat()
+        except Exception:  # noqa: BLE001
+            live_df = None
+        if live_df is not None and not live_df.is_empty() and "symbol" in live_df.columns:
+            price_col = "last_price" if "last_price" in live_df.columns else (
+                "close" if "close" in live_df.columns else None
+            )
+            if price_col is not None:
+                live_map = {
+                    str(r.get("symbol") or "").strip().upper(): _finite(r.get(price_col))
+                    for r in live_df.select(
+                        [c for c in ("symbol", price_col) if c in live_df.columns]
+                    ).to_dicts()
+                }
+                patched = 0
+                merged: list[dict] = []
+                for r in rows:
+                    nr = dict(r)
+                    sym = str(nr.get("symbol") or "").strip().upper()
+                    lp = live_map.get(sym)
+                    if lp is not None and lp > 0:
+                        nr["close"] = lp
+                        patched += 1
+                    merged.append(nr)
+                # 至少覆盖 60% 样本才认作 live, 避免 watchlist/残缺缓存冒充全市场实时
+                if patched >= max(1, int(len(rows) * 0.6)):
+                    erp_rows = merged
+                    price_source = "live"
+                    # 盘中 live 的 as_of 仍标交易日, 但 source=live 让前端区分
+                    from app.market_time import cn_today
+                    price_as_of = str(cn_today())
+
+    equity_premium = (
+        build_equity_premium(
+            erp_rows,
+            data_dir,
+            price_as_of=price_as_of,
+            price_source=price_source,
+            quote_age_ms=float(quote_age_ms) if quote_age_ms is not None else None,
+        )
+        if data_dir is not None
+        else {
+            "value": None, "pe": None, "earnings_yield": None, "bond_yield_10y": None,
+            "bond_as_of": None, "sample_count": 0, "label": "暂无", "tone": "neutral",
+            "hint": "数据目录不可用", "formula": "1/PE − 10Y国债收益率",
+            "price_as_of": price_as_of, "price_source": "eod", "freshness": "unavailable",
+            "quality_warning": None,
+        }
+    )
+
     return _json_safe({
         "as_of": str(effective_as_of),
         "quote_status": status,
@@ -589,6 +668,7 @@ def build_market_overview(
         },
         "radar": radar,
         "emotion": {"score": emotion_score, "label": emotion_label},
+        "equity_premium": equity_premium,
         "top_gainers": _top_rows(rows, "change_pct", True),
         "top_losers": _top_rows(rows, "change_pct", False),
         "turnover_leaders": _top_rows(rows, "amount", True),

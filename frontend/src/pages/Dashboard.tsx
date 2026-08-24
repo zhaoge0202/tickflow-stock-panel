@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
+import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Scale, Sparkles, Target, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
-import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
+import { api, type EquityPremium, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
@@ -229,6 +229,138 @@ function KpiCell({ label, value, sub, tone = 'neutral' }: { label: ReactNode; va
       <div className="flex items-center gap-1 text-[11px] text-muted">{label}</div>
       <div className={`mt-1 truncate font-mono text-lg font-semibold leading-none tabular-nums ${isPlain ? color : 'text-foreground'}`}>{value}</div>
       {sub && <div className="mt-1 truncate text-[10px] text-muted">{sub}</div>}
+    </div>
+  )
+}
+
+/** 股权溢价 tone → 主色 (A 股惯例: 牛红 / 熊绿) */
+function erpToneColor(tone: string | undefined): string {
+  switch (tone) {
+    case 'bull': return '#F04438'
+    case 'lean_bull': return '#FB923C'
+    case 'lean_bear': return '#84CC16'
+    case 'bear': return '#12B76A'
+    default: return '#F59E0B'
+  }
+}
+
+function erpToneClass(tone: string | undefined): string {
+  switch (tone) {
+    case 'bull': return 'text-bull'
+    case 'lean_bull': return 'text-orange-400'
+    case 'lean_bear': return 'text-lime-500'
+    case 'bear': return 'text-bear'
+    default: return 'text-amber-400'
+  }
+}
+
+/** 主页顶部: 股权溢价指数 + 牛熊分档 (明确标注数据时效, 不伪装实时) */
+function EquityPremiumBanner({ data }: { data?: EquityPremium | null }) {
+  const ep = data
+  const value = n(ep?.value)
+  const color = erpToneColor(ep?.tone)
+  const toneCls = erpToneClass(ep?.tone)
+  const hasValue = value != null
+  const valueText = hasValue ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%` : '—'
+  const label = ep?.label || '暂无'
+  const pe = n(ep?.pe)
+  const ey = n(ep?.earnings_yield)
+  const bond = n(ep?.bond_yield_10y)
+  const isLive = ep?.price_source === 'live' || ep?.freshness === 'live'
+  const priceAsOf = ep?.price_as_of || null
+  const bondAsOf = ep?.bond_as_of || null
+  const freshnessLabel = isLive
+    ? (ep?.quote_age_ms != null ? `盘中最新 · ${quoteAge(ep.quote_age_ms)}` : '盘中最新')
+    : priceAsOf
+      ? `收盘价 · ${priceAsOf}`
+      : '收盘价'
+  const title = [
+    ep?.formula || '盈利收益率 − 10Y 国债收益率',
+    `股价: ${freshnessLabel}`,
+    bondAsOf ? `国债: ${bondAsOf}${ep?.stale_bond ? ' (缓存)' : ''}` : null,
+    ep?.hint,
+  ].filter(Boolean).join(' | ')
+
+  return (
+    <div
+      className="mb-1.5 overflow-hidden rounded-card border bg-surface/80 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm"
+      style={{ borderColor: `${color}55` }}
+      title={title}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Scale className="h-3.5 w-3.5 shrink-0" style={{ color }} />
+          <span className="text-xs font-semibold text-foreground">股权溢价指数</span>
+          <span className="hidden font-mono text-[10px] text-muted sm:inline">ERP</span>
+          <span
+            className={cn(
+              'rounded px-1.5 py-px text-[9px] font-medium',
+              isLive ? 'bg-accent/15 text-accent' : 'bg-elevated text-muted',
+            )}
+            title={isLive ? '全市场最新价覆盖市值后计算' : '使用最新有数据交易日的收盘价, 非 tick 实时'}
+          >
+            {freshnessLabel}
+          </span>
+        </div>
+
+        <div className="flex items-baseline gap-1.5">
+          <span className={cn('font-mono text-xl font-bold leading-none tabular-nums', hasValue ? toneCls : 'text-muted')}>
+            {valueText}
+          </span>
+          <span
+            className="rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-none"
+            style={{
+              color,
+              borderColor: `${color}55`,
+              background: `${color}18`,
+            }}
+          >
+            {label}
+          </span>
+          {ep?.stale_bond && (
+            <span className="rounded bg-warning/15 px-1 py-px text-[9px] text-warning" title="国债收益率取自缓存, 可能略旧">
+              国债缓存
+            </span>
+          )}
+        </div>
+
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[10px] text-muted">
+          <span title="全市场市值加权 PE (盈利取最近一期报告)">
+            PE <span className="text-secondary">{pe != null ? pe.toFixed(1) : '—'}</span>
+          </span>
+          <span title="盈利收益率 = 1/PE">
+            盈利收益 <span className="text-secondary">{ey != null ? `${ey.toFixed(2)}%` : '—'}</span>
+          </span>
+          <span title={bondAsOf ? `10Y 国债 · ${bondAsOf}` : '10Y 国债收益率(日频)'}>
+            10Y国债 <span className="text-secondary">{bond != null ? `${bond.toFixed(2)}%` : '—'}</span>
+            {bondAsOf ? <span className="text-muted/70"> · {bondAsOf}</span> : null}
+          </span>
+          {ep?.sample_count ? (
+            <span className="text-muted/70">样本 {ep.sample_count}</span>
+          ) : null}
+        </div>
+      </div>
+      {(ep?.quality_warning || ep?.hint) && (
+        <div
+          className="border-t px-3 py-1 text-[10px] leading-relaxed"
+          style={{ borderColor: `${color}22`, background: `${color}0a` }}
+        >
+          {ep?.quality_warning ? (
+            <div className="text-warning">{ep.quality_warning}</div>
+          ) : null}
+          {ep?.hint ? (
+            <div className="text-secondary">
+              {ep.hint}
+              {ep.formula ? <span className="ml-2 font-mono text-muted">({ep.formula})</span> : null}
+              <span className="ml-2 text-muted">
+                · 股价{isLive ? '盘中最新' : `收盘${priceAsOf ? ` ${priceAsOf}` : ''}`}
+                · 国债日频{bondAsOf ? ` ${bondAsOf}` : ''}
+                · 盈利取最近财报
+              </span>
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
   )
 }
@@ -722,6 +854,19 @@ export function Dashboard() {
           >
             {data.emotion.label} · {score}
           </span>
+          {data.equity_premium?.value != null && (
+            <span
+              className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
+              style={{
+                color: erpToneColor(data.equity_premium.tone),
+                borderColor: `${erpToneColor(data.equity_premium.tone)}40`,
+                background: `${erpToneColor(data.equity_premium.tone)}14`,
+              }}
+              title={data.equity_premium.hint || '股权溢价指数'}
+            >
+              溢价 {data.equity_premium.value >= 0 ? '+' : ''}{data.equity_premium.value.toFixed(2)}% · {data.equity_premium.label}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-[11px] text-muted">
           {currentDate ? (
@@ -758,6 +903,9 @@ export function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* 股权溢价指数 — 顶部实时股债性价比 + 牛熊分档 */}
+      <EquityPremiumBanner data={data.equity_premium} />
 
       <div className="mb-1.5 grid grid-cols-4 gap-1">
         {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}

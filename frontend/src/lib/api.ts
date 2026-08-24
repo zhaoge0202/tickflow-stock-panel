@@ -630,6 +630,29 @@ export interface OverviewDimensionRankItem {
   } | null
 }
 
+export interface EquityPremium {
+  value: number | null
+  pe: number | null
+  earnings_yield: number | null
+  bond_yield_10y: number | null
+  bond_as_of?: string | null
+  sample_count: number
+  label: string
+  tone: 'bull' | 'lean_bull' | 'neutral' | 'lean_bear' | 'bear' | string
+  hint?: string
+  formula?: string
+  stale_bond?: boolean
+  /** eod=最新交易日收盘价; live=盘中全市场最新价覆盖 */
+  price_source?: 'eod' | 'live' | string
+  /** 股价对应交易日 YYYY-MM-DD */
+  price_as_of?: string | null
+  quote_age_ms?: number | null
+  /** live | eod | stale | unavailable */
+  freshness?: 'live' | 'eod' | 'stale' | 'unavailable' | string
+  /** 财务口径异常等质量警告, 有则前端必须展示 */
+  quality_warning?: string | null
+}
+
 export interface OverviewMarket {
   as_of: string | null
   quote_status: {
@@ -660,6 +683,8 @@ export interface OverviewMarket {
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
   radar: { key: string; label: string; value: number }[]
   emotion: { score: number; label: string }
+  /** 股权溢价指数: 盈利收益率 − 10Y 国债收益率 */
+  equity_premium?: EquityPremium
   top_gainers: MarketSnapshotRow[]
   top_losers: MarketSnapshotRow[]
   turnover_leaders: MarketSnapshotRow[]
