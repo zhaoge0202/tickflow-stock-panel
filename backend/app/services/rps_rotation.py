@@ -138,8 +138,15 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     if cached and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
         return _slice_cached(cached, days)
 
-    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 polars DataFrame
-    map_df, member_count = _load_concept_map_df(repo, kind)
+    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 polars DataFrame。
+    #    兼容返回裸 DataFrame 的实现: 元组解包会把两列拆成 Series(见
+    #    market_mainline.compute_mainline_range 同类处理)。
+    loaded = _load_concept_map_df(repo, kind)
+    if isinstance(loaded, tuple):
+        map_df, member_count = loaded
+    else:
+        map_df = loaded
+        member_count = loaded[kind].n_unique() if kind in loaded.columns else 0
     if map_df.is_empty():
         logger.info("rps_rotation: no %s data (ext dimension not fetched yet)", kind)
         return {"dates": [], "columns": {}, "concept_count": 0}
