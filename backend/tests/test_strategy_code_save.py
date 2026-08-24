@@ -30,7 +30,6 @@ ENTRY_SIGNALS = []
 EXIT_SIGNALS = []
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 RULES = """
 1. 测试规则一
@@ -137,3 +136,59 @@ def test_save_strategy_code_updates_existing_source_file(tmp_path):
     assert custom_path.exists()
     assert not (tmp_path / "strategies" / "ai" / "custom_update.py").exists()
     assert '"name": "新名称"' in custom_path.read_text(encoding="utf-8")
+
+
+def test_save_strategy_code_rejects_undefined_custom_signal(tmp_path):
+    """REQUIRED_FEATURES 引用未定义的自定义信号 → 拒绝保存并恢复文件。
+
+    回归: 之前保存不校验, 运行期才抛 polars 缺列错 (500)。
+    """
+    request = _request(tmp_path)
+    code = _code("custom_missing_sig") + (
+        '\nREQUIRED_FEATURES = {"csg_oversold_macd_about_to_golden"}\n'
+    )
+    req = StrategyCodeSaveRequest(
+        strategy_id="custom_missing_sig",
+        target_source="custom",
+        mode="create",
+        code=code,
+        name="引用不存在信号的策略",
+    )
+
+    with pytest.raises(ValueError, match="csg_oversold_macd_about_to_golden"):
+        _save_strategy_code(req, request)
+
+    # 校验失败不落盘
+    assert not (tmp_path / "strategies" / "custom" / "custom_missing_sig.py").exists()
+
+
+def test_save_strategy_code_ok_when_custom_signal_defined(tmp_path):
+    """信号已定义时, 引用它的策略可以正常保存。"""
+    from app.strategy import custom_signals
+
+    custom_signals.save_one(tmp_path, {
+        "id": "oversold_macd_about_to_golden",
+        "name": "超跌接近金叉",
+        "kind": "entry",
+        "conditions": [
+            {"left": "momentum_60d", "op": "<=", "right": "-0.30",
+             "leftDays": 0, "rightDays": 0},
+        ],
+        "enabled": True,
+    })
+    request = _request(tmp_path)
+    code = _code("custom_with_sig") + (
+        '\nREQUIRED_FEATURES = {"csg_oversold_macd_about_to_golden"}\n'
+    )
+    req = StrategyCodeSaveRequest(
+        strategy_id="custom_with_sig",
+        target_source="custom",
+        mode="create",
+        code=code,
+        name="引用已定义信号的策略",
+    )
+
+    result = _save_strategy_code(req, request)
+    assert result["ok"] is True
+    loaded = request.app.state.strategy_engine.get("custom_with_sig")
+    assert "csg_oversold_macd_about_to_golden" in loaded.required_features

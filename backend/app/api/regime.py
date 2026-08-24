@@ -7,8 +7,9 @@ from __future__ import annotations
 import threading
 import time
 from datetime import date
-from typing import Any
+from typing import Annotated, Any
 
+import polars as pl
 from fastapi import APIRouter, Query, Request
 
 from app.services import regime_builder
@@ -142,6 +143,8 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
       与 daily_pipeline 的增量补差(compute_regime_incremental)不同 —— 此接口面向
       人工「我要重新算一遍」的预期, 必须真正重算而非增量补缺口。
     - 传 start: 仅重算 [start, end] 区间。
+    - 重算后统一重标情绪周期阶段(refresh_phase_labels)并回填主线
+      (概念+行业, 概念成分为当前快照回看历史, 早年有归属漂移)。
     """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
@@ -156,5 +159,201 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
     new_rows = regime_builder.run_regime_batch(repo, start=start, end=end)
     if not new_rows.is_empty():
         regime_builder.upsert_regime_history(data_dir, new_rows)
+    phase_days = regime_builder.refresh_phase_labels(data_dir)
+
+    from app.services import market_mainline
+
+    mainline_rows = 0
+    for kind in ("concept", "industry"):
+        rows = market_mainline.compute_mainline_range(repo, data_dir, start, end, kind=kind)
+        if not rows.is_empty():
+            market_mainline.upsert_mainline_history(data_dir, rows)
+            mainline_rows += rows.height
+
     invalidate_regime_cache()
-    return {"ok": True, "computed": new_rows.height if not new_rows.is_empty() else 0}
+    return {
+        "ok": True,
+        "computed": new_rows.height if not new_rows.is_empty() else 0,
+        "phase_days": phase_days,
+        "mainline_rows": mainline_rows,
+    }
+
+
+@router.get("/phases")
+def regime_phases(
+    request: Request,
+    start: date | None = None,
+    end: date | None = None,
+):
+    """情绪周期阶段段列表: 连续同阶段合段, 附段内均值指标与主导主线。
+
+    直接回答「什么阶段走什么主升」: 主升/高潮段的主导主线即该段行情主线。
+    主线按段内进入当日 top5 的天数与累计分排序, 取前 3。
+    """
+    from app.services.market_mainline import load_mainline_history
+    from app.services.market_phase import PHASE_LABELS
+
+    data_dir = _data_dir(request)
+    df = regime_builder.load_regime_history(data_dir)
+    if df.is_empty() or "phase" not in df.columns:
+        return {"segments": [], "total": 0}
+    if start:
+        df = df.filter(pl_col_date(df, ">=", start))
+    if end:
+        df = df.filter(pl_col_date(df, "<=", end))
+    df = df.sort("date")
+    if df.is_empty():
+        return {"segments": [], "total": 0}
+
+    mainline = load_mainline_history(data_dir, "concept")
+
+    segments: list[dict] = []
+    cur: dict | None = None
+    for r in df.iter_rows(named=True):
+        phase = r.get("phase")
+        if cur is None or cur["phase"] != phase:
+            cur = {
+                "phase": phase,
+                "label": PHASE_LABELS.get(phase, phase),
+                "start": str(r["date"]),
+                "end": str(r["date"]),
+                "days": 0,
+                "_height": 0.0,
+                "_first_board": 0.0,
+                "_ge2": 0.0,
+                "_promo_sum": 0.0,
+                "_promo_n": 0,
+                "_seal": 0.0,
+            }
+            segments.append(cur)
+        cur["end"] = str(r["date"])
+        cur["days"] += 1
+        cur["_height"] += float(r.get("max_consecutive") or 0)
+        cur["_first_board"] += float(r.get("first_board") or 0)
+        cur["_ge2"] += float(r.get("ge2_count") or 0)
+        promo = r.get("promo_rate")
+        if promo is not None:
+            cur["_promo_sum"] += float(promo)
+            cur["_promo_n"] += 1
+        cur["_seal"] += float(r.get("seal_rate") or 0)
+
+    for seg in segments:
+        n = seg["days"]
+        seg["avg_height"] = round(seg.pop("_height") / n, 1)
+        seg["avg_first_board"] = round(seg.pop("_first_board") / n, 1)
+        seg["avg_ge2"] = round(seg.pop("_ge2") / n, 1)
+        seg["avg_promo"] = (
+            round(seg.pop("_promo_sum") / seg["_promo_n"], 3) if seg["_promo_n"] else None
+        )
+        seg.pop("_promo_n")
+        seg["avg_seal_rate"] = round(seg.pop("_seal") / n, 3)
+        seg["top_mainlines"] = _segment_mainlines(
+            mainline, date.fromisoformat(seg["start"]), date.fromisoformat(seg["end"])
+        )
+
+    return {"segments": segments, "total": len(segments)}
+
+
+def _segment_mainlines(mainline: pl.DataFrame, start: date, end: date, top: int = 3) -> list[dict]:
+    """段内主导主线: 按进入当日 top5 的天数与累计分排序。"""
+    if mainline.is_empty():
+        return []
+    seg = mainline.filter(
+        (pl.col("date") >= start) & (pl.col("date") <= end) & (pl.col("rank") <= 5)
+    )
+    if seg.is_empty():
+        return []
+    ranked = (
+        seg.group_by("member")
+        .agg(
+            pl.col("date").n_unique().alias("top5_days"),
+            pl.col("score").sum().alias("score_sum"),
+            pl.col("max_boards").max().alias("max_boards"),
+            pl.col("leader_symbol").first().alias("leader_symbol"),
+        )
+        .sort(["top5_days", "score_sum"], descending=[True, True])
+        .head(top)
+    )
+    return [
+        {
+            "member": r["member"],
+            "top5_days": r["top5_days"],
+            "score_sum": round(r["score_sum"], 1),
+            "max_boards": r["max_boards"],
+            "leader_symbol": r["leader_symbol"],
+        }
+        for r in ranked.to_dicts()
+    ]
+
+
+@router.post("/mainline/recompute")
+def mainline_recompute(request: Request):
+    """全量重算主线(概念+行业), 应用当前过滤配置。窄扫描, 秒级。
+
+    修改过滤配置(preferences mainline-filter)后调用本接口生效,
+    无需触发较重的 regime 全量重算。
+    """
+    from app.services import market_mainline
+
+    repo = request.app.state.repo
+    data_dir = _data_dir(request)
+    earliest = regime_builder.earliest_enriched_date(repo)
+    if earliest is None:
+        return {"ok": True, "rows": 0}
+    rows = 0
+    for kind in ("concept", "industry"):
+        computed = market_mainline.compute_mainline_range(
+            repo, data_dir, earliest, date.today(), kind=kind
+        )
+        if not computed.is_empty():
+            market_mainline.upsert_mainline_history(data_dir, computed)
+            rows += computed.height
+    return {"ok": True, "rows": rows}
+
+
+@router.get("/mainline")
+def regime_mainline(
+    request: Request,
+    start: date | None = None,
+    end: date | None = None,
+    top: Annotated[int, Query(ge=1, le=30)] = 10,
+    kind: Annotated[str, Query(pattern="^(concept|industry)$")] = "concept",
+):
+    """每日主线排行(截 rank<=top) + 窗口内持续性汇总。
+
+    membership_note 说明概念成分口径(当前快照回看历史)。
+    """
+    from app.services.market_mainline import MEMBERSHIP_NOTE, load_mainline_history
+
+    try:
+        from app.services import preferences
+
+        filter_cfg = preferences.get_mainline_filter_config()
+    except Exception:
+        filter_cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
+    df = load_mainline_history(_data_dir(request), kind)
+    if df.is_empty():
+        return {"rows": [], "leaders": [], "membership_note": MEMBERSHIP_NOTE, "filter": filter_cfg}
+    if start:
+        df = df.filter(pl_col_date(df, ">=", start))
+    if end:
+        df = df.filter(pl_col_date(df, "<=", end))
+    df = df.sort(["date", "rank"])
+    rows_df = df.filter(pl.col("rank") <= top)
+    leaders = (
+        df.filter(pl.col("rank") == 1)
+        .group_by("member")
+        .agg(
+            pl.col("date").n_unique().alias("top1_days"),
+            pl.col("score").mean().round(1).alias("avg_score"),
+            pl.col("max_boards").max().alias("max_boards"),
+        )
+        .sort(["top1_days", "avg_score"], descending=[True, True])
+        .head(10)
+    )
+    return {
+        "rows": _df_to_records(rows_df),
+        "leaders": leaders.to_dicts(),
+        "membership_note": MEMBERSHIP_NOTE,
+        "filter": filter_cfg,
+    }

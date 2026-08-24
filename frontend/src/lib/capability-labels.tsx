@@ -1,4 +1,6 @@
 // capability 内部名 → 用户能理解的中文标签
+import { useNavigate } from 'react-router-dom'
+
 export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'quote.by_symbol':         { name: '自选股实时监控', hint: 'Free 可按标的查询实时行情,用于少量自选股监控' },
   'quote.batch':             { name: '实时行情(批量)',   hint: '一次拿多只股票的价' },
@@ -9,12 +11,55 @@ export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'kline.minute.batch':      { name: '分钟 K(批量)',    hint: '多股分钟 K' },
 
   'depth5':                  { name: '五档盘口',          hint: '买卖五档报价' },
+  'depth5.batch':            { name: '五档盘口(批量)',   hint: '批量买卖五档快照' },
   'websocket':               { name: '实时推送(WS)',    hint: '免轮询的实时行情订阅' },
   'financial':               { name: '财务数据',          hint: '利润表 / 资负表 / 现金流 / 关键指标' },
   'adj_factor':              { name: '复权因子',          hint: '让 MA/MACD 等指标在分红送转日不失真' },
 }
 
-// 套餐等级 —— 用于按档位门控功能(如专线端点 / 按月扩展分钟K)。
+// ===== 数据源无关的能力提示 (所有数据源共用一套标准) =====
+// 功能门槛一律以能力键表达, 不再出现 TickFlow 档位词 (档位仅出现在 TickFlow 专属界面)。
+
+/** 能力键 → 用户可读能力名 */
+export function capName(capKey: string): string {
+  return CAP_LABELS[capKey]?.name ?? capKey
+}
+
+/** 数据不可用标准徽章: 「分钟 K(批量) · 不可用」, 通用状态陈述, 默认点击跳转 设置→数据源 (to=null 关闭跳转) */
+export function MissingCapChip({ capKey, label, to = '/settings?tab=data-sources', className = '' }: {
+  capKey?: string
+  label?: string
+  to?: string | null
+  className?: string
+}) {
+  const navigate = useNavigate()
+  const text = label ?? (capKey != null ? capName(capKey) : '')
+  const content = (
+    <>
+      {text ? `${text} · 不可用` : '不可用'}
+    </>
+  )
+  if (to == null) {
+    return (
+      <span className={`text-[10px] text-warning/90 bg-warning/8 rounded px-1.5 py-px font-medium ${className}`} title="该数据当前不可用">
+        {content}
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); navigate(to) }}
+      className={`text-[10px] text-warning/90 bg-warning/8 rounded px-1.5 py-px font-medium hover:bg-warning/15 transition-colors ${className}`}
+      title="前往 设置 → 数据源"
+    >
+      {content}
+    </button>
+  )
+}
+
+// 套餐等级 —— 仅用于 TickFlow 专属界面 (Key 配置 / 端点测速 / 引导页 tickflow 分支)。
+// 通用功能门槛一律用能力键 (capName/needCapText/MissingCapChip), 不用档位词。
 // 基础档提取与后端 quote_service.py 一致:取 label 第一个词("Pro +" → "pro")。
 // none = None 档(无 key / 无效 key),低于 free,仅历史日K无实时行情。
 export const TIER_RANK: Record<string, number> = { none: -1, free: 0, starter: 1, pro: 2, expert: 3 }

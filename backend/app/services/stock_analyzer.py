@@ -315,14 +315,18 @@ async def analyze_stock_stream(
         kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
         user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus,
                                          asset_type=repo.resolve_asset_type(symbol))
+        got_content = False
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
-            max_tokens=4500,
+            # 不限制输出: 推理模型(deepseek reasoner 系)思考 token 计入 max_tokens
+            # 预算, 固定上限会把正文挤光(实测 4500 全被推理吃掉 → 正文 0 字)。
+            max_tokens=None,
         ):
+            got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
     except Exception as e:  # noqa: BLE001
@@ -330,4 +334,9 @@ async def analyze_stock_stream(
         yield json.dumps({"type": "error", "message": f"AI 分析失败: {e}"}, ensure_ascii=False)
         return
 
+    if not got_content:
+        # 流正常结束但一个正文块都没有(典型: 输出上限被思考吃光后静默截断)
+        logger.warning("AI stock analysis ended with empty content for %s", symbol)
+        yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
+        return
     yield json.dumps({"type": "done"}, ensure_ascii=False)

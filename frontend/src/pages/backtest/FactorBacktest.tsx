@@ -1,13 +1,16 @@
 import { useState, useMemo } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { Play, BarChart3, Clock } from 'lucide-react'
+import { Play, BarChart3, BookmarkPlus, Clock } from 'lucide-react'
 import { api, type FactorColumn, type FactorBacktestResult, type GroupStat } from '@/lib/api'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
+import { toast } from '@/components/Toast'
+import { QK } from '@/lib/queryKeys'
 import { FactorICChart } from './charts/FactorICChart'
 import { FactorGroupNavChart } from './charts/FactorGroupNavChart'
+import { factorResultCandidate } from './researchCandidates'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -80,8 +83,9 @@ function LoadingPanel({ symbolsText }: { symbolsText: string }) {
   )
 }
 
-export function FactorBacktest() {
-  const [factorName, setFactorName] = useState('momentum_20d')
+export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initialFactorName?: string }) {
+  const queryClient = useQueryClient()
+  const [factorName, setFactorName] = useState(initialFactorName)
   const [symbols, setSymbols] = useState('')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   const [start, setStart] = useState(THREE_MONTHS_AGO)
@@ -92,7 +96,7 @@ export function FactorBacktest() {
   const [result, setResult] = useState<FactorBacktestResult | null>(null)
 
   const columns = useQuery({
-    queryKey: ['backtest-factor-columns'],
+    queryKey: QK.factorColumns,
     queryFn: api.factorColumns,
   })
 
@@ -110,6 +114,11 @@ export function FactorBacktest() {
   const factorDesc = useMemo(() => {
     return columns.data?.columns.find(c => c.id === factorName)?.desc ?? ''
   }, [columns.data, factorName])
+
+  const resultFactorLabel = useMemo(() => {
+    const resultFactorName = String(result?.config.factor_name ?? factorName)
+    return columns.data?.columns.find(c => c.id === resultFactorName)?.label ?? resultFactorName
+  }, [columns.data, factorName, result])
 
   const run = useMutation({
     mutationFn: () =>
@@ -131,6 +140,18 @@ export function FactorBacktest() {
         setResult(data)
       }
     },
+  })
+
+  const saveCandidate = useMutation({
+    mutationFn: () => {
+      if (!result) throw new Error('暂无因子结果')
+      return api.researchCandidateCreate(factorResultCandidate(result, resultFactorLabel))
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: QK.researchCandidates })
+      toast('已保存到候选方案', 'success')
+    },
+    onError: error => toast(`保存失败 · ${String((error as Error).message || error)}`, 'error'),
   })
 
   const applyRange = (months: number) => {
@@ -291,7 +312,7 @@ export function FactorBacktest() {
           onClick={() => run.mutate()}
           disabled={run.isPending}
           className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-btn
-            bg-accent text-sm font-medium hover:bg-accent/90
+            bg-accent text-sm font-medium text-white hover:bg-accent/90
             transition-colors duration-150 ease-smooth disabled:opacity-50"
         >
           <Play className="h-3.5 w-3.5" />
@@ -343,6 +364,15 @@ export function FactorBacktest() {
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-medium text-foreground">因子预测能力</h3>
                 <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => saveCandidate.mutate()}
+                    disabled={saveCandidate.isPending}
+                    className="inline-flex items-center gap-1 rounded-btn border border-border bg-base/50 px-2 py-1 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+                  >
+                    <BookmarkPlus className="h-3 w-3" />
+                    {saveCandidate.isPending ? '保存中' : '保存候选'}
+                  </button>
                   <span className="text-[11px] text-muted">
                     Rank IC · 日度调仓
                   </span>

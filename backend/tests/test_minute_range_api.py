@@ -26,7 +26,13 @@ def _request(repo=None, capset=None):
 def test_minute_range_returns_latest_sessions_with_previous_closes():
     repo = MagicMock()
     repo.resolve_asset_type.return_value = "stock"
-    repo.execute_one.return_value = ("浦发银行", 1.0, 1.0)
+    # _get_stock_info 走 instruments 内存缓存 (不再走 execute_one DuckDB 查询)
+    repo.get_instruments.return_value = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "name": ["浦发银行"],
+        "total_shares": [1.0],
+        "float_shares": [1.0],
+    })
     repo.get_minute_range.return_value = pl.DataFrame({
         "symbol": ["600000.SH"] * 3,
         "datetime": [

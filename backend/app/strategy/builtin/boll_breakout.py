@@ -40,7 +40,6 @@ ENTRY_SIGNALS = ["signal_boll_breakout_upper"]
 EXIT_SIGNALS = ["signal_boll_breakdown_lower"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 15
-ALERTS = []
 
 
 class BollBreakoutMatrixStrategy:

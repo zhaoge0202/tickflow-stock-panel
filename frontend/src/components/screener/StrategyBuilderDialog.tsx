@@ -112,7 +112,6 @@ ENTRY_SIGNALS = ["signal_n_day_high"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 RULES = """
 1. 规则一
@@ -150,7 +149,6 @@ ENTRY_SIGNALS = []
 EXIT_SIGNALS = []
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 class CustomMatrixStrategy:
     def required_fields(self) -> frozenset[str]:
@@ -598,7 +596,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                     AI 修改
                   </button>
                 </div>
-                <p className="text-[10px] text-muted/40">修改指令可调整参数、信号、告警、评分等任意内容。确认无误后点击「保存策略」。</p>
+                <p className="text-[10px] text-muted/40">修改指令可调整参数、信号、评分等任意内容。确认无误后点击「保存策略」。</p>
               </>
             )}
             </>

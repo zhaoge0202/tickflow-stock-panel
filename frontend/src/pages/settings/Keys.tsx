@@ -40,6 +40,8 @@ export function TickFlowKeyConfig() {
       setKeyInput('')
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      // 档位变化会改变实时行情模式(none/watchlist/full_market), 立即刷新侧边栏状态
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.ok) {
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
@@ -53,6 +55,7 @@ export function TickFlowKeyConfig() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
     },
   })
 
@@ -61,6 +64,7 @@ export function TickFlowKeyConfig() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.settings })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
     },
   })
 

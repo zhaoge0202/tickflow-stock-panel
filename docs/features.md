@@ -8,7 +8,7 @@
 
 ## 🔍 选股引擎(Screener)
 
-**20 个内置策略**,每个策略一个独立 Python 文件,基于 Polars 表达式向量化实现(`backend/app/strategy/builtin/`):
+**18 个内置策略**,每个策略一个独立 Python 文件,基于 Polars 表达式向量化实现(`backend/app/strategy/builtin/`):
 
 | 类型        | 代表策略                                                 |
 | :---------- | :------------------------------------------------------- |
@@ -53,6 +53,10 @@
 **组合管理**:最大持仓数 · 敞口控制 · 等权 / 自定义仓位。
 
 输出净值曲线 · 夏普 · 最大回撤 · 胜率 · 交易明细。SSE 流式进度支持切页重连,不会丢失回测任务。
+
+**因子与策略挖掘**:复用已有日频因子和 matrix-native 策略，通过 T-1 市场环境、相关去重和嵌套样本外验证生成研究候选。任务在 spawn worker 中运行，支持持久 run ID、取消、刷新重连和显式发布；自动周度任务默认关闭且永不自动发布。完整口径见 [因子与策略挖掘](./mining.md)。
+
+**市场阶段与主线**:市场环境页在原 5 档状态之外新增情绪周期阶段(冰点/启动/主升/高潮/退潮/修复,由连板梯队的高度、宽度、晋级率、梯队完整度判定,平均段长约 10 天)与主线识别(概念/行业维度的涨停梯队聚合排名,可配置宽基标签过滤)。完整口径见 [市场阶段与主线识别](./market-phase.md)。
 
 **ETF 支持**:三种模式的后端与 API 均支持 `asset_type=etf`,回测面板改从 `kline_etf_enriched` 读取(单次回测为单一资产类型,不混合股票与 ETF)。策略组合与因子回测页均有 `股票 / ETF` 切换,ETF 模式下策略列表与标的搜索跟随资产。需先开启 ETF 拉取并跑盘后管道。
 
@@ -104,9 +108,11 @@
 
 ## 🧰 数据与扩展
 
-### TickFlow 多源数据
+### 数据源插件化
 
-日 K / 分钟 K / 指数 / 财务 / 实时行情,基于 [TickFlow](https://tickflow.org) 官方 SDK。
+内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 镜像已内置)。五个数据集(daily / adj_factor / realtime / minute / financial)按源声明自由组合,在「设置 → 数据源」切换。
+
+详见 [custom-data-source.md](./custom-data-source.md) 与 [plugin-development.md](./plugin-development.md)。
 
 ### 🔌 第三方数据接入(重点)
 

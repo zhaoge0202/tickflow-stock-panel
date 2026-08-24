@@ -58,7 +58,6 @@ ENTRY_SIGNALS = []
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 10
-ALERTS = []
 
 
 class StrongOpenMatrixStrategy:

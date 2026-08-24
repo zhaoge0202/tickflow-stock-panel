@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import secrets_store
 from app.data_providers.custom.config import MAX_TIMEOUT
@@ -62,6 +63,8 @@ def get_settings() -> dict:
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
     )
 
     key = secrets_store.get_tickflow_key()
@@ -90,6 +93,8 @@ def get_settings() -> dict:
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -250,6 +255,8 @@ class AiSettingsIn(BaseModel):
     codex_command: str = ""
     codex_reasoning_effort: str = ""
     user_agent: str = ""
+    max_output_tokens: int | None = None   # 输出上限, 钳制所有任务的 max_tokens
+    context_window: int | None = None      # 输入上下文窗口上限 (约 token)
 
 
 @router.post("/ai")
@@ -266,6 +273,8 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         normalize_codex_command,
         normalize_codex_model,
         normalize_codex_reasoning_effort,
@@ -306,6 +315,18 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
 
+    # 输出上限 / 输入上下文窗口 (数值配置, 缺省保持原值)
+    if req.max_output_tokens is not None:
+        if req.max_output_tokens <= 0:
+            raise HTTPException(status_code=400, detail="输出上限必须为正整数")
+        updates["ai_max_output_tokens"] = req.max_output_tokens
+        settings.ai_max_output_tokens = req.max_output_tokens
+    if req.context_window is not None:
+        if req.context_window <= 0:
+            raise HTTPException(status_code=400, detail="上下文窗口必须为正整数")
+        updates["ai_context_window"] = req.context_window
+        settings.ai_context_window = req.context_window
+
     if updates:
         secrets_store.save(updates)
 
@@ -320,6 +341,8 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_configured": ai_configured(provider),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -341,6 +364,7 @@ def clear_ai_settings() -> dict:
         "ai_codex_command",
         "ai_codex_reasoning_effort",
     )
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort", "ai_max_output_tokens", "ai_context_window")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
@@ -348,6 +372,8 @@ def clear_ai_settings() -> dict:
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
     settings.ai_codex_reasoning_effort = ""
+    settings.ai_max_output_tokens = 8192
+    settings.ai_context_window = 64000
 
     return {"ok": True}
 
@@ -430,6 +456,14 @@ class CustomSourceTestIn(BaseModel):
     config: CustomSourceIn | None = None
 
 
+class MiningSchedulePrefs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mining_schedule_enabled: bool
+    mining_schedule_weekday: int = Field(ge=0, le=4)
+    mining_budget_profile: Literal["balanced", "strict"]
+
+
 @router.get("/preferences")
 def get_preferences() -> dict:
     """返回用户偏好设置。"""
@@ -488,6 +522,7 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        **preferences.get_mining_schedule(),
     }
 
 
@@ -583,7 +618,7 @@ def save_data_source(req: CustomSourceIn) -> dict:
 
 
 @router.delete("/data-sources/{name}")
-def delete_data_source(name: str) -> dict:
+def delete_data_source(name: str, request: Request) -> dict:
     """删除一个自定义数据源 yaml, 保存后自动 reload。
 
     若当前总开关选中的就是被删的源, 回退到 tickflow。
@@ -608,6 +643,8 @@ def delete_data_source(name: str) -> dict:
         updates["adj_factor_provider"] = "same_as_daily"
     if updates:
         preferences.save(updates)
+    # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
+    request.app.state.capabilities = detect_capabilities()
     return list_data_sources()
 
 
@@ -637,12 +674,14 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
 
 
 @router.put("/preferences/data-providers")
-def update_data_providers(req: DataProvidersIn) -> dict:
+def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
     if updates:
         preferences.save(updates)
+    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
+    request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -658,6 +697,18 @@ def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
     from app.services import preferences
     preferences.save(req.model_dump())
     return req.model_dump()
+
+
+@router.put("/preferences/mining-schedule")
+def update_mining_schedule(req: MiningSchedulePrefs) -> dict:
+    """一次更新周度自动 mining 配置。"""
+    from app.services import preferences
+
+    return preferences.set_mining_schedule(
+        req.mining_schedule_enabled,
+        req.mining_schedule_weekday,
+        req.mining_budget_profile,
+    )
 
 
 @router.get("/preferences/watchlist-columns")
@@ -762,6 +813,19 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     """
     from app.services import preferences
     qs = getattr(request.app.state, "quote_service", None)
+    depth_svc = getattr(request.app.state, "depth_service", None)
+
+    def _sync_depth_polling(realtime_on: bool) -> None:
+        """实时行情开关联动 depth 盘中轮询: 开→恢复(仍受监控开关/能力门控), 关→立即停。
+
+        实时行情关闭时 enriched 停留在上一交易日, depth 轮询只会反复拉陈旧名单。
+        """
+        if not depth_svc:
+            return
+        if realtime_on:
+            depth_svc.start_polling()
+        else:
+            depth_svc.stop_polling()
 
     allowed = qs.is_realtime_allowed() if qs else True
     if req.realtime_quotes_enabled and not allowed:
@@ -769,12 +833,39 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         preferences.save({"realtime_quotes_enabled": False})
         if qs:
             qs.disable()
+        _sync_depth_polling(False)
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
         raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
+    if req.realtime_quotes_enabled:
+        # 历史完整性门禁: 检测到最近交易日的盘中快照/缺口时禁止开启 —
+        # 实时 flush 写出"今天"分区后, 盘后管道的"只刷今天"分支会让停机日的
+        # 半日快照永久留存。同时自动创建修复任务, 修完即可正常开启。
+        from app.services import data_integrity
+
+        repo = getattr(request.app.state, "repo", None)
+        if repo is not None:
+            try:
+                issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
+            except Exception:  # noqa: BLE001
+                issues = []
+            earliest = data_integrity.earliest_issue_day(issues)
+            if issues and data_integrity.within_auto_repair_window(earliest):
+                job_id, is_new = data_integrity.launch_integrity_repair(
+                    request.app.state, earliest, "realtime_gate",
+                )
+                if job_id is not None:
+                    detail = (
+                        f"检测到{data_integrity.describe_issues(issues)}，"
+                        + ("已自动创建修复任务，完成后即可开启实时行情"
+                           if is_new else "修复任务正在进行中，请稍后再开启")
+                        + f"（任务 {job_id}）"
+                    )
+                    raise HTTPException(status_code=409, detail=detail)
     if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
         preferences.save({"realtime_quotes_enabled": False})
+        _sync_depth_polling(False)
         return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
 
     preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
@@ -783,6 +874,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
             qs.enable()
         else:
             qs.disable()
+    _sync_depth_polling(req.realtime_quotes_enabled)
 
     return {"realtime_quotes_enabled": req.realtime_quotes_enabled, "realtime_allowed": allowed}
 
@@ -928,6 +1020,27 @@ def update_regime_batch_params(req: RegimeBatchParamsIn) -> dict:
 class PipelineIndexSymbolsIn(BaseModel):
     """指数自定义拉取代码(逗号/换行/空格分隔,空串表示全量)。"""
     symbols: str = ""
+
+
+class MainlineFilterIn(BaseModel):
+    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单 + ST 剔除开关)。"""
+
+    min_members: int | None = None
+    max_members: int | None = None
+    blacklist: list[str] | str | None = None
+    exclude_st: bool | None = None
+
+
+@router.put("/preferences/mainline-filter")
+def update_mainline_filter(req: MainlineFilterIn) -> dict:
+    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。
+
+    exclude_st 同步控制市场环境(regime)统计口径 — 切换后需全量重算 regime。
+    """
+    from app.services import preferences
+
+    payload = req.model_dump()
+    return preferences.set_mainline_filter_config(payload)
 
 
 @router.put("/preferences/pipeline-index-symbols")

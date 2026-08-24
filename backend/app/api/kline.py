@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
-from app.db_safe import is_valid_ext_ident, quote_ident
+from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
 from app.services.symbols import normalize_symbol
 
@@ -177,21 +177,28 @@ def instruments_names(request: Request, symbols: list[str]):
 
 
 def _get_stock_info(repo, symbol: str) -> dict:
-    """从 instruments 视图查标的名称 + 股本。"""
+    """从 instruments 内存缓存查标的名称 + 股本。
+
+    该接口在个股弹窗打开时每秒被调用 (SSE invalidate 触发重拉), 走
+    repo.get_instruments() 的 Polars 内存缓存按 symbol 过滤, 不再每请求
+    DuckDB 扫 instruments parquet。列缺失时返回空 dict, 与旧 SQL 报错路径一致。
+    """
+    import polars as pl
     try:
-        row = repo.execute_one(
-            "SELECT name, total_shares, float_shares FROM instruments WHERE symbol = ? LIMIT 1",
-            [symbol],
-        )
+        df = repo.get_instruments()
+        needed = ("symbol", "name", "total_shares", "float_shares")
+        if df.is_empty() or not all(c in df.columns for c in needed):
+            return {}
+        hit = df.filter(pl.col("symbol") == symbol).head(1)
+        if hit.is_empty():
+            return {}
+        return {
+            "name": hit["name"][0],
+            "total_shares": hit["total_shares"][0],
+            "float_shares": hit["float_shares"][0],
+        }
     except Exception:  # noqa: BLE001
         return {}
-    if not row:
-        return {}
-    return {
-        "name": row[0],
-        "total_shares": row[1],
-        "float_shares": row[2],
-    }
 
 
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
@@ -453,7 +460,8 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
     key 形如 "{config_id}__{field_name}"，与自选列表 enriched 接口保持一致。
-    JOIN 逻辑参考 watchlist.watchlist_enriched；任何 ext 表/字段缺失都静默跳过。
+    委托 screener._load_ext_value_maps 取值: 复用其 (路径,mtime) 签名缓存,
+    个股弹窗每秒重拉时不再重复读 ext parquet; 任何 ext 表/字段缺失都静默跳过。
     """
     if not ext_columns or not ext_columns.strip():
         return resp
@@ -470,43 +478,17 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     if not specs:
         return resp
 
-    import polars as pl
-    data_dir = repo.store.data_dir
     try:
-        from app.services.ext_data import ExtConfigStore
-        from app.api.ext_data import _read_ext_dataframe
-        ext_store = ExtConfigStore(data_dir)
-        configs = {c.id: c for c in ext_store.load_all()}
+        from app.api.screener import _load_ext_value_maps
+        value_maps = _load_ext_value_maps(repo, ext_columns)
     except Exception:  # noqa: BLE001
-        configs = {}
+        value_maps = {}
 
     ext_values: dict = {}
     for config_id, field_name in specs:
         ext_col_name = f"{config_id}__{field_name}"
-        value = None
-        try:
-            cfg = configs.get(config_id)
-            if cfg:
-                ext_df, _ = _read_ext_dataframe(cfg, data_dir)
-            else:
-                ext_df = pl.from_arrow(
-                    repo.store.db.query(
-                        f"SELECT symbol, {quote_ident(field_name)} FROM ext_{config_id}"
-                    ).arrow()
-                )
-            if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                # 时序表取最新分区，避免一个 symbol 多行
-                row = (
-                    ext_df
-                    .select(["symbol", field_name])
-                    .unique(subset=["symbol"], keep="last")
-                    .filter(pl.col("symbol") == symbol)
-                )
-                if not row.is_empty():
-                    value = row[field_name][0]
-        except Exception as e:  # noqa: BLE001
-            logger.debug("kline ext join failed for %s.%s: %s", config_id, field_name, e)
-        ext_values[ext_col_name] = value
+        vmap = value_maps.get(ext_col_name) or {}
+        ext_values[ext_col_name] = vmap.get(symbol)
 
     stock_info = dict(resp.get("stock_info") or {})
     stock_info["ext"] = ext_values
@@ -668,12 +650,13 @@ def get_daily_batch(request: Request, body: dict):
         return {"data": {}}
     df = pl.concat(frames, how="diagonal_relaxed")
 
-    # 按 symbol 分组, 每只取最近 N 条
+    # 按 symbol 分组, 每只取最近 N 条。
+    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
     result: dict[str, list[dict]] = {}
-    for sym in symbols:
-        sub = df.filter(pl.col("symbol") == sym).sort("date").tail(days)
+    for part in df.partition_by("symbol", maintain_order=True):
+        sub = part.sort("date").tail(days)
         if not sub.is_empty():
-            result[sym] = sub.to_dicts()
+            result[sub["symbol"][0]] = sub.to_dicts()
 
     return {"data": result}
 
@@ -756,14 +739,15 @@ def get_minute_batch(request: Request, body: dict):
     else:
         expected = 240
 
-    # 按 symbol 分组, 判定哪些不完整需要补拉
+    # 按 symbol 分组, 判定哪些不完整需要补拉 (partition_by 一次切分, 同 daily-batch)
     result: dict[str, list[dict]] = {}
     incomplete: list[str] = []
+    local_parts: dict[str, pl.DataFrame] = {}
+    if not df_local.is_empty():
+        for part in df_local.partition_by("symbol", maintain_order=True):
+            local_parts[part["symbol"][0]] = part.sort("datetime")
     for sym in symbols:
-        if df_local.is_empty():
-            sub = pl.DataFrame()
-        else:
-            sub = df_local.filter(pl.col("symbol") == sym).sort("datetime")
+        sub = local_parts.get(sym, pl.DataFrame())
         if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
             incomplete.append(sym)
         elif not sub.is_empty():
@@ -806,9 +790,13 @@ def get_minute_batch(request: Request, body: dict):
                 live_parts.append(df_e)
         if live_parts:
             live_df = pl.concat(live_parts, how="diagonal_relaxed")
+            live_map: dict[str, pl.DataFrame] = {
+                part["symbol"][0]: part.sort("datetime")
+                for part in live_df.partition_by("symbol", maintain_order=True)
+            }
             for sym in incomplete:
-                sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
-                if not sub.is_empty():
+                sub = live_map.get(sym)
+                if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
     return {"data": result}
@@ -1044,7 +1032,7 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.pools import get_pool
@@ -1071,7 +1059,7 @@ async def sync_minute(request: Request):
         return {"status": "reused", "job_id": job_id}
 
     async def task() -> None:
-        if not try_acquire_run_slot():
+        if not try_acquire_run_slot(job_id):
             job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
             return
         loop = asyncio.get_event_loop()
@@ -1122,11 +1110,14 @@ async def sync_minute(request: Request):
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
             job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
             invalidate_storage_cache()
+        except JobCancelledError:
+            # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+            invalidate_storage_cache()
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
-            release_run_slot()
+            release_run_slot(job_id)
 
     asyncio.create_task(task())
     return {"status": "started", "job_id": job_id}
@@ -1244,7 +1235,7 @@ async def extend_history(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1252,7 +1243,7 @@ async def extend_history(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1273,12 +1264,15 @@ async def extend_history(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("extend_history failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1323,7 +1317,7 @@ async def repair_daily(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.repair_daily import run_repair_daily
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1331,7 +1325,7 @@ async def repair_daily(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1357,12 +1351,15 @@ async def repair_daily(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("repair_daily failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1383,7 +1380,7 @@ async def rebuild_enriched(request: Request):
     try:
         repo = request.app.state.repo
 
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1391,7 +1388,7 @@ async def rebuild_enriched(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1439,12 +1436,15 @@ async def rebuild_enriched(request: Request):
                     "enriched_rows": written,
                 })
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("rebuild_enriched failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}

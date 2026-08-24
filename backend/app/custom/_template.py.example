@@ -1,0 +1,38 @@
+from fastapi import APIRouter
+
+from app.extensions import (
+    BACKEND_EXTENSION_API_VERSION,
+    BackendExtensionRegistrar,
+    ExtensionContext,
+    NotificationFormatContext,
+    NotificationFormatter,
+)
+
+
+class CompanyNotificationFormatter(NotificationFormatter):
+    def format_message(self, event: dict, context: NotificationFormatContext) -> str:
+        return f"[公司规则] {event.get('message', '')}".strip()
+
+
+EXTENSION_ID = "company.example"
+EXTENSION_API_VERSION = BACKEND_EXTENSION_API_VERSION
+
+
+def setup(registrar: BackendExtensionRegistrar) -> None:
+    registrar.register_notification_formatter(
+        "company.notification",
+        CompanyNotificationFormatter(),
+    )
+
+    router = APIRouter(prefix="/api/custom/example", tags=["custom-example"])
+
+    @router.get("/status")
+    def status() -> dict:
+        return {"status": "ok"}
+
+    registrar.include_router(router)
+
+
+def startup(context: ExtensionContext) -> None:
+    # Core repository and data directory are available here. Keep this hook fast.
+    _ = context

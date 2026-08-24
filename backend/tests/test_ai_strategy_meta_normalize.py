@@ -22,7 +22,6 @@ ENTRY_SIGNALS = []
 EXIT_SIGNALS = []
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)

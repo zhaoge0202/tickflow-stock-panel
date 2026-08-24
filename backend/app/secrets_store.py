@@ -87,6 +87,18 @@ def get_ai_config(key: str, default: str = "") -> str:
     return getattr(settings, key, default) or default
 
 
+def get_ai_config_int(key: str, default: int) -> int:
+    """取 AI 数值配置项 (如 ai_max_output_tokens): secrets.json 优先,否则 config。"""
+    val = load().get(key)
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            logger.warning("ai config %s is not an int: %r", key, val)
+    from app.config import settings
+    return int(getattr(settings, key, default) or default)
+
+
 def mask(key: str, prefix: int = 4, suffix: int = 4) -> str:
     """脱敏显示。"""
     if not key:

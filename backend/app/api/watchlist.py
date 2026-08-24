@@ -51,6 +51,10 @@ class GroupNameRequest(BaseModel):
     color: str | None = None
 
 
+class GroupReorderRequest(BaseModel):
+    ordered_ids: list[str]
+
+
 class GroupAssignRequest(BaseModel):
     group_id: str | None = None
 
@@ -107,6 +111,16 @@ def create_group(req: GroupNameRequest):
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"groups": groups, "group": group}
+
+
+@router.put("/groups/reorder")
+def reorder_groups(req: GroupReorderRequest):
+    """重排分组前后顺序 (json 数组顺序即定义顺序, 侧边栏/标签栏/分组视图共用)。"""
+    try:
+        groups = watchlist.reorder_groups(req.ordered_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"groups": groups}
 
 
 @router.put("/groups/{group_id}")
@@ -193,8 +207,33 @@ def move_one_to_top(symbol: str, request: Request):
 
 @router.put("/{symbol}/group")
 def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
+    """互斥设定分组(仅保留此组; None=移出全部分组)。多组操作用 members 端点。"""
     try:
         rows = watchlist.set_group(symbol, req.group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.post("/groups/{group_id}/members/{symbol}")
+def add_member(group_id: str, symbol: str, request: Request):
+    """把标的加入分组(多组成员关系: 不影响其他分组)。"""
+    try:
+        rows = watchlist.add_to_group(symbol, group_id)
+    except KeyError as e:
+        raise HTTPException(404, "自选标的不存在") from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"symbols": _with_names(rows, request)}
+
+
+@router.delete("/groups/{group_id}/members/{symbol}")
+def remove_member(group_id: str, symbol: str, request: Request):
+    """把标的移出分组(仅摘本组标签; 标的仍在自选, 可能落入未分组)。"""
+    try:
+        rows = watchlist.remove_from_group(symbol, group_id)
     except KeyError as e:
         raise HTTPException(404, "自选标的不存在") from e
     except ValueError as e:
@@ -218,7 +257,7 @@ def clear_all():
 
 # 自选页需要的列
 _WATCHLIST_COLS = [
-    "symbol", "close", "change_pct", "change_amount", "amount",
+    "symbol", "close", "open", "high", "low", "change_pct", "change_amount", "amount",
     "turnover_rate",
     "amplitude", "annual_vol_20d",
     "vol_ratio_5d", "realtime_vol_ratio",
@@ -231,6 +270,7 @@ _WATCHLIST_COLS = [
     "boll_upper", "boll_lower",
     "atr_14",
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "deviate_3d", "deviate_10d", "deviate_30d",
     "consecutive_limit_ups", "consecutive_limit_downs",
     "signal_limit_up", "signal_limit_down", "signal_volume_surge",
     "signal_ma_golden_5_20", "signal_macd_golden", "signal_n_day_high",

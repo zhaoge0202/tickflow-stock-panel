@@ -16,6 +16,7 @@ def _today_rows(turnover_rate: float | None = None) -> pl.DataFrame:
         "close": 10.0,
         "raw_close": 10.0,
         "raw_high": 10.0,
+        "raw_low": 10.0,
         "volume": 8000.0,
     }
     if turnover_rate is not None:

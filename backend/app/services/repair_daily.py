@@ -8,7 +8,9 @@
 这样修正功能与盘后管道永远保持一致,不会出现遗漏。
 
 落盘是 merge-upsert (按 symbol+date 去重 keep="last"), 新数据天然覆盖旧值,
-不会产生重复,也不需要先删分区。
+不会产生重复。日K/指数/ETF 族无需先删分区; 股票 enriched 例外 — 增量重算
+只算 enriched 里不存在的日期, "分区已存在但内容是盘中快照"的场景由管道内
+的 prune_enriched_partitions 先删坏分区再重算 (run_now 内处理, 此处无需关心)。
 """
 from __future__ import annotations
 

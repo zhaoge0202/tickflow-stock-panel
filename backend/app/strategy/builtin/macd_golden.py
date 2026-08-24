@@ -46,7 +46,6 @@ EXIT_SIGNALS = ["signal_macd_dead"]
 EXECUTION_BACKEND = "matrix_native"
 STOP_LOSS = -0.07
 MAX_HOLD_DAYS = 20
-ALERTS = []
 
 
 class MACDGoldenMatrixStrategy:

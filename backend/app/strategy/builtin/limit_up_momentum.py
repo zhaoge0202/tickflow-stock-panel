@@ -44,7 +44,6 @@ ENTRY_SIGNALS = ["signal_limit_up"]
 EXIT_SIGNALS = []
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 5
-ALERTS = []
 
 
 class LimitUpMomentumMatrixStrategy:

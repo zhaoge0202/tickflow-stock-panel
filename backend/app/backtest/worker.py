@@ -22,6 +22,9 @@ class BacktestWorkerError(RuntimeError):
     """Raised when a spawned worker fails before returning a task result."""
 
 
+_CANCEL_GRACE_SECONDS = 5.0
+
+
 class _PeakRssSampler:
     """Track whole-task and resettable phase RSS peaks with one sampling thread."""
 
@@ -136,6 +139,10 @@ def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
         encoded = asdict(config)
         encoded["start"] = config.start.isoformat()
         encoded["end"] = config.end.isoformat()
+    elif kind == "mining":
+        if not isinstance(config, dict):
+            raise TypeError("mining worker config must be a dict")
+        encoded = dict(config)
     else:
         raise ValueError(f"unsupported worker task kind: {kind}")
     return {
@@ -165,8 +172,8 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         from app.backtest.engine import BacktestEngine
         from app.backtest.optimizer import StrategyOptimizer
         from app.backtest.strategy import StrategyBacktestService
-        from app.strategy.engine import StrategyEngine
         from app.strategy import config as strategy_config
+        from app.strategy.engine import StrategyEngine
         from app.tickflow.repository import DataStore, KlineRepository
 
         data_dir = Path(task["data_dir"])
@@ -201,6 +208,18 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
             optimizer = StrategyOptimizer(service, strategy_engine)
             walkforward = WalkForwardService(optimizer, service, strategy_engine)
             result = walkforward.run(config, _progress, cancel_event)
+        elif kind == "mining":
+            from app.backtest.mining_runtime import run_mining_runtime
+
+            result = run_mining_runtime(
+                task["config"],
+                data_dir=data_dir,
+                service=service,
+                strategy_engine=strategy_engine,
+                progress_cb=_progress,
+                cancel_check=cancel_event,
+                rss_sampler=sampler,
+            )
         else:
             raise ValueError(f"unsupported worker task kind: {kind}")
 
@@ -261,11 +280,20 @@ def run_worker_task(
     result: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
     ipc_started = time.perf_counter()
+    cancel_started: float | None = None
 
     try:
         while result is None and failure is None:
             if cancel_event is not None and cancel_event.is_set():
                 process_cancel.set()
+                if cancel_started is None:
+                    cancel_started = time.monotonic()
+                elif time.monotonic() - cancel_started >= _CANCEL_GRACE_SECONDS:
+                    process.terminate()
+                    process.join(timeout=5.0)
+                    raise BacktestWorkerError(
+                        "backtest worker did not stop within 5 seconds after cancellation"
+                    )
             try:
                 message = events.get(timeout=0.1)
             except queue.Empty:

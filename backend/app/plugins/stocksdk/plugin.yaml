@@ -5,7 +5,7 @@
 #    开发模式下需手动安装依赖: cd backend/app/plugins/stocksdk && npm install
 
 name: stocksdk
-display_name: "stock-sdk（第三方行情·合规风险自负）"
+display_name: "stock-sdk"
 runtime: node
 entry: app.plugins.stocksdk.provider:StockSDKProvider
 check: app.plugins.stocksdk.bridge:availability

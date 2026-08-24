@@ -44,7 +44,6 @@ ENTRY_SIGNALS = ["signal_ma20_breakout"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 15
-ALERTS = []
 
 
 class VolumePriceSurgeMatrixStrategy:

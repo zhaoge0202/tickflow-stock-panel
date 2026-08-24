@@ -1,12 +1,13 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download, Layers, Plus, Trash2 } from 'lucide-react'
-import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo } from '@/lib/api'
+import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { color } from '@/lib/colors'
 import { SignalPicker } from './SignalPicker'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import { Modal } from '@/components/Modal'
+import { ScoringEditor } from '@/components/ScoringEditor'
 
 // 内置列名 → 中文标签
 const FIELD_LABEL: Record<string, string> = {}
@@ -173,31 +174,6 @@ function ParamField({ def, value, onChange }: {
   )
 }
 
-// 评分权重字段
-function ScoringField({ col, weight, pct, editing, onChange }: {
-  col: string; weight: number; pct: number; editing: boolean; onChange: (v: number) => void
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-[11px] text-secondary w-16 shrink-0 text-right">{FIELD_LABEL[col] ?? col}</span>
-      {editing ? (
-        <input
-          type="range"
-          value={weight}
-          onChange={e => onChange(Number(e.target.value))}
-          min={0} max={100} step={1}
-          className="flex-1 h-1 accent-amber-400 cursor-pointer"
-        />
-      ) : (
-        <div className="flex-1 h-1.5 bg-elevated rounded-full overflow-hidden">
-          <div className="h-full bg-amber-400/70 rounded-full transition-all duration-300" style={{ width: `${Math.min(pct, 100)}%` }} />
-        </div>
-      )}
-      <span className="w-10 text-right text-[10px] font-mono text-muted">{editing ? weight : `${pct}%`}</span>
-    </div>
-  )
-}
-
 export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModify, onDeleted }: Props) {
   const [detail, setDetail] = useState<StrategyDetail | null>(null)
   const [loading, setLoading] = useState(false)
@@ -210,6 +186,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   const [basicFilter, setBasicFilter] = useState<Record<string, any>>({})
   const [params, setParams] = useState<Record<string, any>>({})
   const [scoring, setScoring] = useState<Record<string, number>>({})
+  const [scoringDirections, setScoringDirections] = useState<Record<string, ScoringDirection>>({})
   const [stopLoss, setStopLoss] = useState<number | null>(null)
   const [maxHoldDays, setMaxHoldDays] = useState<number | null>(null)
   const [entrySignals, setEntrySignals] = useState<string[]>([])
@@ -221,7 +198,6 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   // 可选子策略列表 + 添加面板开关(composite 设置用)
   const [allStrategies, setAllStrategies] = useState<{ id: string; name: string; source?: string }[]>([])
   const [showAddChild, setShowAddChild] = useState(false)
-  const [editingScoring, setEditingScoring] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleteError, setDeleteError] = useState('')
@@ -245,7 +221,8 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         if (!bf.boards) bf.boards = ALL_BOARDS
         setBasicFilter(bf)
         setParams(d.params_defaults)
-        setScoring(Object.fromEntries(Object.entries(d.scoring).map(([k, v]) => [k, Math.round((v as number) * 100)])))
+        setScoring(d.scoring)
+        setScoringDirections(d.scoring_directions ?? {})
         setStopLoss(d.stop_loss)
         setMaxHoldDays(d.max_hold_days)
         setEntrySignals(d.entry_signals ?? [])
@@ -288,7 +265,11 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
         description: strategyDesc,
         basic_filter: { ...basicFilter, enabled: basicFilterEnabled },
         params,
-        scoring: Object.fromEntries(Object.entries(scoring).map(([k, v]) => [k, +(v / 100).toFixed(4)])),
+        ...(detail?.source !== 'composite' ? {
+          scoring,
+          scoring_directions: scoringDirections,
+          scoring_replace: true,
+        } : {}),
         stop_loss: stopLoss,
         max_hold_days: maxHoldDays,
         entry_signals: entrySignals,
@@ -321,17 +302,18 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
       if (!bf.boards) bf.boards = ALL_BOARDS
       setBasicFilter(bf)
       setParams(d.params_defaults)
-      setScoring(Object.fromEntries(Object.entries(d.scoring).map(([k, v]) => [k, Math.round((v as number) * 100)])))
-        setStopLoss(d.stop_loss)
-        setMaxHoldDays(d.max_hold_days)
-        setEntrySignals(d.entry_signals ?? [])
-        setExitSignals(d.exit_signals ?? [])
-        setDisplayLimit(d.display_limit ?? null)
-        setBasicFilterEnabled(d.basic_filter?.enabled !== false)
-        setCompositeChildren(d.composite_children ?? [])
-      } finally {
-        setResetting(false)
-      }
+      setScoring(d.scoring)
+      setScoringDirections(d.scoring_directions ?? {})
+      setStopLoss(d.stop_loss)
+      setMaxHoldDays(d.max_hold_days)
+      setEntrySignals(d.entry_signals ?? [])
+      setExitSignals(d.exit_signals ?? [])
+      setDisplayLimit(d.display_limit ?? null)
+      setBasicFilterEnabled(d.basic_filter?.enabled !== false)
+      setCompositeChildren(d.composite_children ?? [])
+    } finally {
+      setResetting(false)
+    }
   }
 
   const handleDelete = async () => {
@@ -560,54 +542,16 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   {/* 列3：评分 + 交易 */}
                   <div className="space-y-3">
                     <Section icon={Star} title="评分权重" accent="text-amber-400">
-                      {Object.entries(scoring).length > 0 ? (() => {
-                        const total = Object.values(scoring).reduce((a: number, b: number) => a + b, 0) || 1
-                        return (
-                          <div className="space-y-2">
-                            {Object.entries(scoring).map(([col, w]) => {
-                              const pct = Math.round((w / total) * 100)
-                              return (
-                                <ScoringField key={col} col={col} weight={w} pct={pct}
-                                  editing={editingScoring}
-                                  onChange={v => setScoring({ ...scoring, [col]: Math.max(0, v) })} />
-                              )
-                            })}
-                            <div className="flex items-center justify-between pt-1.5 border-t border-border/10">
-                              <div className="flex items-center gap-1.5 text-[10px] text-muted">
-                                <span>总和</span>
-                                <span className={`font-mono font-medium text-xs ${editingScoring ? (total === 100 ? color.ok : color.scoreWarn) : color.ok}`}>{editingScoring ? total : '100'}</span>
-                                <span className="text-muted/40">自动归权计算</span>
-                              </div>
-                              <button
-                                onClick={() => {
-                                  if (editingScoring) {
-                                    // 确认：归一化到 100
-                                    const sum = Object.values(scoring).reduce((a: number, b: number) => a + b, 0) || 1
-                                    const norm = Object.fromEntries(
-                                      Object.entries(scoring).map(([k, v]) => [k, Math.round((v / sum) * 100)])
-                                    )
-                                    // 修正舍入误差
-                                    const newSum = Object.values(norm).reduce((a: number, b: number) => a + b, 0)
-                                    if (newSum !== 100) {
-                                      const keys = Object.keys(norm)
-                                      norm[keys[0]] += (100 - newSum)
-                                    }
-                                    setScoring(norm)
-                                  } else {
-                                    // 进入编辑：展开为 0-100 范围
-                                    const sum = Object.values(scoring).reduce((a: number, b: number) => a + b, 0) || 1
-                                    setScoring(Object.fromEntries(
-                                      Object.entries(scoring).map(([k, v]) => [k, Math.round((v / sum) * 100)])
-                                    ))
-                                  }
-                                  setEditingScoring(v => !v)
-                                }}
-                                className="text-[10px] text-accent/80 hover:text-accent cursor-pointer"
-                              >{editingScoring ? '确定' : '设置'}</button>
-                            </div>
-                          </div>
-                        )
-                      })() : <div className="text-[11px] text-muted">未配置</div>}
+                      <ScoringEditor
+                        key={detail.id}
+                        value={scoring}
+                        directions={scoringDirections}
+                        fallbackLabels={FIELD_LABEL}
+                        onChange={(nextScoring, nextDirections) => {
+                          setScoring(nextScoring)
+                          setScoringDirections(nextDirections)
+                        }}
+                      />
                     </Section>
 
                     <Section icon={TrendingUp} title="交易参数" accent="text-emerald-400">
@@ -657,15 +601,6 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                       出入场触发器保存后对<b className="text-secondary">回测和监控</b>生效;选股扫描仍按策略本身的筛选规则,不受此影响。
                     </div>
 
-                    {detail.alerts.length > 0 && (
-                      <Section icon={Settings2} title="提醒" accent="text-muted">
-                        <div className="space-y-1">
-                          {detail.alerts.map((a, i) => (
-                            <div key={i} className="text-[10px] text-secondary">{a.message} <span className="text-muted font-mono">{a.op ? `${FIELD_LABEL[a.field] ?? a.field} ${a.op} ${a.value}` : FIELD_LABEL[a.field] ?? a.field}</span></div>
-                          ))}
-                        </div>
-                      </Section>
-                    )}
                   </div>
                 </div>
                 )}

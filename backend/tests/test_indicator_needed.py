@@ -28,6 +28,19 @@ def _bars(n: int = 90) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def test_compute_indicators_assume_sorted_matches_default_values():
+    bars = _bars().sort(["symbol", "date"])
+
+    default = compute_indicators(bars, needed={"macd_hist", "rsi_14", "momentum_20d"})
+    fast = compute_indicators(
+        bars,
+        needed={"macd_hist", "rsi_14", "momentum_20d"},
+        assume_sorted=True,
+    )
+
+    assert fast.equals(default)
+
+
 def test_compute_signals_subset_matches_full_values():
     indicators = compute_indicators(_bars())
     full = compute_signals(indicators)

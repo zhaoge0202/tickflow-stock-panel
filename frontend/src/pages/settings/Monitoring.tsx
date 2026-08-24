@@ -19,8 +19,6 @@ import {
 import { useUpdateQuoteInterval, useToggleRealtimeQuotes } from '@/lib/useSharedMutations'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { tierRank } from '@/lib/capability-labels'
-import { dataSourceSupportsDataset } from '@/lib/data-source-utils'
 import { toast } from '@/components/Toast'
 import { DepthConfigContent } from '@/components/data/DepthConfigCard'
 
@@ -46,24 +44,11 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const { data: caps } = useCapabilities()
   const { data: quoteStatus } = useQuoteStatus()
   const { data: intervalData } = useQuoteInterval()
-  const { data: dataSources } = useQuery({
-    queryKey: QK.dataSources,
-    queryFn: api.dataSources,
-    staleTime: 60_000,
-  })
   const updateInterval = useUpdateQuoteInterval()
   const toggleQuote = useToggleRealtimeQuotes()
-  const tier = tierRank(caps?.label ?? '')
-  const realtimeProvider = prefs?.realtime_data_provider ?? 'tickflow'
-  const usesProviderRealtime = realtimeProvider !== 'tickflow' && (
-    dataSourceSupportsDataset(dataSources, realtimeProvider, 'realtime')
-    || prefs?.realtime_allowed === true
-  )
-  // None 档但配了自定义实时源时, 后端 is_realtime_allowed 仍返回 True (realtime_mode=full_market)
-  // 此时不应拦截实时监控页 — 用 quoteStatus.realtime_allowed 作为最终判据
-  const isNoneTier = !usesProviderRealtime && tier < 0
-  const realtimeAllowed = quoteStatus?.realtime_allowed ?? !isNoneTier
-  const isFreeTier = !usesProviderRealtime && tier === 0
+  // 实时模式以 quote_status 为准 (数据源无关): watchlist=自选实时 / full_market=全市场 / none=不可用
+  const quoteMode = quoteStatus?.mode ?? 'none'
+  const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 分时图实时刷新间隔 (秒), 与后端 [3,60] clamp 对齐; 默认 6
   const intradayInterval = prefs?.minute_intraday_refresh_interval ?? 6
@@ -123,7 +108,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const watchlist = useQuery({
     queryKey: QK.watchlist,
     queryFn: () => api.watchlistList(),
-    enabled: isFreeTier && watchlistSymbols.length > 0,
+    enabled: isWatchlistMode && watchlistSymbols.length > 0,
   })
   const watchlistNameBySymbol = new Map(
     (watchlist.data?.symbols ?? []).map(row => [row.symbol, row.name] as const),
@@ -293,29 +278,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     }
   }, [highlight])
 
-  if (isNoneTier && !realtimeAllowed) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl
-                        bg-gradient-to-br from-purple-500/20 to-blue-500/20 mb-5">
-          <Activity className="h-7 w-7 text-purple-400" />
-        </div>
-        <h2 className="text-lg font-medium text-foreground mb-2">实时监控</h2>
-        <p className="text-sm text-secondary max-w-md mb-6">
-          实时行情需要 Free 及以上档位。None 档可使用 free-api 获取历史日K（当日数据需盘后1-2小时），但不能调用付费服务器实时接口。
-        </p>
-        <a
-          href="/settings?tab=data-sources"
-          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-btn
-                     bg-accent text-white text-sm font-medium
-                     hover:bg-accent/90 transition-colors"
-        >
-          配置 API Key 升级
-        </a>
-      </div>
-    )
-  }
-
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6 max-w-5xl">
       {/* ========== 左列 ========== */}
@@ -340,7 +302,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               <div className="min-w-0">
                 <div className="text-sm text-foreground">轮询间隔</div>
                 <div className="text-[11px] text-muted">
-                  {isFreeTier ? '每轮拉取自选股实时行情的时间间隔' : '每轮拉取全市场行情的时间间隔'}
+                  {isWatchlistMode ? '每轮拉取自选股实时行情的时间间隔' : '每轮拉取全市场行情的时间间隔'}
                 </div>
               </div>
               <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
@@ -364,10 +326,10 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           </div>
         </Card>
 
-        {isFreeTier && (
+        {isWatchlistMode && (
         <Card icon={Activity} title="自选股实时">
           <div className="mb-3 rounded-btn border border-accent/25 bg-accent/10 px-3 py-2 text-xs font-medium leading-snug text-accent">
-            Free 档开启实时行情时自动监控「自选」页面前 5 个标的，最低 6 秒刷新。
+            自选实时模式下自动监控「自选」页面前 5 个标的，最低 6 秒刷新。
           </div>
           {watchlistSymbols.length > 0 ? (
             <div className="space-y-1.5">
@@ -386,7 +348,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
             </div>
           ) : (
             <div className="rounded-btn border border-border bg-base/40 px-3 py-3 text-xs text-muted">
-              自选列表为空，Free 实时行情开启前请先添加自选股。
+              自选列表为空，开启自选实时前请先添加自选股。
             </div>
           )}
           <div className="mt-2 flex items-center justify-between gap-3">
@@ -400,7 +362,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           </div>
         </Card>
         )}
-        {!isFreeTier && (
+        {!isWatchlistMode && (
         <Card icon={Wifi} title="页面实时刷新">
           <p className="text-xs text-secondary mb-4">
             选择哪些页面跟随 SSE 实时刷新数据。关闭的页面不会被推送，
@@ -424,7 +386,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         <Card icon={Activity} title="分时图刷新">
           <ToggleRow
             label="自选/策略分时图实时刷新"
-            desc={`开启后自选与策略列表的分时图盘中每 ${intradayInterval} 秒自动刷新（需 Pro+ 权限 + 实时行情运行）。关闭时仅打开页面时拉取一次, 可点表头刷新按钮手动更新。`}
+            desc={`开启后自选与策略列表的分时图盘中每 ${intradayInterval} 秒自动刷新（依赖分钟K批量数据 + 实时行情运行）。关闭时仅打开页面时拉取一次, 可点表头刷新按钮手动更新。`}
             checked={prefs?.minute_intraday_refresh ?? false}
             onChange={(v) => save({ minute_intraday_refresh: v })}
           />
@@ -457,7 +419,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           </div>
         </Card>
 
-        {!isFreeTier && (
+        {!isWatchlistMode && (
         <Card icon={BarChart3} title="左侧菜单指数">
           <p className="text-xs text-secondary mb-4">
             选择实时行情开启时，左侧菜单底部显示哪些指数点位和涨跌幅。

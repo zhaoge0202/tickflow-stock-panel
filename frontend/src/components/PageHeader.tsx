@@ -2,7 +2,7 @@ import { cn } from '@/lib/cn'
 
 interface Props {
   title: string
-  subtitle?: string
+  subtitle?: React.ReactNode
   /** 标题右侧、subtitle 之前的额外节点(如状态徽标) */
   titleExtra?: React.ReactNode
   right?: React.ReactNode

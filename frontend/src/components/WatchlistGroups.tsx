@@ -1,11 +1,18 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
+import { fmtPct } from '@/lib/format'
 import type { WatchlistGroup, WatchlistGroupColor } from '@/lib/api'
+import {
+  groupPctColor,
+  groupPctTitle,
+  type GroupPctMap,
+} from '@/lib/watchlistGroupStats'
 import {
   DEFAULT_WATCHLIST_GROUP_COLOR,
   WATCHLIST_GROUP_COLORS,
@@ -19,11 +26,15 @@ interface GroupBarProps {
   counts: Record<string, number>
   selected: WatchlistGroupFilter
   total: number
+  /** 分组等权平均涨跌幅 (key: 'all' | 'ungrouped' | 分组id); 缺省不显示 */
+  pcts?: GroupPctMap
   onSelect: (group: WatchlistGroupFilter) => void
   onCreate: (name: string, color: WatchlistGroupColor) => Promise<void>
   onRename: (groupId: string, name: string, color: WatchlistGroupColor) => Promise<void>
   onDelete: (groupId: string) => Promise<void>
   onClearGroup?: (groupId: string) => Promise<void>
+  /** 手动调整分组前后顺序 (持久化到后端) */
+  onReorder?: (orderedIds: string[]) => Promise<void>
 }
 
 export function WatchlistGroupBar({
@@ -31,11 +42,13 @@ export function WatchlistGroupBar({
   counts,
   selected,
   total,
+  pcts,
   onSelect,
   onCreate,
   onRename,
   onDelete,
   onClearGroup,
+  onReorder,
 }: GroupBarProps) {
   const [managerOpen, setManagerOpen] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -44,22 +57,82 @@ export function WatchlistGroupBar({
     { id: 'ungrouped', name: '未分组', count: counts.ungrouped ?? 0, color: null },
     ...groups.map(group => ({ id: group.id, name: group.name, count: counts[group.id] ?? 0, color: group.color })),
   ]
+  // 拖拽排序状态: dragIndex = 拖动中的分组下标, dropIndex = 插入位置 (均相对 groups 数组)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const reorderable = !!onReorder && groups.length > 1
+  const tablistRef = useRef<HTMLDivElement>(null)
+
+  const clearDrag = () => { setDragIndex(null); setDropIndex(null) }
+
+  // 分组很多时标签栏横向滚动, 拖到边缘附近自动滚动, 保证能拖到视野外的位置
+  const autoScroll = (clientX: number) => {
+    const el = tablistRef.current
+    if (!el || el.scrollWidth <= el.clientWidth) return
+    const rect = el.getBoundingClientRect()
+    const edge = 48
+    if (clientX < rect.left + edge) el.scrollLeft -= 16
+    else if (clientX > rect.right - edge) el.scrollLeft += 16
+  }
+
+  const handleDrop = () => {
+    if (dragIndex == null || dropIndex == null) { clearDrag(); return }
+    const ids = groups.map(group => group.id)
+    const [moved] = ids.splice(dragIndex, 1)
+    if (moved) {
+      ids.splice(dropIndex > dragIndex ? dropIndex - 1 : dropIndex, 0, moved)
+      if (ids.join(',') !== groups.map(group => group.id).join(',')) {
+        void onReorder?.(ids)
+      }
+    }
+    clearDrag()
+  }
 
   return (
     <>
       <div className="flex h-10 items-stretch border-b border-border bg-surface/40 px-5">
-        <div role="tablist" aria-label="自选分组" className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
-          {tabs.map(tab => {
+        <div
+          ref={tablistRef}
+          role="tablist"
+          aria-label="自选分组"
+          onDragOver={dragIndex != null ? e => autoScroll(e.clientX) : undefined}
+          className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto"
+        >
+          {tabs.map((tab, tabIndex) => {
             const active = selected === tab.id
             const color = tab.color ? resolveWatchlistGroupColor(tab.color) : null
+            // 前两个为固定标签 (全部/未分组), 其后对应 groups 数组 — 可拖拽排序
+            const groupIndex = tabIndex - 2
+            const draggable = reorderable && tabIndex >= 2
+            const dragging = draggable && dragIndex === groupIndex
             return (
               <button
                 key={tab.id}
                 type="button"
                 role="tab"
                 aria-selected={active}
+                draggable={draggable}
+                onDragStart={draggable ? e => {
+                  setDragIndex(groupIndex)
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData('text/plain', tab.id)
+                } : undefined}
+                onDragOver={draggable ? e => {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  autoScroll(e.clientX)
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  setDropIndex(groupIndex + (e.clientX > rect.left + rect.width / 2 ? 1 : 0))
+                } : undefined}
+                onDrop={draggable ? e => { e.preventDefault(); handleDrop() } : undefined}
+                onDragEnd={draggable ? clearDrag : undefined}
                 onClick={() => onSelect(tab.id)}
-                className={`my-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-btn border px-3 text-xs transition-colors ${
+                title={draggable ? `${tab.name} — 可拖拽调整分组顺序` : undefined}
+                className={`relative my-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-btn border px-3 text-xs transition-colors ${
+                  draggable ? 'cursor-grab active:cursor-grabbing' : ''
+                } ${
+                  dragging ? 'opacity-40' : ''
+                } ${
                   active
                     ? color
                       ? `${color.text} ${color.border} ${color.background}`
@@ -69,11 +142,29 @@ export function WatchlistGroupBar({
                       : 'border-transparent text-secondary hover:bg-elevated hover:text-foreground'
                 }`}
               >
+                {draggable && dragIndex != null && dropIndex === groupIndex && (
+                  <span className="absolute -left-0.5 top-1 bottom-1 w-0.5 rounded-full bg-accent" />
+                )}
+                {draggable && dragIndex != null && dropIndex === groupIndex + 1 && groupIndex === groups.length - 1 && (
+                  <span className="absolute -right-0.5 top-1 bottom-1 w-0.5 rounded-full bg-accent" />
+                )}
                 {color && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color.dot}`} />}
                 <span>{tab.name}</span>
                 <span className={`font-mono text-[10px] tabular-nums ${active && !color ? 'text-accent/80' : 'text-muted'}`}>
                   {tab.count}
                 </span>
+                {pcts && (() => {
+                  const info = pcts[tab.id]
+                  if (!info || info.pct == null || info.sampled === 0) return null
+                  return (
+                    <span
+                      className={`font-mono text-[10px] tabular-nums ${groupPctColor(info.pct)}`}
+                      title={groupPctTitle(info)}
+                    >
+                      {fmtPct(info.pct)}
+                    </span>
+                  )
+                })()}
               </button>
             )
           })}
@@ -139,6 +230,7 @@ export function WatchlistGroupBar({
           onCreate={onCreate}
           onRename={onRename}
           onDelete={onDelete}
+          onReorder={onReorder}
         />
       )}
     </>
@@ -186,6 +278,7 @@ function GroupManagerDialog({
   onCreate,
   onRename,
   onDelete,
+  onReorder,
 }: Omit<GroupBarProps, 'selected' | 'total' | 'onSelect' | 'onClearGroup'> & { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [newName, setNewName] = useState('')
@@ -257,6 +350,17 @@ function GroupManagerDialog({
     })
   }
 
+  // 上移/下移: 与相邻分组交换位置, 新顺序由后端持久化 (json 数组顺序即定义顺序)
+  const move = async (groupId: string, dir: -1 | 1) => {
+    if (!onReorder) return
+    const ids = groups.map(group => group.id)
+    const index = ids.indexOf(groupId)
+    const target = index + dir
+    if (index < 0 || target < 0 || target >= ids.length) return
+    ;[ids[index], ids[target]] = [ids[target], ids[index]]
+    await run(async () => { await onReorder(ids) })
+  }
+
   return (
     <Modal
       onClose={onClose}
@@ -326,7 +430,7 @@ function GroupManagerDialog({
       <div className="max-h-[360px] overflow-y-auto border-t border-border px-4">
         {groups.length === 0 ? (
           <div className="py-10 text-center text-xs text-muted">暂无自定义分组</div>
-        ) : groups.map(group => {
+        ) : groups.map((group, index) => {
           const color = resolveWatchlistGroupColor(group.color)
           return (
           <div key={group.id} className="flex min-h-12 items-center gap-2 border-b border-border/60 last:border-0">
@@ -374,6 +478,30 @@ function GroupManagerDialog({
               <>
                 <span className={`min-w-0 flex-1 truncate text-xs ${color.text}`}>{group.name}</span>
                 <span className="font-mono text-[10px] text-muted tabular-nums">{counts[group.id] ?? 0} 只</span>
+                {onReorder && groups.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={pending || index === 0}
+                      onClick={() => void move(group.id, -1)}
+                      className="p-1 text-muted hover:text-accent disabled:opacity-30 disabled:hover:text-muted"
+                      title="上移"
+                      aria-label={`上移分组 ${group.name}`}
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pending || index === groups.length - 1}
+                      onClick={() => void move(group.id, 1)}
+                      className="p-1 text-muted hover:text-accent disabled:opacity-30 disabled:hover:text-muted"
+                      title="下移"
+                      aria-label={`下移分组 ${group.name}`}
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -408,37 +536,146 @@ function GroupManagerDialog({
 
 interface GroupPickerProps {
   groups: WatchlistGroup[]
-  groupId?: string | null
+  /** 该标的当前所属分组 id 列表 */
+  groupIds: string[]
   symbol: string
   disabled?: boolean
-  onChange: (symbol: string, groupId: string | null) => void
+  /** 勾选=加入该分组, 取消勾选=仅移出该分组 (标的保留在自选中) */
+  onToggleMember: (symbol: string, groupId: string, member: boolean) => void
 }
 
-export function WatchlistGroupPicker({ groups, groupId, symbol, disabled, onChange }: GroupPickerProps) {
-  const group = groups.find(item => item.id === groupId)
-  const groupName = group?.name ?? '未分组'
-  const color = resolveWatchlistGroupColor(group?.color)
+export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onToggleMember }: GroupPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState({ top: 0, left: 0, flipUp: false })
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+
+  const POP_WIDTH = 176
+  const openMenu = () => {
+    const rect = btnRef.current?.getBoundingClientRect()
+    if (rect) {
+      // 面板右对齐按钮 (视口边界保护); 底部放不下时翻转到按钮上方
+      const estHeight = groups.length * 28 + 44
+      const flipUp = rect.bottom + estHeight > window.innerHeight && rect.top > estHeight
+      setPos({
+        top: flipUp ? rect.top - 4 : rect.bottom + 4,
+        left: Math.max(8, Math.min(rect.right - POP_WIDTH, window.innerWidth - POP_WIDTH - 8)),
+        flipUp,
+      })
+    }
+    setOpen(true)
+  }
+
+  // 外部点击 / Esc 关闭 (按钮与面板自身除外)
+  useEffect(() => {
+    if (!open) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDocMouseDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const memberSet = new Set(groupIds)
+  const memberGroups = groupIds
+    .map(gid => groups.find(g => g.id === gid))
+    .filter((g): g is WatchlistGroup => !!g)
+  const dots = memberGroups.slice(0, 3)
+  const titleNames = memberGroups.map(g => g.name).join('、')
+
   return (
-    <label
-      className={`relative inline-flex h-5 w-5 items-center justify-center rounded border transition-colors ${
-        group
-          ? `${color.text} ${color.border} ${color.background}`
-          : 'border-transparent text-muted hover:border-accent/30 hover:text-accent'
-      } ${disabled ? 'opacity-40' : ''}`}
-      title={`分组：${groupName}`}
-    >
-      <FolderInput className="h-3.5 w-3.5" />
-      <select
-        value={groupId ?? ''}
+    <>
+      <button
+        ref={btnRef}
+        type="button"
         disabled={disabled}
+        onClick={event => { event.stopPropagation(); open ? setOpen(false) : openMenu() }}
+        className={`relative inline-flex h-5 items-center justify-center gap-0.5 rounded border border-transparent px-1 transition-colors ${
+          memberGroups.length > 0
+            ? 'hover:border-accent/30'
+            : 'text-muted hover:border-accent/30 hover:text-accent'
+        } ${disabled ? 'opacity-40' : ''}`}
+        title={memberGroups.length === 0 ? '未分组 — 点击设置分组' : `分组：${titleNames}`}
         aria-label={`${symbol} 的分组`}
-        onClick={event => event.stopPropagation()}
-        onChange={event => onChange(symbol, event.target.value || null)}
-        className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
-        <option value="">未分组</option>
-        {groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
-      </select>
-    </label>
+        {dots.length === 0 ? (
+          <FolderInput className="h-3.5 w-3.5" />
+        ) : (
+          // 叠瓦式圆点: 先加的分组在最上层完整显示, 后加的从其右侧露出半圆, 紧凑不撑宽
+          <span className="flex items-center">
+            {dots.map((g, i) => (
+              <span
+                key={g.id}
+                style={{ zIndex: dots.length - i }}
+                className={`relative h-2 w-2 rounded-full ring-1 ring-border/50 ${resolveWatchlistGroupColor(g.color).dot} ${i > 0 ? '-ml-1' : ''}`}
+              />
+            ))}
+            {memberGroups.length > 3 && (
+              <span className="ml-0.5 font-mono text-[9px] leading-none text-muted">+{memberGroups.length - 3}</span>
+            )}
+          </span>
+        )}
+      </button>
+      {open && createPortal(
+        <div
+          ref={popRef}
+          role="menu"
+          aria-label={`${symbol} 的分组`}
+          data-watchlist-group-menu
+          style={{
+            position: 'fixed',
+            top: pos.flipUp ? undefined : pos.top,
+            bottom: pos.flipUp ? window.innerHeight - pos.top : undefined,
+            left: pos.left,
+            width: POP_WIDTH,
+          }}
+          className="z-50 rounded-card border border-border bg-base p-1 shadow-xl"
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="px-2 pb-1 pt-1.5 text-[10px] text-muted">加入分组（可多选）</div>
+          {groups.length === 0 ? (
+            <div className="px-2 py-2 text-xs text-muted">暂无分组，请先新建</div>
+          ) : groups.map(group => {
+            const color = resolveWatchlistGroupColor(group.color)
+            const member = memberSet.has(group.id)
+            return (
+              <button
+                key={group.id}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={member}
+                onClick={() => onToggleMember(symbol, group.id, !member)}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-elevated ${
+                  member ? color.text : 'text-secondary'
+                }`}
+              >
+                <span className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border ${
+                  member ? `${color.border} ${color.background}` : 'border-border'
+                }`}>
+                  {member && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color.dot}`} />
+                <span className="min-w-0 flex-1 truncate">{group.name}</span>
+              </button>
+            )
+          })}
+          {groups.length > 0 && groupIds.length === 0 && (
+            <div className="border-t border-border/60 px-2 pb-1 pt-1.5 text-[10px] text-muted">
+              未加入任何分组 — 标的仍在自选中
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }
