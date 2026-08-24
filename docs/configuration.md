@@ -12,7 +12,7 @@
 TICKFLOW_API_KEY=              # 留空 = None 模式(历史日K免费);填 Key = 按订阅档位解锁
 ```
 
-本项目基于 [TickFlow](https://tickflow.org) 数据源。
+TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(YAML 声明自有接口见 [custom-data-source.md](./custom-data-source.md),插件开发见 [plugin-development.md](./plugin-development.md)),在面板 **设置 → 数据源** 切换。
 
 - **留空(None 模式)**:通过 free-api 使用历史日 K(当日数据盘后 1-2 小时可用),**无需付费**即可体验核心选股/回测功能
 - **填入 API Key**:按你的订阅档位解锁更多能力
@@ -28,6 +28,8 @@ TICKFLOW_API_KEY=              # 留空 = None 模式(历史日K免费);填 Key 
 
 > 完整能力矩阵见 [tickflow.org/pricing](https://tickflow.org/pricing/),高等档位含较低档全部权益。
 > 在面板 **设置 → 凭据与能力** 点「重新检测」可查看当前档位标签。
+>
+> **档位仅适用于 TickFlow 数据源**。功能门槛的统一标准是"能力"(`kline.minute.batch`、`depth5.batch`、`financial` 等能力键):其他第三方/自定义数据源以声明的数据集能力为准,系统会按当前数据源配置自动合并判定,UI 提示一律以能力名表达,不再依赖 TickFlow 档位名。
 
 ---
 

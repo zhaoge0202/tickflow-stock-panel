@@ -137,6 +137,13 @@ export function useQuoteStream(
           const activePrefixes = SSE_INVALIDATE_PREFIXES.filter((p) => {
             // 'quote-status' 始终刷新 (全局状态)
             if (p === 'quote-status') return true
+            // 兼容旧配置: 'watchlist' 拆成两个精确前缀后, 未单独设置时沿用旧 'watchlist' 开关
+            if (
+              (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
+              pages[p] === undefined
+            ) {
+              return pages['watchlist'] !== false
+            }
             return pages[p] !== false
           })
           qc.invalidateQueries({

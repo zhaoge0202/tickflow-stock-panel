@@ -73,7 +73,7 @@ export function StockMultiDayIntradayChart({
     onError: (e: Error) => {
       const msg = e.message || ''
       if (msg.includes('403') || msg.includes('Pro')) {
-        toast('分钟K数据需要 Pro+ 权限', 'error')
+        toast('分钟K(批量)数据不可用', 'error')
       } else {
         toast(`补齐数据失败: ${msg}`, 'error')
       }

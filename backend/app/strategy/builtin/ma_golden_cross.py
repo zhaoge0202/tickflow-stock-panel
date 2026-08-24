@@ -49,7 +49,6 @@ ENTRY_SIGNALS = ["signal_ma_golden_5_20"]
 EXIT_SIGNALS = ["signal_ma_dead_5_20"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 15
-ALERTS = []
 
 
 class MAGoldenCrossMatrixStrategy:

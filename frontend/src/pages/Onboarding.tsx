@@ -1,18 +1,13 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Eye,
-  EyeOff,
   Loader2,
-  Save,
-  Check,
   CheckCircle2,
   AlertCircle,
   ArrowRight,
   ArrowLeft,
-  ExternalLink,
   Sparkles,
   LineChart,
   ScanSearch,
@@ -25,17 +20,20 @@ import {
   FileText,
   Landmark,
   Database,
+  Plus,
+  Puzzle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { useCapabilities, useSettings } from '@/lib/useSharedQueries'
+import { useCapabilities, usePreferences, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
 import { CAP_LABELS } from '@/lib/capability-labels'
 import { Logo } from '@/components/Logo'
+import { DataSourceEditor } from '@/pages/settings/DataSourceEditor'
 
 // ===== 引导页:5 步向导 =====
 // 0. 声明  1. 欢迎  2. 输入 Key(可跳过)  3. 能力探测结果  4. 完成 → 写标记 → 进面板
 
-const STEPS = ['声明', '欢迎', '配置 Key', '能力探测', '完成'] as const
+const STEPS = ['声明', '欢迎', '数据源', '能力探测', '完成'] as const
 
 const BRAND = '#8B5CF6'
 
@@ -108,7 +106,7 @@ export function Onboarding() {
             className="shrink-0"
             style={{ color: BRAND, filter: `drop-shadow(0 0 8px ${BRAND}55)` }}
           />
-          <span className="text-sm font-semibold tracking-tight">TickFlow Stock Panel</span>
+          <span className="text-sm font-semibold tracking-tight">Tick Stock Panel</span>
         </div>
         {/* 步骤进度条 —— 胶囊式 */}
         <div className="flex items-center gap-1.5">
@@ -137,9 +135,9 @@ export function Onboarding() {
         </div>
       </header>
 
-      {/* 步骤内容 */}
+      {/* 步骤内容 (数据源步骤含编辑器, 加宽容器) */}
       <main className="relative z-10 flex-1 flex items-center justify-center px-6 py-10">
-        <div className="w-full max-w-xl">
+        <div className={`w-full ${step === 2 ? 'max-w-3xl' : 'max-w-xl'}`}>
           <AnimatePresence mode="wait">
             <motion.div
               key={step}
@@ -151,7 +149,7 @@ export function Onboarding() {
               {step === 0 && <DisclaimerStep onNext={() => setStep(1)} />}
               {step === 1 && <WelcomeStep onNext={() => setStep(2)} onSkip={finish} />}
               {step === 2 && (
-                <KeyStep onNext={() => setStep(3)} onSkip={() => setStep(3)} onBack={() => setStep(1)} />
+                <DataSourceStep onNext={() => setStep(3)} onBack={() => setStep(1)} />
               )}
               {step === 3 && <ResultStep onNext={() => setStep(4)} onBack={() => setStep(2)} />}
               {step === 4 && <FinishStep onNext={finish} onBack={() => setStep(3)} pending={complete.isPending} />}
@@ -185,23 +183,14 @@ function DisclaimerStep({ onNext }: { onNext: () => void }) {
           <ShieldCheck className="h-4 w-4 text-accent shrink-0 mt-0.5" />
           <div className="space-y-2.5 text-sm text-secondary leading-relaxed">
             <p>
-              本项目为<strong className="text-warning">个人开源项目</strong>,<span className="text-warning">非</span>
-              <a
-                href="https://tickflow.org"
-                target="_blank"
-                rel="noreferrer"
-                className="text-accent hover:underline font-medium inline-flex items-baseline gap-0.5"
-              >
-                TickFlow
-                <ExternalLink className="h-3 w-3 self-center" />
-              </a>
-              <span className="text-warning">官方项目</span>。本项目独立维护，当前支持 TickFlow 数据服务。
+              本项目为<strong className="text-warning">个人开源项目</strong>,由个人独立维护,与任何商业数据服务
+              <span className="text-warning">无官方关联</span>。数据能力依赖第三方数据服务提供。
             </p>
             <p>
               仅供学习研究使用,不构成任何投资建议。股市有风险,使用本项目产生的任何盈亏由使用者自行承担。
             </p>
             <p>
-              本项目基于 MIT 协议开源。使用本项目时,请遵守数据源(TickFlow 等)的服务条款;stock-sdk 等第三方接口插件存在版权与反爬风险,使用需自行评估合规责任。
+              本项目基于 MIT 协议开源。使用本项目时,请遵守所用数据源的服务条款;第三方接口插件存在版权与反爬风险,使用需自行评估合规责任。
             </p>
           </div>
         </div>
@@ -237,7 +226,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
       </motion.div>
 
       <h1 className="mt-6 text-3xl font-bold text-foreground tracking-tight">
-        欢迎使用 TickFlow Stock Panel
+        欢迎使用 TSP
       </h1>
       <p className="mt-3 text-sm text-secondary leading-relaxed max-w-md mx-auto">
         一个本地化的 A 股量化分析面板 —— 行情、选股、回测、监控、财务一体化。
@@ -285,167 +274,219 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   )
 }
 
-// ===== Step 2: 输入 TickFlow Key =====
+// ===== Step 2: 配置第三方数据源 (默认内置源; 可添加自有数据源) =====
 
-function KeyStep({ onNext, onSkip, onBack }: { onNext: () => void; onSkip: () => void; onBack: () => void }) {
+/** datasets 标签的中文名 (与设置页数据集口径一致) */
+const DATASET_LABELS: Record<string, string> = {
+  daily: '日K',
+  adj_factor: '除权',
+  realtime: '实时',
+  minute: '分钟K',
+  financial: '财务',
+}
+
+function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const qc = useQueryClient()
-  const settings = useSettings()
-
-  const [keyInput, setKeyInput] = useState('')
-  const [revealing, setRevealing] = useState(false)
-  const [saved, setSaved] = useState(false)
-
-  const save = useMutation({
-    mutationFn: () => api.saveTickflowKey(keyInput.trim()),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: QK.settings })
-      qc.invalidateQueries({ queryKey: QK.capabilities })
-      if (data.ok) {
-        // 仅当 key 有效(被存储)时才进入下一步看探测结果
-        setSaved(true)
-        setTimeout(() => onNext(), 600)
-      }
-      // ok=false(key 无效):不进入下一步,错误提示由 save.error / save.data 渲染
-    },
+  const prefs = usePreferences()
+  const sources = useQuery({
+    queryKey: QK.dataSources,
+    queryFn: api.dataSources,
+    staleTime: 60_000,
   })
 
-  // 已配置 key —— 免费档或付费档都算(只要不是 None 档)
-  const alreadyHasKey = settings.data?.mode !== 'none' && settings.data?.mode !== undefined
+  // null = 跟随后端当前激活源 (首次使用即默认内置源)
+  const [picked, setPicked] = useState<string | null>(null)
+  // 是否展开「添加自有数据源」编辑器
+  const [adding, setAdding] = useState(false)
+
+  const builtin = sources.data?.builtin ?? []
+  const plugins = sources.data?.plugins ?? []
+  const custom = sources.data?.custom ?? []
+  const items = [
+    ...builtin.map(s => ({ ...s, kind: 'builtin' as const })),
+    ...plugins.map(s => ({ ...s, kind: 'plugin' as const })),
+    ...custom.map(s => ({ ...s, kind: 'custom' as const })),
+  ]
+  const byName = new Map(items.map(s => [s.name, s]))
+
+  const activeName = prefs.data?.daily_data_provider || 'tickflow'
+  const selected = picked ?? activeName
+
+  // 切换数据源 —— 与设置页同一套偏好接口:
+  // 内置源 5 个数据集全量切换; 其他源仅切换其声明支持的数据集, 其余回落内置源
+  const switchProvider = useMutation({
+    mutationFn: (name: string) => {
+      if (name === 'tickflow') {
+        return api.updateDataProviders({
+          daily_data_provider: 'tickflow',
+          adj_factor_provider: 'same_as_daily',
+          realtime_data_provider: 'tickflow',
+          minute_data_provider: 'tickflow',
+          financial_data_provider: 'tickflow',
+        })
+      }
+      const supported = new Set(byName.get(name)?.datasets ?? [])
+      const pick = (dataset: string) => (supported.has(dataset) ? name : 'tickflow')
+      return api.updateDataProviders({
+        daily_data_provider: pick('daily'),
+        adj_factor_provider: 'same_as_daily',
+        realtime_data_provider: pick('realtime'),
+        minute_data_provider: pick('minute'),
+        financial_data_provider: pick('financial'),
+      })
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
+  })
+
+  const choose = (name: string, available: boolean) => {
+    if (!available || name === selected || switchProvider.isPending) return
+    setAdding(false)
+    setPicked(name)
+    switchProvider.mutate(name)
+  }
 
   return (
     <div>
       <div className="flex items-center gap-2.5">
         <div className="rounded-lg bg-accent/10 p-2">
-          <ShieldCheck className="h-4 w-4 text-accent" />
+          <Database className="h-4 w-4 text-accent" />
         </div>
-        <h2 className="text-xl font-bold text-foreground">配置 TickFlow API Key</h2>
+        <h2 className="text-xl font-bold text-foreground">配置数据源</h2>
       </div>
       <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-        本项目基于 TickFlow 这款稳定的数据源为基座进行开发,正在适配其他第三方数据源。
-        如果有任何建议或意见,欢迎发送邮件至{' '}
-        <a
-          href="mailto:415333856@qq.com"
-          className="text-accent hover:underline font-medium"
-        >
-          415333856@qq.com
-        </a>
-        。
+        所有数据源均为第三方服务,按需选择或添加自有接口;随时可在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>
+        中调整。
       </p>
 
-      {/* 档位对比说明 —— None 档 vs Free 档 */}
-      <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-        {/* None 档 —— 不配置时默认 */}
-        <div className="rounded-card border border-accent/20 bg-accent/[0.04] p-3">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex h-[18px] items-center rounded px-1.5 text-[10px] font-bold font-mono bg-accent/15 text-accent/70">None</span>
-            <span className="text-xs font-medium text-foreground">不配置(默认)</span>
-          </div>
-          <ul className="mt-2 space-y-1 text-[11px] text-muted leading-relaxed">
-            <li>· 仅历史日K数据,无实时行情</li>
-            <li>· 数据有延迟,盘后约 1-2 小时更新当天</li>
-            <li>· 可用于策略回测、盘后分析</li>
-          </ul>
+      {/* 数据源卡片选择器 */}
+      {sources.isLoading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-muted">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在加载数据源…
         </div>
-        {/* Free 档 —— 免费注册即可获取 */}
-        <div className="rounded-card border border-accent/35 bg-accent/[0.08] p-3">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex h-[18px] items-center rounded px-1.5 text-[10px] font-bold font-mono bg-accent/15 text-accent">Free</span>
-            <span className="text-xs font-medium text-foreground">注册免费获取</span>
-            <span className="inline-flex items-center rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm shadow-accent/30">推荐</span>
-          </div>
-          <ul className="mt-2 space-y-1 text-[11px] text-secondary leading-relaxed">
-            <li>· 无需付费,注册即享</li>
-            <li>· 历史日K + 限定范围内的实时数据</li>
-            <li>· 可指定个股进行实时监控</li>
-          </ul>
-        </div>
-      </div>
+      ) : (
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {items.map(item => {
+            const isSelected = selected === item.name
+            const unavailable = item.kind === 'plugin' && !item.available
+            const plugin = item.kind === 'plugin' ? plugins.find(p => p.name === item.name) : undefined
+            // 切换中的目标卡片: 圆点位置显示转圈, 其余卡片压暗
+            const switchingToThis = switchProvider.isPending && switchProvider.variables === item.name
+            return (
+              <button
+                key={item.name}
+                type="button"
+                onClick={() => choose(item.name, !unavailable)}
+                disabled={unavailable || switchProvider.isPending}
+                title={unavailable ? plugin?.status || '依赖未安装' : item.display_name}
+                className={`relative text-left rounded-card border px-3.5 py-3 transition-all ${
+                  unavailable
+                    ? 'border-border/40 bg-elevated/10 opacity-60 cursor-not-allowed'
+                    : isSelected
+                      ? 'border-accent/50 bg-accent/[0.06] ring-1 ring-accent/20 cursor-pointer'
+                      : 'border-border/60 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
+                } ${switchProvider.isPending && !switchingToThis ? 'opacity-50' : ''}`}
+              >
+                <div className="flex items-center gap-2">
+                  {switchingToThis ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" />
+                  ) : (
+                    <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                      isSelected ? 'bg-accent' : 'bg-transparent border border-muted/40'
+                    }`} />
+                  )}
+                  <span className={`text-sm truncate flex-1 ${isSelected ? 'font-medium text-foreground' : 'text-secondary'}`}>
+                    {/* 卡片展示去掉声明里的括号备注 (如合规提示), 保持名称干净 */}
+                    {item.display_name.replace(/（.*?）|\(.*?\)/g, '').trim() || item.display_name}
+                  </span>
+                  {item.kind === 'custom' ? (
+                    <span className="text-[9px] text-muted/50 tracking-wider shrink-0">自有</span>
+                  ) : (
+                    <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
+                  )}
+                </div>
+                <div className="mt-1.5 flex items-center gap-1 pl-3.5">
+                  {unavailable ? (
+                    <span className="text-[10px] text-muted">需安装依赖,见 设置 → 数据源</span>
+                  ) : item.datasets.length > 0 ? (
+                    item.datasets.slice(0, 4).map(ds => (
+                      <span key={ds} className="rounded bg-elevated/60 px-1 py-0.5 text-[10px] text-muted">
+                        {DATASET_LABELS[ds] ?? ds}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[10px] text-muted">未声明数据集</span>
+                  )}
+                </div>
+              </button>
+            )
+          })}
 
-      {/* Key 已配置提示 */}
-      {alreadyHasKey && !save.isPending && (
-        <div className="mt-4 flex items-start gap-2 rounded-btn border border-bear/30 bg-bear/10 px-3 py-2.5 text-xs text-bear">
-          <CheckCircle2 className="h-3.5 w-3.5 mt-px shrink-0" />
-          <span>
-            已检测到配置好的 Key(<span className="font-mono">{settings.data?.tickflow_api_key_masked}</span>)。
-            可直接下一步查看能力,或在下方粘贴新 Key 替换。
-          </span>
+          {/* 添加自有数据源卡片 */}
+          <button
+            type="button"
+            onClick={() => setAdding(v => !v)}
+            className={`rounded-card border border-dashed px-3.5 py-3 transition-all flex items-center justify-center gap-1.5 text-sm ${
+              adding
+                ? 'border-accent/50 bg-accent/5 text-accent'
+                : 'border-border/50 text-muted hover:text-foreground hover:border-border hover:bg-elevated/30'
+            }`}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            添加自有数据源
+          </button>
         </div>
       )}
 
-      {/* 获取 Key 的说明 —— 黄框卡片 */}
-      <div className="mt-4 flex items-start gap-2 rounded-card border border-warning/40 bg-warning/10 px-3 py-2.5 text-xs text-foreground leading-relaxed">
-        <AlertCircle className="h-4 w-4 shrink-0 text-warning mt-px" />
-        <span>
-          Key 可在{' '}
-          <a
-            href="https://tickflow.org/auth/register?ref=V3KDKGXPEA"
-            target="_blank"
-            rel="noreferrer"
-            className="text-warning hover:underline inline-flex items-baseline gap-0.5 font-medium"
-          >
-            tickflow.org
-            <ExternalLink className="h-3 w-3 self-center" />
-          </a>
-          获取。
-          <span className="block mt-1.5 text-foreground/70">
-            当前数据源基于 TickFlow 基座,其他第三方数据源正在开发适配中。
-          </span>
-        </span>
+      {/* 插件化提示: 标识数据源体系已插件化, 并给出两条接入路径与文档指引 */}
+      <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
+        <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
+        <div className="text-[11px] leading-relaxed text-muted">
+          <span className="text-secondary">数据源已插件化</span>
+          ,接入自有行情有两条路径:用 YAML 描述自有 HTTP 接口,放入
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">data/data_sources/*.yaml</span>
+          (也可用上方表单配置);或开发插件源,放入
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">backend/app/plugins/</span>
+          目录。接入方法与字段映射详见
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
+          与
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
+          。
+        </div>
       </div>
 
-      {/* 输入 */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          if (keyInput.trim()) save.mutate()
-        }}
-        className="mt-4 space-y-2"
-      >
-        <div className="relative">
-          <input
-            type={revealing ? 'text' : 'password'}
-            placeholder={alreadyHasKey ? '粘贴新 Key 替换当前' : '粘贴 TickFlow API Key'}
-            value={keyInput}
-            onChange={(e) => {
-              setKeyInput(e.target.value)
-              if (saved) setSaved(false)
-            }}
-            className="w-full px-3 py-2.5 pr-9 rounded-input bg-base border border-border text-sm font-mono focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all"
-          />
-          <button
-            type="button"
-            onClick={() => setRevealing((v) => !v)}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-foreground transition-colors"
-            tabIndex={-1}
-            aria-label={revealing ? '隐藏' : '显示'}
-          >
-            {revealing ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
+      {switchProvider.isError && (
+        <div className="mt-3 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
+          <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
+          <span>数据源切换失败:{String((switchProvider.error as any)?.message ?? '')}</span>
         </div>
+      )}
 
-        {/* 保存中提示 */}
-        {save.isPending && (
-          <div className="flex items-start gap-1.5 rounded-btn border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-snug text-warning">
-            <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
-            <span>正在验证 Key 并探测能力,验证通过前请不要离开当前页面。</span>
-          </div>
+      {/* 添加自有数据源: 复用设置页编辑器 (命名/鉴权/数据集字段映射/测试/启用) */}
+      <AnimatePresence mode="wait">
+        {adding && (
+          <motion.div
+            key="ds-editor"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="mt-4"
+          >
+            <DataSourceEditor
+              initial={null}
+              onCancel={() => setAdding(false)}
+              onSaved={() => {
+                qc.invalidateQueries({ queryKey: QK.dataSources })
+                setAdding(false)
+              }}
+              activeName={activeName}
+              onActivate={name => switchProvider.mutate(name)}
+            />
+          </motion.div>
         )}
-
-        {save.isError && (
-          <div className="text-xs text-danger">保存失败:{String((save.error as any).message)}</div>
-        )}
-        {/* 无效 key —— 探测失败(key 无效/乱填)未存储,提示用户 */}
-        {save.data && !save.data.ok && (
-          <div className="flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
-            <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
-            <span>
-              {save.data.reason === 'invalid'
-                ? 'Key 无效或已过期,请检查后重试(未保存该 Key)。'
-                : save.data.error ?? '保存失败'}
-            </span>
-          </div>
-        )}
-      </form>
+      </AnimatePresence>
 
       {/* 底部操作 */}
       <div className="mt-6 flex items-center justify-between">
@@ -456,39 +497,40 @@ function KeyStep({ onNext, onSkip, onBack }: { onNext: () => void; onSkip: () =>
           <ArrowLeft className="h-4 w-4" />
           上一步
         </button>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onSkip}
-            disabled={save.isPending}
-            className="px-4 h-9 rounded-btn text-sm text-secondary hover:text-foreground transition-colors disabled:opacity-50"
-          >
-            {alreadyHasKey ? '下一步' : '暂不配置'}
-          </button>
-          <button
-            onClick={() => keyInput.trim() && save.mutate()}
-            disabled={save.isPending || !keyInput.trim()}
-            className="inline-flex items-center gap-2 px-5 h-9 rounded-xl bg-accent text-white text-sm font-semibold hover:bg-accent/90 disabled:opacity-40 transition-all"
-          >
-            {save.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : saved ? (
-              <Check className="h-4 w-4" />
-            ) : (
-              <Save className="h-4 w-4" />
-            )}
-            {save.isPending ? '保存中...' : saved ? '已保存' : '保存并检测'}
-          </button>
-        </div>
+        <button
+          onClick={onNext}
+          className="inline-flex items-center gap-2 px-5 h-9 rounded-xl bg-accent text-white text-sm font-semibold hover:bg-accent/90 transition-colors"
+        >
+          下一步
+          <ArrowRight className="h-4 w-4" />
+        </button>
       </div>
     </div>
   )
 }
 
 // ===== Step 3: 能力探测结果 =====
+// 按当前实际选中的数据源分流:
+// - TickFlow: 提示第三方源性质 + 可配 Key、按 Key 匹配档位, 展示档位与能力探测
+// - 其他源: 弱化 TickFlow (不展示其档位/能力), 只汇总所选源的数据集覆盖与回落规则
 
 function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const settings = useSettings()
   const caps = useCapabilities()
+  const prefs = usePreferences()
+  const sources = useQuery({
+    queryKey: QK.dataSources,
+    queryFn: api.dataSources,
+    staleTime: 60_000,
+  })
+
+  const activeName = prefs.data?.daily_data_provider || 'tickflow'
+  const isTickflow = activeName === 'tickflow'
+  const sourceItem = [
+    ...(sources.data?.builtin ?? []),
+    ...(sources.data?.plugins ?? []),
+    ...(sources.data?.custom ?? []),
+  ].find(s => s.name === activeName)
 
   // 是否配置成功 —— 免费档(free)或付费档(api_key)都算;None 档算未配置
   const hasKey = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
@@ -503,57 +545,112 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
         <h2 className="text-xl font-bold text-foreground">能力探测结果</h2>
       </div>
 
-      {hasKey ? (
+      {prefs.isLoading ? (
+        <div className="mt-5 flex items-center gap-2 text-xs text-muted">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在读取当前数据源…
+        </div>
+      ) : isTickflow ? (
         <>
-          <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-            Key 已生效,以下是你当前可用的全部能力。后续可在
-            <span className="text-foreground font-medium"> 设置 → 账户 </span>
-            中重新检测或更换 Key。
-          </p>
-
-          <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
-            <div className="flex items-baseline justify-between">
-              <span className="text-[10px] uppercase tracking-widest text-muted">订阅档位</span>
-              <span className="font-mono text-2xl font-bold tracking-tight text-foreground">
-                {caps.data?.label ?? settings.data?.tier_label ?? '—'}
-              </span>
+          {/* TickFlow 源说明: 点明第三方性质 + Key/档位关系 */}
+          <div className="mt-4 flex items-start gap-2.5 rounded-card border border-border/60 bg-surface/60 px-3.5 py-3">
+            <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
+            <div className="text-[11px] leading-relaxed text-muted">
+              <span className="text-secondary">当前选择了 TickFlow 第三方数据源</span>
+              。实时行情、监控等能力与订阅档位由 TickFlow Key 决定:可在
+              <span className="text-foreground font-medium"> 设置 → 账户 </span>
+              配置 Key,系统会根据 Key 自动匹配档位;未配置 Key 时按 None 档运行,仅保留内置历史数据能力。
             </div>
+          </div>
 
-            {caps.isLoading ? (
-              <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                正在探测能力…
-              </div>
-            ) : capList.length > 0 ? (
-              <div className="mt-4 grid grid-cols-1 gap-1.5">
-                {capList.slice(0, 8).map(([cap]) => {
-                  const meta = CAP_LABELS[cap]
-                  return (
-                    <div key={cap} className="flex items-center gap-2 text-xs">
-                      <CheckCircle2 className="h-3.5 w-3.5 text-bear shrink-0" />
-                      <span className="text-foreground">{meta?.name ?? cap}</span>
-                    </div>
-                  )
-                })}
-                {capList.length > 8 && (
-                  <div className="text-[11px] text-muted pl-5">…等共 {capList.length} 项</div>
+          {hasKey ? (
+            <>
+              <p className="mt-2.5 text-sm text-secondary leading-relaxed">
+                Key 已生效,以下是你当前可用的全部能力。后续可在
+                <span className="text-foreground font-medium"> 设置 → 账户 </span>
+                中重新检测或更换 Key。
+              </p>
+
+              <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
+                <div className="flex items-baseline justify-between">
+                  <span className="text-[10px] uppercase tracking-widest text-muted">订阅档位</span>
+                  <span className="font-mono text-2xl font-bold tracking-tight text-foreground">
+                    {caps.data?.label ?? settings.data?.tier_label ?? '—'}
+                  </span>
+                </div>
+
+                {caps.isLoading ? (
+                  <div className="mt-4 flex items-center gap-2 text-xs text-muted">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    正在探测能力…
+                  </div>
+                ) : capList.length > 0 ? (
+                  <div className="mt-4 grid grid-cols-1 gap-1.5">
+                    {capList.slice(0, 8).map(([cap]) => {
+                      const meta = CAP_LABELS[cap]
+                      return (
+                        <div key={cap} className="flex items-center gap-2 text-xs">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-bear shrink-0" />
+                          <span className="text-foreground">{meta?.name ?? cap}</span>
+                        </div>
+                      )
+                    })}
+                    {capList.length > 8 && (
+                      <div className="text-[11px] text-muted pl-5">…等共 {capList.length} 项</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 text-xs text-muted">暂未探测到能力</div>
                 )}
               </div>
-            ) : (
-              <div className="mt-4 text-xs text-muted">暂未探测到能力</div>
-            )}
-          </div>
+            </>
+          ) : (
+            <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-6 text-center">
+              <div className="mx-auto w-fit rounded-xl bg-elevated p-3">
+                <Zap className="h-6 w-6 text-warning" />
+              </div>
+              <div className="mt-3 text-sm font-medium text-foreground">将以 None 档继续</div>
+              <p className="mt-2 text-xs text-muted leading-relaxed max-w-sm mx-auto">
+                当前未配置有效 Key,仍可使用看板、选股、回测等功能 —— 进入看板后可直接获取近 1 年历史日K数据。配置 Key 后可解锁实时行情监控等能力,随时在
+                <span className="text-foreground font-medium"> 设置 → 账户 </span>填写。
+              </p>
+            </div>
+          )}
         </>
       ) : (
-        <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-6 text-center">
-          <div className="mx-auto w-fit rounded-xl bg-elevated p-3">
-            <Zap className="h-6 w-6 text-warning" />
+        /* 其他数据源: 不展示 TickFlow 档位/能力探测, 汇总所选源的数据集覆盖 */
+        <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-[10px] uppercase tracking-widest text-muted">当前数据源</span>
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              <span className="truncate text-lg font-bold text-foreground">
+                {(sourceItem?.display_name ?? activeName).replace(/（.*?）|\(.*?\)/g, '').trim() || sourceItem?.display_name || activeName}
+              </span>
+              <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">
+                {sources.data?.custom?.some(s => s.name === activeName) ? '自有' : '第三方'}
+              </span>
+            </span>
           </div>
-          <div className="mt-3 text-sm font-medium text-foreground">将以 None 档继续</div>
-          <p className="mt-2 text-xs text-muted leading-relaxed max-w-sm mx-auto">
-            当前未配置有效 Key,仍可使用看板、选股、回测等功能 —— 进入看板后可直接获取近 1 年历史日K数据。配置 Key 后可解锁实时行情监控等能力,随时在
-            <span className="text-foreground font-medium"> 设置 → 账户 </span>填写。
+
+          <div className="mt-3 flex flex-wrap items-center gap-1">
+            {(sourceItem?.datasets?.length ?? 0) > 0 ? (
+              sourceItem!.datasets.map(ds => (
+                <span key={ds} className="rounded bg-elevated/60 px-1.5 py-0.5 text-[10px] text-secondary">
+                  {DATASET_LABELS[ds] ?? ds}
+                </span>
+              ))
+            ) : (
+              <span className="text-[10px] text-muted">未声明数据集</span>
+            )}
+          </div>
+          <p className="mt-2.5 text-xs text-muted leading-relaxed">
+            行情能力由所选数据源决定:以上数据集由该源提供,未覆盖的数据集自动回落内置源,无需额外配置。
           </p>
+
+          <div className="mt-3 border-t border-border/60 pt-2.5 text-[11px] leading-relaxed text-muted">
+            TickFlow 的 Key 与档位探测仅在选择 TickFlow 作为数据源时展示;如需切换,前往
+            <span className="text-foreground font-medium"> 设置 → 数据源 </span>。
+          </div>
         </div>
       )}
 

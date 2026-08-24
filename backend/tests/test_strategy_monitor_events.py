@@ -55,12 +55,23 @@ def _result(
     pool: tuple[str, ...] = (),
     buys: tuple[str, ...] = (),
     sells: tuple[str, ...] = (),
+    scores: dict[str, float] | None = None,
 ) -> StrategyResult:
+    scores = scores or {}
     return StrategyResult(
         as_of=as_of,
         strategy_id="demo",
-        rows=[{"symbol": symbol, "close": 10.0, "change_pct": 0.01} for symbol in pool],
+        rows=[
+            {
+                "symbol": symbol,
+                "close": 10.0,
+                "change_pct": 0.01,
+                **({"score": scores[symbol]} if symbol in scores else {}),
+            }
+            for symbol in pool
+        ],
         total=len(pool),
+        scores=scores,
         entry_signal_hits=[{"symbol": symbol, "signals": ["signal_buy"]} for symbol in buys],
         exit_signal_hits=[{"symbol": symbol, "signals": ["signal_sell"]} for symbol in sells],
     )
@@ -84,13 +95,73 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
     loaded = monitor_rules.load_one(tmp_path, "legacy")
     assert loaded is not None
     assert loaded["notify_events"] == ["pool_entry", "pool_exit"]
+    assert loaded["score_min"] is None
+    assert loaded["score_max"] is None
     assert monitor_rules.load_all(tmp_path)[0]["notify_events"] == ["pool_entry", "pool_exit"]
 
     with pytest.raises(ValueError, match="至少选择一个通知事件"):
         monitor_rules.validate(_rule())
     with pytest.raises(ValueError, match="非法事件"):
         monitor_rules.validate(_rule("unknown"))
+    with pytest.raises(ValueError, match="0 到 100"):
+        monitor_rules.validate(_rule("pool_entry", score_min=-1))
+    with pytest.raises(ValueError, match="不能大于"):
+        monitor_rules.validate(_rule("pool_entry", score_min=90, score_max=70))
     monitor_rules.validate(_rule("buy_signal", "pool_exit"))
+
+
+def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals():
+    day = date(2026, 7, 24)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(
+            day,
+            pool=("A", "B", "D"),
+            buys=("A", "B", "D"),
+            scores={"A": 69, "B": 80},
+        ),
+        _result(
+            day,
+            pool=("A", "B", "C", "D"),
+            buys=("A", "B", "C", "D"),
+            sells=("B",),
+            scores={"A": 70, "B": 91, "C": 90},
+        ),
+    ]))
+    engine.set_rules([_rule(
+        "buy_signal", "sell_signal", "pool_entry", "pool_exit",
+        score_min=70,
+        score_max=90,
+    )])
+
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
+        assert engine.evaluate(_quotes()) == []
+        events = engine.evaluate(_quotes())
+
+    assert {(event["type"], event["symbol"]) for event in events} == {
+        ("buy_signal", "A"),
+        ("buy_signal", "C"),
+        ("sell_signal", "B"),
+        ("pool_entry", "A"),
+        ("pool_entry", "C"),
+        ("pool_exit", "B"),
+    }
+
+
+def test_strategy_score_range_edit_resets_pool_baseline():
+    day = date(2026, 7, 24)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(day, pool=("A",), scores={"A": 80}),
+        _result(day, pool=("A",), scores={"A": 80}),
+    ]))
+    rule = _rule("pool_exit", score_min=70)
+    engine.set_rules([rule])
+    assert engine.evaluate(_quotes()) == []
+
+    engine.set_rules([{**rule, "score_min": 90}])
+
+    assert engine.evaluate(_quotes()) == []
 
 
 def test_strategy_events_baseline_dedupe_and_next_day_replay():
@@ -223,7 +294,6 @@ def test_matrix_strategy_pool_masks_rows_and_both_signal_directions():
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        alerts=[],
         filter_fn=None,
         filter_history_fn=None,
         lookback_days=1,
@@ -270,7 +340,6 @@ def test_ordinary_strategy_uses_signal_overrides_and_ignores_malformed_values():
         trailing_take_profit_activate=None,
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        alerts=[],
         filter_fn=None,
         filter_history_fn=None,
         lookback_days=1,

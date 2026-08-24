@@ -1,4 +1,4 @@
-"""TickFlow Stock Panel backend."""
+"""Tick Stock Panel backend."""
 
 import sys
 

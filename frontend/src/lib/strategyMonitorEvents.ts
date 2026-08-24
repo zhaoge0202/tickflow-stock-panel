@@ -20,22 +20,22 @@ const META: Record<string, StrategyEventMeta> = {
   pool_entry: {
     label: '进入',
     action: '进入选股结果',
-    className: 'text-emerald-400',
+    className: 'text-danger',
   },
   pool_exit: {
     label: '移出',
     action: '移出选股结果',
-    className: 'text-warning',
+    className: 'text-bear',
   },
   new_entry: {
     label: '进入',
     action: '进入选股结果',
-    className: 'text-emerald-400',
+    className: 'text-danger',
   },
   dropped: {
     label: '移出',
     action: '移出选股结果',
-    className: 'text-warning',
+    className: 'text-bear',
   },
 }
 

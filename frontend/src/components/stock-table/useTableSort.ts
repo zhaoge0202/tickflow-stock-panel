@@ -5,7 +5,7 @@
  */
 import { useCallback, useState } from 'react'
 import type { ColumnConfig } from '@/lib/list-columns'
-import { UNSORTABLE_KEYS, getSortValue as defaultGetSortValue } from '@/lib/stock-table'
+import { getSortValue as defaultGetSortValue } from '@/lib/stock-table'
 
 export interface SortState {
   key: string   // 列 id
@@ -24,16 +24,17 @@ export function useTableSort<T>(getSortValue: (r: T, col: ColumnConfig) => any =
     })
   }, [])
 
-  /** 对行集合按当前 sort 排序（返回新数组）。无 sort 或列为不可排序时原样返回。 */
+  /** 对行集合按当前 sort 排序（返回新数组）。无 sort 或列不存在时原样返回；
+   *  取值为 null 的行排在最后。表头是否可点由 StockDataTable 控制。 */
   const sortRows = useCallback((rows: T[], columns: ColumnConfig[]): T[] => {
     if (!sort) return rows
     const col = columns.find(c => c.id === sort.key)
     if (!col) return rows
-    if (col.source.type === 'builtin' && UNSORTABLE_KEYS.has(col.source.key)) return rows
     const { dir } = sort
     return [...rows].sort((a, b) => {
       const va = getSortValue(a, col)
       const vb = getSortValue(b, col)
+      if (va == null && vb == null) return 0
       if (va == null) return 1
       if (vb == null) return -1
       const na = typeof va === 'number' ? va : Number(va)

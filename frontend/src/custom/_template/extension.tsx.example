@@ -1,0 +1,62 @@
+import { ShieldCheck } from 'lucide-react'
+import type { FrontendExtension } from '@/extensions/types'
+
+function RiskPage() {
+  return <div>风险分析</div>
+}
+
+function NavigationExtra({ collapsed }: { collapsed: boolean; pathname: string }) {
+  return collapsed ? null : <div className="px-3 py-1 text-xs text-muted">二开内容</div>
+}
+
+/** 个股详情对话框底部: 自带分隔与内边距 */
+function StockPreviewFooter({ symbol, name }: { symbol: string; name: string | null; view: 'daily' | 'intraday' }) {
+  return (
+    <div className="border-t border-border px-4 py-2 text-xs text-muted">
+      {symbol} {name} · 二开面板示例
+    </div>
+  )
+}
+
+/** 自选页工具栏: 按钮尺寸与核心工具栏一致 */
+function WatchlistToolbar({ symbols, refresh }: { symbols: string[]; viewMode: 'table' | 'card'; selectedGroup: string; refresh: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={refresh}
+      className="inline-flex items-center h-8 px-2.5 rounded-btn bg-elevated text-xs text-secondary hover:bg-elevated/80 hover:text-foreground transition-colors duration-150 ease-smooth"
+    >
+      二开操作 ({symbols.length})
+    </button>
+  )
+}
+
+const extension: FrontendExtension = {
+  id: 'company.risk',
+  apiVersion: 1,
+  routes: [
+    { id: 'company-risk', path: '/company/risk', component: RiskPage },
+  ],
+  navigation: [
+    { id: 'company-risk', routeId: 'company-risk', label: '风险分析', icon: ShieldCheck },
+  ],
+  slots: [
+    {
+      name: 'layout.navigation.extra',
+      id: 'company-risk-summary',
+      component: NavigationExtra,
+    },
+    {
+      name: 'stock-preview.footer',
+      id: 'company-risk-stock-footer',
+      component: StockPreviewFooter,
+    },
+    {
+      name: 'watchlist.toolbar',
+      id: 'company-risk-watchlist-action',
+      component: WatchlistToolbar,
+    },
+  ],
+}
+
+export default extension

@@ -2,24 +2,25 @@ import { motion } from 'framer-motion'
 import { Loader2, CheckCircle2, Settings, Table2 } from 'lucide-react'
 import { formatNumber } from '@/lib/format'
 import { fmtDate } from '@/lib/format'
+import { MissingCapChip } from '@/lib/capability-labels'
 import { Skeleton } from './Skeleton'
 
-// 卡片能力定义：capKey → 查 capability limits；tierReq → 无权限时显示的档位要求
-// capKey 为空串表示该数据在 free-api 服务器(None 档/Free 档)即可获取,无需付费能力门控。
+// 卡片能力定义：capKey → 查 capability limits；missingCapName → 无权限时提示的能力名
+// capKey 为空串表示该数据在免费服务器(None/Free)或本地即可获取,无需能力门控。
 export const CARD_META: Record<string, {
-  capKey: string   // 对应的 capability key，空串表示本地计算 / free 服务器可用
-  tierReq: string  // 最低档位要求（无权限时显示）
+  capKey: string          // 对应的 capability key，空串表示本地计算 / 免费服务器可用
+  missingCapName: string  // 缺能力时提示的能力名(空串表示缺能力也不显示徽章)
 }> = {
-  // 标的维表走 exchanges 端点,free-api 服务器即可获取,无需付费能力
-  instruments: { capKey: '',                        tierReq: '' },
-  daily:       { capKey: 'kline.daily.batch',       tierReq: 'Starter+' },
-  adj_factor:  { capKey: 'adj_factor',              tierReq: 'Starter+' },
-  enriched:    { capKey: '',                        tierReq: '' },
-  // ETF 复用日K批量能力(免费档 kline.daily.batch 即可),不显示档位徽章
-  etf:         { capKey: 'kline.daily.batch',       tierReq: '' },
-  minute:      { capKey: 'kline.minute.batch',      tierReq: 'Pro+' },
-  financials:  { capKey: 'financial',                tierReq: 'Expert' },
-  regime:      { capKey: '',                        tierReq: '' },
+  // 标的维表走 exchanges 端点,免费服务器即可获取,无需付费能力
+  instruments: { capKey: '',                        missingCapName: '' },
+  daily:       { capKey: 'kline.daily.batch',       missingCapName: '日 K(批量)' },
+  adj_factor:  { capKey: 'adj_factor',              missingCapName: '复权因子' },
+  enriched:    { capKey: '',                        missingCapName: '' },
+  // ETF 复用日K批量能力(免费档即可),缺能力时随日K卡提示,不单独显示徽章
+  etf:         { capKey: 'kline.daily.batch',       missingCapName: '' },
+  minute:      { capKey: 'kline.minute.batch',      missingCapName: '分钟 K(批量)' },
+  financials:  { capKey: 'financial',               missingCapName: '财务数据' },
+  regime:      { capKey: '',                        missingCapName: '' },
 }
 
 export function Pill({ label, value }: { label: string; value: number | string }) {
@@ -31,16 +32,15 @@ export function Pill({ label, value }: { label: string; value: number | string }
   )
 }
 
-function CapBadge({ hasCap, isLocal, tierLabel, tierReq, capInfo, localSuffix, customProvider }: {
+function CapBadge({ hasCap, isLocal, missingCapName, capInfo, localSuffix, customProvider }: {
   hasCap: boolean
   isLocal: boolean
-  tierLabel?: string
-  tierReq?: string
+  missingCapName?: string
   capInfo?: { rpm: number | null; batch: number | null; subscribe: number | null } | undefined
   localSuffix?: string
   customProvider?: string | null
 }) {
-  // 走自定义数据源时, 显示数据源名而非 TickFlow 档位
+  // 走自定义数据源时, 显示数据源名 (能力来源对所有数据源统一表达)
   if (customProvider) {
     return (
       <span className="text-[10px] text-accent/80 bg-accent/8 rounded px-1.5 py-px font-medium">
@@ -57,8 +57,8 @@ function CapBadge({ hasCap, isLocal, tierLabel, tierReq, capInfo, localSuffix, c
     )
   }
 
-  if (hasCap && capInfo && tierLabel) {
-    const parts = [tierLabel, `${capInfo.rpm}/min`]
+  if (hasCap && capInfo) {
+    const parts = ['可用', `${capInfo.rpm}/min`]
     if (capInfo.batch != null && capInfo.batch > 1) parts.push(`${capInfo.batch}股/批`)
     return (
       <span className="text-[10px] text-accent/80 bg-accent/8 rounded px-1.5 py-px font-mono font-medium">
@@ -67,20 +67,15 @@ function CapBadge({ hasCap, isLocal, tierLabel, tierReq, capInfo, localSuffix, c
     )
   }
 
-  if (!hasCap && tierReq && tierReq !== 'Free') {
-    // 缺权限且非 Free 档(付费档位才提示升级);Free 档人人可用,
-    // 若显示"需 Free"会造成 Expert 等用户困惑(通常是探测瞬时失败丢能力)
-    return (
-      <span className="text-[10px] text-warning/90 bg-warning/8 rounded px-1.5 py-px font-medium">
-        需 {tierReq}
-      </span>
-    )
+  if (!hasCap && missingCapName) {
+    // 能力标准对所有数据源一致: 缺能力提示能力名而非档位, 点击跳数据源设置
+    return <MissingCapChip label={missingCapName} />
   }
 
   if (hasCap) {
     return (
       <span className="text-[10px] text-accent/80 bg-accent/8 rounded px-1.5 py-px font-medium">
-        {tierLabel ?? '已授权'}
+        可用
       </span>
     )
   }
@@ -93,7 +88,7 @@ export type FieldTab = { label: string; table: string }
 export function StatCard({
   title, hint, stats, isInstrument = false, loading = false,
   active = false, done = false, skipped = false, stagePct = 0,
-  tierKey, capLimits, tierLabel, customProvider,
+  tierKey, capLimits, customProvider,
   auto, onSettings, onShowFields, settingsOpen, subLabel, localBadgeSuffix, fieldTabs,
 }: {
   title: string
@@ -107,7 +102,6 @@ export function StatCard({
   stagePct?: number
   tierKey?: string
   capLimits?: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }>
-  tierLabel?: string
   customProvider?: string | null
   onSettings?: () => void
   onShowFields?: (table?: string) => void
@@ -248,8 +242,7 @@ export function StatCard({
           <CapBadge
             hasCap={hasCap}
             isLocal={isLocal}
-            tierLabel={tierLabel}
-            tierReq={meta?.tierReq}
+            missingCapName={meta?.missingCapName}
             capInfo={capInfo}
             localSuffix={localBadgeSuffix}
             customProvider={customProvider}

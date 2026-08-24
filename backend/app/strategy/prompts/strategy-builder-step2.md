@@ -23,7 +23,6 @@
 - 增/删/改参数 → 更新 META["params"]，同步修改当前执行后端对应的 `filter()`、`filter_history()` 或 `MATRIX_STRATEGY`
 - 调整信号 → 更新 ENTRY_SIGNALS / EXIT_SIGNALS
 - 修改止损/持有 → 更新 STOP_LOSS / MAX_HOLD_DAYS
-- 增减告警 → 更新 ALERTS
 - 调整评分 → 更新 META["scoring"]；只使用真实数值字段或受控虚拟字段 `ma20_bias`，权重总和保持 1.0
 - 修改筛选逻辑 → 更新唯一公式；新增历史回溯时切换为 `python_history_legacy` + `filter_history()`，移除回溯时切回 `polars_expr` + `filter()`，不得同时保留两套公式
 
@@ -38,3 +37,4 @@
 7. 优先使用 Polars 表达式、窗口函数、聚合和 join，不要默认改成逐行/逐股 Python 循环
 8. **输出前自我检查**：完整通读修改后的代码，确认 Python 语法正确、括号匹配、引号闭合、缩进一致。有错误直接修正再输出。
 9. 直接输出完整 Python 代码
+10. 历史代码中的 `ALERTS` 已废弃，输出时删除；实时提醒由监控中心统一管理

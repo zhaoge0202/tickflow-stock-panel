@@ -126,7 +126,7 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
                       </div>
                     ))}
                     <div className="mt-1.5 pt-1.5 border-t border-border text-muted">
-                      真假板判定依赖五档盘口实时快照(卖一/买一量)。Pro+ 套餐的当天数据在收盘后自动恢复。
+                      真假板判定依赖五档盘口实时快照(卖一/买一量)。配置提供五档盘口的数据源后,当天数据在收盘后自动恢复。
                     </div>
                   </>
                 ) : (

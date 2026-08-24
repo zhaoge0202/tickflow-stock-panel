@@ -61,10 +61,6 @@ STOP_LOSS = -0.05
 # 最长持有天数 (短线 5~20, 中线 20~60)
 MAX_HOLD_DAYS = 20
 
-# 提醒条件 (监控用)
-ALERTS = []
-
-
 # 策略规则（人类可读，逐条编号，至少 3 条）
 RULES = """
 1. 规则描述一
@@ -330,7 +326,6 @@ ENTRY_SIGNALS = ["signal_broken_board_recovery"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 10
-ALERTS = [{"field": "signal_broken_board_recovery", "message": "反包信号"}]
 
 RULES = """
 1. 前一交易日为阴线，且跌幅不小于设定阈值

@@ -30,7 +30,7 @@ def build_step1(
     strategy_id: str = "",
     execution_backend: str = "polars_expr",
 ) -> str:
-    """步骤1：规则 → 完整策略代码（参数 + 信号 + 评分 + 告警）
+    """步骤1：规则 → 完整策略代码（参数 + 信号 + 评分）
 
     注意: 生成规范已在 ai_generator.py 的 system prompt 中加载，
     此处只拼用户输入以降低网关超时概率。

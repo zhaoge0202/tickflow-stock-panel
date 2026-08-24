@@ -46,6 +46,43 @@ def test_name_map_stock_beats_index(repo):
     assert repo.get_name_map(["600000.SH"]).get("600000.SH") == "浦发银行"
 
 
+def _write_stock_instruments(repo, symbols, names):
+    pl.DataFrame({
+        "symbol": symbols, "name": names, "code": [s[:6] for s in symbols],
+        "exchange": ["SH"] * len(symbols), "region": ["CN"] * len(symbols),
+        "type": ["stock"] * len(symbols),
+        "listing_date": [None] * len(symbols), "total_shares": [None] * len(symbols),
+        "float_shares": [None] * len(symbols), "tick_size": [None] * len(symbols),
+        "limit_up": [None] * len(symbols), "limit_down": [None] * len(symbols),
+        "as_of": ["2026-08-14"] * len(symbols),
+    }).write_parquet(repo.store.data_dir / "instruments" / "instruments.parquet")
+    repo._refresh_instruments()
+
+
+def test_name_map_partial_query_does_not_poison_cache(repo):
+    """带 symbols 的部分查询不能把残缺映射写入缓存 (自选新加股票无名称的回归).
+
+    旧 bug: 首次 get_name_map(["600000.SH"]) 把只含 600000 的映射缓存住,
+    之后自选加入 000001.SZ 再查名称命中残缺缓存 → name=None。
+    """
+    _write_stock_instruments(repo, ["600000.SH", "000001.SZ"], ["浦发银行", "平安银行"])
+    first = repo.get_name_map(["600000.SH"])
+    assert first == {"600000.SH": "浦发银行"}
+    # 缓存必须是全量: 后续其他 symbols 查询仍能命中
+    second = repo.get_name_map(["000001.SZ"])
+    assert second == {"000001.SZ": "平安银行"}
+    full = repo.get_name_map()
+    assert full == {"600000.SH": "浦发银行", "000001.SZ": "平安银行"}
+
+
+def test_name_map_cache_invalidated_on_instruments_refresh(repo):
+    """维表刷新后缓存必须失效: 新收录的股票能立刻查到名称。"""
+    _write_stock_instruments(repo, ["600000.SH"], ["浦发银行"])
+    assert repo.get_name_map(["600000.SH"]) == {"600000.SH": "浦发银行"}
+    _write_stock_instruments(repo, ["600000.SH", "301999.SZ"], ["浦发银行", "新股股份"])
+    assert repo.get_name_map(["301999.SZ"]) == {"301999.SZ": "新股股份"}
+
+
 import datetime as _dt
 
 

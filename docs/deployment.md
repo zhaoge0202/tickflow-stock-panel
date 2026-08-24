@@ -11,8 +11,8 @@
 由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
 
 ```bash
-git clone https://github.com/shy3130/tickflow-stock-panel.git
-cd tickflow-stock-panel
+git clone https://github.com/shy3130/tick-stock-panel.git
+cd tick-stock-panel
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```

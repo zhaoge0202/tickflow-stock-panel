@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Plus, Save, Search, X } from 'lucide-react'
+import { ArrowRight, Loader2, Plus, Save, Search, Sparkles, X } from 'lucide-react'
 import { api, type CustomSignal, type CustomSignalCondition, type CustomSignalFieldGroup } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
@@ -28,6 +28,14 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   const [draft, setDraft] = useState<CustomSignal>(() => emptySignal(defaultKind))
   const [error, setError] = useState('')
 
+  // AI 生成条件
+  const [aiOpen, setAiOpen] = useState(false)
+  const [aiDesc, setAiDesc] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState('')
+  const [aiConfigured, setAiConfigured] = useState<boolean | null>(null)
+  const checkedAi = useRef(false)
+
   const fields = options.data?.fields ?? []
   const groups = options.data?.groups
   const maxDays = options.data?.maxDays ?? 60
@@ -38,7 +46,36 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
     if (!open) return
     setDraft(signal ? { ...signal, conditions: signal.conditions.map(c => ({ ...c })) } : emptySignal(defaultKind))
     setError('')
+    setAiOpen(false); setAiDesc(''); setAiError(''); setAiLoading(false)
   }, [open, signal, defaultKind])
+
+  // 打开时检查一次 AI 是否已配置（复用策略构建器逻辑）
+  useEffect(() => {
+    if (!open || checkedAi.current) return
+    checkedAi.current = true
+    api.strategyAiStatus()
+      .then(s => setAiConfigured(s.configured))
+      .catch(() => setAiConfigured(false))
+  }, [open])
+
+  const generateByAI = async () => {
+    const desc = aiDesc.trim()
+    if (!desc) { setAiError('请先描述信号思路'); return }
+    setAiLoading(true)
+    setAiError('')
+    try {
+      const res = await api.customSignalsAiGenerate(desc)
+      setDraft(d => ({
+        ...d,
+        name: d.name.trim() ? d.name : res.name,
+        conditions: res.conditions.map(c => ({ ...c, leftDays: c.leftDays ?? 0, rightDays: c.rightDays ?? 0 })),
+      }))
+    } catch (err: any) {
+      setAiError(String(err?.message ?? err))
+    } finally {
+      setAiLoading(false)
+    }
+  }
 
   const save = useMutation({
     mutationFn: () => {
@@ -122,11 +159,19 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
               </div>
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] text-muted">条件（多条件为「且」关系）</span>
-                  <button onClick={addCond} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
-                    <Plus className="h-3 w-3" />添加条件
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => setAiOpen(o => !o)}
+                      className={`inline-flex items-center gap-1 text-[11px] cursor-pointer transition-colors ${aiOpen ? 'text-amber-400' : 'text-amber-400/80 hover:text-amber-400'}`}
+                    >
+                      <Sparkles className="h-3 w-3" />AI 生成条件
+                    </button>
+                    <button onClick={addCond} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
+                      <Plus className="h-3 w-3" />添加条件
+                    </button>
+                  </div>
                 </div>
                 <div className="space-y-2 rounded-card border border-border/70 bg-base/50 p-3">
                   {draft.conditions.map((c, i) => (
@@ -155,6 +200,41 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                     </div>
                   ))}
                 </div>
+                {aiOpen && (
+                  <div className="rounded-card border border-amber-400/30 bg-amber-400/5 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                      <span className="text-[11px] text-amber-300">描述信号思路，AI 将生成条件组合</span>
+                    </div>
+                    {aiConfigured === false ? (
+                      <div className="text-xs text-amber-400/80">
+                        AI 未配置，无法生成信号。{' '}
+                        <a href="/settings?tab=ai" className="underline hover:text-amber-300">去设置页配置 API Key</a>
+                      </div>
+                    ) : (
+                      <>
+                        <textarea
+                          value={aiDesc}
+                          onChange={e => setAiDesc(e.target.value)}
+                          placeholder="例如：收盘价回踩20日均线，且量比≥2 放量"
+                          rows={2}
+                          className="w-full rounded-btn border border-border bg-base px-3 py-2 text-xs text-foreground focus:outline-none focus:border-amber-400/50 resize-none"
+                        />
+                        {aiError && <div className="text-xs text-danger">{aiError}</div>}
+                        <div className="flex justify-end">
+                          <button
+                            onClick={generateByAI}
+                            disabled={aiLoading}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-amber-500/90 text-base text-xs font-medium disabled:opacity-50 cursor-pointer"
+                          >
+                            {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                            {aiLoading ? '生成中…' : '生成条件'}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
                 <p className="text-[10px] text-muted/60 px-1">
                   每个操作数左侧的 <span className="text-foreground/70">最新</span> 按钮可点击切换为「前N日」(取 N 个交易日前的值)。例:收盘价(最新) &gt; 收盘价(前1日) = 上涨。带偏移的条件仅盘后/回测生效, 盘中实时跳过。
                 </p>

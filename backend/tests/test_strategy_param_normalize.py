@@ -113,7 +113,7 @@ def _make_strategy_with_params(params) -> StrategyDef:
         entry_signals=[], exit_signals=[],
         stop_loss=None, trailing_stop=None,
         trailing_take_profit_activate=None, trailing_take_profit_drawdown=None,
-        max_hold_days=None, alerts=[],
+        max_hold_days=None,
         filter_fn=None, filter_history_fn=None,
         lookback_days=60, source="custom",
     )
