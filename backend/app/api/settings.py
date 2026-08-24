@@ -401,6 +401,11 @@ class DataProvidersIn(BaseModel):
     financial_data_provider: str | None = None
 
 
+class PluginKeyIn(BaseModel):
+    plugin: str
+    api_key: str
+
+
 class DataSourceJobTimeoutPrefs(BaseModel):
     data_source_job_timeout_s: int = Field(ge=60)
     data_source_long_job_timeout_s: int = Field(ge=60)
@@ -533,6 +538,53 @@ def list_data_sources() -> dict:
         "custom": custom_sources.list_sources(),
         "errors": custom_sources.errors(),
         "config_dir": str(custom_sources.data_sources_dir()),
+    }
+
+
+@router.post("/plugin-key")
+def save_plugin_key(req: PluginKeyIn) -> dict:
+    """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
+
+    流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
+    ({plugin}_api_key, 优先级高于 .env) → load_all 重扫, 插件即刻变为可切换。
+    """
+    from app.data_providers import custom as custom_sources
+
+    name = req.plugin.strip().lower()
+    key = req.api_key.strip()
+    if not key:
+        return {"ok": False, "error": "key empty"}
+    ok, message = custom_sources.probe_plugin_key(name, key)
+    if not ok:
+        return {"ok": False, "reason": "invalid", "error": message}
+    secrets_store.save({f"{name}_api_key": key})
+    custom_sources.load_all()
+    status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
+    return {
+        "ok": True,
+        "api_key_masked": secrets_store.mask(key),
+        "plugin_available": bool(status and status.get("available")),
+        "plugin": status,
+    }
+
+
+@router.delete("/plugin-key/{name}")
+def clear_plugin_key(name: str) -> dict:
+    """清除插件的界面配置 Key(secrets.json);.env 里的同名变量仍然生效。"""
+    from app.data_providers import custom as custom_sources
+
+    manifest = custom_sources.plugin_manifest(name)
+    if manifest is None or not custom_sources.is_builtin(name):
+        raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
+    if not manifest.get("api_key_env"):
+        raise HTTPException(status_code=400, detail=f"插件 '{name}' 不支持在界面配置 Key")
+    secrets_store.clear(f"{name.lower()}_api_key")
+    custom_sources.load_all()
+    status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
+    return {
+        "ok": True,
+        "plugin_available": bool(status and status.get("available")),
+        "plugin": status,
     }
 
 

@@ -1376,6 +1376,7 @@ export interface PluginDataSourceItem {
   status: string           // 可用性原因 (供 UI 显示)
   description: string
   install_hint: string     // 未装依赖时显示的安装命令
+  api_key_env?: string     // 声明后设置页提供 Key 输入框 (先探后存)
 }
 
 export interface DataSourceLoadError {
@@ -1398,6 +1399,16 @@ export interface DataSourceTestResult {
   rows: number
   columns: string[]
   preview: Record<string, unknown>[]
+}
+
+/** 插件 Key 保存结果 (先探后存: 无效 Key 返回 ok=false 且不落盘) */
+export interface PluginKeyResult {
+  ok: boolean
+  reason?: string
+  error?: string
+  api_key_masked?: string
+  plugin_available?: boolean
+  plugin?: PluginDataSourceItem | null
 }
 
 export interface DatasetConfig {
@@ -1595,6 +1606,18 @@ export const api = {
       `/api/settings/plugins/${encodeURIComponent(name)}/install`,
       { method: 'DELETE' },
     ),
+  savePluginKey: (plugin: string, apiKey: string) => {
+    // 先探后存: 后端会用候选 Key 实探一次, 探测超时 10s + 余量
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30_000)
+    return request<PluginKeyResult>('/api/settings/plugin-key', {
+      method: 'POST',
+      body: JSON.stringify({ plugin, api_key: apiKey }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer))
+  },
+  clearPluginKey: (plugin: string) =>
+    request<PluginKeyResult>(`/api/settings/plugin-key/${encodeURIComponent(plugin)}`, { method: 'DELETE' }),
   testDataSource: (
     provider: string,
     dataset: string,

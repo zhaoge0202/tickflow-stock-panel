@@ -103,6 +103,33 @@ def plugin_dir_of(name: str) -> Path:
     return plugins_dir() / (name or "")
 
 
+def probe_plugin_key(name: str, api_key: str) -> tuple[bool, str]:
+    """调用插件的 probe_api_key(key) 探测候选 Key(不落盘)。
+
+    约定: 声明了 api_key_env 的插件, 其 entry 模块提供模块级
+    probe_api_key(key) -> (ok, reason)。未声明或未提供 → (False, 原因)。
+    """
+    manifest = plugin_manifest(name)
+    if manifest is None:
+        return False, f"插件 '{name}' 不存在"
+    if not manifest.get("api_key_env"):
+        return False, f"插件 '{name}' 不支持在界面配置 Key"
+    entry = str(manifest.get("entry") or "")
+    if ":" not in entry:
+        return False, f"插件 '{name}' entry 非法"
+    try:
+        module = importlib.import_module(entry.split(":", 1)[0])
+    except Exception as e:
+        return False, f"插件模块加载失败: {e}"
+    probe = getattr(module, "probe_api_key", None)
+    if probe is None:
+        return False, f"插件 '{name}' 未提供 Key 探测"
+    try:
+        return probe(api_key)
+    except Exception as e:
+        return False, f"探测失败: {e}"
+
+
 def install_plugin(name: str) -> tuple[bool, str]:
     """安装指定插件的依赖。根据 runtime 执行 npm install / pip install。
 
@@ -509,6 +536,10 @@ def _register_one_plugin(manifest: dict) -> None:
     if not name or not _NAME_RE.match(name):
         logger.warning("插件清单缺少合法 name: %r", name)
         return
+    # hidden: 已加载但对 UI 隐藏 (功能未完成/暂不开放), 不注册不展示
+    if manifest.get("hidden"):
+        logger.info("插件 %s 标记为 hidden, 跳过注册", name)
+        return
     runtime = str(manifest.get("runtime", "none")).lower()
     # 委托检测: 调用插件自己的 check 函数 (node 型/python 型各自实现)
     available, reason = _call_check(manifest.get("check"))
@@ -521,6 +552,7 @@ def _register_one_plugin(manifest: dict) -> None:
         "status": reason,
         "description": manifest.get("description", ""),
         "install_hint": manifest.get("install_hint", ""),
+        "api_key_env": manifest.get("api_key_env", ""),
     }
     if not available:
         return  # 依赖没装: 不注册, 但状态已记录供 UI 显示
