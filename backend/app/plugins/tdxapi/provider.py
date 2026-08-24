@@ -31,6 +31,10 @@ _QUOTE_BATCH = 50
 _QUOTE_WORKERS_DEFAULT = 8
 _QUOTE_WORKERS_MAX = 16
 _KLINE_BATCH = 8
+# 分钟K是单票 HTTP(I/O bound); 默认 8 并发, 可通过 TDX_API_MINUTE_WORKERS 上调。
+# tdx-api 侧有代理/IP 池, 适度并发通常比串行快一个数量级; 过高可能打满节点或触发超时重试。
+_MINUTE_WORKERS_DEFAULT = 8
+_MINUTE_WORKERS_MAX = 32
 _MINUTE_FETCH_ATTEMPTS = 3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
@@ -177,27 +181,56 @@ class TDXAPIProvider:
         if not symbols:
             return pl.DataFrame()
         kline_type = _minute_type(freq)
-        frames: list[pl.DataFrame] = []
-        chunks = chunked(symbols, _KLINE_BATCH)
-        for i, chunk in enumerate(chunks):
-            for symbol in chunk:
-                app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
-                try:
-                    rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
-                except Exception as e:
-                    logger.warning("tdx-api minute 拉取失败(%s): %s", app_symbol, e)
-                    if len(symbols) == 1:
-                        raise
-                    continue
-                mapped = [
-                    row for row in (self._minute_row(app_symbol, item) for item in rows)
-                    if row is not None and _in_datetime_range(row["datetime"], start_time, end_time)
-                ]
-                if mapped:
-                    frames.append(pl.DataFrame(mapped).select(_MINUTE_CANONICAL))
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(chunks))
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+        single = len(symbols) == 1
+
+        def _fetch_one(symbol: str) -> pl.DataFrame | None:
+            app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+            try:
+                rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
+            except Exception as e:
+                logger.warning("tdx-api minute 拉取失败(%s): %s", app_symbol, e)
+                if single:
+                    raise
+                return None
+            mapped = [
+                row for row in (self._minute_row(app_symbol, item) for item in rows)
+                if row is not None and _in_datetime_range(row["datetime"], start_time, end_time)
+            ]
+            if not mapped:
+                return None
+            return pl.DataFrame(mapped).select(_MINUTE_CANONICAL)
+
+        # 进度按「已完成标的数 / 总数」上报 (比旧的 8 股一块更细, 也便于估算 ETA)。
+        workers = min(_minute_workers(), len(symbols))
+        frames: list[pl.DataFrame | None] = [None] * len(symbols)
+        if workers <= 1 or single:
+            for i, symbol in enumerate(symbols):
+                frames[i] = _fetch_one(symbol)
+                if on_chunk_done:
+                    on_chunk_done(i + 1, len(symbols))
+        else:
+            done = 0
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tdx-minute") as executor:
+                futures = {
+                    executor.submit(_fetch_one, symbol): idx
+                    for idx, symbol in enumerate(symbols)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        frames[idx] = future.result()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "tdx-api minute 并发任务失败(%s): %s",
+                            symbols[idx],
+                            e,
+                        )
+                    done += 1
+                    if on_chunk_done:
+                        on_chunk_done(done, len(symbols))
+
+        out = [frame for frame in frames if frame is not None and not frame.is_empty()]
+        return pl.concat(out, how="diagonal_relaxed") if out else pl.DataFrame()
 
     def _fetch_minute_rows_with_retry(self, symbol: str, kline_type: str) -> list[dict]:
         """TDX 节点会偶发返回业务超时, 换节点重试可恢复。"""
@@ -1172,6 +1205,17 @@ def _realtime_workers() -> int:
     except ValueError:
         workers = _QUOTE_WORKERS_DEFAULT
     return max(1, min(_QUOTE_WORKERS_MAX, workers))
+
+
+def _minute_workers() -> int:
+    try:
+        workers = int(
+            os.getenv("TDX_API_MINUTE_WORKERS", str(_MINUTE_WORKERS_DEFAULT))
+            or _MINUTE_WORKERS_DEFAULT
+        )
+    except ValueError:
+        workers = _MINUTE_WORKERS_DEFAULT
+    return max(1, min(_MINUTE_WORKERS_MAX, workers))
 
 
 def _symbols_from_env() -> list[str]:

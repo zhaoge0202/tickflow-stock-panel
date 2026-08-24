@@ -138,6 +138,50 @@ def test_get_minute_raises_after_retry_exhausted(monkeypatch):
         )
 
 
+def test_get_minute_fetches_symbols_concurrently_and_keeps_order(monkeypatch):
+    monkeypatch.setattr(tp, "_minute_workers", lambda: 4)
+    provider = TDXAPIProvider()
+
+    running = 0
+    max_running = 0
+    lock = threading.Lock()
+    progress: list[tuple[int, int]] = []
+
+    def fake_fetch(symbol, _kline_type):
+        nonlocal running, max_running
+        with lock:
+            running += 1
+            max_running = max(max_running, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+        code = str(symbol).split(".", 1)[0]
+        return [{
+            "Time": "2026-01-05T09:31:00+08:00",
+            "Open": 10000,
+            "High": 10000,
+            "Low": 10000,
+            "Close": int(code[-4:]) if code[-4:].isdigit() else 10000,
+            "Volume": 1,
+            "Amount": 1,
+        }]
+
+    monkeypatch.setattr(provider, "_fetch_minute_rows_with_retry", fake_fetch)
+
+    symbols = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"]
+    df = provider.get_minute(
+        symbols,
+        dt.datetime(2026, 1, 5, 9, 30),
+        dt.datetime(2026, 1, 5, 15, 0),
+        on_chunk_done=lambda cur, total: progress.append((cur, total)),
+    )
+
+    assert max_running > 1
+    assert df["symbol"].to_list() == symbols
+    assert progress[-1] == (len(symbols), len(symbols))
+    assert {cur for cur, _total in progress} == set(range(1, len(symbols) + 1))
+
+
 def test_get_realtime_batches_and_maps_quote(monkeypatch):
     def fake_codes(kwargs):
         return {"codes": [{"code": "002491", "name": "通鼎互联", "exchange": "sz"}]}
