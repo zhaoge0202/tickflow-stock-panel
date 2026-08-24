@@ -196,8 +196,9 @@ async def test_ai_generate_endpoint_success(monkeypatch):
     result = await ai_generate_signal(AIGenerateRequest(description="回踩MA20且放量"))
     assert result["name"] == "回踩MA20放量"
     assert len(result["conditions"]) == 2
-    # 复杂描述 (多条件) 需要足够 token, 避免 JSON 被截断
-    assert captured["max_tokens"] >= 2000
+    # 复杂描述 (多条件) 不设输出上限: 推理模型思考 token 计入 max_tokens 预算,
+    # 显式限制会挤占正文导致 JSON 截断 (对齐分析器的放开策略)
+    assert captured["max_tokens"] is None
 
 
 @pytest.mark.asyncio
