@@ -34,6 +34,31 @@ _REQUIRED = {
     "financial": {"symbol"},
 }
 
+# 小数制下 change_pct/amplitude/turnover_rate 的物理上限: A股最大涨跌停 30% (+容差)。
+# 中位数口径下小数制批次不可能超过该值, 百分制批次(典型中位数 0.5~3)必然超过。
+_PCT_FRACTION_MAX = 0.31
+
+
+def _normalize_pct_units(df: pl.DataFrame) -> pl.DataFrame:
+    """百分制源自适应归一为小数制 (契约: change_pct/amplitude/turnover_rate 为小数,
+    0.0366 = 3.66%)。不少第三方接口(如 a-stock-data)直接返回 3.66 表示 3.66%,
+    若不归一, 下游(行业/概念统计、前端 x100 展示)会整体放大 100 倍。
+
+    截面判定: 样本 >= 5 用 |值| 中位数(对个别无涨跌幅限制新股免疫),
+    小样本退用最大值。整批同除 100, 避免逐值阈值在 0.3~1 区间的歧义。
+    """
+    for col in ("change_pct", "amplitude", "turnover_rate"):
+        if col not in df.columns:
+            continue
+        df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+        vals = df[col].drop_nulls().abs()
+        if vals.is_empty():
+            continue
+        stat = vals.median() if vals.len() >= 5 else vals.max()
+        if stat > _PCT_FRACTION_MAX:
+            df = df.with_columns((pl.col(col) / 100).alias(col))
+    return df
+
 
 class GenericHTTPProvider:
     """HTTP-backed custom source. It only handles fetching and schema mapping."""
@@ -121,6 +146,8 @@ class GenericHTTPProvider:
         cfg = self._dataset("realtime")
         rows = self._request_rows(cfg)
         df = self._mapped_frame(cfg, rows)
+        # 百分制源(返回 3.66 表示 3.66%)截面归一为契约小数制
+        df = _normalize_pct_units(df)
         if df.is_empty():
             return []
         return df.to_dicts()

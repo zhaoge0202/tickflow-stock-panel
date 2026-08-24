@@ -125,7 +125,7 @@ datasets:
 
 建议实时接口额外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失时部分字段会由 pipeline 回算,但精度取决于可用输入。
 
-`change_pct` 和 `amplitude` 使用小数制,例如 `0.0366` 表示 `3.66%`。
+`change_pct` 和 `amplitude` 使用小数制,例如 `0.0366` 表示 `3.66%`(`turnover_rate` 同)。若接口直接返回百分数值 `3.66`,实时行情会按截面中位数自动归一为小数制,但仍建议接口直接提供小数制以避免小样本歧义。
 
 ## 请求约定
 
