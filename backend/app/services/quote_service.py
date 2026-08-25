@@ -28,7 +28,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, time as dt_time
+from datetime import date, datetime, time as dt_time
 
 import polars as pl
 
@@ -218,6 +218,16 @@ class QuoteService:
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        # 轮询放量 (volume_delta 规则): 上一轮全市场股票快照的 (累计成交量[手], 累计成交额[元])。
+        # 每轮全量快照后更新 (含非连续竞价时段, 保证 13:00 恢复时 prev 是 12:59
+        # 而非 11:30); 跨交易日清空; cur < prev (数据源重置) 时丢弃该轮差值。
+        self._prev_stock_volume: dict[str, tuple[float, float]] | None = None
+        self._prev_volume_fetched_at: float | None = None   # epoch 毫秒
+        self._prev_volume_date: date | None = None
+        # 最近一轮的有效差值 (vol_delta[手], amt_delta[元]) - 仅连续竞价时段内、
+        # prev 不早于本时段开盘时计算
+        self._volume_delta: dict[str, tuple[float, float]] = {}
+        self._volume_delta_span_s: float = 0.0
 
     # ================================================================
     # 生命周期
@@ -719,6 +729,9 @@ class QuoteService:
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
+        # 轮询放量状态更新 (volume_delta 规则的差值来源)
+        self._update_volume_delta(stock_records, fetched_at)
+
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
         daily_df = self._build_daily(stock_records)
         if not daily_df.is_empty() and self._repo:
@@ -1117,6 +1130,8 @@ class QuoteService:
                         eval_df = enriched_today
                         if engine.has_rule_type("ladder"):
                             eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
+                        if engine.has_rule_type("volume_delta"):
+                            eval_df = self._inject_volume_delta(eval_df)
                         eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
                         rule_events = engine.evaluate(eval_df, asset_type="stock")
                         if engine.consume_strategy_result_updates():
@@ -1203,7 +1218,8 @@ class QuoteService:
                                 "window_change_pct", "coverage_ratio", "valid_count",
                                 "total_count", "up_count", "down_count", "leader",
                                 "abnormal_window", "abnormal_value", "abnormal_threshold",
-                                "abnormal_closeness",
+                                "abnormal_closeness", "volume_delta", "volume_delta_span",
+                                "volume_delta_amount",
                             ):
                                 if key in ev:
                                     alert[key] = ev[key]
@@ -1352,6 +1368,88 @@ class QuoteService:
         )
         return self._intraday_signal_evaluator.inject(enriched, signals)
 
+    @staticmethod
+    def _continuous_session_start_ms() -> float:
+        """当前连续竞价时段的起点 (北京时间 9:30 或 13:00) 的 epoch 毫秒。"""
+        now = cn_now()
+        start_time = dt_time(13, 0) if now.time() >= dt_time(13, 0) else dt_time(9, 30)
+        return datetime.combine(now.date(), start_time, tzinfo=now.tzinfo).timestamp() * 1000.0
+
+    def _update_volume_delta(self, stock_records: list[dict], fetched_at_ms: float) -> None:
+        """全市场相邻两次快照的股票累计成交量差值 (手), 供 volume_delta 规则。
+
+        - prev 每轮都更新 (含非连续竞价时段); 差值只在连续竞价时段内计算
+        - 开盘保护: prev 早于本时段起点 (9:30/13:00) 时本轮差值无效 -- 避免
+          9:25 集合竞价撮合量 / 午休缺口被当成"突然放量"
+        - cur < prev (数据源重置/口径跳变) 的个股丢弃差值; 跨交易日清空
+        """
+        today = cn_today()
+        if self._prev_volume_date != today:
+            self._prev_stock_volume = None
+            self._prev_volume_fetched_at = None
+            self._prev_volume_date = today
+            self._volume_delta = {}
+
+        cur: dict[str, tuple[float, float]] = {}
+        for r in stock_records:
+            sym = r.get("symbol")
+            vol = r.get("volume")
+            amt = r.get("amount")
+            if not sym or not isinstance(vol, (int, float)):
+                continue
+            cur[str(sym)] = (
+                float(vol),
+                float(amt) if isinstance(amt, (int, float)) else 0.0,
+            )
+
+        prev = self._prev_stock_volume
+        prev_ts = self._prev_volume_fetched_at
+        if (
+            prev is not None
+            and prev_ts is not None
+            and self._is_continuous_trading()
+            and prev_ts >= self._continuous_session_start_ms()
+        ):
+            delta = {
+                sym: (v - prev[sym][0], a - prev[sym][1])
+                for sym, (v, a) in cur.items()
+                if sym in prev and v >= prev[sym][0] and a >= prev[sym][1] and v - prev[sym][0] > 0
+            }
+            self._volume_delta = delta
+            self._volume_delta_span_s = max((fetched_at_ms - prev_ts) / 1000.0, 0.001)
+        else:
+            self._volume_delta = {}
+
+        self._prev_stock_volume = cur
+        self._prev_volume_fetched_at = fetched_at_ms
+
+    def _inject_volume_delta(self, enriched_today: pl.DataFrame) -> pl.DataFrame:
+        """把最近一轮快照差值作为临时列注入 enriched 副本。
+
+        _volume_delta (手) / _volume_delta_amount (元) / _volume_delta_span (秒, 快照间隔)。
+        无有效差值 (首轮/开盘保护/暂停后恢复) 时返回原 df, 规则安全降级不触发。
+        """
+        try:
+            delta = self._volume_delta
+            if not delta:
+                return enriched_today
+            span = self._volume_delta_span_s
+            delta_df = pl.DataFrame({
+                "symbol": list(delta.keys()),
+                "_volume_delta": [v for v, _ in delta.values()],
+                "_volume_delta_amount": [a for _, a in delta.values()],
+                "_volume_delta_span": [span] * len(delta),
+            })
+            drop_cols = [
+                c for c in ("_volume_delta", "_volume_delta_amount", "_volume_delta_span")
+                if c in enriched_today.columns
+            ]
+            df = enriched_today.drop(drop_cols) if drop_cols else enriched_today
+            return df.join(delta_df, on="symbol", how="left")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("快照差值注入失败 (volume_delta 规则将不触发): %s", e)
+            return enriched_today
+
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
         """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。
 
@@ -1414,7 +1512,7 @@ class QuoteService:
             source_labels = {
                 "strategy": "策略", "signal": "信号",
                 "price": "价格", "market": "异动", "ladder": "连板梯队",
-                "sector": "板块",
+                "sector": "板块", "volume_delta": "放量",
             }
             rules = engine.rules if engine is not None else {}
             enqueued = 0

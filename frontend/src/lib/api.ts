@@ -783,7 +783,7 @@ export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal' | 'volume_delta'
   asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
@@ -812,9 +812,23 @@ export interface MonitorRule {
   webhook_channels?: string[]  // 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
   runtime_warning?: string
-  // ladder 专属: 封单监控
-  metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 额(元)
+  // ladder 专属: 封单监控; volume_delta 复用 metric 表示阈值口径 (volume=手数, amount=金额)
+  metric?: 'sealed_vol' | 'sealed_amount' | 'volume' | 'amount'
   threshold?: number                        // 封单 <= 此值时报警
+  // volume_delta 专属 (轮询放量): 相邻两次全市场快照的成交量增量(手)
+  threshold_volume?: number                 // 单轮增量 >= 此值时报警
+  threshold_amount?: number                 // metric=amount 时: 单轮增量 >= 此值(元)时报警
+  basic_filter?: VDBasicFilter             // 基础过滤 (与策略 basic_filter 语义对齐)
+}
+
+export interface VDBasicFilter {
+  price_min?: number | null                 // 股价下限 (元)
+  price_max?: number | null                 // 股价上限 (元)
+  market_cap_min?: number | null            // 总市值下限 (元)
+  float_cap_min?: number | null             // 流通市值下限 (元)
+  float_cap_max?: number | null             // 流通市值上限 (元)
+  amount_min?: number | null                // 当日成交额下限 (元)
+  exclude_st?: boolean                      // 剔除 ST
 }
 
 export interface MonitorRuleOptions {
