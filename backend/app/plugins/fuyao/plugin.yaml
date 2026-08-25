@@ -1,0 +1,14 @@
+# 扶摇 — 同花顺官方金融数据 API 插件 (https://fuyao.aicubes.cn)
+# 纯 HTTP REST 源, 无额外依赖 (runtime: none)。
+# 需在 .env 或环境变量配置 FUYAO_API_KEY, 未配置时插件灰显不可切换。
+
+name: fuyao
+display_name: "fuyao"
+runtime: none
+entry: app.plugins.fuyao.provider:FuyaoProvider
+check: app.plugins.fuyao.provider:availability
+datasets: [realtime]
+api_key_env: FUYAO_API_KEY   # 声明后设置页提供 Key 输入框(先探后存, secrets.json 优先)
+hidden: true                  # 优化完成前不在数据源页展示; 删除此行即可恢复
+description: "同花顺官方 REST 数据 API。当前提供 A 股全市场实时快照(分页拉取);日K/分钟/财务未接入,自动回退 TickFlow。"
+install_hint: "点击卡片中的输入框配置 API Key(https://fuyao.aicubes.cn 申请),或在 .env 中配置 FUYAO_API_KEY"

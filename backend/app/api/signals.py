@@ -145,8 +145,9 @@ async def ai_generate_signal(req: AIGenerateRequest):
 
     messages = custom_signals_ai.build_messages(description)
     try:
-        # max_tokens 给足 8 个条件的 JSON 余量 (1000 会被复杂描述截断, 导致返回非法 JSON)
-        text = await generate_ai_text(messages, temperature=0.2, max_tokens=2000)
+        # max_tokens=None 不传上限: 推理模型思考 token 计入预算, 显式限制
+        # 会挤占正文导致 JSON 截断/0 字 (与四个分析器同因, 见 0ee3aa8)
+        text = await generate_ai_text(messages, temperature=0.2, max_tokens=None)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:

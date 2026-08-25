@@ -127,7 +127,9 @@ if [ ! -d "$BACKEND_DIR/.venv" ] || [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
   else
     info "后端首次启动 — 安装 Python 依赖(约 1-2 分钟)..."
   fi
-  ( cd "$BACKEND_DIR" && uv sync --frozen "${BACKEND_EXTRA_ARGS[@]}" )
+  # macOS 自带 bash 3.2 在 set -u 下展开空数组会报 unbound variable,
+  # ${arr[@]+"${arr[@]}"} 守卫:数组为空时展开为零个参数,非空时逐个带引号展开。
+  ( cd "$BACKEND_DIR" && uv sync --frozen ${BACKEND_EXTRA_ARGS[@]+"${BACKEND_EXTRA_ARGS[@]}"} )
   ok "后端依赖装好了"
 fi
 
@@ -175,7 +177,9 @@ echo
   cd "$BACKEND_DIR"
   # --no-sync: 跳过依赖解析, 直接用已安装的 .venv。
   # 比 --frozen 更彻底: 不校验 lockfile, 避免镜像源 403/网络抖动导致后端起不来。
-  uv run --no-sync uvicorn app.main:app "${UVICORN_ENV_ARGS[@]}" --reload \
+  # python -m uvicorn: 强制用 venv 的解释器和 uvicorn 模块, 防止 PATH 里
+  # 其他 Python(如 /usr/local/bin/uvicorn) 抢先, 导致用错误版本启动后端。
+  uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &

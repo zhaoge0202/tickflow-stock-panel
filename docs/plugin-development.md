@@ -25,9 +25,24 @@ runtime: python                          # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
 datasets: [daily, adj_factor, minute, realtime]     # 支持的数据集
+api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
+hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
 description: "数据源描述"
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
 ```
+
+#### api_key_env(界面配置 API Key)
+
+声明 `api_key_env` 的插件可以在设置页的数据源卡片中直接填写 Key, 对齐
+TickFlow 的「先探后存」语义:
+
+1. entry 模块需提供模块级 `probe_api_key(key) -> (ok, reason)`,
+   后端用候选 Key 实探一次, **无效不落盘**
+2. 有效则写入 `data/user_data/secrets.json` 的 `{name}_api_key` 字段
+   (0600 权限, 优先级高于 `.env` / 环境变量)
+3. 保存后自动重载数据源注册表, 插件即刻变为可切换
+4. 插件取 Key 用 `secrets_store.get_env_backed_secret("{name}_api_key", api_key_env)`,
+   保证 secrets.json 与 .env 两条配置路径一致
 
 ### runtime 字段说明
 
@@ -105,6 +120,12 @@ class MyConfig:
 
 ## 现有插件参考
 
+- **`backend/app/plugins/fuyao/`** — 同花顺官方 REST 数据源(runtime: none, 纯 HTTP 零依赖)
+  - 当前提供 `realtime`(A 股全市场快照, 分页拉取); Key 在设置页卡片直接配置(先探后存), 或 `.env` 配 `FUYAO_API_KEY`
+  - `client.py` — httpx 客户端(X-api-key 认证 + 统一信封解包 + 分页)
+  - `provider.py` — Provider 实现(字段映射、百分数→小数制单位转换、软失败、Key 探测)
+  - 单位口径注意: 扶摇 `price_change_ratio_pct` 为百分数数值(1.74 = +1.74%),
+    内部 `change_pct` 契约为小数制, provider 内显式 / 100(见 CONTRIBUTING §3.1)
 - **`backend/app/plugins/stocksdk/`** — Node 型插件, 通过 subprocess 桥接调用 stock-sdk
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)

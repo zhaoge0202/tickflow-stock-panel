@@ -169,7 +169,8 @@ class AIStrategyGenerator:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=3000,
+            # None = 不传上限: 策略代码较长, 推理模型思考 token 计入预算会截断代码
+            max_tokens=None,
         ):
             yield chunk
 
@@ -313,7 +314,8 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=3000,
+            # None = 不传上限: 策略代码较长, 推理模型思考 token 计入预算会截断代码
+            max_tokens=None,
         )
         return self._extract_code_block(content)
 
