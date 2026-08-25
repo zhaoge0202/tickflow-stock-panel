@@ -4,6 +4,7 @@ import types
 
 import pytest
 from fastapi import APIRouter, FastAPI
+from fastapi.testclient import TestClient
 
 from app.extensions.contracts import (
     BACKEND_EXTENSION_API_VERSION,
@@ -151,4 +152,6 @@ def test_loader_isolates_failed_setup_and_registers_valid_route(
     assert registry.extension_ids() == frozenset({"company.valid"})
     assert len(errors) == 1
     assert errors[0].module == broken.__name__
-    assert any(getattr(route, "path", None) == "/api/custom/valid/status" for route in app.routes)
+    client = TestClient(app)
+    response = client.get("/api/custom/valid/status")
+    assert response.status_code == 200
