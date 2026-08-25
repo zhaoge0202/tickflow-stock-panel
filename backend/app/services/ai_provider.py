@@ -249,11 +249,25 @@ def normalize_openai_base_url(url: str) -> str:
 
 
 def codex_cli_available() -> bool:
+    """Codex CLI 是否真正可用: 解析命令后实跑一次 --version。
+
+    仅 which 到二进制不够 — npm 壳缺平台原生二进制时同样存在于 PATH,
+    但一运行就报错(如 "Codex CLI not available"), 状态页会误报已连接。
+    """
     try:
-        _codex_base_command()
-        return True
+        base = _codex_base_command()
     except RuntimeError:
         return False
+    try:
+        proc = subprocess.run(
+            [*base, "--version"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 def ai_configured(provider: str | None = None) -> bool:
@@ -589,10 +603,11 @@ async def _run_codex_cli(
         output_path = codex_home_path / "last-message.txt"
         _prepare_codex_home(codex_home_path)
 
+        # 不传 --ephemeral: 老版本 codex(如 0.58)无此参数, 传了直接报
+        # unexpected argument; 会话隔离已由一次性临时 CODEX_HOME 保证(跑完即删)。
         args = [
             *_codex_base_command(),
             "exec",
-            "--ephemeral",
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",
