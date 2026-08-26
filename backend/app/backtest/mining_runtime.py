@@ -522,6 +522,10 @@ def run_mining_runtime(
         "factors": len(request.factor_names),
     })
 
+    if request.require_regime:
+        emit({"phase": "panel", "label": "校验市场环境数据", "done": 0, "total": 1})
+        _validate_regime_availability(panel, request, data_dir)
+
     _raise_if_cancelled(cancel_check)
     start_phase()
     matrix_started = time.perf_counter()
@@ -1307,6 +1311,32 @@ def _fold_row(
         "skipped": evaluation is None or error is not None,
         "reason": error,
     }
+
+
+def _validate_regime_availability(
+    panel: pl.DataFrame,
+    request: RuntimeRequest,
+    data_dir: Path,
+) -> None:
+    """搜索开始前 fail-fast 校验市场环境数据。
+
+    环境分组评估 (strong/range/weak) 依赖 T-1 市场环境序列; 数据为空或覆盖不足时,
+    若拖到 artifacts 阶段才在 _regime_date_count 中抛错, 整轮嵌套搜索的计算全部浪费。
+    这里用与 artifacts 相同的 fold 口径 (panel 标签) 预先构建一次 mask:
+    required 区间取所有外层 fold 测试窗的并集, 覆盖后续每个 fold 单独调用的要求,
+    任何 ValueError (数据为空 / 覆盖不完整) 立即带指引消息终止运行。
+    """
+    labels = _date_labels(panel)
+    nested = generate_nested_folds(labels, request.mining_request.validation)
+    if not nested:
+        return
+    StrategyBacktestService._build_regime_mask(
+        labels,
+        _REGIME_FILTERS["strong"],
+        data_dir,
+        required_start=date.fromisoformat(nested[0].outer.test_start),
+        required_end=date.fromisoformat(nested[-1].outer.test_end),
+    )
 
 
 def _regime_date_count(
