@@ -719,7 +719,7 @@ function RulesList({ rulesQuery, onEdit }: {
   const rulesNavItems = useMemo(
     () => rules
       .filter(r => r.scope === 'symbols' && r.symbols.length > 0)
-      .map(r => ({ symbol: r.symbols[0], name: symbolNames[r.symbols[0]] ?? undefined }) as NavItem),
+      .map(r => ({ symbol: r.symbols[0], name: symbolNames[r.symbols[0]] ?? undefined })),
     [rules, symbolNames],
   )
 

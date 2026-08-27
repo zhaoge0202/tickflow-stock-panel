@@ -1,9 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { api, type KlineRow, type FinancialMetricRecord } from '@/lib/api'
-import { QK } from '@/lib/queryKeys'
-import { klineDailyQueryOptions } from '@/lib/kline'
+import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { klineDailyQueryOptions, klineMinuteQueryOptions } from '@/lib/kline'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, toOHLC } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
@@ -123,7 +122,6 @@ export function StockPanel({
   useEffect(() => {
     if (!prefetchKey) return
     prefetchTickRef.current = prefetchKey
-    const tick = prefetchKey
     for (const s of prefetchKey.split(',')) {
       if (s === symbol) continue
       if (hasFinanceField && hasFinancialCap) {
@@ -132,12 +130,13 @@ export function StockPanel({
       // 日K用 fetchQuery (返回数据) 以便级联预取分时; 邻股预取失败静默, 不影响切股。
       void qc.fetchQuery({ ...klineDailyQueryOptions(s, dateRange, extColumns), staleTime: 30_000 })
         .then((res) => {
-          if (prefetchTickRef.current !== tick) return
+          if (prefetchTickRef.current !== prefetchKey) return
           // 日K到货后级联预取其默认选中日的分时数据: 日K视图并排展示分时图(默认选中最后交易日)。
           const lastDate = res?.rows?.at(-1)?.date
           if (lastDate) {
             const d = String(lastDate).slice(0, 10)
-            qc.prefetchQuery({ queryKey: QK.klineMinute(s, d), queryFn: () => api.klineMinute(s, d), staleTime: 30_000 })
+            // live=true: 若 d 为当日, 预取即命中实时源, 与实际渲染的 queryKey 同源 (历史日期后端忽略 live)
+            qc.prefetchQuery({ ...klineMinuteQueryOptions(s, d, true), staleTime: 30_000 })
           }
         })
         .catch(() => {})

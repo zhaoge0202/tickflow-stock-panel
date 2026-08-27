@@ -576,9 +576,10 @@ function stockListNav(rows: MarketSnapshotRow[]): NavItem[] {
   return toNavItems(rows.slice(0, 8))
 }
 function rankNav(rank?: OverviewMarket['concept_rank']): NavItem[] {
-  return [...(rank?.leading ?? []), ...(rank?.lagging ?? [])]
-    .filter(r => r.leader?.symbol)
-    .map(r => ({ symbol: r.leader!.symbol!, name: r.leader!.name ?? undefined }))
+  const leaders = [...(rank?.leading ?? []), ...(rank?.lagging ?? [])]
+    .map(r => r.leader)
+    .filter((l): l is NonNullable<typeof l> & { symbol: string } => !!l?.symbol)
+  return toNavItems(leaders)
 }
 
 export function Dashboard() {
@@ -935,7 +936,7 @@ export function Dashboard() {
           message: previewStock.alert.message,
         } : null}
         navList={previewStock?.navList}
-        onNavigate={(sym, n) => setPreviewStock(prev => prev ? { ...prev, symbol: sym, name: n, alert: prev.source === 'alert' ? undefined : prev.alert } : prev)}
+        onNavigate={(sym, n) => setPreviewStock(prev => prev ? { ...prev, symbol: sym, name: n, alert: undefined } : prev)}
         onClose={() => setPreviewStock(null)}
       />
       <DimensionMembersDialog

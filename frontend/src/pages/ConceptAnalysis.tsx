@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
@@ -242,6 +242,11 @@ export function ConceptAnalysis() {
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
   const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
+  const handleStockClick = useCallback((symbol: string, name?: string, navList?: NavItem[]) => {
+    setPreviewSymbol(symbol)
+    setPreviewName(name ?? '')
+    setPreviewNavList(navList ?? [])
+  }, [])
   const [showRps, setShowRps] = useState(false)
 
   const configsQuery = useQuery({ queryKey: QK.extData, queryFn: api.extDataList })
@@ -395,7 +400,7 @@ export function ConceptAnalysis() {
             selectedKey={selected?.key ?? null}
             onSelect={setSelectedKey}
             activeSymbol={previewSymbol}
-            onStockClick={(sym, name, navList) => { setPreviewSymbol(sym); setPreviewName(name ?? ''); setPreviewNavList(navList ?? []) }}
+            onStockClick={handleStockClick}
           />
 
           {stats.length > 0 ? (
@@ -409,7 +414,7 @@ export function ConceptAnalysis() {
                 onSort={setSortMode}
                 onSelect={setSelectedKey}
               />
-              <ConceptFocus stat={selected} activeSymbol={previewSymbol} onStockClick={(sym, name, navList) => { setPreviewSymbol(sym); setPreviewName(name ?? ''); setPreviewNavList(navList ?? []) }} />
+              <ConceptFocus stat={selected} activeSymbol={previewSymbol} onStockClick={handleStockClick} />
             </div>
           ) : rowsQuery.isLoading ? (
             <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">正在计算概念强度...</div>

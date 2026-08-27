@@ -1135,7 +1135,7 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
               </div>
             )}
             <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 px-3 pb-3">
-              {sortLadderStocks(tier.stocks, { monitoredSymbols, sealMode, selectedTag, extFields }).map(s => (
+              {tier.stocks.map(s => (
                 <StockCard
                   key={`${s.symbol}-${s.status}`}
                   stock={s}
@@ -1550,15 +1550,21 @@ export function LimitUpLadder() {
   const tiers = useMemo(() => filterTiers(rawTiers, filterKeys, extFields.bf), [rawTiers, filterKeys, extFields.bf])
   const displayDate = data?.as_of ?? asOf
 
-  // 切股导航列表: 各梯队按展示同款排序展平 (监控优先 → 状态 → 封单量)
+  // 单源: 梯队按展示同款过滤+排序一次 (监控优先 → 状态 → 封单量),
+  // 卡片渲染(TierGroup)与切股导航(ladderNavItems)共用, 避免每 tick 二次排序。
+  const resolvedExtFields = useMemo(
+    () => resolveExtFields(extFields, showConcept, showIndustry),
+    [extFields, showConcept, showIndustry],
+  )
+  const sortedTiers = useMemo(
+    () => tiers.map(t => ({ ...t, stocks: sortLadderStocks(t.stocks, { monitoredSymbols, sealMode, selectedTag, extFields: resolvedExtFields }) })),
+    [tiers, monitoredSymbols, sealMode, selectedTag, resolvedExtFields],
+  )
+
+  // 切股导航列表: 由 sortedTiers 展平 (顺序 = 卡片展示顺序)
   const ladderNavItems = useMemo(
-    () => toNavItems(tiers.flatMap(t => sortLadderStocks(t.stocks, {
-      monitoredSymbols,
-      sealMode,
-      selectedTag,
-      extFields: resolveExtFields(extFields, showConcept, showIndustry),
-    }))),
-    [tiers, monitoredSymbols, sealMode, selectedTag, extFields, showConcept, showIndustry],
+    () => toNavItems(sortedTiers.flatMap(t => t.stocks)),
+    [sortedTiers],
   )
 
   const handleStockClick = useCallback((symbol: string, name?: string, navList?: NavItem[]) => {
@@ -1742,7 +1748,7 @@ export function LimitUpLadder() {
         <TagStats
           title="概念分布"
           tiers={tiers}
-          extFields={resolveExtFields(extFields, showConcept, showIndustry)}
+          extFields={resolvedExtFields}
           fieldKey="concept"
           color={{ text: [250, 204, 21], textLight: [161, 98, 7], bg: [234, 179, 8] }}
           selectedTag={selectedTag}
@@ -1756,7 +1762,7 @@ export function LimitUpLadder() {
         <TagStats
           title="行业分布"
           tiers={tiers}
-          extFields={resolveExtFields(extFields, showConcept, showIndustry)}
+          extFields={resolvedExtFields}
           fieldKey="industry"
           color={{ text: [96, 165, 250], textLight: [29, 78, 216], bg: [59, 130, 246] }}
           selectedTag={selectedTag}
@@ -1768,12 +1774,12 @@ export function LimitUpLadder() {
 
       {/* 梯队列表 */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-        {tiers.map(t => (
+        {sortedTiers.map(t => (
           <TierGroup
             key={t.boards}
             tier={t}
             defaultOpen={t.boards >= 1 || t.count <= 8}
-            extFields={resolveExtFields(extFields, showConcept, showIndustry)}
+            extFields={resolvedExtFields}
             filterKeys={filterKeys}
             bf={extFields.bf}
             onStockClick={handleStockClick}

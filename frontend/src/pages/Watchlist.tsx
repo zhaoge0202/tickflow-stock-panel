@@ -1259,10 +1259,11 @@ export function Watchlist() {
     [filteredRows, sortRows, columns],
   )
 
-  // 切股导航列表: 按列表当前展示顺序 (与 sortedRows 一致, 排序/筛选后行序随之变化)
+  // 切股导航列表: 按列表当前展示顺序 (与 sortedRows 一致, 排序/筛选后行序随之变化)。
+  // 弹窗未打开时跳过构建 — sortedRows 随行情 tick 重建, 避免无谓分配。
   const previewNavItems = useMemo(
-    () => toNavItems(sortedRows),
-    [sortedRows],
+    () => previewSymbol ? toNavItems(sortedRows) : [],
+    [previewSymbol, sortedRows],
   )
 
   const cardColumns = useCardColumnCount()

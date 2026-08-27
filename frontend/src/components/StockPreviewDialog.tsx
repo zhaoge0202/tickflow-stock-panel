@@ -218,6 +218,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !priceAlertDraft) { onCloseRef.current(); return }
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        // 点位监控弹窗打开时方向键不切股 (与 ESC 的 !priceAlertDraft 守卫同层级)
+        if (priceAlertDraft) return
         // 焦点在输入框/编辑器时方向键让位给光标/输入, 不切股
         const t = e.target as HTMLElement | null
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
