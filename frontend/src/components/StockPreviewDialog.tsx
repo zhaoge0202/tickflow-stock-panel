@@ -51,6 +51,18 @@ function wrapNavIndex(navIdx: number, delta: number, navTotal: number): number {
   return (navIdx + delta + navTotal) % navTotal
 }
 
+/** 榜单里同一标的可能多次出现 (多概念/行业 leader、监控重复触发), 去重以免切股/计数空跳; 保留首次出现。 */
+function uniqueNavItems(xs: NavItem[]): NavItem[] {
+  const seen = new Set<string>()
+  const out: NavItem[] = []
+  for (const n of xs) {
+    if (seen.has(n.symbol)) continue
+    seen.add(n.symbol)
+    out.push(n)
+  }
+  return out
+}
+
 // ===== 板块标识（与 Screener 列表一致）=====
 
 // 预设快捷范围（只保留半年和1年）
@@ -155,7 +167,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
   })
 
   // ===== 切股导航 =====
-  const navList = useMemo(() => navListSource ?? [], [navListSource])
+  const navList = useMemo(() => uniqueNavItems(navListSource ?? []), [navListSource])
 
   // 当前 symbol 在 navList 中的位置 (不在列表则为 -1, 此时不显示计数/按钮)
   const navIdx = navList.findIndex(n => n.symbol === symbol)
