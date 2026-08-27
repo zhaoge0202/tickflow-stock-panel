@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from 'react'
-import { Settings2, RadioTower, Star } from 'lucide-react'
+import { Settings2, RadioTower, Star, ExternalLink } from 'lucide-react'
 import type { KlineRow, FinancialMetricRecord } from '@/lib/api'
 import { fmtPrice, fmtBigNum, fmtVolume } from '@/lib/format'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
+import { buildStockExternalUrl, loadStockExternalTemplate } from '@/lib/stock-external-link'
 
 const BULL = '#C74040'
 const BEAR = '#2D9B65'
@@ -235,6 +236,8 @@ export function StockInfoBar({
     )
   }
 
+  const extUrl = buildStockExternalUrl(loadStockExternalTemplate(), symbol)
+
   return (
     <div className="px-2 pb-3 font-mono text-[12px] select-none space-y-1">
       {/* Row 1: code, name, price, change, change% */}
@@ -250,8 +253,19 @@ export function StockInfoBar({
         <span style={{ color: clr }} className="tabular-nums">
           {isUp ? '+' : ''}{fmtPrice(chgPct)}%
         </span>
-        {/* 右侧操作按钮：加自选 + 加监控 + 信息条配置 */}
+        {/* 右侧操作按钮：外链 + 加自选 + 加监控 + 信息条配置 */}
         <div className="ml-auto self-center flex items-center gap-1">
+          {extUrl && (
+            <a
+              href={extUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={extUrl}
+              className="p-1 rounded-btn text-muted hover:text-foreground hover:bg-elevated transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
           {inWatchlist && onRemoveFromWatchlist ? (
             <button
               type="button"
