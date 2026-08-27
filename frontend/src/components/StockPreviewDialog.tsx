@@ -203,6 +203,15 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
     return true
   }, [navList, navIdx, navTotal])
 
+  // 邻近预取目标: 当前股左右相邻两只 (首↔尾循环), 交由 StockPanel 提前拉取日K/财务/分时缓存
+  const prefetchSymbols = useMemo(() => {
+    if (!navEnabled) return []
+    return [
+      navList[wrapNavIndex(navIdx, -1, navTotal)].symbol,
+      navList[wrapNavIndex(navIdx, 1, navTotal)].symbol,
+    ]
+  }, [navEnabled, navIdx, navTotal, navList])
+
   // ESC 关闭 + 左右键切股
   useEffect(() => {
     if (!symbol) return
@@ -590,6 +599,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
+                  prefetchSymbols={prefetchSymbols}
                 />
               ) : (
                 <>
@@ -597,6 +607,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   symbol={symbol}
                   dateRange={dateRange}
                   infoBarOnly
+                  prefetchSymbols={prefetchSymbols}
                 />
                 <StockMultiDayIntradayChart
                   symbol={symbol}
