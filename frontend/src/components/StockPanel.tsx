@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
-import { klineDailyQueryOptions, klineMinuteQueryOptions } from '@/lib/kline'
+import { klineDailyQueryOptions, klineMinuteQueryOptions, klineMinuteRangeQueryOptions } from '@/lib/kline'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, toOHLC } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
@@ -44,6 +44,8 @@ interface Props {
   infoBarOnly?: boolean
   /** 邻近预取目标 (切股导航的左右邻股): 提前拉取其日K/财务/分时缓存, 切换瞬间免 loading */
   prefetchSymbols?: string[]
+  /** 多日分时周期 (分时 tab 使用): 预取邻股 klineMinuteRange 时用同一 days, 保证 queryKey 命中 */
+  intradayDays?: number
 }
 
 export { getDefaultRange }
@@ -69,6 +71,7 @@ export function StockPanel({
   refetchIntervalMs,
   infoBarOnly = false,
   prefetchSymbols,
+  intradayDays = 10,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -127,6 +130,9 @@ export function StockPanel({
       if (hasFinanceField && hasFinancialCap) {
         qc.prefetchQuery(financialMetricsQueryOptions(s))
       }
+      // 分时 tab 的多日分时 + 最新分时: 切股后分时图也免 loading (与日K并行预取)
+      qc.prefetchQuery({ ...klineMinuteRangeQueryOptions(s, intradayDays), staleTime: 30_000 })
+      qc.prefetchQuery({ ...klineMinuteQueryOptions(s), staleTime: 30_000 })
       // 日K用 fetchQuery (返回数据) 以便级联预取分时; 邻股预取失败静默, 不影响切股。
       void qc.fetchQuery({ ...klineDailyQueryOptions(s, dateRange, extColumns), staleTime: 30_000 })
         .then((res) => {
@@ -141,7 +147,7 @@ export function StockPanel({
         })
         .catch(() => {})
     }
-  }, [prefetchKey, symbol, dateRange, extColumns, hasFinanceField, hasFinancialCap, qc])
+  }, [prefetchKey, symbol, dateRange, extColumns, hasFinanceField, hasFinancialCap, intradayDays, qc])
 
   // symbol 变化时重置分时相关状态，避免切股后残留旧日期。
   // 日K信息直接读 query data (切股到已预取邻股首帧即有), 无需清空或门控。

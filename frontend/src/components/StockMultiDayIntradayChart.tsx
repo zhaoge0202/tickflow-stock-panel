@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import { api, type MinuteKlineSession } from '@/lib/api'
-import { QK } from '@/lib/queryKeys'
-import { klineMinuteQueryOptions } from '@/lib/kline'
+import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions } from '@/lib/kline'
 import { toast } from '@/components/Toast'
 import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
 
@@ -30,8 +29,7 @@ export function StockMultiDayIntradayChart({
 }: Props) {
   const queryClient = useQueryClient()
   const history = useQuery({
-    queryKey: QK.klineMinuteRange(symbol, days),
-    queryFn: () => api.klineMinuteRange(symbol, days),
+    ...klineMinuteRangeQueryOptions(symbol, days),
     enabled: !!symbol,
     placeholderData: (previous, previousQuery) =>
       previousQuery?.queryKey[1] === symbol ? previous : undefined,

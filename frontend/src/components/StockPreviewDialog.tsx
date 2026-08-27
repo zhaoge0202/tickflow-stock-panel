@@ -606,6 +606,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
                   prefetchSymbols={prefetchSymbols}
+                  intradayDays={intradayDays}
                 />
               ) : (
                 <>
@@ -614,6 +615,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   dateRange={dateRange}
                   infoBarOnly
                   prefetchSymbols={prefetchSymbols}
+                  intradayDays={intradayDays}
                 />
                 <StockMultiDayIntradayChart
                   symbol={symbol}

@@ -38,3 +38,11 @@ export function klineMinuteQueryOptions(symbol: string, date?: string, live?: bo
     queryFn: () => api.klineMinute(symbol, date ?? undefined, live),
   }
 }
+
+/** 多日分时查询配置 — 分时 tab 的 StockMultiDayIntradayChart 与 邻近预取 共用。 */
+export function klineMinuteRangeQueryOptions(symbol: string, days: number) {
+  return {
+    queryKey: QK.klineMinuteRange(symbol, days),
+    queryFn: () => api.klineMinuteRange(symbol, days),
+  }
+}
