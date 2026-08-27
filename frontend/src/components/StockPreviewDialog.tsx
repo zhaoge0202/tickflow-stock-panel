@@ -231,8 +231,12 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
     return () => document.removeEventListener('keydown', handler)
   }, [symbol, go, showMonitorEditor, priceAlertDraft])
 
+  // 弹窗内切股时保留当前视图 (分时 tab 下切股不应跳回日K);
+  // 仅当弹窗首次打开 (symbol 从 null 变非空) 时重置为日K。
+  const prevSymbolRef = useRef<string | null>(symbol)
   useEffect(() => {
-    if (symbol) setView('daily')
+    if (prevSymbolRef.current == null && symbol != null) setView('daily')
+    prevSymbolRef.current = symbol
     setPriceAlertDraft(null)
   }, [symbol])
 
@@ -307,7 +311,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
             className={cn(
               'relative rounded-card border border-border bg-base shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-smooth',
-              maximized ? 'w-screen h-screen max-w-none max-h-none' : 'w-[92vw] max-w-[1100px] max-h-[95vh]',
+              maximized ? 'w-screen h-screen max-w-none max-h-none' : 'w-[92vw] max-w-[1200px] max-h-[95vh]',
             )}
           >
             {/* 顶栏 */}

@@ -190,10 +190,11 @@ export function StockPanel({
 
       {infoBarOnly ? null : (
       <div className="flex gap-3 items-start">
+        {/* 日K为主视图占更宽 (与分时约 1.4:1): 图表自带信息栏(悬停含「至今/周期」)需要更宽才能单行容纳 */}
         <StockDailyKChart
           symbol={symbol}
           height={height}
-          className="flex-1 min-w-0"
+          className="flex-[1.4] min-w-0"
           dateRange={dateRange}
           markers={markers}
           ranges={ranges}
