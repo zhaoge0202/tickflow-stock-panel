@@ -966,14 +966,17 @@ export function EChartsCandlestick({
   }, [data, stockInfo, showMA, activeIndicators])
   getInfoBarHTMLRef.current = getInfoBarHTML
 
-  // data 变化时重置 infoIdx
+  // data/symbol 变化时重置 infoIdx:
+  // symbol(_symbol) 进依赖是必要的——预取切股到同长度邻股时 data.length 不变,
+  // 但悬停上下文来自上一只股票, 必须清掉 hoverActiveRef 以免「至今/周期」残留显示。
+  // (同一股的实时刷新 symbol 不变, 不触发, 悬停位置与「至今」保持实时)
   useEffect(() => {
     infoIdxRef.current = data.length - 1
     compactRef.current = false
     userZoomRef.current = null
     // 新数据无悬停上下文, 隐藏「至今」; 下次鼠标移动时由 updateAxisPointer 重新置位
     hoverActiveRef.current = false
-  }, [data.length])
+  }, [_symbol, data.length])
 
   // ===== 初始化 chart (只在 chartHeight 变化时重建) =====
   useEffect(() => {
