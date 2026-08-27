@@ -224,7 +224,12 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
         const t = e.target as HTMLElement | null
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
         if (showMonitorEditor) return
-        if (go(e.key === 'ArrowRight' ? 1 : -1)) e.preventDefault()
+        if (go(e.key === 'ArrowRight' ? 1 : -1)) {
+          e.preventDefault()
+          // 切股后清掉控件残留的键盘焦点: 点过分时tab/外链等控件后方向键切股,
+          // 浏览器会给该控件显示 focus-visible 默认蓝色 outline, 切换后 blur 掉避免残留
+          ;(document.activeElement as HTMLElement | null)?.blur()
+        }
       }
     }
     document.addEventListener('keydown', handler)
