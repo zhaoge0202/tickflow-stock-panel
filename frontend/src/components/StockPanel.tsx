@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
-import { klineDailyQueryOptions, klineMinuteQueryOptions, klineMinuteRangeQueryOptions } from '@/lib/kline'
+import { klineDailyQueryOptions, klineMinuteQueryOptions, klineMinuteRangeQueryOptions, DEFAULT_INTRADAY_DAYS } from '@/lib/kline'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, toOHLC } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
@@ -46,6 +46,8 @@ interface Props {
   prefetchSymbols?: string[]
   /** 多日分时周期 (分时 tab 使用): 预取邻股 klineMinuteRange 时用同一 days, 保证 queryKey 命中 */
   intradayDays?: number
+  /** 日K/分时并排时日K图占宽 (默认 1:1; 弹窗内图表信息栏较宽需更多空间时传 flex-[1.4] 之类) */
+  dailyKlineFlex?: string
 }
 
 export { getDefaultRange }
@@ -71,7 +73,8 @@ export function StockPanel({
   refetchIntervalMs,
   infoBarOnly = false,
   prefetchSymbols,
-  intradayDays = 10,
+  intradayDays = DEFAULT_INTRADAY_DAYS,
+  dailyKlineFlex = 'flex-1',
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -196,11 +199,10 @@ export function StockPanel({
 
       {infoBarOnly ? null : (
       <div className="flex gap-3 items-start">
-        {/* 日K为主视图占更宽 (与分时约 1.4:1): 图表自带信息栏(悬停含「至今/周期」)需要更宽才能单行容纳 */}
         <StockDailyKChart
           symbol={symbol}
           height={height}
-          className="flex-[1.4] min-w-0"
+          className={`${dailyKlineFlex} min-w-0`}
           dateRange={dateRange}
           markers={markers}
           ranges={ranges}

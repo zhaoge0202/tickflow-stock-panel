@@ -18,6 +18,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
+import { DEFAULT_INTRADAY_DAYS } from '@/lib/kline'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
 interface Props {
@@ -79,11 +80,12 @@ interface PriceAlertDraft {
 }
 const INTRADAY_DAY_OPTIONS = [1, 5, 10, 20] as const
 
-function loadIntradayDays(): number | null {
-  const saved = storage.stockPreviewIntradayDays.get(10)
+function loadIntradayDays(): number {
+  const saved = storage.stockPreviewIntradayDays.get(DEFAULT_INTRADAY_DAYS)
   return INTRADAY_DAY_OPTIONS.includes(saved as typeof INTRADAY_DAY_OPTIONS[number])
     ? saved
-    : null
+    : DEFAULT_INTRADAY_DAYS
+}
 }
 
 function boardTag(symbol: string): { label: string; color: string } | null {
@@ -227,8 +229,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
         if (go(e.key === 'ArrowRight' ? 1 : -1)) {
           e.preventDefault()
           // 切股后清掉控件残留的键盘焦点: 点过分时tab/外链等控件后方向键切股,
-          // 浏览器会给该控件显示 focus-visible 默认蓝色 outline, 切换后 blur 掉避免残留
-          ;(document.activeElement as HTMLElement | null)?.blur()
+          // 浏览器会给该控件显示 focus-visible 默认蓝色 outline, 切换后 blur 掉避免残留。
+          // keydown 的 e.target 即聚焦元素, 复用已捕获的 t (已排除输入框/编辑器)。
+          t?.blur()
         }
       }
     }
@@ -238,7 +241,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
 
   // 弹窗内切股时保留当前视图 (分时 tab 下切股不应跳回日K);
   // 仅当弹窗首次打开 (symbol 从 null 变非空) 时重置为日K。
-  const prevSymbolRef = useRef<string | null>(symbol)
+  const prevSymbolRef = useRef<string | null>(null)
   useEffect(() => {
     if (prevSymbolRef.current == null && symbol != null) setView('daily')
     prevSymbolRef.current = symbol
@@ -612,6 +615,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   refetchIntervalMs={intradayRefetchMs}
                   prefetchSymbols={prefetchSymbols}
                   intradayDays={intradayDays}
+                  dailyKlineFlex="flex-[1.4]"
                 />
               ) : (
                 <>

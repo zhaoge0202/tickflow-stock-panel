@@ -31,8 +31,6 @@ export function StockMultiDayIntradayChart({
   const history = useQuery({
     ...klineMinuteRangeQueryOptions(symbol, days),
     enabled: !!symbol,
-    placeholderData: (previous, previousQuery) =>
-      previousQuery?.queryKey[1] === symbol ? previous : undefined,
   })
   const latest = useQuery({
     // live: 当日盘中直接实时拉取, 不被分钟增量落盘的本地分区(≥60s一轮)拖慢

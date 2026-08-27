@@ -10,6 +10,9 @@
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
+/** 分时 tab 多日分时默认周期 (StockPanel 预取与弹窗存储回退共用, 避免魔数两处漂移) */
+export const DEFAULT_INTRADAY_DAYS = 10
+
 export function klineDailyQueryOptions(
   symbol: string,
   dateRange: { start: string; end: string },
@@ -39,10 +42,16 @@ export function klineMinuteQueryOptions(symbol: string, date?: string, live?: bo
   }
 }
 
-/** 多日分时查询配置 — 分时 tab 的 StockMultiDayIntradayChart 与 邻近预取 共用。 */
+/** 多日分时查询配置 — 分时 tab 的 StockMultiDayIntradayChart 与 邻近预取 共用。
+ * 内嵌「仅同 symbol 占位」守卫 (key 结构 ['kline-minute-range', symbol, days], index 1 为 symbol),
+ * 与 klineDailyQueryOptions 同源, 调用点不再各自手写。 */
 export function klineMinuteRangeQueryOptions(symbol: string, days: number) {
   return {
     queryKey: QK.klineMinuteRange(symbol, days),
     queryFn: () => api.klineMinuteRange(symbol, days),
+    placeholderData: (prev: any, prevQuery: any) => {
+      const prevKey = prevQuery?.queryKey as readonly unknown[] | undefined
+      return prevKey?.[1] === symbol ? prev : undefined
+    },
   }
 }
