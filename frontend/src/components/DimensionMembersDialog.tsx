@@ -13,6 +13,7 @@ import {
 import { Activity, Building2, ChevronRight, Database, RefreshCw, Search, Tags, Users, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { boardTag } from '@/components/stock-table/primitives'
+import { toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import { api, type DimensionIntradayPoint, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
@@ -39,7 +40,7 @@ export function dimensionKindForSourceField(sourceField: string): DimensionKind 
 interface Props {
   target: DimensionMembersTarget | null
   onClose: () => void
-  onStockClick?: (symbol: string, name?: string) => void
+  onStockClick?: (symbol: string, name?: string, navList?: NavItem[]) => void
 }
 
 interface ResolvedSource {
@@ -279,7 +280,7 @@ function DimensionMembersDialogContent({ target, onClose, onStockClick }: Omit<P
                       key={virtualRow.key}
                       ref={rowVirtualizer.measureElement}
                       data-index={virtualRow.index}
-                      onClick={() => onStockClick?.(row.symbol, row.name)}
+                      onClick={() => onStockClick?.(row.symbol, row.name, toNavItems(visibleRows))}
                       disabled={!onStockClick}
                       className="absolute left-0 top-0 grid min-h-[54px] w-full grid-cols-[minmax(132px,1fr)_74px_74px_18px] items-center border-b border-border/60 px-4 text-left text-xs transition-colors hover:bg-elevated/50 disabled:cursor-default md:grid-cols-[minmax(180px,1fr)_90px_84px_88px_100px_18px]"
                       style={{ transform: `translateY(${virtualRow.start}px)` }}
