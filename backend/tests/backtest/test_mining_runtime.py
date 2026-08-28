@@ -349,7 +349,7 @@ def _upsert_regime(tmp_path, labels, states: list[str]) -> None:
 def test_validate_regime_availability_fails_fast_when_regime_data_missing(
     tmp_path,
 ) -> None:
-    labels, panel = _regime_panel()
+    _labels, panel = _regime_panel()
     request = SimpleNamespace(
         mining_request=SimpleNamespace(validation=_small_validation()),
     )
