@@ -302,6 +302,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
   const [keyFor, setKeyFor] = useState<string | null>(null)
   const [keyInput, setKeyInput] = useState('')
   const [keyError, setKeyError] = useState<string | null>(null)
+  const [keySaved, setKeySaved] = useState<string | null>(null)
 
   const builtin = sources.data?.builtin ?? []
   const plugins = sources.data?.plugins ?? []
@@ -358,6 +359,10 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
   const keyPlugin = keyFor
     ? (plugins.find(p => p.name === keyFor) ?? (keyFor === 'tickflow' ? TICKFLOW_KEY_META : undefined))
     : undefined
+  // 已配置态徽标: tickflow 看 settings.mode (free/api_key 均为已配 Key), fuyao 看插件 api_key_masked
+  const settings = useSettings()
+  const tfConfigured = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
+  const fuyaoConfigured = !!plugins.find(p => p.name === 'fuyao')?.api_key_masked
   const saveKey = useMutation<any, Error, string>({
     mutationFn: (name: string) => (name === 'tickflow'
       ? api.saveTickflowKey(keyInput.trim())
@@ -365,19 +370,37 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     onSuccess: (data: any, name) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.capabilityMatrix })
       if (data.ok) {
         setKeyFor(null)
         setKeyInput('')
         setKeyError(null)
-        if (name !== 'tickflow' && data.plugin_available) {
+        if (name === 'tickflow') {
+          setKeySaved(`TickFlow Key 已保存${data.tier_label ? `,当前档位:${data.tier_label}` : ''}`)
+        } else if (name === 'fuyao') {
+          // fuyao 定位为增强源: 仅实时行情 + 除权因子路由过去, 其余数据集保持 TickFlow
+          routeFuyaoEnhanced.mutate()
+          setKeySaved('fuyao Key 已保存:实时行情与除权因子已切换到 fuyao,其余数据集保持 TickFlow')
+        } else if (data.plugin_available) {
           setPicked(name)
           switchProvider.mutate(name)
+          setKeySaved('Key 已保存,已选用该数据源')
         }
+        setTimeout(() => setKeySaved(null), 6000)
       } else {
         setKeyError(data.error || (data.reason === 'invalid' ? 'Key 验证失败,请检查后重试' : '保存失败,请重试'))
       }
     },
     onError: (e: Error) => setKeyError(`保存失败: ${e.message}`),
+  })
+
+  // fuyao 增强路由: 只切实时行情 + 除权因子两个字段 (updateDataProviders 部分更新, 其余不动)
+  const routeFuyaoEnhanced = useMutation({
+    mutationFn: () => api.updateDataProviders({
+      realtime_data_provider: 'fuyao',
+      adj_factor_provider: 'fuyao',
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
   return (
@@ -488,16 +511,37 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
-      {/* TickFlow Key 入口: 不改变数据源选择, 仅解锁更高档位 */}
-      {!keyFor && (
-        <button
-          type="button"
-          onClick={() => { setKeyFor('tickflow'); setKeyInput(''); setKeyError(null) }}
-          className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-muted hover:text-accent transition-colors"
-        >
-          <KeyRound className="h-3 w-3" />
-          为 TickFlow 填写 API Key(可选, 解锁更高数据档位)
-        </button>
+      {/* API Key 配置入口: TickFlow(档位解锁) + fuyao(实时/除权增强路由) */}
+      {!keyFor && !keySaved && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px]">
+          <span className="text-muted">配置 API Key:</span>
+          <button
+            type="button"
+            onClick={() => { setKeyFor('tickflow'); setKeyInput(''); setKeyError(null) }}
+            className="inline-flex items-center gap-1 rounded-btn border border-border/60 bg-elevated/20 px-2 py-1 text-secondary hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            <KeyRound className="h-3 w-3" />
+            TickFlow
+            <span className="text-muted/70">{tfConfigured ? '·已配置' : '(可选,解锁档位)'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setKeyFor('fuyao'); setKeyInput(''); setKeyError(null) }}
+            className="inline-flex items-center gap-1 rounded-btn border border-border/60 bg-elevated/20 px-2 py-1 text-secondary hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            <KeyRound className="h-3 w-3" />
+            fuyao
+            <span className="text-muted/70">{fuyaoConfigured ? '·已配置' : '(实时行情/除权因子增强)'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* Key 保存成功横幅 (含路由变化说明) */}
+      {keySaved && !keyFor && (
+        <div className="mt-2.5 flex items-center gap-1.5 rounded-btn border border-bull/25 bg-bull/[0.06] px-3 py-2 text-[11px] text-secondary">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull" />
+          {keySaved}
+        </div>
       )}
 
       {/* 插件化提示: 标识数据源体系已插件化, 并给出两条接入路径与文档指引 */}
@@ -551,7 +595,9 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                     {' '}申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后将自动选用该数据源。
                   </>
                 ) : (
-                  '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
+                  keyFor === 'fuyao'
+                  ? '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。'
+                  : '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
                 )}
               </>
             )}
