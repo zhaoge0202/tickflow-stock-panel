@@ -1,5 +1,6 @@
 // capability 内部名 → 用户能理解的中文标签
 import { useNavigate } from 'react-router-dom'
+import type { CapabilityMatrix, CapabilityRoute } from './api'
 
 export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'quote.by_symbol':         { name: '自选股实时监控', hint: 'Free 可按标的查询实时行情,用于少量自选股监控' },
@@ -57,6 +58,30 @@ export function MissingCapChip({ capKey, label, to = '/settings?tab=data-sources
     </button>
   )
 }
+
+// ===== 能力路由门控 (各页统一判定) =====
+// usable = 生效源当前能否提供该能力 (区别于 TickFlow 套餐视角):
+// 路由到可用插件/自定义源时同样可用; 路由到 TickFlow 但档位不足时不可用。
+// 矩阵未加载时返回 undefined, 调用方回退 TickFlow 套餐视角, 避免首屏闪烁。
+// 数据来自 useCapabilityMatrix (设置页与其他页面共享同一缓存)。
+
+export type RouteCapId = 'realtime' | 'daily' | 'minute' | 'adj_factor' | 'financial'
+
+export function routeCap(matrix: CapabilityMatrix | undefined, id: RouteCapId): CapabilityRoute | undefined {
+  return matrix?.capabilities.find(c => c.id === id)
+}
+
+export function routeCapUsable(matrix: CapabilityMatrix | undefined, id: RouteCapId): boolean | undefined {
+  return routeCap(matrix, id)?.usable
+}
+
+/** 生效源非 TickFlow 且当前可用时返回其展示名 (卡片徽章显示实际数据源), 否则 null */
+export function routeProviderDisplay(matrix: CapabilityMatrix | undefined, id: RouteCapId): string | null {
+  const cap = routeCap(matrix, id)
+  return cap && cap.usable && cap.effective !== 'tickflow' ? cap.effective_display : null
+}
+
+// ===== TickFlow 档位 (仅 TickFlow 专属界面) =====
 
 // 套餐等级 —— 仅用于 TickFlow 专属界面 (Key 配置 / 端点测速 / 引导页 tickflow 分支)。
 // 通用功能门槛一律用能力键 (capName/needCapText/MissingCapChip), 不用档位词。

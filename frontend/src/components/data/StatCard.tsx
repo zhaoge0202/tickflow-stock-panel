@@ -32,6 +32,10 @@ export function Pill({ label, value }: { label: string; value: number | string }
   )
 }
 
+// 卡片能力徽章的输入: TickFlow 套餐限额对象, 或路由门控合并后的布尔可用性
+// (矩阵 usable 合并进 caps 时, 非对象真值表示「经其他数据源可用, 无套餐限额可显」)。
+export type CapLimitValue = { rpm: number | null; batch: number | null; subscribe: number | null } | boolean
+
 function CapBadge({ hasCap, isLocal, missingCapName, capInfo, localSuffix, customProvider }: {
   hasCap: boolean
   isLocal: boolean
@@ -101,7 +105,7 @@ export function StatCard({
   skipped?: boolean
   stagePct?: number
   tierKey?: string
-  capLimits?: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }>
+  capLimits?: Record<string, CapLimitValue>
   customProvider?: string | null
   onSettings?: () => void
   onShowFields?: (table?: string) => void
@@ -123,8 +127,10 @@ export function StatCard({
 
   const meta = tierKey ? CARD_META[tierKey] : undefined
   const isLocal = meta?.capKey === ''
-  const capInfo = meta?.capKey ? capLimits?.[meta.capKey] : undefined
-  const hasCap = isLocal || !!capInfo
+  // 布尔值 (路由门控合并) 只表达可用性; 限额信息仅当值为套餐对象时展示
+  const rawCap = meta?.capKey ? capLimits?.[meta.capKey] : undefined
+  const capInfo = rawCap && typeof rawCap === 'object' ? rawCap : undefined
+  const hasCap = isLocal || !!rawCap
 
   // 渲染字段说明入口图标
   // - fieldTabs 提供时: 返回 null (图标由 renderSubLabelInline 内联到文字后)

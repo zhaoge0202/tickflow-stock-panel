@@ -1378,7 +1378,51 @@ export interface PluginDataSourceItem {
   status: string           // 可用性原因 (供 UI 显示)
   description: string
   install_hint: string     // 未装依赖时显示的安装命令
+  homepage?: string        // 插件官网/申请地址 (manifest 可选声明)
   api_key_env?: string     // 声明后设置页提供 Key 输入框 (先探后存)
+  api_key_masked?: string  // 当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底; 与 TickFlow Key 同一展示契约)
+}
+
+/** 数据源路由偏好字段 (每个能力一个, 与后端能力注册表一一对应) */
+export type ProviderField =
+  | 'daily_data_provider'
+  | 'adj_factor_provider'
+  | 'minute_data_provider'
+  | 'depth5_data_provider'
+  | 'realtime_data_provider'
+  | 'financial_data_provider'
+
+/** 能力路由矩阵中的一个候选源 (candidates 只含当前确实可提供该能力的源) */
+export interface CapabilityCandidate {
+  name: string
+  display: string
+  kind: 'builtin' | 'plugin' | 'custom'
+  available: boolean
+  status: string
+  note?: string | null
+}
+
+/** 一个能力 (标准化数据集) 的路由视图 */
+export interface CapabilityRoute {
+  id: string
+  label: string
+  desc: string
+  field: ProviderField
+  default: string
+  tf_tier: string                                  // TickFlow 所需最低订阅档位
+  tf_available: boolean                            // 当前 TickFlow 档位是否提供该能力
+  usable: boolean                                  // 生效源当前能否真正提供 (各页能力门控的统一判定)
+  current: string                                  // 原始偏好值
+  current_display: string
+  effective: string                                // 当前生效源 (独立路由, current 即生效)
+  effective_display: string
+  candidates: CapabilityCandidate[]                // 当前可用候选 (按当前 TickFlow 档位过滤)
+  pending: CapabilityCandidate[]                   // 声明了该能力但未就绪的源 (置灰提示)
+}
+
+export interface CapabilityMatrix {
+  tickflow_tier?: string                           // TickFlow 当前档位基础名 (none/free/...)
+  capabilities: CapabilityRoute[]
 }
 
 export interface DataSourceLoadError {
@@ -1464,6 +1508,7 @@ export interface Preferences {
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
+  depth5_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
   data_source_job_timeout_s: number
@@ -1587,6 +1632,7 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
+  capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
@@ -1632,8 +1678,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, dataset, symbols, config }),
     }),
-  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
-    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+  updateDataProviders: (cfg: Partial<Pick<Preferences, ProviderField>>) =>
+    request<Pick<Preferences, ProviderField>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),

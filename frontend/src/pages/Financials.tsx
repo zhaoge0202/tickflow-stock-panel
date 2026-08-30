@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { RefreshCw, Download, Lock, Loader2, X, Search, FileText, Database, Clock, CheckCircle2, Hourglass, Lightbulb, ExternalLink, ChartPie } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { useCapabilities } from '@/lib/useSharedQueries'
+import { useCapabilities, useCapabilityMatrix } from '@/lib/useSharedQueries'
+import { routeCapUsable } from '@/lib/capability-labels'
 import { useFinancialStatus, useFinancialSync } from '@/lib/useFinancials'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockFinancialDetail } from '@/components/financials/StockFinancialDetail'
@@ -30,8 +32,12 @@ const TABLE_ICON: Record<string, typeof FileText> = {
 
 export function Financials() {
   const { data: caps } = useCapabilities()
+  const { data: matrix } = useCapabilityMatrix()
   const { data: status, isLoading } = useFinancialStatus()
-  const hasFinancial = caps?.capabilities?.['financial'] != null || status?.available === true
+  // 路由感知门控: 生效源当前能否提供财务数据 (含插件/自定义源);
+  // 矩阵未加载时回退 TickFlow 套餐视角 + 后端可用状态
+  const hasFinancial = routeCapUsable(matrix, 'financial')
+    ?? (caps?.capabilities?.['financial'] != null || status?.available === true)
   const syncMut = useFinancialSync()
   // 同步进行中 = 服务端真值(status.syncing)或本地乐观态(请求已发出待确认)。
   // 乐观窗口:点击后到 invalidate 触发的 refetch 返回之间,status.syncing 暂为 false,
@@ -72,6 +78,12 @@ export function Financials() {
             <p className="mt-2 text-xs leading-relaxed text-secondary">
               当前数据源未提供财务数据。配置提供财务数据的数据源后,此页自动显示财务数据面板。
             </p>
+            <Link
+              to="/settings?tab=data-sources"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-btn bg-accent/90 px-3.5 py-1.5 text-xs font-medium text-base hover:bg-accent transition-colors"
+            >
+              前往数据源配置
+            </Link>
             {/* 当前财务数据源(TickFlow)需付费,后续将接入免费数据源;期间欢迎在 issues 推荐免费源 */}
             <div className="mt-5 rounded-btn border border-accent/25 bg-accent/[0.05] px-3.5 py-3 text-left">
               <div className="flex items-center gap-1.5 text-xs font-medium text-accent">
@@ -274,7 +286,7 @@ export function Financials() {
           <div className="rounded-card border border-dashed border-border bg-surface px-6 py-14 text-center">
             <Database className="mx-auto h-8 w-8 text-muted" />
             <div className="mt-3 text-sm text-secondary">暂无财务数据</div>
-            <div className="mt-1 text-xs text-muted">点击右上角"全部同步"从 TickFlow 拉取</div>
+            <div className="mt-1 text-xs text-muted">点击右上角"全部同步"从当前数据源拉取</div>
           </div>
         ) : (
           <>
