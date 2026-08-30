@@ -12,7 +12,6 @@ import {
   LineChart,
   ScanSearch,
   Flame,
-  Zap,
   Radar,
   ShieldCheck,
   BellRing,
@@ -23,18 +22,18 @@ import {
   Plus,
   Puzzle,
   KeyRound,
+  Route,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { useCapabilities, usePreferences, useSettings } from '@/lib/useSharedQueries'
+import { usePreferences, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
-import { CAP_LABELS } from '@/lib/capability-labels'
 import { Logo } from '@/components/Logo'
 import { DataSourceEditor } from '@/pages/settings/DataSourceEditor'
 
 // ===== 引导页:5 步向导 =====
-// 0. 声明  1. 欢迎  2. 输入 Key(可跳过)  3. 能力探测结果  4. 完成 → 写标记 → 进面板
+// 0. 声明  1. 欢迎  2. 数据源与 Key  3. 能力路由检测  4. 完成 → 写标记 → 进面板
 
-const STEPS = ['声明', '欢迎', '数据源', '能力探测', '完成'] as const
+const STEPS = ['声明', '欢迎', '数据源', '能力路由', '完成'] as const
 
 const BRAND = '#8B5CF6'
 
@@ -643,149 +642,96 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
   )
 }
 
-// ===== Step 3: 能力探测结果 =====
-// 按当前实际选中的数据源分流:
-// - TickFlow: 提示第三方源性质 + 可配 Key、按 Key 匹配档位, 展示档位与能力探测
-// - 其他源: 弱化 TickFlow (不展示其档位/能力), 只汇总所选源的数据集覆盖与回落规则
+// ===== Step 3: 能力路由检测结果 =====
+// 以能力路由矩阵呈现: 每个标准化数据集一行, 展示当前生效源与可用性,
+// 不再以 TickFlow 档位为中心 —— 多源下各数据集独立路由, 矩阵即真相。
 
 function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const settings = useSettings()
-  const caps = useCapabilities()
   const prefs = usePreferences()
-  const sources = useQuery({
-    queryKey: QK.dataSources,
-    queryFn: api.dataSources,
-    staleTime: 60_000,
+  const matrix = useQuery({
+    queryKey: QK.capabilityMatrix,
+    queryFn: api.capabilityMatrix,
+    staleTime: 30_000,
   })
 
   const activeName = prefs.data?.daily_data_provider || 'tickflow'
   const isTickflow = activeName === 'tickflow'
-  const sourceItem = [
-    ...(sources.data?.builtin ?? []),
-    ...(sources.data?.plugins ?? []),
-    ...(sources.data?.custom ?? []),
-  ].find(s => s.name === activeName)
-
+  const routes = matrix.data?.capabilities ?? []
   // 是否配置成功 —— 免费档(free)或付费档(api_key)都算;None 档算未配置
   const hasKey = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
-  const capList = caps.data ? Object.entries(caps.data.capabilities) : []
+  const usableCount = routes.filter(r => r.usable).length
 
   return (
     <div>
       <div className="flex items-center gap-2.5">
         <div className="rounded-lg bg-accent/10 p-2">
-          <ScanSearch className="h-4 w-4 text-accent" />
+          <Route className="h-4 w-4 text-accent" />
         </div>
-        <h2 className="text-xl font-bold text-foreground">能力探测结果</h2>
+        <h2 className="text-xl font-bold text-foreground">能力路由检测</h2>
       </div>
+      <p className="mt-2.5 text-sm text-secondary leading-relaxed">
+        每个标准化数据集独立路由:下方是当前生效源与实际可用性,随时可在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>
+        按数据集改选候选源。
+      </p>
 
-      {prefs.isLoading ? (
+      {matrix.isLoading ? (
         <div className="mt-5 flex items-center gap-2 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          正在读取当前数据源…
+          正在检测能力路由…
         </div>
-      ) : isTickflow ? (
+      ) : routes.length === 0 ? (
+        <div className="mt-5 rounded-card border border-border bg-surface/80 p-5 text-center text-xs text-muted">
+          暂未获取到能力路由矩阵,可稍后在 设置 → 数据源 中重新检测。
+        </div>
+      ) : (
         <>
-          {/* TickFlow 源说明: 点明第三方性质 + Key/档位关系 */}
-          <div className="mt-4 flex items-start gap-2.5 rounded-card border border-border/60 bg-surface/60 px-3.5 py-3">
-            <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
-            <div className="text-[11px] leading-relaxed text-muted">
-              <span className="text-secondary">当前选择了 TickFlow 第三方数据源</span>
-              。实时行情、监控等能力与订阅档位由 TickFlow Key 决定:可在
-              <span className="text-foreground font-medium"> 设置 → 账户 </span>
-              配置 Key,系统会根据 Key 自动匹配档位;未配置 Key 时按 None 档运行,仅保留内置历史数据能力。
-            </div>
-          </div>
-
-          {hasKey ? (
-            <>
-              <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-                Key 已生效,以下是你当前可用的全部能力。后续可在
-                <span className="text-foreground font-medium"> 设置 → 账户 </span>
-                中重新检测或更换 Key。
-              </p>
-
-              <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
-                <div className="flex items-baseline justify-between">
-                  <span className="text-[10px] uppercase tracking-widest text-muted">订阅档位</span>
-                  <span className="font-mono text-2xl font-bold tracking-tight text-foreground">
-                    {caps.data?.label ?? settings.data?.tier_label ?? '—'}
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {routes.map(r => (
+              <div
+                key={r.id}
+                className={`rounded-card border px-3.5 py-2.5 ${
+                  r.usable ? 'border-border/60 bg-elevated/20' : 'border-warning/25 bg-warning/[0.03]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {r.usable ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bear" />
+                  ) : (
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
+                  )}
+                  <span className="text-sm font-medium text-foreground">{r.label}</span>
+                  <span className="ml-auto shrink-0 text-[10px] font-medium text-secondary">
+                    {r.usable ? '可用' : '不可用'}
                   </span>
                 </div>
-
-                {caps.isLoading ? (
-                  <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    正在探测能力…
+                <div className="mt-1 flex items-center gap-1.5 pl-5 text-[10px] text-muted">
+                  <span className="truncate">生效源:{r.effective_display}</span>
+                  <span className="shrink-0 text-muted/50">·</span>
+                  <span className="shrink-0">{r.desc}</span>
+                </div>
+                {!r.usable && (
+                  <div className="mt-1 pl-5 text-[10px] text-warning/80 leading-relaxed">
+                    {r.candidates.length > 0
+                      ? `可切换候选:${r.candidates.map(c => c.display).join(' / ')}`
+                      : isTickflow && !hasKey
+                        ? '配置 TickFlow Key 后可解锁'
+                        : '暂无可用候选,可在设置中排查该源'}
                   </div>
-                ) : capList.length > 0 ? (
-                  <div className="mt-4 grid grid-cols-1 gap-1.5">
-                    {capList.slice(0, 8).map(([cap]) => {
-                      const meta = CAP_LABELS[cap]
-                      return (
-                        <div key={cap} className="flex items-center gap-2 text-xs">
-                          <CheckCircle2 className="h-3.5 w-3.5 text-bear shrink-0" />
-                          <span className="text-foreground">{meta?.name ?? cap}</span>
-                        </div>
-                      )
-                    })}
-                    {capList.length > 8 && (
-                      <div className="text-[11px] text-muted pl-5">…等共 {capList.length} 项</div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="mt-4 text-xs text-muted">暂未探测到能力</div>
                 )}
               </div>
-            </>
-          ) : (
-            <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-6 text-center">
-              <div className="mx-auto w-fit rounded-xl bg-elevated p-3">
-                <Zap className="h-6 w-6 text-warning" />
-              </div>
-              <div className="mt-3 text-sm font-medium text-foreground">将以 None 档继续</div>
-              <p className="mt-2 text-xs text-muted leading-relaxed max-w-sm mx-auto">
-                当前未配置有效 Key,仍可使用看板、选股、回测等功能 —— 进入看板后可直接获取近 1 年历史日K数据。配置 Key 后可解锁实时行情监控等能力,随时在
-                <span className="text-foreground font-medium"> 设置 → 账户 </span>填写。
-              </p>
-            </div>
-          )}
-        </>
-      ) : (
-        /* 其他数据源: 不展示 TickFlow 档位/能力探测, 汇总所选源的数据集覆盖 */
-        <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[10px] uppercase tracking-widest text-muted">当前数据源</span>
-            <span className="flex min-w-0 items-baseline gap-1.5">
-              <span className="truncate text-lg font-bold text-foreground">
-                {(sourceItem?.display_name ?? activeName).replace(/（.*?）|\(.*?\)/g, '').trim() || sourceItem?.display_name || activeName}
-              </span>
-              <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">
-                {sources.data?.custom?.some(s => s.name === activeName) ? '自有' : '第三方'}
-              </span>
+            ))}
+          </div>
+
+          <div className="mt-3 flex items-center justify-between rounded-btn bg-elevated/50 px-3.5 py-2 text-[11px] text-muted">
+            <span>
+              {usableCount}/{routes.length} 个数据集可用
+              {isTickflow && !hasKey && ' · 未配置 TickFlow Key,按 None 档运行,历史日K不受影响'}
             </span>
+            <LinkMark />
           </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-1">
-            {(sourceItem?.datasets?.length ?? 0) > 0 ? (
-              sourceItem!.datasets.map(ds => (
-                <span key={ds} className="rounded bg-elevated/60 px-1.5 py-0.5 text-[10px] text-secondary">
-                  {DATASET_LABELS[ds] ?? ds}
-                </span>
-              ))
-            ) : (
-              <span className="text-[10px] text-muted">未声明数据集</span>
-            )}
-          </div>
-          <p className="mt-2.5 text-xs text-muted leading-relaxed">
-            行情能力由所选数据源决定:以上数据集由该源提供,未覆盖的数据集自动回落内置源,无需额外配置。
-          </p>
-
-          <div className="mt-3 border-t border-border/60 pt-2.5 text-[11px] leading-relaxed text-muted">
-            TickFlow 的 Key 与档位探测仅在选择 TickFlow 作为数据源时展示;如需切换,前往
-            <span className="text-foreground font-medium"> 设置 → 数据源 </span>。
-          </div>
-        </div>
+        </>
       )}
 
       {/* 底部操作 */}
@@ -807,6 +753,11 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
       </div>
     </div>
   )
+}
+
+/** 指向设置数据源的行内提示 (能力路由可随时调整) */
+function LinkMark() {
+  return <span className="shrink-0">调整: 设置 → 数据源</span>
 }
 
 // ===== Step 4: 完成 =====
