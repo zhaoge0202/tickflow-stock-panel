@@ -319,6 +319,8 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
+  /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
+  timeframes?: string[]
 }
 
 export interface StrategyLoadError {
@@ -1457,6 +1459,8 @@ export interface Preferences {
   minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
+  minute_refresh_enabled: boolean
+  minute_refresh_interval: number
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
@@ -1644,15 +1648,38 @@ export const api = {
         }),
       },
     ),
-  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number, refresh?: { enabled?: boolean; interval?: number }) =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
       body: JSON.stringify({
         minute_sync_enabled: enabled,
         minute_sync_days: days,
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
+        ...(refresh?.enabled != null ? { minute_refresh_enabled: refresh.enabled } : {}),
+        ...(refresh?.interval != null ? { minute_refresh_interval: refresh.interval } : {}),
       }),
     }),
+
+  /** 盘中分钟增量刷新服务状态 (Expert 专有) */
+  minuteRefreshStatus: () =>
+    request<{
+      available: boolean
+      enabled?: boolean
+      running?: boolean
+      interval_seconds?: number
+      capability_ok?: boolean
+      custom_provider_active?: boolean
+      in_trading_hours?: boolean
+      gate_reason?: string | null
+      rounds?: number
+      last_round_at?: number | null
+      last_round_ms?: number | null
+      last_rows?: number
+      last_symbols?: number
+      last_requests?: number
+      next_round_at?: number | null
+      last_error?: string | null
+    }>('/api/settings/minute-refresh/status'),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{
       pipeline_pull_a_share: boolean
@@ -2091,16 +2118,16 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index') => {
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', timeframe: '1d' | '1m' = '1d') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
+      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=${timeframe}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
-      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType }),
+      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe }),
     }),
   screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run', {

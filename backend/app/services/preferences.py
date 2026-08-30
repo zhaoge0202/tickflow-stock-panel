@@ -214,6 +214,25 @@ def get_minute_sync_segment_days() -> int:
     """
     return max(5, min(30, load().get("minute_sync_segment_days", 20)))
 
+# ===== 盘中分钟增量刷新 (Expert 专有, intraday.batch 独立限流池) =====
+
+# 下限 60s: 保证任何 60s 滑动窗口至多一个全市场脉冲 (28 并发 < 48 安全 rpm)。
+_MINUTE_REFRESH_INTERVAL_MIN = 60
+_MINUTE_REFRESH_INTERVAL_MAX = 300
+
+
+def get_minute_refresh_enabled() -> bool:
+    """盘中分钟K增量落盘开关。默认关闭; 能力门控 (Expert) 在服务层判断。"""
+    return bool(load().get("minute_refresh_enabled", False))
+
+
+def get_minute_refresh_interval() -> int:
+    """盘中分钟增量刷新间隔(秒)。默认 60,范围 [60, 300]。"""
+    return max(
+        _MINUTE_REFRESH_INTERVAL_MIN,
+        min(_MINUTE_REFRESH_INTERVAL_MAX, int(load().get("minute_refresh_interval", 60))),
+    )
+
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 

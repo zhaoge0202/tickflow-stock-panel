@@ -828,6 +828,52 @@ def fetch_intraday_monitor_batch(
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
+def fetch_intraday_full_market_burst(
+    symbols: list[str],
+    capset: CapabilitySet | None,
+    *,
+    count: int = 300,
+) -> tuple[pl.DataFrame, int]:
+    """全市场当日分钟K并发脉冲拉取 (盘中增量刷新专用, 不落盘)。
+
+    与 fetch_intraday_monitor_batch 的区别:
+    - 监控路径每轮只拉少量标的 (≤ batch 上限, 单请求);
+      本函数按 batch_size 把全市场切块后用线程池一次全部打出
+      (5546/200 = 28 并发), 配合 >=60s 的固定轮节奏, 任何 60s
+      滑动窗口至多一个脉冲 (28 < 48 安全 rpm), 轮内失败不重试。
+
+    限流口径: 只用 intraday.batch 独立池 (Cap.INTRADAY_BATCH, Expert 专有),
+    不与 kline.minute.batch (盘后分钟同步) 共享配额。
+    返回 (当日全市场分钟K, 请求数)。
+    """
+    if not symbols:
+        return (pl.DataFrame(), 0)
+    limits = capset.limits(Cap.INTRADAY_BATCH) if capset and capset.has(Cap.INTRADAY_BATCH) else None
+    batch_size = max(1, int(limits.batch) if limits and limits.batch else 200)
+    chunks = list(chunked(symbols, batch_size))
+    if not chunks:
+        return (pl.DataFrame(), 0)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    tf = get_client()
+
+    def _fetch(chunk: list[str]) -> list[pl.DataFrame]:
+        raw = tf.klines.intraday_batch(
+            chunk, count=count, as_dataframe=True, show_progress=False,
+            batch_size=len(chunk),
+        )
+        return _normalize_intraday_raw(raw)
+
+    frames: list[pl.DataFrame] = []
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 32)) as pool:
+        for result in pool.map(_fetch, chunks):
+            frames.extend(result)
+    if not frames:
+        return (pl.DataFrame(), len(chunks))
+    return (pl.concat(frames, how="diagonal_relaxed"), len(chunks))
+
+
 def fetch_minute_single(
     symbol: str,
     trade_date: date,

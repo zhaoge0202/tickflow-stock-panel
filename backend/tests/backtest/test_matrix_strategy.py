@@ -319,9 +319,13 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
 
-    assert len(strategy_files) == 19
+    # 非 matrix 后端的内置策略白名单 (当前仅分钟形态策略)
+    non_matrix = {"minute_red_streak"}
+    assert len(strategy_files) == 19 + len(non_matrix)
     for strategy_path in strategy_files:
         strategy = StrategyEngine._load_file(strategy_path)
+        if strategy_path.stem in non_matrix:
+            continue
         assert strategy.execution_backend == "matrix_native"
         assert strategy.matrix_strategy is not None
         assert strategy.matrix_strategy.__class__.__module__ == strategy_path.stem
@@ -784,7 +788,10 @@ def test_registered_builtin_matrix_strategies_share_one_cache_profile():
         strategy_dirs=[REPO_ROOT / "backend" / "app" / "strategy" / "builtin"]
     )
     profile = build_matrix_cache_profile(engine, "stock")
-    strategies = engine.strategy_definitions()
+    strategies = tuple(
+        s for s in engine.strategy_definitions()
+        if s.execution_backend != "minute_filter"
+    )
 
     assert len(strategies) == 19
     assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)

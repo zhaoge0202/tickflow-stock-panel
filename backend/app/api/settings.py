@@ -391,6 +391,10 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
+    # 盘中分钟增量刷新 (Expert 专有)。None 表示不修改现有值。
+    minute_refresh_enabled: bool | None = None
+    # 刷新间隔(秒),范围 [60, 300]。None 表示不修改现有值。
+    minute_refresh_interval: int | None = None
 
 
 class DataProvidersIn(BaseModel):
@@ -478,6 +482,8 @@ def get_preferences() -> dict:
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
+        "minute_refresh_enabled": preferences.get_minute_refresh_enabled(),
+        "minute_refresh_interval": preferences.get_minute_refresh_interval(),
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
@@ -833,12 +839,27 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     }
     if req.minute_sync_segment_days is not None:
         updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
+    if req.minute_refresh_enabled is not None:
+        updates["minute_refresh_enabled"] = req.minute_refresh_enabled
+    if req.minute_refresh_interval is not None:
+        updates["minute_refresh_interval"] = max(60, min(300, req.minute_refresh_interval))
     preferences.save(updates)
     return {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
+        "minute_refresh_enabled": preferences.get_minute_refresh_enabled(),
+        "minute_refresh_interval": preferences.get_minute_refresh_interval(),
     }
+
+
+@router.get("/minute-refresh/status")
+def minute_refresh_status(request: Request) -> dict:
+    """盘中分钟增量刷新服务状态 (开关/能力门控/最近一轮/下一轮)。"""
+    svc = getattr(request.app.state, "minute_refresh", None)
+    if svc is None:
+        return {"available": False}
+    return {"available": True, **svc.status()}
 
 
 class RealtimeQuotesPrefs(BaseModel):

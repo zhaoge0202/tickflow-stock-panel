@@ -41,18 +41,23 @@ def test_all_builtin_strategies_declare_asset_types_and_timeframes():
     assert engine.load_errors() == []
     for meta in engine.list_strategies():
         assert meta["asset_types"]
-        assert meta["timeframes"] == ["1d"]
+        # 分钟策略 timeframes 为 ["1m"], 日线内置策略为 ["1d"]
+        assert meta["timeframes"] in (["1d"], ["1m"])
 
 
 def test_all_builtin_strategies_use_matrix_backend_only():
     engine = _engine()
     assert engine.load_errors() == []
     strategies = [engine.get(meta["id"]) for meta in engine.list_strategies()]
-    assert len(strategies) == 18
-    assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
-    assert all(strategy.matrix_strategy is not None for strategy in strategies)
-    assert all(strategy.filter_fn is None for strategy in strategies)
-    assert all(strategy.filter_history_fn is None for strategy in strategies)
+    matrix_strategies = [s for s in strategies if s.execution_backend == "matrix_native"]
+    assert len(matrix_strategies) == 18
+    assert all(s.matrix_strategy is not None for s in matrix_strategies)
+    assert all(s.filter_fn is None for s in matrix_strategies)
+    assert all(s.filter_history_fn is None for s in matrix_strategies)
+    # 分钟形态策略 (minute_filter) 不参与日线矩阵不变量
+    assert [s.meta["id"] for s in strategies if s.execution_backend == "minute_filter"] == [
+        "minute_red_streak"
+    ]
 
 
 def test_all_builtin_matrix_formulas_accept_base_market_matrix():
@@ -79,10 +84,14 @@ def test_all_builtin_matrix_formulas_accept_base_market_matrix():
     from app.backtest.matrix import build_market_data_matrix
 
     fields = set()
-    for strategy in (engine.get(meta["id"]) for meta in engine.list_strategies()):
+    matrix_metas = [
+        m for m in engine.list_strategies()
+        if engine.get(m["id"]).execution_backend == "matrix_native"
+    ]
+    for strategy in (engine.get(meta["id"]) for meta in matrix_metas):
         fields.update(engine._matrix_field_columns(strategy))
     market = build_market_data_matrix(panel, field_columns=fields)
-    for meta in engine.list_strategies():
+    for meta in matrix_metas:
         strategy = engine.get(meta["id"])
         signals = strategy.matrix_strategy.compute_signals(market, {})
         assert signals.shape == market.shape, meta["id"]

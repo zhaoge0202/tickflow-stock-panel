@@ -40,6 +40,8 @@ const SHOW_STRATEGY_STORE = false
 
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
+  // 周期: 日线 (盘后缓存 + runAll) / 分钟 (本地分钟K分区, 单策略实时跑)
+  const [timeframe, setTimeframe] = useState<'1d' | '1m'>('1d')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
@@ -128,27 +130,28 @@ export function Screener() {
   const screenerAutoRun = prefs?.screener_auto_run ?? true
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies('all'),
-    queryFn: () => api.screenerStrategies(),
+    queryKey: [...QK.screenerStrategies('all'), timeframe],
+    queryFn: () => api.screenerStrategies(undefined, timeframe),
   })
 
   // 卡片首屏只读取轻量摘要；明细在点击策略或“全部”时按需加载。
   const summaryQuery = useQuery({
     queryKey: QK.screenerCachedSummary,
     queryFn: api.screenerCachedSummary,
-    enabled: assetType === 'stock',
+    enabled: assetType === 'stock' && timeframe === '1d',
   })
 
   const fullCachedQuery = useQuery({
     queryKey: QK.screenerCached(asOf, extColumnsParam),
     queryFn: () => api.screenerCached(extColumnsParam || undefined),
-    enabled: assetType === 'stock' && showAll,
+    enabled: assetType === 'stock' && timeframe === '1d' && showAll,
   })
 
   const singleCachedQuery = useQuery({
     queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam),
     queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined),
     enabled: assetType === 'stock'
+      && timeframe === '1d'
       && !showAll
       && !!activeStrategy
       && summaryQuery.data?.results[activeStrategy]?.as_of === asOf,
@@ -204,8 +207,10 @@ export function Screener() {
     if (strategies.isError) return        // 拉取失败: 不 prune
     if (!strategies.isSuccess) return     // 加载中: 不 prune
     if (allStrategyIds.size === 0) return  // 空列表: 不 prune
+    // 分钟模式的列表只含分钟策略, prune 会误删池中的日线策略 → 仅日线模式清理
+    if (timeframe !== '1d') return
     prune(allStrategyIds)
-  }, [allStrategyIds, prune, strategies.isError, strategies.isSuccess])
+  }, [allStrategyIds, prune, strategies.isError, strategies.isSuccess, timeframe])
 
   // 策略文件加载失败时提示用户(避免"策略静默消失"被误判为正常)
   const loadErrors = strategies.data?.load_errors ?? []
@@ -445,7 +450,8 @@ export function Screener() {
   // 缓存命中时秒加载; 未命中时, 仅当 screener_auto_run 开启才自动触发 runAll
   useEffect(() => {
     // ETF 模式无股票盘后缓存/ runAll, 单策略走实时单跑, 不触发 runAll
-    if (assetType !== 'stock') return
+    // 分钟模式走本地分钟K分区, 同样不触发 runAll (盘后缓存是日线语义)
+    if (assetType !== 'stock' || timeframe !== '1d') return
     if (!asOf || strategyPresets.length === 0 || !summaryQuery.isSuccess || runAll.isPending || visiblePool.length === 0) return
     const runKey = `${asOf}|${visiblePool.join(',')}`
     if (runAllDateRef.current === runKey) return
@@ -458,11 +464,11 @@ export function Screener() {
     if (!screenerAutoRun) return
     runAllDateRef.current = runKey
     requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
-  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending, requestRunAll])
+  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, timeframe, runAll.isPending, requestRunAll])
 
   const run = useMutation({
     mutationFn: ({ id, date }: { id: string; date: string }) =>
-      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType),
+      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType, timeframe),
     onSuccess: (data, vars) => {
       setResult(data)
       // 同步更新卡片上的命中数
@@ -479,7 +485,7 @@ export function Screener() {
     if (result?.strategy !== s.id || result.as_of !== asOf) setResult(null)
     // ETF 模式: 无股票盘后缓存, 始终实时单跑。
     // 传空日期让后端用 ETF 自己的最新交易日 (asOf 跟随的是股票 enriched, 两者可能不同日)。
-    if (assetType !== 'stock') {
+    if (assetType !== 'stock' || timeframe !== '1d') {
       run.mutate({ id: s.id, date: '' })
       return
     }
@@ -602,19 +608,47 @@ export function Screener() {
         subtitle="基于本地 enriched 表 · 毫秒级 SQL"
         right={
           <div className="flex items-center gap-2">
-            {/* 资产类型切换: 股票 / ETF */}
+            {/* 资产类型切换: 股票 / ETF (分钟策略仅支持股票, 1m 模式下 ETF 置灰) */}
             <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
-              {(['stock', 'etf'] as const).map(t => (
+              {(['stock', 'etf'] as const).map(t => {
+                const disabled = t === 'etf' && timeframe === '1m'
+                return (
+                  <button
+                    key={t}
+                    disabled={disabled}
+                    title={disabled ? '分钟策略仅支持股票' : undefined}
+                    onClick={() => { setAssetType(t); setActiveStrategy(null); setResult(null); setShowAll(false) }}
+                    className={`h-full px-2.5 text-xs font-medium transition-colors
+                      ${disabled
+                        ? 'text-muted/40 cursor-not-allowed'
+                        : 'cursor-pointer ' + (assetType === t
+                          ? 'bg-accent/10 text-accent'
+                          : 'text-muted hover:text-secondary hover:bg-elevated')
+                      }`}
+                  >
+                    {t === 'stock' ? '股票' : 'ETF'}
+                  </button>
+                )
+              })}
+            </div>
+            {/* 周期切换: 日线 (盘后缓存) / 分钟 (本地分钟K分区实时计算) */}
+            <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
+              {(['1d', '1m'] as const).map(tf => (
                 <button
-                  key={t}
-                  onClick={() => { setAssetType(t); setActiveStrategy(null); setResult(null); setShowAll(false) }}
+                  key={tf}
+                  onClick={() => {
+                    if (timeframe === tf) return
+                    setTimeframe(tf)
+                    setActiveStrategy(null); setResult(null); setShowAll(false)
+                    if (tf === '1m') setAssetType('stock')
+                  }}
                   className={`h-full px-2.5 text-xs font-medium transition-colors cursor-pointer
-                    ${assetType === t
+                    ${timeframe === tf
                       ? 'bg-accent/10 text-accent'
                       : 'text-muted hover:text-secondary hover:bg-elevated'
                     }`}
                 >
-                  {t === 'stock' ? '股票' : 'ETF'}
+                  {tf === '1d' ? '日线' : '分钟'}
                 </button>
               ))}
             </div>
@@ -746,6 +780,7 @@ export function Screener() {
                   onSettings={() => setSettingsStrategyId(s.id)}
                   monitored={strategyMonitorMap.has(s.id)}
                   onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
+                  timeframeBadge={s.timeframes?.includes('1m') ? '分钟' : undefined}
                 />
               )
             })}
@@ -1004,6 +1039,7 @@ export function Screener() {
       {showPoolDialog && (
         <StrategyPoolDialog
           pool={pool}
+          timeframe={timeframe}
           onConfirm={(newPool) => {
             reorderPool(newPool)
           }}

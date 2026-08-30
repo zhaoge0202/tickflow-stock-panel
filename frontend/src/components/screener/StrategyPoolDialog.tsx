@@ -8,6 +8,8 @@ interface Props {
   pool: string[]
   onConfirm: (newPool: string[]) => void
   onClose: () => void
+  /** 列表周期: 1d 日线 / 1m 分钟, 与策略页当前周期一致 */
+  timeframe?: '1d' | '1m'
 }
 
 const SOURCE_CLS: Record<string, string> = {
@@ -42,7 +44,7 @@ function fileStem(name: string): string {
   return name.replace(/\.py$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '')
 }
 
-export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
+export function StrategyPoolDialog({ pool, onConfirm, onClose, timeframe = '1d' }: Props) {
   const backdrop = useDialogBackdrop(onClose)
   // 草稿状态: 打开时从 pool 复制, 操作只改草稿, 点确定才提交
   const [draftPool, setDraftPool] = useState<string[]>(() => [...pool])
@@ -57,7 +59,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
-      const d = await api.strategyList()
+      const d = await api.strategyList(undefined, timeframe)
       setAllStrategies(d.strategies)
     } catch {
       setAllStrategies([])

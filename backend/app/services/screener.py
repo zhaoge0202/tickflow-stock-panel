@@ -386,6 +386,19 @@ class ScreenerService:
 
         if current is None:
             current = self._load_enriched_for_date(as_of)
+        if timeframe == "1m":
+            # 分钟策略数据源是本地当日分钟K分区 (单分区文件直读), 与日线
+            # enriched 历史窗口无关, 不走 required_history_bars 日线路径。
+            history = self._load_minute_history(as_of, current)
+            return StrategyDataContext(
+                asset_type=self.asset_type,
+                timeframe=timeframe,
+                as_of=as_of,
+                current=current,
+                history=history,
+                market=None,
+                cache_key=cache_key,
+            )
         history_bars = engine.required_history_bars(
             strategy_ids,
             params_map=params_map,
@@ -403,6 +416,31 @@ class ScreenerService:
             market=market,
             cache_key=cache_key,
         )
+
+    def _load_minute_history(self, as_of: date, current: pl.DataFrame | None) -> pl.DataFrame:
+        """分钟策略数据源: 优先 as_of 当日分钟分区, 缺失时回退全市场最近分区。
+
+        只按日期直读单个分区文件 (get_minute_by_dates), 与全量 glob 扫描解耦,
+        内存只随当日分区大小 (~67万行) 走。标的池限定为 enriched 快照 universe;
+        分区与快照的日期差是允许的 (分钟分区可能比 enriched 更新, 行自带时间戳)。
+        """
+        if self.asset_type != "stock":
+            raise ValueError("分钟策略当前仅支持 A 股")
+        symbols: list[str] = []
+        if current is not None and not current.is_empty():
+            symbols = current["symbol"].cast(pl.Utf8).unique().to_list()
+        if not symbols:
+            return pl.DataFrame()
+        df = self.repo.get_minute_by_dates(symbols, [as_of])
+        if df.is_empty():
+            fallback = self.repo.latest_minute_date_global()
+            if fallback is None:
+                raise ValueError(
+                    "无分钟K数据 — 请先在 数据→分钟K 完成同步, 或开启盘中增量刷新"
+                )
+            if fallback != as_of:
+                df = self.repo.get_minute_by_dates(symbols, [fallback])
+        return df
 
     def latest_date(self) -> date | None:
         if self.asset_type != "stock":
