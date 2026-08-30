@@ -292,11 +292,10 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     staleTime: 60_000,
   })
 
-  // 内联 Key 配置目标 (tickflow = 档位 Key; fuyao = 实时/除权增强路由)
-  const [keyFor, setKeyFor] = useState<string | null>(null)
-  const [keyInput, setKeyInput] = useState('')
-  const [keyError, setKeyError] = useState<string | null>(null)
-  const [keySaved, setKeySaved] = useState<string | null>(null)
+  // 两个常驻 Key 表单 (不收起): 输入/错误/已保存提示按数据源名分槽
+  const [inputs, setInputs] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState<Record<string, string | null>>({})
+  const [savedMsg, setSavedMsg] = useState<Record<string, string | null>>({})
 
   const plugins = sources.data?.plugins ?? []
   const builtin = sources.data?.builtin ?? []
@@ -307,45 +306,41 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     ...custom.map(s => ({ ...s, kind: 'custom' as const })),
   ]
 
-  const TICKFLOW_KEY_META = {
-    name: 'tickflow', display_name: 'TickFlow', api_key_env: 'TICKFLOW_API_KEY',
-    homepage: 'https://tickflow.org/auth/register?ref=V3KDKGXPEA',
-  }
-  const keyPlugin = keyFor
-    ? (plugins.find(p => p.name === keyFor) ?? (keyFor === 'tickflow' ? TICKFLOW_KEY_META : undefined))
-    : undefined
   // 已配置态徽标: tickflow 看 settings.mode (free/api_key 均为已配 Key), fuyao 看插件 api_key_masked
   const tfConfigured = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
   const fuyaoConfigured = !!plugins.find(p => p.name === 'fuyao')?.api_key_masked
 
   // 内联 Key 配置 (先探后存): 验证通过才落盘
-  const saveKey = useMutation<any, Error, string>({
-    mutationFn: (name: string) => (name === 'tickflow'
-      ? api.saveTickflowKey(keyInput.trim())
-      : api.savePluginKey(name, keyInput.trim())),
-    onSuccess: (data: any, name) => {
+  const saveKey = useMutation<any, Error, { name: string; key: string }>({
+    mutationFn: ({ name, key }) => (name === 'tickflow'
+      ? api.saveTickflowKey(key)
+      : api.savePluginKey(name, key)),
+    onSuccess: (data: any, vars) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.capabilities })
       qc.invalidateQueries({ queryKey: QK.capabilityMatrix })
+      const setError = (msg: string | null) => setErrors(s => ({ ...s, [vars.name]: msg }))
+      const setSaved = (msg: string | null) => {
+        setSavedMsg(s => ({ ...s, [vars.name]: msg }))
+        if (msg) setTimeout(() => setSavedMsg(s => ({ ...s, [vars.name]: null })), 6000)
+      }
       if (data.ok) {
-        setKeyFor(null)
-        setKeyInput('')
-        setKeyError(null)
-        if (name === 'tickflow') {
-          setKeySaved(`TickFlow Key 已保存${data.tier_label ? `,当前档位:${data.tier_label}` : ''}`)
-        } else if (name === 'fuyao' && data.plugin_available) {
+        setInputs(s => ({ ...s, [vars.name]: '' }))
+        setError(null)
+        if (vars.name === 'tickflow') {
+          setSaved(`TickFlow Key 已保存${data.tier_label ? `,当前档位:${data.tier_label}` : ''}`)
+        } else if (vars.name === 'fuyao' && data.plugin_available) {
           // fuyao 定位为增强源: 仅实时行情 + 除权因子路由过去, 其余数据集保持 TickFlow
           routeFuyaoEnhanced.mutate()
-          setKeySaved('fuyao Key 已保存:实时行情与除权因子已切换到 fuyao,其余数据集保持 TickFlow')
+          setSaved('fuyao Key 已保存:实时行情与除权因子已切换到 fuyao,其余数据集保持 TickFlow')
         } else if (data.plugin_available) {
-          setKeySaved('Key 已保存,该数据源已就绪(可在设置中启用)')
+          setSaved('Key 已保存,该数据源已就绪')
         }
-        setTimeout(() => setKeySaved(null), 6000)
       } else {
-        setKeyError(data.error || (data.reason === 'invalid' ? 'Key 验证失败,请检查后重试' : '保存失败,请重试'))
+        setError(data.error || (data.reason === 'invalid' ? 'Key 验证失败,请检查后重试' : '保存失败,请重试'))
       }
     },
-    onError: (e: Error) => setKeyError(`保存失败: ${e.message}`),
+    onError: (e: Error, vars) => setErrors(s => ({ ...s, [vars.name]: `保存失败: ${e.message}` })),
   })
 
   // fuyao 增强路由: 只切实时行情 + 除权因子两个字段 (updateDataProviders 部分更新, 其余不动)
@@ -356,6 +351,18 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
+
+  // 常驻展开的两个 Key 表单元数据 (卡片只读, Key 是向导里唯一可操作项)
+  const keyForms = [
+    {
+      name: 'tickflow', display: 'TickFlow', env: 'TICKFLOW_API_KEY', configured: tfConfigured, autoFocus: true,
+      copy: '留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。仅存本地 (secrets.json),先验证后保存。',
+    },
+    {
+      name: 'fuyao', display: 'fuyao', env: 'FUYAO_API_KEY', configured: fuyaoConfigured, autoFocus: false,
+      copy: '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。',
+    },
+  ]
 
   return (
     <div>
@@ -381,27 +388,17 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {items.map(item => {
             const plugin = item.kind === 'plugin' ? plugins.find(p => p.name === item.name) : undefined
-            // 缺 Key 型插件 (如 fuyao) 卡片可点击展开 Key 表单; 其余纯展示
+            // 缺 Key 型插件 (如 fuyao): 表单常驻下方, 卡片仅提示, 不可交互
             const needsKey = item.kind === 'plugin' && !item.available && !!plugin?.api_key_env
             const unavailable = item.kind === 'plugin' && !item.available && !needsKey
-            const needsKeyProps = needsKey ? {
-              type: 'button' as const,
-              onClick: () => {
-                setKeyFor(keyFor === item.name ? null : item.name)
-                setKeyInput('')
-                setKeyError(null)
-              },
-              title: '需配置 API Key,点击填写',
-            } : {}
             return (
               <div
                 key={item.name}
-                {...needsKeyProps}
                 className={`relative text-left rounded-card border px-3.5 py-3 ${
                   unavailable
                     ? 'border-border/40 bg-elevated/10 opacity-60'
                     : needsKey
-                      ? 'border-warning/30 bg-elevated/20 cursor-pointer hover:bg-elevated/40 transition-colors'
+                      ? 'border-warning/30 bg-elevated/20'
                       : 'border-border/60 bg-elevated/20'
                 }`}
               >
@@ -422,7 +419,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                   {unavailable ? (
                     <span className="text-[10px] text-muted">需安装依赖,见 设置 → 数据源</span>
                   ) : needsKey ? (
-                    <span className="text-[10px] text-warning">需配置 API Key,点击填写</span>
+                    <span className="text-[10px] text-warning">需配置 API Key,见下方表单</span>
                   ) : item.datasets.length > 0 ? (
                     item.datasets.slice(0, 4).map(ds => (
                       <span key={ds} className="rounded bg-elevated/60 px-1 py-0.5 text-[10px] text-muted">
@@ -439,100 +436,70 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
-      {/* API Key 配置入口: TickFlow(档位解锁) + fuyao(实时/除权增强路由) */}
-      {!keyFor && !keySaved && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px]">
-          <span className="text-muted">配置 API Key:</span>
-          <button
-            type="button"
-            onClick={() => { setKeyFor('tickflow'); setKeyInput(''); setKeyError(null) }}
-            className="inline-flex items-center gap-1 rounded-btn border border-border/60 bg-elevated/20 px-2 py-1 text-secondary hover:border-accent/40 hover:text-accent transition-colors"
-          >
-            <KeyRound className="h-3 w-3" />
-            TickFlow
-            <span className="text-muted/70">{tfConfigured ? '·已配置' : '(可选,解锁档位)'}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => { setKeyFor('fuyao'); setKeyInput(''); setKeyError(null) }}
-            className="inline-flex items-center gap-1 rounded-btn border border-border/60 bg-elevated/20 px-2 py-1 text-secondary hover:border-accent/40 hover:text-accent transition-colors"
-          >
-            <KeyRound className="h-3 w-3" />
-            fuyao
-            <span className="text-muted/70">{fuyaoConfigured ? '·已配置' : '(实时行情/除权因子增强)'}</span>
-          </button>
-        </div>
-      )}
-
-      {/* Key 保存成功横幅 (含路由变化说明) */}
-      {keySaved && !keyFor && (
-        <div className="mt-2.5 flex items-center gap-1.5 rounded-btn border border-bull/25 bg-bull/[0.06] px-3 py-2 text-[11px] text-secondary">
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull" />
-          {keySaved}
-        </div>
-      )}
-
-      {/* 内联 Key 配置 (缺 Key 型插件如 fuyao / TickFlow 档位 Key): 先探后存 */}
-      {keyFor && keyPlugin && (
-        <div className="mt-3 rounded-card border border-warning/30 bg-warning/[0.04] px-3.5 py-3">
-          <div className="flex items-center gap-2">
-            <KeyRound className="h-3.5 w-3.5 text-warning" />
-            <span className="text-xs font-medium text-foreground">
-              配置 {keyPlugin.display_name.replace(/（.*?）|\(.*?\)/g, '').trim()} API Key
-            </span>
-            <span className="rounded bg-elevated/70 px-1 py-px font-mono text-[9px] text-muted">{keyPlugin.api_key_env}</span>
-          </div>
-          <p className="mt-1.5 text-[11px] text-muted leading-relaxed">
-            {keyFor === 'tickflow' ? (
-              <>
-                留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。
-                仅存本地 (secrets.json),先验证后保存。
-              </>
-            ) : keyFor === 'fuyao' ? (
-              '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。'
-            ) : (
-              '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存。'
+      {/* API Key 配置 (常驻展开, 不收起): TickFlow 解锁档位 + fuyao 实时/除权增强路由 */}
+      {keyForms.map(f => {
+        const val = inputs[f.name] ?? ''
+        const err = errors[f.name] ?? null
+        const msg = savedMsg[f.name] ?? null
+        const pending = saveKey.isPending && saveKey.variables?.name === f.name
+        return (
+          <div key={f.name} className="mt-3 rounded-card border border-border/70 bg-surface/60 px-3.5 py-3">
+            <div className="flex items-center gap-2">
+              <KeyRound className="h-3.5 w-3.5 text-accent/80" />
+              <span className="text-xs font-medium text-foreground">配置 {f.display} API Key</span>
+              <span className="rounded bg-elevated/70 px-1 py-px font-mono text-[9px] text-muted">{f.env}</span>
+              {f.configured ? (
+                <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-bull">
+                  <CheckCircle2 className="h-3 w-3" />
+                  已配置
+                </span>
+              ) : f.name === 'tickflow' && (
+                <span className="ml-auto text-[10px] text-muted/70">可选</span>
+              )}
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">{f.copy}</p>
+            <form
+              className="mt-2.5 flex items-center gap-2"
+              onSubmit={e => {
+                e.preventDefault()
+                if (val.trim() && !saveKey.isPending) saveKey.mutate({ name: f.name, key: val.trim() })
+              }}
+            >
+              <input
+                type="password"
+                value={val}
+                onChange={e => {
+                  setInputs(s => ({ ...s, [f.name]: e.target.value }))
+                  setErrors(s => ({ ...s, [f.name]: null }))
+                }}
+                placeholder={`粘贴 ${f.env}`}
+                autoFocus={f.autoFocus}
+                className="h-8 flex-1 rounded-input border border-border bg-surface px-3 font-mono text-xs text-foreground placeholder:text-muted/60 focus:border-accent/60 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!val.trim() || saveKey.isPending}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
+              >
+                {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {pending ? '验证中…' : '验证并保存'}
+              </button>
+            </form>
+            {err && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-danger">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                {err}
+              </p>
             )}
-          </p>
-          <form
-            className="mt-2.5 flex items-center gap-2"
-            onSubmit={e => {
-              e.preventDefault()
-              if (keyInput.trim() && !saveKey.isPending) saveKey.mutate(keyFor)
-            }}
-          >
-            <input
-              type="password"
-              value={keyInput}
-              onChange={e => { setKeyInput(e.target.value); setKeyError(null) }}
-              placeholder={`粘贴 ${keyPlugin.api_key_env}`}
-              autoFocus
-              className="h-8 flex-1 rounded-input border border-border bg-surface px-3 font-mono text-xs text-foreground placeholder:text-muted/60 focus:border-accent/60 focus:outline-none"
-            />
-            <button
-              type="submit"
-              disabled={!keyInput.trim() || saveKey.isPending}
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
-            >
-              {saveKey.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-              {saveKey.isPending ? '验证中…' : '验证并保存'}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setKeyFor(null); setKeyInput(''); setKeyError(null) }}
-              className="h-8 shrink-0 rounded-btn px-3 text-xs text-secondary hover:text-foreground hover:bg-elevated transition-colors"
-            >
-              取消
-            </button>
-          </form>
-          {keyError && (
-            <p className="mt-1.5 flex items-center gap-1 text-[11px] text-danger">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              {keyError}
-            </p>
-          )}
-        </div>
-      )}
+            {msg && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-bull">
+                <CheckCircle2 className="h-3 w-3 shrink-0" />
+                {msg}
+              </p>
+            )}
+          </div>
+        )
+      })}
 
       {/* 插件化提示: 自有数据源接入与切换在设置页, 向导保持极简 */}
       <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
