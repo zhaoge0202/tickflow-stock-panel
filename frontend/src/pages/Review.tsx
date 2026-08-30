@@ -469,7 +469,7 @@ export function Review() {
                 <p className="mt-1.5 text-[10px] leading-relaxed text-muted/70">
                   手动或定时生成的复盘都会推送完整报告。复用「设置 → 实时监控」的 Webhook 配置。
                   {((reviewPushChannels.includes('feishu') && !feishuConfigured) || (reviewPushChannels.includes('wecom') && !wecomConfigured)) && (
-                    <Link to="/settings?tab=monitoring" className="ml-1 text-accent hover:underline" onClick={() => setShowSchedule(false)}>
+                    <Link to="/settings?tab=monitoring&highlight=webhooks" className="ml-1 text-accent hover:underline" onClick={() => setShowSchedule(false)}>
                       前往配置 →
                     </Link>
                   )}

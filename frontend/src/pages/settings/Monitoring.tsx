@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, createContext, useContext } from 'react'
 import { Link } from 'react-router-dom'
 import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -19,8 +19,13 @@ import {
 import { useUpdateQuoteInterval, useToggleRealtimeQuotes } from '@/lib/useSharedMutations'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { useCardFlash, cardFlashCls } from '@/lib/useCardFlash'
 import { toast } from '@/components/Toast'
 import { DepthConfigContent } from '@/components/data/DepthConfigCard'
+
+// 卡片定位锚点: highlight=<anchor> 时该卡片滚动到视口中央并闪烁高亮。
+// 其他页面用 /settings?tab=monitoring&highlight=<anchor> 精确引导用户到某张卡片。
+const HighlightContext = createContext('')
 
 // 页面 → 显示名
 const PAGE_LABELS: Record<string, string> = {
@@ -288,27 +293,13 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     return () => window.clearTimeout(t)
   }, [minuteRefreshIntervalDraft, minuteRefreshInterval, save])
 
-  // highlight=depth-fix 时闪烁高亮连板梯队修正卡片
-  const [flash, setFlash] = useState(false)
-  const flashedRef = useRef(false)
-  useEffect(() => {
-    if (highlight === 'depth-fix' && !flashedRef.current) {
-      flashedRef.current = true
-      // 延迟一帧确保 DOM 已渲染, 再触发闪烁
-      requestAnimationFrame(() => {
-        setFlash(true)
-        const t = setTimeout(() => setFlash(false), 2000)
-        return () => clearTimeout(t)
-      })
-    }
-  }, [highlight])
-
   return (
+    <HighlightContext.Provider value={highlight ?? ''}>
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6 max-w-5xl">
       {/* ========== 左列 ========== */}
       <div className="space-y-6">
         {/* 行情状态 — 开关 + 间隔 */}
-        <Card icon={Activity} title="行情轮询">
+        <Card icon={Activity} title="行情轮询" anchor="quotes">
           <ToggleRow
             label="实时行情"
             desc={
@@ -408,7 +399,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         )}
 
         {/* 自选列表分时图实时刷新 (默认关闭, 开启后盘中按设定间隔轮询刷新分时数据) */}
-        <Card icon={Activity} title="分时图刷新">
+        <Card icon={Activity} title="分时图刷新" anchor="intraday-refresh">
           <ToggleRow
             label="自选/策略分时图实时刷新"
             desc={`开启后自选与策略列表的分时图盘中每 ${intradayInterval} 秒自动刷新（依赖分钟K批量数据 + 实时行情运行）。关闭时仅打开页面时拉取一次, 可点表头刷新按钮手动更新。`}
@@ -474,14 +465,11 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
 
       {/* ========== 右列 ========== */}
       <div className="space-y-6">
-        {/* 连板梯队降级修正 (移至右列顶部) */}
-        <div
-          id="depth-fix"
-          className={`rounded-card transition-all duration-500 ${flash ? 'ring-2 ring-accent/60 ring-offset-2 ring-offset-base scale-[1.01]' : 'ring-0 ring-transparent'}`}
-        >
+        {/* 连板梯队降级修正 (右列顶部) */}
         <Card
           icon={Flame}
           title="连板梯队降级修正"
+          anchor="depth-fix"
           badge={!hasDepth ? '五档盘口不可用' : undefined}
           right={hasDepth ? (
             <button
@@ -519,10 +507,9 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
             <DepthConfigContent disabled />
           )}
         </Card>
-        </div>
 
         {/* 盘中分钟增量落盘 (Expert 专有): 交易时段常驻服务, intraday.batch 独立配额 */}
-        <Card icon={Zap} title="盘中分钟增量">
+        <Card icon={Zap} title="盘中分钟增量" anchor="minute-refresh">
           <ToggleRow
             label="盘中分钟增量落盘"
             desc={
@@ -575,7 +562,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。
             飞书 / 企业微信。
             每个渠道合并成一行: 勾选=新建规则默认推送, 点行展开地址配置。 */}
-        <Card icon={Webhook} title="推送通知">
+        <Card icon={Webhook} title="推送通知" anchor="webhooks">
           <p className="text-xs text-secondary mb-3">
             监控规则命中后,可把告警推送到外部。勾选渠道作为<b className="text-foreground/80">新建规则的默认推送</b>,
             单条规则仍可在编辑页独立修改。
@@ -841,6 +828,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         </Card>
       </div>
     </div>
+    </HighlightContext.Provider>
   )
 }
 
@@ -899,8 +887,10 @@ interface CardProps {
   children: React.ReactNode
 }
 
-function Card({ icon: Icon, title, badge, right, children }: CardProps) {
-  return (
+function Card({ icon: Icon, title, badge, right, children, anchor }: CardProps & { anchor?: string }) {
+  const highlight = useContext(HighlightContext)
+  const { ref, flash } = useCardFlash(anchor ? highlight : undefined, anchor ?? '')
+  const inner = (
     <section className="rounded-card border border-border bg-surface p-5">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2.5">
@@ -916,5 +906,11 @@ function Card({ icon: Icon, title, badge, right, children }: CardProps) {
       </div>
       {children}
     </section>
+  )
+  if (!anchor) return inner
+  return (
+    <div ref={ref} id={anchor} className={cardFlashCls(flash)}>
+      {inner}
+    </div>
   )
 }

@@ -633,7 +633,7 @@ export function Data() {
               </button>
               <div className="w-px h-4 bg-border" />
               <Link
-                to="/settings?tab=data-sources"
+                to="/settings?tab=data-sources&highlight=data-sources"
                 className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
                 title="切换数据源"
               >
@@ -661,7 +661,7 @@ export function Data() {
             <span className="text-secondary leading-relaxed">
               当前无需 API Key,历史日K将使用免费通道获取。
               实时行情、分钟K等能力取决于所选数据源,可在
-              <Link to="/settings?tab=data-sources" className="mx-0.5 font-medium text-accent hover:underline">
+              <Link to="/settings?tab=data-sources&highlight=data-sources" className="mx-0.5 font-medium text-accent hover:underline">
                 数据源设置
               </Link>
               中配置。

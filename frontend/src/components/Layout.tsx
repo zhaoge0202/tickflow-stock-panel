@@ -754,7 +754,7 @@ export function Layout() {
                 当前数据源无实时行情权限,
                 <button
                   type="button"
-                  onClick={() => navigate('/settings?tab=data-sources')}
+                  onClick={() => navigate('/settings?tab=data-sources&highlight=data-sources')}
                   className="mx-0.5 text-accent/80 hover:text-accent hover:underline"
                 >
                   去配置数据源
@@ -777,7 +777,7 @@ export function Layout() {
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button
-                  onClick={() => navigate('/settings?tab=monitoring')}
+                  onClick={() => navigate('/settings?tab=monitoring&highlight=quotes')}
                   aria-label="打开实时监控设置"
                   className="flex h-7 w-7 items-center justify-center rounded-btn text-muted transition-colors hover:bg-elevated hover:text-foreground"
                   title="实时监控设置"

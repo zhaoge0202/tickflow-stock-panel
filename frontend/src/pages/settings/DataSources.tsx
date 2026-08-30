@@ -5,6 +5,7 @@ import { Check, Database, Eye, EyeOff, KeyRound, Plus, RefreshCw, Zap, FileWarni
 import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { AnchorWrap } from '@/lib/useCardFlash'
 import { TIER_RANK, tierRank, tierStyle } from '@/lib/capability-labels'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
@@ -367,7 +368,7 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
   )
 }
 
-export function SettingsDataSourcesPanel() {
+export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } = {}) {
   const qc = useQueryClient()
   const prefs = usePreferences()
   const sources = useQuery({ queryKey: QK.dataSources, queryFn: api.dataSources })
@@ -585,6 +586,7 @@ export function SettingsDataSourcesPanel() {
   return (
     <div className="space-y-5 max-w-5xl">
       {/* ===== 顶部: 当前数据源 + 数据源选择 (一个大卡片) ===== */}
+      <AnchorWrap highlight={highlight} anchor="data-sources">
       <section className="rounded-card border border-border bg-surface p-5">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2.5">
@@ -779,6 +781,7 @@ export function SettingsDataSourcesPanel() {
         </div>
 
       </section>
+      </AnchorWrap>
 
       {/* ===== 下方: 编辑区 ===== */}
       <AnimatePresence mode="wait">
