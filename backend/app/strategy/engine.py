@@ -155,6 +155,9 @@ class StrategyDataContext:
     as_of: date
     current: pl.DataFrame | None = None
     history: pl.DataFrame | None = None
+    # 仅 1m 分支: 策略声明 META["daily_history_bars"] 时注入的日线 enriched 窗口,
+    # 供分钟策略叠加日线维度条件 (如 N 日内涨停过); 未声明时为 None。
+    daily_history: pl.DataFrame | None = None
     market: Any | None = None
     cache_key: str | None = None
 
@@ -201,6 +204,9 @@ class StrategyDef:
     composite: CompositeSpec | None = None  # 仅 backend=="composite" 时非空
     # 仅 backend=="minute_filter" 时非空: 输入为当日分钟K窗口, 输出为命中标的行
     filter_minute_history_fn: Callable[[pl.DataFrame, dict], pl.DataFrame] | None = None
+    # 仅 minute_filter: META["daily_history_bars"] 声明需要的日线历史窗口 (0=不需要;
+    # >0 时 filter_minute_history 必须接受 daily 关键字, 引擎注入 context.daily_history)
+    minute_daily_bars: int = 0
 
 
 @dataclass
@@ -493,6 +499,7 @@ class StrategyEngine:
 
         matrix_strategy = getattr(mod, "MATRIX_STRATEGY", None)
         composite_spec: CompositeSpec | None = None
+        minute_daily_bars = 0
         if execution_backend == "matrix_native":
             from app.backtest.matrix import MatrixStrategy
 
@@ -535,6 +542,22 @@ class StrategyEngine:
                 raise ValueError(
                     "minute_filter strategy must declare timeframes == ['1m']"
                 )
+            # 可选日线历史窗口: 声明 daily_history_bars 时 fn 必须接受 daily 关键字,
+            # 引擎会把 context.daily_history (enriched 日线窗口) 注入进来。
+            minute_daily_bars = int(meta.get("daily_history_bars") or 0)
+            if minute_daily_bars < 0 or minute_daily_bars > 250:
+                raise ValueError(
+                    "minute_filter daily_history_bars must be within [0, 250]"
+                )
+            if minute_daily_bars > 0:
+                import inspect
+
+                sig = inspect.signature(filter_minute_history_fn)
+                if "daily" not in sig.parameters:
+                    raise ValueError(
+                        "minute_filter daily_history_bars requires "
+                        "filter_minute_history to accept a 'daily' keyword"
+                    )
         elif filter_history_fn is None or filter_fn is not None:
             raise ValueError("python_history_legacy strategy must declare only filter_history")
 
@@ -559,6 +582,7 @@ class StrategyEngine:
             matrix_strategy=matrix_strategy,
             composite=composite_spec,
             filter_minute_history_fn=filter_minute_history_fn,
+            minute_daily_bars=minute_daily_bars,
         )
 
     def reload(self) -> None:
@@ -672,6 +696,16 @@ class StrategyEngine:
         if value in (None, 0):
             return None
         return max(0, int(value))
+
+    def minute_daily_history_bars(self, strategy_ids: list[str]) -> int:
+        """1m 分支需要的日线 enriched 窗口大小: 各 minute_filter 策略声明的
+        META["daily_history_bars"] 取 max, 未声明 (纯分钟策略) 为 0。"""
+        required = 0
+        for strategy_id in strategy_ids:
+            strategy = self.get(strategy_id)
+            if strategy.execution_backend == "minute_filter":
+                required = max(required, strategy.minute_daily_bars)
+        return required
 
     def required_history_bars(
         self,
@@ -917,7 +951,10 @@ class StrategyEngine:
                     strategy_id=strategy_id,
                     exit_signal_hits=exit_signal_hits,
                 )
-            df = s.filter_minute_history_fn(history, params)
+            if s.minute_daily_bars > 0:
+                df = s.filter_minute_history_fn(history, params, daily=context.daily_history)
+            else:
+                df = s.filter_minute_history_fn(history, params)
             # 基础过滤/展示列 (name/total_shares/change_pct 等) 来自 enriched 快照,
             # 在命中结果上事后联表, 避免把 enriched 列铺到全市场分钟行上。
             if current is not None and not current.is_empty():

@@ -390,12 +390,20 @@ class ScreenerService:
             # 分钟策略数据源是本地当日分钟K分区 (单分区文件直读), 与日线
             # enriched 历史窗口无关, 不走 required_history_bars 日线路径。
             history = self._load_minute_history(as_of, current)
+            # 策略声明 META["daily_history_bars"] 时额外装配日线 enriched 窗口,
+            # 供分钟策略叠加日线维度条件 (如 N 日内涨停过)。
+            daily_history = None
+            if engine is not None:
+                daily_bars = engine.minute_daily_history_bars(strategy_ids)
+                if daily_bars > 0:
+                    daily_history = self._load_enriched_history(as_of, daily_bars)
             return StrategyDataContext(
                 asset_type=self.asset_type,
                 timeframe=timeframe,
                 as_of=as_of,
                 current=current,
                 history=history,
+                daily_history=daily_history,
                 market=None,
                 cache_key=cache_key,
             )

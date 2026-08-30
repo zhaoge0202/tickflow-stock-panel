@@ -52,7 +52,7 @@ def test_pattern_hits_five_red_of_seven_with_red_top_two():
         (10.5, 10.7, 10.80),  # 红
         (10.7, 10.8, 10.90),  # 红 (最高)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     assert out["symbol"].to_list() == ["600000.SH"]
     row = out.row(0, named=True)
     assert row["red_count"] == 5
@@ -61,7 +61,7 @@ def test_pattern_hits_five_red_of_seven_with_red_top_two():
 
 
 def test_pattern_insufficient_bars_never_triggers():
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", [(10.0, 10.2, 10.3)] * 6), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", [(10.0, 10.2, 10.3)] * 6), {"require_limit_up": False})
     assert out.is_empty()
 
 
@@ -76,7 +76,7 @@ def test_pattern_green_at_top_blocks_hit():
         (11.5, 11.0, 12.00),  # 绿 (最高)
         (11.0, 11.4, 11.90),  # 红 (次高)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     assert out.is_empty()
 
 
@@ -91,9 +91,9 @@ def test_pattern_rank_by_close_uses_close_not_high():
         (11.4, 11.1, 11.50),  # 绿 (high 最高, 并列)
         (11.1, 11.5, 11.55),  # 红 (close 最高)
     ]
-    by_high = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    by_high = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     by_close = minute_red_streak.filter_minute_history(
-        _bars("600000.SH", candles), {"rank_by_close": True}
+        _bars("600000.SH", candles), {"rank_by_close": True, "require_limit_up": False}
     )
     assert by_high.is_empty()
     assert by_close["symbol"].to_list() == ["600000.SH"]
@@ -107,7 +107,7 @@ def test_pattern_sorts_unordered_input_by_datetime():
             (10.6, 10.5, 10.65), (10.5, 10.7, 10.80), (10.7, 10.8, 10.90),
         ]),
     ]).sample(fraction=1.0, shuffle=True, seed=7)
-    out = minute_red_streak.filter_minute_history(bars, {})
+    out = minute_red_streak.filter_minute_history(bars, {"require_limit_up": False})
     assert out["symbol"].to_list() == ["600000.SH"]
     assert out.row(0, named=True)["close"] == 10.8  # 最后一根(时间最大)的收盘
 
@@ -124,7 +124,7 @@ def test_pattern_three_way_high_tie_prefers_later_bars():
         (10.5, 10.6, 10.90),  # 红 (并列最高, 中间)
         (10.6, 10.8, 10.90),  # 红 (并列最高, 最晚)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     assert out["symbol"].to_list() == ["600000.SH"]
     assert out.row(0, named=True)["top_red_count"] == 2
 
@@ -141,8 +141,8 @@ def test_pattern_min_red_threshold_respected():
         (10.5, 10.8, 10.90),  # 红
     ]
     bars = _bars("600000.SH", candles)
-    assert minute_red_streak.filter_minute_history(bars, {"min_red": 5}).is_empty()
-    assert not minute_red_streak.filter_minute_history(bars, {"min_red": 4}).is_empty()
+    assert minute_red_streak.filter_minute_history(bars, {"min_red": 5, "require_limit_up": False}).is_empty()
+    assert not minute_red_streak.filter_minute_history(bars, {"min_red": 4, "require_limit_up": False}).is_empty()
 
 
 def test_pattern_uses_opening_bars_even_if_day_turns_green():
@@ -159,7 +159,7 @@ def test_pattern_uses_opening_bars_even_if_day_turns_green():
         (10.8, 10.0, 10.85),  # 开盘窗口外的绿
         (10.0, 9.5, 10.05),   # 开盘窗口外的绿
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     assert out["symbol"].to_list() == ["600000.SH"]
     row = out.row(0, named=True)
     assert row["red_count"] == 5
@@ -180,8 +180,82 @@ def test_pattern_opening_window_miss_not_rescued_by_late_reds():
         (10.8, 10.9, 11.00),  # 红 (窗口外)
         (10.9, 11.0, 11.10),  # 红 (窗口外)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
     assert out.is_empty()
+
+
+# ── 涨停条件 (日线维度) ─────────────────────────────────────────────
+
+
+_HIT_CANDLES = [
+    (10.0, 10.2, 10.30),  # 红
+    (10.2, 10.1, 10.25),  # 绿 (低高点)
+    (10.1, 10.4, 10.50),  # 红
+    (10.4, 10.6, 10.70),  # 红 (次高)
+    (10.6, 10.5, 10.65),  # 绿 (低高点)
+    (10.5, 10.7, 10.80),  # 红
+    (10.7, 10.8, 10.90),  # 红 (最高)
+]
+
+
+def _daily(
+    symbol: str,
+    days: int,
+    flag_on: set[int] | None = None,
+    *,
+    broken: bool = False,
+) -> pl.DataFrame:
+    """days 个交易日的日线帧; flag_on 指定第几天 (0=最早) 触发涨停信号。"""
+    flag_on = flag_on or set()
+    base = date(2026, 8, 25)
+    return pl.DataFrame({
+        "symbol": [symbol] * days,
+        "date": [base - _dt.timedelta(days=days - i) for i in range(days)],
+        "signal_limit_up": [i in flag_on and not broken for i in range(days)],
+        "signal_broken_limit_up": [i in flag_on and broken for i in range(days)],
+    })
+
+
+def test_pattern_limit_up_condition_filters_by_daily_signals():
+    bars = pl.concat([
+        _bars("600001.SH", _HIT_CANDLES),
+        _bars("600002.SH", _HIT_CANDLES),
+        _bars("600003.SH", _HIT_CANDLES),
+    ])
+    daily = pl.concat([
+        _daily("600001.SH", 20, {3}),                 # 收盘涨停 → 过
+        _daily("600002.SH", 20, {15}, broken=True),   # 炸板触及 → 过
+        _daily("600003.SH", 20),                      # 无涨停 → 剔除
+    ])
+    out = minute_red_streak.filter_minute_history(bars, {}, daily=daily)
+    assert sorted(out["symbol"].to_list()) == ["600001.SH", "600002.SH"]
+    assert sorted(out["recent_limit_ups"].to_list()) == [1, 1]
+
+
+def test_pattern_limit_up_lookback_window_boundary():
+    # 25 个交易日, 涨停仅发生在第 5 天 (0=最早): 回看 20 日窗口 = 最后 20 根
+    # (索引 5..24), 第 5 天在窗外 → 不命中; 回看放宽到 25 → 命中
+    bars = _bars("600000.SH", _HIT_CANDLES)
+    daily = _daily("600000.SH", 25, {4})
+    assert minute_red_streak.filter_minute_history(bars, {}, daily=daily).is_empty()
+    out = minute_red_streak.filter_minute_history(
+        bars, {"limit_up_days": 25}, daily=daily
+    )
+    assert out["symbol"].to_list() == ["600000.SH"]
+
+
+def test_pattern_limit_up_fails_closed_without_daily():
+    # 日线窗口缺失时失败闭合 (宁可漏过不可错报)
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", _HIT_CANDLES), {})
+    assert out.is_empty()
+
+
+def test_pattern_limit_up_disabled_ignores_daily():
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", _HIT_CANDLES), {"require_limit_up": False}
+    )
+    assert out["symbol"].to_list() == ["600000.SH"]
+    assert "recent_limit_ups" not in out.columns
 
 
 # ── 引擎加载与运行 ──────────────────────────────────────────────────
@@ -223,6 +297,75 @@ def test_minute_filter_backend_validation(tmp_path):
     assert "m_bad2" not in ids
     assert any("only filter_minute_history" in e["error"] for e in engine.load_errors())
     assert any("timeframes" in e["error"] for e in engine.load_errors())
+
+
+def test_minute_filter_daily_history_validation(tmp_path):
+    # 声明 daily_history_bars: fn 必须接受 daily 关键字, 且范围 [0, 250]
+    (tmp_path / "m_daily_ok.py").write_text(
+        'import polars as pl\n'
+        'META = {"id": "m_daily_ok", "name": "x", "asset_types": ["stock"], '
+        '"timeframes": ["1m"], "daily_history_bars": 20}\n'
+        'EXECUTION_BACKEND = "minute_filter"\n'
+        'def filter_minute_history(df, params, *, daily=None):\n'
+        '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
+    )
+    (tmp_path / "m_daily_kw.py").write_text(
+        'import polars as pl\n'
+        'META = {"id": "m_daily_kw", "name": "x", "asset_types": ["stock"], '
+        '"timeframes": ["1m"], "daily_history_bars": 20}\n'
+        'EXECUTION_BACKEND = "minute_filter"\n'
+        'def filter_minute_history(df, params):\n'
+        '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
+    )
+    (tmp_path / "m_daily_range.py").write_text(
+        'import polars as pl\n'
+        'META = {"id": "m_daily_range", "name": "x", "asset_types": ["stock"], '
+        '"timeframes": ["1m"], "daily_history_bars": 300}\n'
+        'EXECUTION_BACKEND = "minute_filter"\n'
+        'def filter_minute_history(df, params, *, daily=None):\n'
+        '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
+    )
+    engine = StrategyEngine(strategy_dirs=[tmp_path])
+    assert engine.has("m_daily_ok")
+    assert engine.get("m_daily_ok").minute_daily_bars == 20
+    assert not engine.has("m_daily_kw")
+    assert not engine.has("m_daily_range")
+    assert any("'daily' keyword" in e["error"] for e in engine.load_errors())
+    assert any("[0, 250]" in e["error"] for e in engine.load_errors())
+
+
+def test_minute_run_injects_daily_history(tmp_path):
+    # fn 直接消费 daily (对涨停信号求和), 验证引擎把 context.daily_history 注入
+    (tmp_path / "m_use_daily.py").write_text(
+        'import polars as pl\n'
+        'META = {"id": "m_use_daily", "name": "x", "asset_types": ["stock"], '
+        '"timeframes": ["1m"], "daily_history_bars": 10}\n'
+        'EXECUTION_BACKEND = "minute_filter"\n'
+        'def filter_minute_history(df, params, *, daily=None):\n'
+        '    if daily is None:\n'
+        '        return pl.DataFrame(schema={"symbol": pl.Utf8})\n'
+        '    return daily.group_by("symbol").agg(\n'
+        '        close=pl.col("signal_limit_up").sum() + 10.0)\n'
+    )
+    engine = StrategyEngine(strategy_dirs=[tmp_path])
+    context = StrategyDataContext(
+        asset_type="stock",
+        timeframe="1m",
+        as_of=date(2026, 8, 25),
+        current=pl.DataFrame({
+            "symbol": ["600001.SH"],
+            "name": ["正常股"],
+            "total_shares": [1e8],
+            "float_shares": [5e7],
+            "amount": [3e8],
+            "change_pct": [0.01],
+        }),
+        history=_bars("600001.SH", [(10.0, 10.2, 10.3)] * 7),
+        daily_history=_daily("600001.SH", 10, {2}),
+    )
+    result = engine.run("m_use_daily", context)
+    assert result.total == 1
+    assert result.rows[0]["close"] == 11  # 10 + 窗口内 1 次收盘涨停
 
 
 def test_minute_context_run_applies_enriched_basic_filter(tmp_path):
@@ -345,3 +488,30 @@ def test_minute_context_rejects_non_stock_asset():
         raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "A 股" in str(e)
+
+
+def test_minute_context_loads_daily_history_for_declared_strategies():
+    class _FakeEngine:
+        def minute_daily_history_bars(self, strategy_ids):
+            return 5
+
+    daily = _daily("600001.SH", 6, {1})
+    repo = _FakeMinuteRepo({date(2026, 8, 25): _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3)})
+    repo.get_enriched_history = lambda target_date, lookback_days: daily  # type: ignore[method-assign]
+    repo.get_instruments_asset = lambda asset_type: None  # type: ignore[method-assign]
+    svc = ScreenerService(repo, asset_type="stock")  # type: ignore[arg-type]
+    ctx = svc.build_strategy_context(
+        _FakeEngine(), date(2026, 8, 25), ["m_x"], timeframe="1m",
+        current=pl.DataFrame({"symbol": ["600001.SH"], "name": ["x"]}),
+    )
+    assert ctx.daily_history is not None
+    assert ctx.daily_history.height == 6  # 引擎声明 5 → 装配日线窗口
+
+
+def test_minute_context_without_engine_skips_daily_history():
+    svc = _svc({date(2026, 8, 25): _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3)})
+    ctx = svc.build_strategy_context(
+        None, date(2026, 8, 25), [], timeframe="1m",
+        current=pl.DataFrame({"symbol": ["600001.SH"]}),
+    )
+    assert ctx.daily_history is None  # 无引擎声明 → 不装配日线

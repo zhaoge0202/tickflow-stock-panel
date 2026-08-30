@@ -4,6 +4,11 @@
 (symbol, datetime, open, high, low, close, volume, amount),
 由 ScreenerService.build_strategy_context 的 1m 分支从本地 kline_minute
 分区注入; 策略本身不感知数据来源 (本地同步 / 盘中增量刷新对它透明)。
+
+META["daily_history_bars"] 声明叠加日线维度的条件 (N 日内涨停过):
+引擎会以 daily= 关键字注入日线 enriched 窗口, 涨停判定直接复用
+enriched 预计算信号 — signal_limit_up (收盘封板) 或 signal_broken_limit_up
+(炸板: 盘中触及涨停未封住), 任一命中即算"盘中涨停过"。
 """
 
 import polars as pl
@@ -11,10 +16,12 @@ import polars as pl
 META = {
     "id": "minute_red_streak",
     "name": "分钟红7",
-    "description": "开盘前7根1分钟K至少5根收红, 且最高的2根(按最高价)都是红K",
+    "description": "开盘前7根1分钟K至少5根收红, 最高的2根(按最高价)都是红K, 且近20日盘中触及过涨停",
     "tags": ["分钟", "形态", "短线"],
     "asset_types": ["stock"],
     "timeframes": ["1m"],
+    # 日线 enriched 窗口 (交易日语义, 含 as_of): 覆盖 limit_up_days 参数上限
+    "daily_history_bars": 60,
     "params": [
         {
             "id": "bars",
@@ -49,6 +56,21 @@ META = {
             "type": "bool",
             "default": False,
         },
+        {
+            "id": "require_limit_up",
+            "label": "要求N日内涨停过",
+            "type": "bool",
+            "default": True,
+        },
+        {
+            "id": "limit_up_days",
+            "label": "涨停回看天数",
+            "type": "int",
+            "default": 20,
+            "min": 5,
+            "max": 60,
+            "step": 1,
+        },
     ],
     "order_by": "red_count",
     "descending": True,
@@ -60,12 +82,41 @@ ENTRY_SIGNALS: list[str] = []
 EXIT_SIGNALS: list[str] = []
 
 
-def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
+def _recent_limit_ups(daily: pl.DataFrame | None, lookback: int) -> pl.DataFrame:
+    """日线窗口 → (symbol, recent_limit_ups) 近 lookback 个交易日的涨停次数。
+
+    涨停过 = signal_limit_up (收盘封板) 或 signal_broken_limit_up (炸板触及)。
+    日线窗口缺失 / 无涨停信号列 → 返回空表 (调用方 inner join 即失败闭合,
+    宁可漏过不可错报)。
+    """
+    empty = pl.DataFrame(schema={"symbol": pl.Utf8, "recent_limit_ups": pl.UInt32})
+    if daily is None or daily.is_empty():
+        return empty
+    if not {"signal_limit_up", "signal_broken_limit_up"}.issubset(daily.columns):
+        return empty
+    return (
+        daily.select("symbol", "date", "signal_limit_up", "signal_broken_limit_up")
+        .sort(["symbol", "date"])
+        .filter(pl.int_range(pl.len()).over("symbol") >= pl.len().over("symbol") - lookback)
+        .group_by("symbol")
+        .agg(
+            recent_limit_ups=(
+                pl.col("signal_limit_up").fill_null(False)
+                | pl.col("signal_broken_limit_up").fill_null(False)
+            ).sum()
+        )
+        .filter(pl.col("recent_limit_ups") > 0)
+    )
+
+
+def filter_minute_history(df: pl.DataFrame, params: dict, *, daily: pl.DataFrame | None = None) -> pl.DataFrame:
     """红K形态过滤: 全向量化, 无逐行 Python 循环。
 
     - 每标的按时间取当日最早 bars 根 (开盘窗口); 不足 bars 根不触发
     - 红 = close > open; 窗口内红K数 >= min_red
     - 按 rank_by (high / close) 降序取前 top_red 根, 同值取时间更晚者, 需全红
+    - require_limit_up: 近 limit_up_days 个交易日盘中触及过涨停 (日线维度,
+      由 daily 窗口的预计算涨停信号判定; 窗口缺失时失败闭合不触发)
     """
     bars = int(params.get("bars") or 7)
     min_red = min(int(params.get("min_red") or 5), bars)
@@ -99,7 +150,7 @@ def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
         .agg(top_red_count=pl.col("_red").sum())
     )
 
-    return (
+    result = (
         window.join(top, on="symbol", how="inner")
         .filter(
             (pl.col("bars_checked") >= bars)
@@ -108,3 +159,7 @@ def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
         )
         .drop("bars_checked")
     )
+    if params.get("require_limit_up", True):
+        lookback = max(5, min(int(params.get("limit_up_days") or 20), 60))
+        result = result.join(_recent_limit_ups(daily, lookback), on="symbol", how="inner")
+    return result
