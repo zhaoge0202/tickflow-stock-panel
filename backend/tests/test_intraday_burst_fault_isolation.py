@@ -16,17 +16,18 @@ def _capset(batch: int = 2) -> CapabilitySet:
     return CapabilitySet({Cap.INTRADAY_BATCH: CapabilityLimits(rpm=60, batch=batch)})
 
 
-def _frame() -> pl.DataFrame:
+def _frame() -> dict:
     # _normalize_minute 的最小输入: 毫秒 timestamp → 北京墙钟 datetime。
     # 时间必须落在交易时段 (时区契约守卫会拒绝非交易小时的脏数据)
     from datetime import datetime
     from zoneinfo import ZoneInfo
     ts = int(datetime(2026, 8, 28, 9, 31, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
-    return pl.DataFrame({
+    # as_dataframe=False 的最小 CompactKlineData (字段 → 列数组)
+    return {
         "timestamp": [ts],
         "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
         "volume": [100.0], "amount": [100.0],
-    })
+    }
 
 
 class _FakeKlines:

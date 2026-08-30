@@ -44,9 +44,11 @@ import polars as pl
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.services import preferences
 
-# 轮询间隔允许范围 (秒): 稳态轮单请求无并发脉冲, 下限 3s; 上限防误配。
+# 轮询间隔允许范围 (秒): 稳态轮单请求无并发脉冲, 下限 3s;
+# 上限 120s — universe 端点每标的只回最新 3 根, 间隔超过 3 分钟必留缺口,
+# 每轮都会触发修复轮, 稳态设计失效, 故不允许配到 120s 以上。
 REFRESH_INTERVAL_MIN = 3
-REFRESH_INTERVAL_MAX = 300
+REFRESH_INTERVAL_MAX = 120
 # 等待步长 (秒): 循环小步睡眠, 便于快速停止与偏好热生效。
 _LOOP_STEP_S = 2.0
 # 当日覆盖滞后超过该分钟数 (≈ universe 单请求 3 根余量) → 触发全天修复轮。

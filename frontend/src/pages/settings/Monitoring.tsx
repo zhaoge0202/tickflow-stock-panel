@@ -56,7 +56,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const intradayInterval = prefs?.minute_intraday_refresh_interval ?? 6
   // 滑块本地草稿: 拖动时即时反馈, 停顿 2s 后落库 (与行情轮询滑块一致)
   const [intradayIntervalDraft, setIntradayIntervalDraft] = useState(intradayInterval)
-  // 盘中分钟增量 (Expert 专有): 间隔 (秒), 与后端 [3,300] clamp 对齐; 默认 6
+  // 盘中分钟增量 (Expert 专有): 间隔 (秒), 与后端 [3,120] clamp 对齐; 默认 6
   const minuteRefreshInterval = prefs?.minute_refresh_interval ?? 6
   const [minuteRefreshIntervalDraft, setMinuteRefreshIntervalDraft] = useState(minuteRefreshInterval)
   // 盘中增量服务状态 (15s 轮询; 无服务时 available=false)
@@ -487,7 +487,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               <input
                 type="range"
                 min={3}
-                max={300}
+                max={120}
                 step={3}
                 value={minuteRefreshIntervalDraft}
                 disabled={!hasFullMinuteCap}
@@ -495,7 +495,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
                 className="flex-1 h-1 accent-accent cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               />
               <span className="text-[10px] text-muted shrink-0">
-                {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '3s — 300s'}
+                {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '3s — 120s'}
               </span>
             </div>
             {rs?.available && rs.rounds != null && rs.rounds > 0 && (
