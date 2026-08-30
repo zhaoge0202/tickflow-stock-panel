@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://fuyao.aicubes.cn"
 
-# A 股约 5400 只, 500/页约 11 页; 50 页上限防御 count 异常导致的死循环。
-_SNAPSHOT_PAGE_SIZE = 500
+# 单页 6000 覆盖全市场(实测 ~5600 含北交所, 2026-08 服务端不截断 limit=6000),
+# 一次请求拉完; 分页循环兜底未来标的扩容或服务端改为截断的场景。
+_SNAPSHOT_PAGE_SIZE = 6000
 _SNAPSHOT_MAX_PAGES = 50
 _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 
