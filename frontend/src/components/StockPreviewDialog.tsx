@@ -161,15 +161,11 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     return () => clearFocusSymbol()
   }, [symbol])
 
-  // 分时图实时轮询: 复用自选列表的「分时刷新开关 + 间隔」偏好。
-  // 仅实时行情运行 且 用户开启分时刷新时才轮询; 否则 undefined (定格)。
+  // 分时图实时轮询: 详情打开即独立轮询, 不再依赖自选列表的「分时刷新」开关
+  // 与实时行情运行状态 (打开详情就是要看实时分时); 间隔沿用偏好, 默认 6s。
+  // 最新一根K由后端 live 参数直接实时拉取, 与行情列表节奏一致。
   const { data: prefs } = usePreferences()
-  const { data: quoteStatus } = useQuoteStatus()
-  const realtimeRunning = quoteStatus?.running ?? false
-  const intradayRefreshOn = prefs?.minute_intraday_refresh ?? false
-  const intradayRefetchMs = (intradayRefreshOn && realtimeRunning)
-    ? (prefs?.minute_intraday_refresh_interval ?? 6) * 1000
-    : undefined
+  const intradayRefetchMs = (prefs?.minute_intraday_refresh_interval ?? 6) * 1000
 
   const handleRefresh = () => {
     if (!symbol) return

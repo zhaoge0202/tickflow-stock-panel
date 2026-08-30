@@ -24,12 +24,11 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import time as dt_time
 from typing import Any
 
 import polars as pl
 
-from app.market_time import cn_now
+from app.market_time import in_continuous_session
 from app.services import preferences
 
 # 轮询间隔允许范围 (秒): 下限 60s 保证任何滑动窗口 ≤1 个脉冲, 上限防误配。
@@ -41,11 +40,7 @@ _LOOP_STEP_S = 2.0
 
 def _in_continuous_session(now=None) -> bool:
     """A股连续竞价时段 (北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。"""
-    now = now or cn_now()
-    t = now.time()
-    morning = dt_time(9, 30) <= t <= dt_time(11, 30)
-    afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
-    return now.weekday() < 5 and (morning or afternoon)
+    return in_continuous_session(now)
 
 
 @dataclass
