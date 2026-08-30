@@ -939,11 +939,13 @@ function FetchDataCard({
               ? '可通过 TickFlow 免费服务器拉取近 1 年全 A 股日K'
               : `将从当前数据源「${providerLabel}」拉取近 1 年全 A 股日K`}(约 5500 只),预计 1-3 分钟,期间可继续浏览其他页面。
           </p>
-          {isTickflowProvider && (
-            <p className="mt-1 text-[11px] text-warning/80 leading-relaxed">
-              ⓘ 获取数据后即可进行策略定制、回测验证、选股扫描等本地分析功能。
-            </p>
-          )}
+          <p className="mt-1 text-[11px] text-warning/80 leading-relaxed">
+            ⓘ 获取数据后即可进行策略定制、回测验证、选股扫描等本地分析功能。
+          </p>
+          <p className="mt-1 text-[11px] text-muted leading-relaxed">
+            💡 配置 fuyao(同花顺 REST) Key 可解锁财务四表 / 龙虎榜 / 盘前风向标 / 竞价异动:
+            <Link to="/settings?tab=data-sources" className="text-accent hover:text-accent/80 transition-colors">前往设置 →</Link>
+          </p>
 
           {isFetching ? (
             <div className="mt-3">
@@ -1025,11 +1027,22 @@ function WelcomeFetchModal({
             : `将从当前数据源「${providerLabel}」拉取近 1 年全 A 股日K`}(约 5500 只),预计 1-3 分钟。
           同步期间可继续浏览其他页面,完成后看板自动刷新。
         </p>
-        {isTickflowProvider && (
-          <div className="mt-3 rounded-btn bg-elevated/60 px-3 py-2 text-[11px] text-muted leading-relaxed">
-            ⓘ 获取数据后即可进行策略定制、回测验证等本地分析功能。
-          </div>
-        )}
+        <div className="mx-auto mt-4 max-w-md rounded-btn bg-elevated/60 px-4 py-3 text-left">
+          <div className="text-[11px] font-medium text-secondary">获取完成后的推荐步骤</div>
+          <ol className="mt-1.5 space-y-1 text-[11px] text-muted leading-relaxed">
+            <li>1. <span className="text-secondary">配置 fuyao(同花顺 REST) Key</span> — 解锁财务四表 / 龙虎榜 / 盘前风向标 / 竞价异动</li>
+            <li>2. <span className="text-secondary">分钟数据落盘(可选)</span> — 分钟策略回测与板块分时走势需要</li>
+            <li>3. <span className="text-secondary">开始研究</span> — 自选加标的 → 策略扫描 → 回测验证</li>
+          </ol>
+          <Link
+            to="/settings?tab=data-sources"
+            onClick={onClose}
+            className="mt-2 inline-flex items-center gap-0.5 text-[11px] text-accent hover:text-accent/80 transition-colors"
+          >
+            前往设置 → 数据源
+            <ArrowUpRight className="h-3 w-3 self-center" />
+          </Link>
+        </div>
         <div className="mt-5 flex items-center justify-center gap-2.5">
           <button
             onClick={onClose}
