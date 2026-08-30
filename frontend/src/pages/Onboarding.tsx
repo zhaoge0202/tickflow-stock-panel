@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -23,7 +23,7 @@ import {
   KeyRound,
   Route,
 } from 'lucide-react'
-import { api } from '@/lib/api'
+import { api, type ProviderField } from '@/lib/api'
 import { usePreferences, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
 import { Logo } from '@/components/Logo'
@@ -550,8 +550,17 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
 // ===== Step 3: 能力路由检测结果 =====
 // 以能力路由矩阵呈现: 每个标准化数据集一行, 展示当前生效源与可用性,
 // 不再以 TickFlow 档位为中心 —— 多源下各数据集独立路由, 矩阵即真相。
+// 进入本步时按默认优先级自动设置路由: 前者可用的能力归前者, 没有则顺延下一个可用源。
+
+// 自动路由的默认优先级 (前者可用的能力优先归前者)
+const ROUTE_PRIORITY = [
+  { name: 'tickflow', display: 'TickFlow' },
+  { name: 'fuyao', display: 'fuyao' },
+  { name: 'stocksdk', display: 'stock-sdk' },
+]
 
 function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const qc = useQueryClient()
   const settings = useSettings()
   const prefs = usePreferences()
   const matrix = useQuery({
@@ -559,6 +568,40 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
     queryFn: api.capabilityMatrix,
     staleTime: 30_000,
   })
+
+  // 自动路由结果: null=尚未执行/执行中; []=已符合优先级无需调整; 有值=本次改写的路由
+  const appliedRef = useRef(false)
+  const [appliedChanges, setAppliedChanges] = useState<{ label: string; to: string }[] | null>(null)
+  const [applyError, setApplyError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!matrix.data || appliedRef.current) return
+    appliedRef.current = true
+    const desired: Partial<Record<ProviderField, string>> = {}
+    const changes: { label: string; to: string }[] = []
+    for (const cap of matrix.data.capabilities) {
+      if (!cap.field) continue   // 不可路由能力 (仅 TickFlow 提供) 跳过
+      const pick = ROUTE_PRIORITY.find(p => (
+        p.name === 'tickflow'
+          ? cap.tf_available
+          : cap.candidates.some(c => c.name === p.name && c.available)
+      ))
+      if (!pick || pick.name === cap.current) continue   // 全都不可用或无需变化: 保持现状
+      desired[cap.field] = pick.name
+      changes.push({ label: cap.label, to: pick.display })
+    }
+    if (changes.length === 0) {
+      setAppliedChanges([])
+      return
+    }
+    api.updateDataProviders(desired)
+      .then(() => {
+        setAppliedChanges(changes)
+        return qc.invalidateQueries({ queryKey: QK.preferences })
+      })
+      .then(() => qc.invalidateQueries({ queryKey: QK.capabilityMatrix }))
+      .catch(e => setApplyError(`自动设置能力路由失败: ${(e as Error).message}`))
+  }, [matrix.data])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeName = prefs.data?.daily_data_provider || 'tickflow'
   const isTickflow = activeName === 'tickflow'
@@ -576,10 +619,31 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
         <h2 className="text-xl font-bold text-foreground">能力路由检测</h2>
       </div>
       <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-        每个标准化数据集独立路由:下方是当前生效源与实际可用性,随时可在
-        <span className="text-foreground font-medium"> 设置 → 数据源 </span>
-        按数据集改选候选源。
+        进入本步时已按默认优先级
+        <span className="text-foreground font-medium"> TickFlow → fuyao → stock-sdk </span>
+        自动设置各数据集的路由:前者可用的能力归前者,没有则顺延下一个可用源。后续可随时在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>按数据集改选。
       </p>
+
+      {/* 自动路由执行结果 */}
+      {applyError && (
+        <div className="mt-2.5 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
+          <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
+          <span>{applyError}</span>
+        </div>
+      )}
+      {!applyError && appliedChanges !== null && (
+        <div className="mt-2.5 flex items-start gap-1.5 rounded-btn border border-bull/25 bg-bull/[0.06] px-3 py-2 text-[11px] leading-snug text-secondary">
+          <CheckCircle2 className="h-3.5 w-3.5 mt-px shrink-0 text-bull" />
+          {appliedChanges.length > 0 ? (
+            <span>
+              已按优先级自动路由:{appliedChanges.map(c => `${c.label} → ${c.to}`).join('、')}
+            </span>
+          ) : (
+            <span>当前能力路由已符合默认优先级,无需调整。</span>
+          )}
+        </div>
+      )}
 
       {matrix.isLoading ? (
         <div className="mt-5 flex items-center gap-2 text-xs text-muted">
