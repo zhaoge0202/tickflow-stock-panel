@@ -254,6 +254,12 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         if store is not None:
             with suppress(Exception):
                 store.db.close()
+        # 保证结果消息在进程退出前完整刷入管道: put 只是入队,
+        # 实际写管道的是后台 feeder 线程; 不 join 的话主线程先退出,
+        # feeder 随进程销毁, 消息尾部丢失 → 父进程误判 "exited without result"。
+        with suppress(Exception):
+            event_queue.close()
+            event_queue.join_thread()
 
 
 def run_worker_task(
@@ -309,6 +315,21 @@ def run_worker_task(
                 result = message["payload"]
             elif message_type == "error":
                 failure = message
+
+        # 子进程退出后, 队列读线程可能尚未把管道尾部的 result/error 搬进本地缓冲
+        # (0.1s 轮询在系统高负载下会先看到 Empty+进程已死)。join 后做一次兜底排空,
+        # 只要消息完整刷入过管道就一定能取到。
+        if result is None and failure is None:
+            for _ in range(2):
+                try:
+                    message = events.get(timeout=1.0)
+                except queue.Empty:
+                    break
+                message_type = message.get("type")
+                if message_type == "result":
+                    result = message["payload"]
+                elif message_type == "error":
+                    failure = message
 
         process.join(timeout=10.0)
         if process.is_alive():
