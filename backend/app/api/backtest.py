@@ -346,6 +346,33 @@ class StrategyBacktestRequest(BaseModel):
     regime_filter: dict | None = None
 
 
+def _guard_minute_strategy_backtest(
+    request: Request, strategy_id: str, start: date, asset_type: str,
+) -> None:
+    """分钟策略回测入口守卫: 仅 A 股 + 本地分钟K覆盖检查 (fail-fast)。"""
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        return
+    try:
+        s = engine.get(strategy_id)
+    except ValueError:
+        return
+    if s is None or s.execution_backend != "minute_filter":
+        return
+    if asset_type != "stock":
+        raise HTTPException(400, detail="分钟策略回测当前仅支持 A 股 (stock)")
+    earliest = request.app.state.repo.earliest_minute_date()
+    if earliest is None or start < earliest:
+        have = f"最早到 {earliest}, " if earliest else ""
+        raise HTTPException(
+            400,
+            detail=(
+                f"本地分钟K{have}无法覆盖回测起始日 {start}。"
+                "请先用「扩展分钟K历史」拉取更多数据, 或缩小回测区间"
+            ),
+        )
+
+
 @router.post("/strategy/run")
 def strategy_run(req: StrategyBacktestRequest, request: Request):
     """策略回测 — 复用 StrategyDef 体系做全周期回测。"""
@@ -355,6 +382,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     end = req.end or date.today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
+    _guard_minute_strategy_backtest(request, req.strategy_id, start, req.asset_type)
 
     cfg = StrategyBacktestConfig(
         strategy_id=req.strategy_id,
@@ -505,6 +533,7 @@ async def strategy_stream(
         # 空 start = 全部历史: 用本地最早日K日期, 查不到再回退到默认窗口
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
+    _guard_minute_strategy_backtest(request, strategy_id, start_date, asset_type)
 
     # 服务端范围保护
     guard_violated = False
