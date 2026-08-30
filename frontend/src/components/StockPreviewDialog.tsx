@@ -475,6 +475,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
+                  refetchIntervalMs={intradayRefetchMs}
                 />
               ) : (
                 <>
