@@ -183,6 +183,20 @@ def test_refresh_preferences_defaults_and_clamp(tmp_path, monkeypatch):
     preferences.save({"minute_refresh_interval": 90})
     assert preferences.get_minute_refresh_interval() == 90
 
+def test_realtime_monitor_config_owns_refresh_keys(tmp_path, monkeypatch):
+    """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [60,300]。"""
+    _isolated_prefs(tmp_path, monkeypatch)
+    saved = preferences.set_realtime_monitor_config({
+        "minute_refresh_enabled": True,
+        "minute_refresh_interval": 10,   # 越界 → clamp 到下限
+    })
+    assert saved["minute_refresh_enabled"] is True
+    assert saved["minute_refresh_interval"] == 60
+    saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 400})
+    assert saved["minute_refresh_interval"] == 300
+    saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 120})
+    assert saved["minute_refresh_interval"] == 120
+
 
 def test_status_endpoint_without_service():
     from fastapi import FastAPI

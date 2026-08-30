@@ -1648,15 +1648,13 @@ export const api = {
         }),
       },
     ),
-  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number, refresh?: { enabled?: boolean; interval?: number }) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
       body: JSON.stringify({
         minute_sync_enabled: enabled,
         minute_sync_days: days,
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
-        ...(refresh?.enabled != null ? { minute_refresh_enabled: refresh.enabled } : {}),
-        ...(refresh?.interval != null ? { minute_refresh_interval: refresh.interval } : {}),
       }),
     }),
 

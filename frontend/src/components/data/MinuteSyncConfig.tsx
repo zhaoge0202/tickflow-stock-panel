@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Trash2, Download, Calendar, Zap } from 'lucide-react'
+import { Loader2, Trash2, Download, Calendar } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { MissingCapChip } from '@/lib/capability-labels'
@@ -12,59 +12,20 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
     queryFn: api.preferences,
   })
   const update = useMutation({
-    mutationFn: ({ enabled, days, segmentDays, refresh }: {
-      enabled: boolean; days: number; segmentDays?: number
-      refresh?: { enabled?: boolean; interval?: number }
-    }) =>
-      api.updateMinuteSync(enabled, days, segmentDays, refresh),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.preferences })
-      qc.invalidateQueries({ queryKey: ['minute-refresh-status'] })
-    },
-  })
-
-  // 盘中增量刷新状态 (轮询 15s, 仅弹窗挂载期间)
-  const refreshStatus = useQuery({
-    queryKey: ['minute-refresh-status'],
-    queryFn: api.minuteRefreshStatus,
-    refetchInterval: 15000,
+    mutationFn: ({ enabled, days, segmentDays }: { enabled: boolean; days: number; segmentDays?: number }) =>
+      api.updateMinuteSync(enabled, days, segmentDays),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
   const hasMinuteCap = !!caps?.capabilities?.['kline.minute.batch']
   const enabled = prefs.data?.minute_sync_enabled ?? false
   const days = prefs.data?.minute_sync_days ?? 5
   const segmentDays = prefs.data?.minute_sync_segment_days ?? 20
-  const refreshEnabled = prefs.data?.minute_refresh_enabled ?? false
-  const refreshInterval = prefs.data?.minute_refresh_interval ?? 60
   const [localDays, setLocalDays] = useState(days)
   const [localSegment, setLocalSegment] = useState(segmentDays)
-  const [localRefreshInterval, setLocalRefreshInterval] = useState(refreshInterval)
 
   useEffect(() => { setLocalDays(days) }, [days])
   useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])
-  useEffect(() => { setLocalRefreshInterval(refreshInterval) }, [refreshInterval])
-
-  // 盘中增量 = intraday.batch 独立能力 (Expert 专有), 与盘后同步的 minute.batch 分属不同限流池
-  const hasIntradayBatchCap = !!caps?.capabilities?.['intraday.batch']
-  const rs = refreshStatus.data
-  const refreshGateText = rs?.custom_provider_active
-    ? '已配置自定义分钟源, 盘中增量由插件自管'
-    : rs && rs.available && !rs.capability_ok
-      ? '需要日内分时批量能力 (Expert)'
-      : !rs?.in_trading_hours ? '非连续竞价时段, 暂停中'
-      : rs?.last_error ? `最近错误: ${rs.last_error}`
-      : null
-
-  const handleRefreshToggle = () => {
-    if (!hasIntradayBatchCap) return
-    update.mutate({ enabled, days: localDays, refresh: { enabled: !refreshEnabled } })
-  }
-
-  const setRefreshInterval = (v: number) => {
-    const clamped = Math.max(60, Math.min(300, Math.round(v / 30) * 30))
-    setLocalRefreshInterval(clamped)
-    update.mutate({ enabled, days: localDays, refresh: { interval: clamped } })
-  }
 
   useEffect(() => { setLocalDays(days) }, [days])
   useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])
@@ -187,67 +148,6 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
       <div className="text-[10px] text-muted leading-relaxed -mt-1">
         每段拉完即写盘,避免内存堆积。越小越省内存但越慢,默认 20 平衡。
       </div>
-      </div>
-
-      {/* 区块 A2: 盘中增量刷新 (Expert 专有, intraday.batch 独立限流池) */}
-      <div className="pt-3 border-t border-border space-y-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <button
-              onClick={handleRefreshToggle}
-              disabled={!hasIntradayBatchCap}
-              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 shrink-0 ${
-                refreshEnabled ? 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.3)]' : 'bg-elevated'
-              } ${!hasIntradayBatchCap ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-            >
-              <span
-                className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                  refreshEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-                }`}
-              />
-            </button>
-            <div className="flex items-center gap-1.5">
-              <Zap className="h-3 w-3 text-amber-400" />
-              <span className="text-xs text-foreground font-medium">
-                盘中增量刷新{refreshEnabled ? '已开启' : '已关闭'}
-              </span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center">
-              <button
-                onClick={() => setRefreshInterval(localRefreshInterval - 30)}
-                disabled={!hasIntradayBatchCap || !refreshEnabled || localRefreshInterval <= 60}
-                className="h-6 w-6 flex items-center justify-center rounded-l-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
-              >−</button>
-              <div className={`h-6 w-10 flex items-center justify-center border-y border-border text-[11px] font-mono tabular-nums ${refreshEnabled ? 'text-foreground bg-base' : 'text-muted bg-elevated/50'}`}>
-                {Math.round(localRefreshInterval / 60) >= 1 && localRefreshInterval % 60 === 0 ? `${localRefreshInterval / 60}m` : `${localRefreshInterval}s`}
-              </div>
-              <button
-                onClick={() => setRefreshInterval(localRefreshInterval + 30)}
-                disabled={!hasIntradayBatchCap || !refreshEnabled || localRefreshInterval >= 300}
-                className="h-6 w-6 flex items-center justify-center rounded-r-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
-              >+</button>
-            </div>
-            {!hasIntradayBatchCap && <MissingCapChip capKey="intraday.batch" />}
-          </div>
-        </div>
-        <div className="text-[10px] text-muted leading-relaxed">
-          交易时段内用日内分时批量 (独立配额) 每 {Math.round(localRefreshInterval / 60) >= 1 && localRefreshInterval % 60 === 0 ? `${localRefreshInterval / 60} 分钟` : `${localRefreshInterval} 秒`} 全市场脉冲落盘一次,
-          分钟策略读到最新K线; 不占用盘后分钟同步的限流配额。
-        </div>
-        {/* 运行状态一行: 门控原因 / 下一轮 / 最近一轮 */}
-        {rs?.available && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
-            <span className={rs.running ? 'text-emerald-400' : ''}>
-              ● {rs.running ? '服务运行中' : '服务未运行'}
-            </span>
-            {refreshGateText && <span className="text-amber-400/80">{refreshGateText}</span>}
-            {rs.rounds != null && rs.rounds > 0 && (
-              <span>已 {rs.rounds} 轮 · 最近 {rs.last_symbols} 标的 / {rs.last_rows} 行 / {rs.last_requests} 请求{rs.last_round_ms != null ? ` · ${(rs.last_round_ms / 1000).toFixed(1)}s` : ''}</span>
-            )}
-          </div>
-        )}
       </div>
 
       {/* 区块 B: 手动获取 (一次性操作, 独立于上方自动同步开关) */}

@@ -54,9 +54,21 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const intradayInterval = prefs?.minute_intraday_refresh_interval ?? 6
   // 滑块本地草稿: 拖动时即时反馈, 停顿 2s 后落库 (与行情轮询滑块一致)
   const [intradayIntervalDraft, setIntradayIntervalDraft] = useState(intradayInterval)
+  // 盘中分钟增量 (Expert 专有): 间隔 (秒), 与后端 [60,300] clamp 对齐; 默认 60
+  const minuteRefreshInterval = prefs?.minute_refresh_interval ?? 60
+  const [minuteRefreshIntervalDraft, setMinuteRefreshIntervalDraft] = useState(minuteRefreshInterval)
+  // 盘中增量服务状态 (15s 轮询; 无服务时 available=false)
+  const refreshStatus = useQuery({
+    queryKey: ['minute-refresh-status'],
+    queryFn: api.minuteRefreshStatus,
+    refetchInterval: 15000,
+  })
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false
   const hasDepth = !!caps?.capabilities?.['depth5.batch']
+  // 盘中分钟增量 = intraday.batch 独立能力 (Expert 专有), 与盘后同步的 minute.batch 分属不同限流池
+  const hasIntradayBatchCap = !!caps?.capabilities?.['intraday.batch']
+  const rs = refreshStatus.data
   // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
   const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
   const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? SIDEBAR_INDEX_OPTIONS.map(i => i.symbol)
@@ -262,6 +274,20 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     return () => window.clearTimeout(t)
   }, [intradayIntervalDraft, intradayInterval, save])
 
+  // 盘中增量间隔: 服务端值变化时同步本地草稿
+  useEffect(() => {
+    setMinuteRefreshIntervalDraft(minuteRefreshInterval)
+  }, [minuteRefreshInterval])
+
+  // 盘中增量间隔: 草稿与已保存值不同时, 2s 防抖落库
+  useEffect(() => {
+    if (minuteRefreshIntervalDraft === minuteRefreshInterval) return
+    const t = window.setTimeout(() => {
+      save({ minute_refresh_interval: minuteRefreshIntervalDraft })
+    }, 2000)
+    return () => window.clearTimeout(t)
+  }, [minuteRefreshIntervalDraft, minuteRefreshInterval, save])
+
   // highlight=depth-fix 时闪烁高亮连板梯队修正卡片
   const [flash, setFlash] = useState(false)
   const flashedRef = useRef(false)
@@ -282,6 +308,57 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
       {/* ========== 左列 ========== */}
       <div className="space-y-6">
         {/* 行情状态 — 开关 + 间隔 */}
+        {/* 盘中分钟增量落盘 (Expert 专有): 交易时段常驻服务, intraday.batch 独立配额 */}
+        <Card icon={Zap} title="盘中分钟增量">
+          <ToggleRow
+            label="盘中分钟增量落盘"
+            desc={
+              !hasIntradayBatchCap ? '需要日内分时批量能力 (Expert)'
+              : rs?.custom_provider_active ? '已配置自定义分钟源, 盘中增量由插件自管'
+              : rs?.running ? (rs?.in_trading_hours ? '服务运行中' : '运行中 · 非连续竞价时段暂停')
+              : '已关闭'
+            }
+            checked={prefs?.minute_refresh_enabled ?? false}
+            onChange={(v) => save({ minute_refresh_enabled: v })}
+            disabled={!hasIntradayBatchCap || !!rs?.custom_provider_active}
+          />
+          <div className="mt-3 pt-3 border-t border-border">
+            <div className="flex items-center justify-between gap-4 py-1">
+              <div className="min-w-0">
+                <div className="text-sm text-foreground">刷新间隔</div>
+                <div className="text-[11px] text-muted">
+                  交易时段内全市场脉冲落盘一轮的间隔; 下限 60s 保证不超 intraday.batch 配额
+                </div>
+              </div>
+              <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
+                {minuteRefreshIntervalDraft >= 60 && minuteRefreshIntervalDraft % 60 === 0 ? `${minuteRefreshIntervalDraft / 60}m` : `${minuteRefreshIntervalDraft}s`}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 mt-2">
+              <input
+                type="range"
+                min={60}
+                max={300}
+                step={30}
+                value={minuteRefreshIntervalDraft}
+                disabled={!hasIntradayBatchCap}
+                onChange={(e) => setMinuteRefreshIntervalDraft(parseInt(e.target.value, 10))}
+                className="flex-1 h-1 accent-accent cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              />
+              <span className="text-[10px] text-muted shrink-0">
+                {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '60s — 300s'}
+              </span>
+            </div>
+            {rs?.available && rs.rounds != null && rs.rounds > 0 && (
+              <div className="mt-2 text-[10px] text-muted">
+                已 {rs.rounds} 轮 · 最近 {rs.last_symbols} 标的 / {rs.last_rows} 行 / {rs.last_requests} 请求
+                {rs.last_round_ms != null ? ` · ${(rs.last_round_ms / 1000).toFixed(1)}s` : ''}
+                {rs.last_error ? ` · ${rs.last_error}` : ''}
+              </div>
+            )}
+          </div>
+        </Card>
+
         <Card icon={Activity} title="行情轮询">
           <ToggleRow
             label="实时行情"

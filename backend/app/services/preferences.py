@@ -940,6 +940,13 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["minute_intraday_refresh_interval"] = max(
             _INTRADAY_REFRESH_INTERVAL_MIN,
             min(_INTRADAY_REFRESH_INTERVAL_MAX, int(cfg["minute_intraday_refresh_interval"])))
+    if "minute_refresh_enabled" in cfg:
+        updates["minute_refresh_enabled"] = bool(cfg["minute_refresh_enabled"])
+    if "minute_refresh_interval" in cfg:
+        # clamp 到 [60, 300] (下限保证 60s 窗口至多一个全市场脉冲), 与 getter 一致
+        updates["minute_refresh_interval"] = max(
+            _MINUTE_REFRESH_INTERVAL_MIN,
+            min(_MINUTE_REFRESH_INTERVAL_MAX, int(cfg["minute_refresh_interval"])))
     if "monitor_ext_fields" in cfg:
         raw = cfg["monitor_ext_fields"] or {}
         updates["monitor_ext_fields"] = {
@@ -961,6 +968,8 @@ def get_realtime_monitor_config() -> dict:
         "screener_auto_run": get_screener_auto_run(),
         "minute_intraday_refresh": get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": get_minute_intraday_refresh_interval(),
+        "minute_refresh_enabled": get_minute_refresh_enabled(),
+        "minute_refresh_interval": get_minute_refresh_interval(),
         "monitor_ext_fields": get_monitor_ext_fields(),
     }
 
