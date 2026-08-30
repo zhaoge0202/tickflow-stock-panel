@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import multiprocessing as mp
 import os
 import queue
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+
+logger = logging.getLogger(__name__)
 
 
 class BacktestWorkerError(RuntimeError):
@@ -254,12 +257,14 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         if store is not None:
             with suppress(Exception):
                 store.db.close()
-        # 保证结果消息在进程退出前完整刷入管道: put 只是入队,
-        # 实际写管道的是后台 feeder 线程; 不 join 的话主线程先退出,
-        # feeder 随进程销毁, 消息尾部丢失 → 父进程误判 "exited without result"。
+        # 终态消息已入队: 显式冲刷队列后立即退出。put 只是入队, 实际写管道的
+        # 是后台 feeder 线程, close+join_thread 保证消息完整落管 (否则父进程误判
+        # "exited without result"); 大数据量任务再跳过解释器 teardown (GC、DuckDB
+        # 线程 join、DLL 卸载), 否则收尾可达数十秒, 撞上父进程 10s 退出预算。
         with suppress(Exception):
             event_queue.close()
             event_queue.join_thread()
+        os._exit(0)
 
 
 def run_worker_task(
@@ -332,10 +337,19 @@ def run_worker_task(
                     failure = message
 
         process.join(timeout=10.0)
+        worker_exit_forcibly = False
         if process.is_alive():
+            # 终态消息 (result/error) 已完整送达, 子进程只是退出收尾慢:
+            # 强制结束并继续走结果/错误处理, 不把已送达的成功结果当失败丢弃。
             process.terminate()
             process.join(timeout=5.0)
-            raise BacktestWorkerError("backtest worker returned but did not exit within 10 seconds")
+            worker_exit_forcibly = True
+            logger.warning(
+                "%s worker delivered its terminal message but did not exit within "
+                "10s; terminated forcibly (exitcode=%s)",
+                task["kind"],
+                process.exitcode,
+            )
         if failure is not None:
             raise BacktestWorkerError(
                 f"{failure.get('message', 'worker failed')}\n{failure.get('traceback', '')}".rstrip()
@@ -350,6 +364,7 @@ def run_worker_task(
             "parent_rss_before_bytes": parent_rss_before,
             "parent_rss_after_worker_exit_bytes": _rss_bytes(),
             "worker_exitcode": process.exitcode,
+            "worker_exit_forcibly": worker_exit_forcibly,
         }
         kind = task["kind"]
         if kind == "backtest":
