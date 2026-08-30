@@ -57,7 +57,10 @@ function todayLocalISO() {
 
 function defaultIntradayDate(rows: StockDailyKChartResult['rows'], rangeEnd: string): string | null {
   // 今日分时/分笔走实时源；即使日 K 缓存尚未生成今日 K 线，也应默认看今天。
-  if (rangeEnd === todayLocalISO()) return rangeEnd
+  // 周末没有"今日"行情: 数据源会拿上一交易日快照冒充今天 (产生 2026-08-30 假分笔
+  // 这类错日期数据), 回退到日 K 最后一根 (即上一交易日)。
+  const weekday = new Date().getDay()
+  if (rangeEnd === todayLocalISO() && weekday >= 1 && weekday <= 5) return rangeEnd
   return rows[rows.length - 1]?.date ?? null
 }
 

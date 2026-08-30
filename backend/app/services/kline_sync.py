@@ -15,7 +15,7 @@ import polars as pl
 
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
-from app.market_time import CN_TZ, cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today, is_trading_weekday
 from app.services import preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
@@ -238,6 +238,13 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
     返回写入的行数。
     """
+    today = cn_today()
+    if not is_trading_weekday(today):
+        # 数据源在周末仍返回以上一交易日快照冒充的"当日"行情,
+        # 落盘会产生日期错误的假日K (如周日分区复制周五)。
+        logger.info("sync_daily_by_quotes: %s 为周末非交易日, 跳过当日快照写盘", today)
+        return 0
+
     from datetime import date as _date
 
     from app.tickflow.client import get_client
@@ -272,7 +279,6 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
 
     # 分区日期用北京交易日 (与 quote_service._build_daily 的 cn_today 一致),
     # 避免 UTC 服务器在盘中把日分区写成服务器本地日期。
-    today = cn_today()
     daily_df = df.with_columns(pl.lit(today).cast(pl.Date).alias("date"))
 
     # 过滤停牌 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)

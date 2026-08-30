@@ -515,7 +515,8 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
         return rows
 
     # 非交易日（周末/假日）缓存的行情日期 != 今天，跳过注入避免产生重复蜡烛
-    if not enriched_date or enriched_date != date.today():
+    # 用北京日期比较: enriched_date 按 cn_today 落盘, 服务器本地时区不能成为隐式输入
+    if not enriched_date or enriched_date != cn_today():
         return rows
 
     # 查找该 symbol 的实时 enriched 行

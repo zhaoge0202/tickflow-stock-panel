@@ -10,6 +10,7 @@ from datetime import date, datetime
 from typing import Any
 
 from app.config import settings
+from app.market_time import cn_today, is_trading_weekday
 from app.plugins.tdxapi.provider import TDXAPIProvider
 from app.services.trade_tick_mysql import trade_tick_mysql_store
 
@@ -60,7 +61,16 @@ class TradeTickIngestor:
         symbol = str(symbol or "").strip().upper()
         if not symbol:
             return {"status": "rejected", "message": "symbol 不能为空"}
-        day = _parse_date(trade_date) or date.today()
+        day = _parse_date(trade_date) or cn_today()
+        # 非交易日没有真实逐笔成交: 数据源返回的是上一交易日快照, 按当天日期
+        # 入库会产生日期错误的假日逐笔 (如 2026-08-30 复制 08-28)。
+        if not is_trading_weekday(day):
+            return {
+                "status": "rejected",
+                "symbol": symbol,
+                "date": day.isoformat(),
+                "message": "非交易日无逐笔成交, 跳过入库",
+            }
 
         if not trade_tick_mysql_store.enabled():
             return {
