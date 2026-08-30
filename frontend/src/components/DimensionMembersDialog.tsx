@@ -439,6 +439,8 @@ function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kin
       width: el.clientWidth,
       height: 132,
       layout: {
+        // 关闭 TV 角标 (licence 归属改由 README 技术栈外链承担)
+        attributionLogo: false,
         background: { color: 'transparent' },
         textColor: ctRef.current.text,
         fontFamily: 'JetBrains Mono, monospace',
