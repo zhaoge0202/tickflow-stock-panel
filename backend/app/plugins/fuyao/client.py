@@ -1,12 +1,17 @@
 """扶摇(同花顺金融数据 API) HTTP 客户端。
 
-职责: 认证、统一信封解包、分页拉取快照。不知道 provider / services 层。
+职责: 认证、统一信封解包、快照分页、单标的日K、市场 dump 下载。不知道 provider / services 层。
 文档: https://fuyao.aicubes.cn/docs — REST + X-api-key, 响应信封 {code, message, data}。
+
+时间字段口径: 所有 *ms 字段(含 start/end 入参与 date_ms/ex_date_ms 出参)均为
+北京时间零点对应的 epoch ms(= UTC 前一日 16:00), 由 provider 层统一 +8h 换算。
 """
+
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import httpx
 
@@ -60,7 +65,9 @@ class FuyaoClient:
         return payload.get("data") or {}
 
     # ---- 快照 ----
-    def snapshot_page(self, limit: int = _SNAPSHOT_PAGE_SIZE, offset: int = 0) -> tuple[list[dict], int]:
+    def snapshot_page(
+        self, limit: int = _SNAPSHOT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[list[dict], int]:
         """拉取一页 A 股全市场快照。返回 (rows, total), total 为全市场总数。
 
         实测响应(2026-08): data={timestamp, total, item}; 官方文档示例为
@@ -107,3 +114,131 @@ class FuyaoClient:
         if not out:
             raise FuyaoError("全市场快照为空")
         return out, server_ts
+
+    # ---- 历史日K ----
+    def historical_kline(
+        self, thscode: str, start_ms: int, end_ms: int, adjust: str = "none"
+    ) -> list[dict]:
+        """单标的日K(interval=1d 固定)。单次窗口 ≤10 年, 超出由调用方分片。
+
+        adjust 必须显式传 "none" 取原始价 — 服务端默认是 forward(前复权),
+        官方前复权序列事件间存在逐日漂移, 项目内禁止使用。
+        返回 data.item 原始行: {date_ms, open_price, high_price, low_price,
+        close_price, volume(股), turnover(元)}。
+        """
+        data = self._get(
+            "/api/a-share/prices/historical",
+            {
+                "thscode": thscode,
+                "interval": "1d",
+                "adjust": adjust,
+                "start": int(start_ms),
+                "end": int(end_ms),
+            },
+        )
+        rows = data.get("item")
+        return rows if isinstance(rows, list) else []
+
+    # ---- 财务 ----
+    # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,
+    # 这里只用 limit。period=quarterly 覆盖每个季度末(含年报期), 与项目"各报告期累积"口径一致。
+    _STATEMENT_ENDPOINTS = {
+        "income": "income-statements",
+        "balance_sheet": "balance-sheets",
+        "cash_flow": "cash-flow-statements",
+    }
+
+    def financial_statements(
+        self, stmt: str, thscode: str, limit: int = 1
+    ) -> list[dict]:
+        """单标的财务报表多期序列。stmt: income | balance_sheet | cash_flow。
+
+        返回 data.item 原始行: 共有元数据(thscode/period/fiscal_year/fiscal_period/
+        report_date_ms/period_end_ms/currency) + 各表字段。行内 null 表示该期未披露。
+        """
+        endpoint = self._STATEMENT_ENDPOINTS.get(stmt)
+        if endpoint is None:
+            raise FuyaoError(f"未知财务报表类型: {stmt}")
+        data = self._get(
+            f"/api/a-share/financials/{endpoint}",
+            {"thscode": thscode, "period": "quarterly", "limit": max(1, min(20, limit))},
+        )
+        rows = data.get("item")
+        return rows if isinstance(rows, list) else []
+
+    def financial_indicators(self, thscode: str, report: str) -> list[dict]:
+        """单标的单报告期财务指标(report 格式 yyyy-N, N=1..4 对应一季报..年报)。
+
+        返回 data.abilities 原始列表 [{ability, indicators: [{index_id, value}]}];
+        value 为保留原始精度的数值字符串(百分制指标即百分点数), 缺失为 null。
+        未披露报告期实测返回 code=5003(文档写 3002, 以实测为准) → 经 _get 抛 FuyaoError,
+        由调用方按"该期无数据"处理。
+        """
+        data = self._get(
+            "/api/a-share/financials/indicators",
+            {"thscode": thscode, "report": report},
+        )
+        abilities = data.get("abilities")
+        return abilities if isinstance(abilities, list) else []
+
+    def valuations_snapshot(self, thscodes: list[str]) -> list[dict]:
+        """批量估值快照(pe_ttm/pe_mrq/pb_mrq/ps_ttm/pcf_ttm), 数值为最新口径。
+
+        服务端单次上限 100 只(超出 code=1003), 分批由调用方负责。
+        返回 data.item 原始行。
+        """
+        data = self._get(
+            "/api/a-share/valuations/snapshot",
+            {"thscodes": ",".join(thscodes[:100])},
+        )
+        rows = data.get("item")
+        return rows if isinstance(rows, list) else []
+
+    def price_snapshot_batch(self, thscodes: list[str]) -> list[dict]:
+        """按 thscodes 批量行情快照(最新价等), 用于估值推导的分母。
+
+        与全市场分页快照同一端点; thscodes 显式传入时不分页。
+        返回 data.item 原始行。
+        """
+        data = self._get(
+            "/api/a-share/prices/snapshot",
+            {"thscodes": ",".join(thscodes[:100])},
+        )
+        rows = data.get("item")
+        return rows if isinstance(rows, list) else []
+
+    # ---- 市场 dump ----
+    def dump_download_url(self, dump_kind: str) -> dict:
+        """获取 dump 预签名下载信息(约 300s 有效)。
+
+        dump_kind: adjustment-factors | daily-k-10d | daily-k。
+        返回 {presigned_url, presigned_url_expires_at, expires_in_seconds};
+        release 版本号(如 20260828)嵌在 presigned_url 的 releases/<date>/ 路径中,
+        供调用方做缓存版本管理。
+        """
+        return self._get(f"/api/dump/market-dumps/{dump_kind}/download-url", {})
+
+    def download_dump(self, dump_kind: str, dest: Path) -> Path:
+        """下载 dump 到 dest(先写 .part 临时文件, 成功后原子改名)。失败抛 FuyaoError。
+
+        预签名 URL 指向对象存储, 请求不得携带 X-api-key 头 → 用独立裸请求,
+        不经过持有认证头的 self._http。
+        """
+        url = str(self.dump_download_url(dump_kind).get("presigned_url") or "")
+        if not url:
+            raise FuyaoError(f"dump {dump_kind} 未返回预签名 URL")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            with httpx.stream("GET", url, timeout=120.0, follow_redirects=True) as resp:
+                if resp.status_code != 200:
+                    raise FuyaoError(f"dump {dump_kind} 下载失败 HTTP {resp.status_code}")
+                with open(tmp, "wb") as fh:
+                    for chunk in resp.iter_bytes(1 << 20):
+                        fh.write(chunk)
+            tmp.replace(dest)
+        except httpx.HTTPError as e:
+            raise FuyaoError(f"dump {dump_kind} 下载网络失败: {e}") from e
+        finally:
+            tmp.unlink(missing_ok=True)
+        return dest

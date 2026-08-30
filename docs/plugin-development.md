@@ -147,7 +147,7 @@ class MyProvider:
 
     def get_minute(self, symbols, start_time, end_time, asset_type="stock",
                    on_chunk_done=None, freq="1m") -> pl.DataFrame:
-        """分钟K: [symbol, datetime, open, high, low, close, volume, amount]"""
+        """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount]"""
 
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
@@ -163,6 +163,21 @@ class MyProvider:
         返回 {provider, dataset, rows, columns, preview, error?}; 未支持的数据集
         返回 error 字段说明会回退 TickFlow。"""
 ```
+
+### get_minute 的 datetime 时区契约
+
+`datetime` 必须是**北京时间墙钟**（naive，如 `2026-08-28 09:35:00`），与日K的
+`date` 语义对齐；不要返回 UTC 或带时区的时间。前端分时图按交易时段时轴
+（09:30–11:30 / 13:00–15:00）映射每根K线，UTC 口径的帧会导致全部点位落在时轴外、
+分时图空白。
+
+入口守卫（`kline_sync._enforce_minute_beijing_wallclock`）对所有分钟源强制归一：
+带时区 → 自动换算成北京墙钟；naive 但整体呈 UTC 特征（如 01:30）→ 自动 +8 纠偏并
+记日志；完全无法识别的口径 → 拒收并回退 TickFlow。契约仍要求源头写对，守卫只是兜底。
+
+可选类属性 `minute_history_days = 5` 声明 1 分钟历史深度（交易日）；未声明视为
+深历史（TickFlow 基准）。浅源（如 stock-sdk 免费分时仅保留最近 5 个交易日）声明后，
+个股分时档位自动收窄为可行选项并默认 5 日，深源默认 20 日。
 
 ### 异常语义
 
@@ -213,7 +228,7 @@ class MyConfig:
 插件 PR 必须带契约测试(CONTRIBUTING §9), **不依赖真实网络与 API Key**——用假
 Client/桥接注入。以 `backend/tests/test_fuyao_provider.py` 为范本, 至少覆盖:
 
-1. 字段映射与单位转换: 百分数→小数制、缺失字段按口径推导、缺失字段置 None 不伪造
+1. 字段映射与单位转换: 百分数→小数制、volume 股→手、*ms 零点戳时区换算、缺失字段按口径推导、缺失字段置 None 不伪造
 2. 接口响应结构变体: 实测结构 vs 官方文档示例双兼容(供应商文档与实际不一致是常态)
 3. 分页: 多页合并、空页终止、页数上限
 4. 软失败: 接口报错返回 []; 整页 schema 变化有告警而非静默空数据
@@ -229,10 +244,10 @@ uv run --extra dev python -m ruff check app/plugins/<your_plugin>/ tests/test_<y
 ## 现有插件参考
 
 - **`backend/app/plugins/fuyao/`** — 同花顺官方 REST 数据源(runtime: none, 纯 HTTP 零依赖)
-  - 当前提供 `realtime`(A 股全市场快照, 分页拉取); Key 在设置页卡片直接配置(先探后存), 或 `.env` 配 `FUYAO_API_KEY`
-  - `client.py` — httpx 客户端(X-api-key 认证 + 统一信封解包 + 分页 + 页间隔限频)
-  - `provider.py` — Provider 实现(实测/文档双字段名映射、百分数→小数制、软失败、Key 探测)
-  - `tests/test_fuyao_provider.py` — 32 个契约测试, 是新插件的测试范本
+  - 提供 `realtime`(A 股全市场快照, 分页拉取)、`daily`(原始价日K三档: 近端窗口走 daily-k-10d dump, 深窗口走 daily-k 10 年全量 dump(172MB 一次下载、缓存复用、10d 补尾), 兜底单标的接口按 10 年自动分片)、`adj_factor`(事件 dump + 前收盘价从本地日K dump 一次取齐、缺价标的回退单标的接口, 按交易所公式推导单事件比值, 涨跌停自检; 全市场配价从逐标的 ~13 分钟降为秒级); Key 在设置页卡片直接配置(先探后存), 或 `.env` 配 `FUYAO_API_KEY`
+  - `client.py` — httpx 客户端(X-api-key 认证 + 统一信封解包 + 分页 + 页间隔限频 + 单标的日K + dump 预签名下载, S3 下载不带 Key 头)
+  - `provider.py` — Provider 实现(实测/文档双字段名映射、百分数→小数制、volume 股→手、上海零点戳 +8h 时区、dump 按 release 版本缓存、软失败、Key 探测)
+  - `tests/test_fuyao_provider.py` — 73 个契约测试, 是新插件的测试范本
 - **`backend/app/plugins/stocksdk/`** — Node 型插件, 通过 subprocess 桥接调用 stock-sdk
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
