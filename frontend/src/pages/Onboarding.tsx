@@ -19,7 +19,6 @@ import {
   FileText,
   Landmark,
   Database,
-  Plus,
   Puzzle,
   KeyRound,
   Route,
@@ -28,7 +27,6 @@ import { api } from '@/lib/api'
 import { usePreferences, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
 import { Logo } from '@/components/Logo'
-import { DataSourceEditor } from '@/pages/settings/DataSourceEditor'
 
 // ===== 引导页:5 步向导 =====
 // 0. 声明  1. 欢迎  2. 数据源与 Key  3. 能力路由检测  4. 完成 → 写标记 → 进面板
@@ -287,71 +285,28 @@ const DATASET_LABELS: Record<string, string> = {
 
 function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const qc = useQueryClient()
-  const prefs = usePreferences()
+  const settings = useSettings()
   const sources = useQuery({
     queryKey: QK.dataSources,
     queryFn: api.dataSources,
     staleTime: 60_000,
   })
 
-  // null = 跟随后端当前激活源 (首次使用即默认内置源)
-  const [picked, setPicked] = useState<string | null>(null)
-  // 是否展开「添加自有数据源」编辑器
-  const [adding, setAdding] = useState(false)
-  // 正在内联配置 Key 的插件名 (仅 api_key_env 声明型, 如 fuyao)
+  // 内联 Key 配置目标 (tickflow = 档位 Key; fuyao = 实时/除权增强路由)
   const [keyFor, setKeyFor] = useState<string | null>(null)
   const [keyInput, setKeyInput] = useState('')
   const [keyError, setKeyError] = useState<string | null>(null)
   const [keySaved, setKeySaved] = useState<string | null>(null)
 
-  const builtin = sources.data?.builtin ?? []
   const plugins = sources.data?.plugins ?? []
+  const builtin = sources.data?.builtin ?? []
   const custom = sources.data?.custom ?? []
   const items = [
     ...builtin.map(s => ({ ...s, kind: 'builtin' as const })),
     ...plugins.map(s => ({ ...s, kind: 'plugin' as const })),
     ...custom.map(s => ({ ...s, kind: 'custom' as const })),
   ]
-  const byName = new Map(items.map(s => [s.name, s]))
 
-  const activeName = prefs.data?.daily_data_provider || 'tickflow'
-  const selected = picked ?? activeName
-
-  // 切换数据源 —— 与设置页同一套偏好接口:
-  // 内置源 5 个数据集全量切换; 其他源仅切换其声明支持的数据集, 其余回落内置源
-  const switchProvider = useMutation({
-    mutationFn: (name: string) => {
-      if (name === 'tickflow') {
-        return api.updateDataProviders({
-          daily_data_provider: 'tickflow',
-          adj_factor_provider: 'same_as_daily',
-          realtime_data_provider: 'tickflow',
-          minute_data_provider: 'tickflow',
-          financial_data_provider: 'tickflow',
-        })
-      }
-      const supported = new Set(byName.get(name)?.datasets ?? [])
-      const pick = (dataset: string) => (supported.has(dataset) ? name : 'tickflow')
-      return api.updateDataProviders({
-        daily_data_provider: pick('daily'),
-        adj_factor_provider: 'same_as_daily',
-        realtime_data_provider: pick('realtime'),
-        minute_data_provider: pick('minute'),
-        financial_data_provider: pick('financial'),
-      })
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
-  })
-
-  const choose = (name: string, available: boolean) => {
-    if (!available || name === selected || switchProvider.isPending) return
-    setAdding(false)
-    setPicked(name)
-    switchProvider.mutate(name)
-  }
-
-  // 内联 Key 配置 (先探后存): 验证通过才落盘, 插件成功即自动选用该源
-  // tickflow 走独立端点: 填 Key 解锁更高档位, 不改变数据源选择
   const TICKFLOW_KEY_META = {
     name: 'tickflow', display_name: 'TickFlow', api_key_env: 'TICKFLOW_API_KEY',
     homepage: 'https://tickflow.org/auth/register?ref=V3KDKGXPEA',
@@ -360,9 +315,10 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     ? (plugins.find(p => p.name === keyFor) ?? (keyFor === 'tickflow' ? TICKFLOW_KEY_META : undefined))
     : undefined
   // 已配置态徽标: tickflow 看 settings.mode (free/api_key 均为已配 Key), fuyao 看插件 api_key_masked
-  const settings = useSettings()
   const tfConfigured = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
   const fuyaoConfigured = !!plugins.find(p => p.name === 'fuyao')?.api_key_masked
+
+  // 内联 Key 配置 (先探后存): 验证通过才落盘
   const saveKey = useMutation<any, Error, string>({
     mutationFn: (name: string) => (name === 'tickflow'
       ? api.saveTickflowKey(keyInput.trim())
@@ -377,14 +333,12 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         setKeyError(null)
         if (name === 'tickflow') {
           setKeySaved(`TickFlow Key 已保存${data.tier_label ? `,当前档位:${data.tier_label}` : ''}`)
-        } else if (name === 'fuyao') {
+        } else if (name === 'fuyao' && data.plugin_available) {
           // fuyao 定位为增强源: 仅实时行情 + 除权因子路由过去, 其余数据集保持 TickFlow
           routeFuyaoEnhanced.mutate()
           setKeySaved('fuyao Key 已保存:实时行情与除权因子已切换到 fuyao,其余数据集保持 TickFlow')
         } else if (data.plugin_available) {
-          setPicked(name)
-          switchProvider.mutate(name)
-          setKeySaved('Key 已保存,已选用该数据源')
+          setKeySaved('Key 已保存,该数据源已就绪(可在设置中启用)')
         }
         setTimeout(() => setKeySaved(null), 6000)
       } else {
@@ -412,12 +366,12 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         <h2 className="text-xl font-bold text-foreground">配置数据源</h2>
       </div>
       <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-        所有数据源均为第三方服务,按需选择或添加自有接口;随时可在
-        <span className="text-foreground font-medium"> 设置 → 数据源 </span>
-        中调整。
+        默认使用内置 <span className="text-foreground font-medium">TickFlow</span> 数据源(无需 Key 即可同步历史日K)。
+        可按下方的说明填写 API Key 增强数据能力;数据源的切换与增删随时在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>中进行。
       </p>
 
-      {/* 数据源卡片选择器 */}
+      {/* 数据源卡片 (只读展示): 不在向导中切换, 保留设置页完整能力 */}
       {sources.isLoading ? (
         <div className="mt-4 flex items-center gap-2 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -426,57 +380,45 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
       ) : (
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {items.map(item => {
-            const isSelected = selected === item.name
             const plugin = item.kind === 'plugin' ? plugins.find(p => p.name === item.name) : undefined
-            // 缺 Key 型 (声明了 api_key_env) 不算不可用: 引导页内联填写验证即可启用
+            // 缺 Key 型插件 (如 fuyao) 卡片可点击展开 Key 表单; 其余纯展示
             const needsKey = item.kind === 'plugin' && !item.available && !!plugin?.api_key_env
             const unavailable = item.kind === 'plugin' && !item.available && !needsKey
-            // 切换中的目标卡片: 圆点位置显示转圈, 其余卡片压暗
-            const switchingToThis = switchProvider.isPending && switchProvider.variables === item.name
+            const needsKeyProps = needsKey ? {
+              type: 'button' as const,
+              onClick: () => {
+                setKeyFor(keyFor === item.name ? null : item.name)
+                setKeyInput('')
+                setKeyError(null)
+              },
+              title: '需配置 API Key,点击填写',
+            } : {}
             return (
-              <button
+              <div
                 key={item.name}
-                type="button"
-                onClick={() => {
-                  if (needsKey) {
-                    setKeyFor(keyFor === item.name ? null : item.name)
-                    setKeyInput('')
-                    setKeyError(null)
-                    return
-                  }
-                  choose(item.name, !unavailable)
-                }}
-                disabled={unavailable || switchProvider.isPending}
-                title={unavailable ? plugin?.status || '依赖未安装' : needsKey ? '需配置 API Key,点击填写' : item.display_name}
-                className={`relative text-left rounded-card border px-3.5 py-3 transition-all ${
+                {...needsKeyProps}
+                className={`relative text-left rounded-card border px-3.5 py-3 ${
                   unavailable
-                    ? 'border-border/40 bg-elevated/10 opacity-60 cursor-not-allowed'
+                    ? 'border-border/40 bg-elevated/10 opacity-60'
                     : needsKey
-                      ? 'border-warning/30 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
-                      : isSelected
-                        ? 'border-accent/50 bg-accent/[0.06] ring-1 ring-accent/20 cursor-pointer'
-                        : 'border-border/60 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
-                } ${switchProvider.isPending && !switchingToThis ? 'opacity-50' : ''}`}
+                      ? 'border-warning/30 bg-elevated/20 cursor-pointer hover:bg-elevated/40 transition-colors'
+                      : 'border-border/60 bg-elevated/20'
+                }`}
               >
                 <div className="flex items-center gap-2">
-                  {switchingToThis ? (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" />
-                  ) : (
-                    <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                      isSelected ? 'bg-accent' : 'bg-transparent border border-muted/40'
-                    }`} />
-                  )}
-                  <span className={`text-sm truncate flex-1 ${isSelected ? 'font-medium text-foreground' : 'text-secondary'}`}>
+                  <span className="text-sm truncate flex-1 font-medium text-foreground">
                     {/* 卡片展示去掉声明里的括号备注 (如合规提示), 保持名称干净 */}
                     {item.display_name.replace(/（.*?）|\(.*?\)/g, '').trim() || item.display_name}
                   </span>
-                  {item.kind === 'custom' ? (
+                  {item.kind === 'builtin' ? (
+                    <span className="shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] font-medium leading-none text-accent">内置</span>
+                  ) : item.kind === 'custom' ? (
                     <span className="text-[9px] text-muted/50 tracking-wider shrink-0">自有</span>
                   ) : (
                     <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
                   )}
                 </div>
-                <div className="mt-1.5 flex items-center gap-1 pl-3.5">
+                <div className="mt-1.5 flex items-center gap-1 pl-0.5">
                   {unavailable ? (
                     <span className="text-[10px] text-muted">需安装依赖,见 设置 → 数据源</span>
                   ) : needsKey ? (
@@ -491,23 +433,9 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                     <span className="text-[10px] text-muted">未声明数据集</span>
                   )}
                 </div>
-              </button>
+              </div>
             )
           })}
-
-          {/* 添加自有数据源卡片 */}
-          <button
-            type="button"
-            onClick={() => setAdding(v => !v)}
-            className={`rounded-card border border-dashed px-3.5 py-3 transition-all flex items-center justify-center gap-1.5 text-sm ${
-              adding
-                ? 'border-accent/50 bg-accent/5 text-accent'
-                : 'border-border/50 text-muted hover:text-foreground hover:border-border hover:bg-elevated/30'
-            }`}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            添加自有数据源
-          </button>
         </div>
       )}
 
@@ -544,30 +472,6 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
-      {/* 插件化提示: 标识数据源体系已插件化, 并给出两条接入路径与文档指引 */}
-      <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
-        <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
-        <div className="text-[11px] leading-relaxed text-muted">
-          <span className="text-secondary">数据源已插件化</span>
-          ,接入自有行情有两条路径:用 YAML 描述自有 HTTP 接口,放入
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">data/data_sources/*.yaml</span>
-          (也可用上方表单配置);或开发插件源,放入
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">backend/app/plugins/</span>
-          目录。接入方法与字段映射详见
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
-          与
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
-          。
-        </div>
-      </div>
-
-      {switchProvider.isError && (
-        <div className="mt-3 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
-          <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
-          <span>数据源切换失败:{String((switchProvider.error as any)?.message ?? '')}</span>
-        </div>
-      )}
-
       {/* 内联 Key 配置 (缺 Key 型插件如 fuyao / TickFlow 档位 Key): 先探后存 */}
       {keyFor && keyPlugin && (
         <div className="mt-3 rounded-card border border-warning/30 bg-warning/[0.04] px-3.5 py-3">
@@ -584,22 +488,10 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                 留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。
                 仅存本地 (secrets.json),先验证后保存。
               </>
+            ) : keyFor === 'fuyao' ? (
+              '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。'
             ) : (
-              <>
-                {keyPlugin.homepage ? (
-                  <>
-                    在{' '}
-                    <a href={keyPlugin.homepage} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                      官网
-                    </a>
-                    {' '}申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后将自动选用该数据源。
-                  </>
-                ) : (
-                  keyFor === 'fuyao'
-                  ? '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。'
-                  : '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
-                )}
-              </>
+              '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存。'
             )}
           </p>
           <form
@@ -642,30 +534,20 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
-      {/* 添加自有数据源: 复用设置页编辑器 (命名/鉴权/数据集字段映射/测试/启用) */}
-      <AnimatePresence mode="wait">
-        {adding && (
-          <motion.div
-            key="ds-editor"
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.15 }}
-            className="mt-4"
-          >
-            <DataSourceEditor
-              initial={null}
-              onCancel={() => setAdding(false)}
-              onSaved={() => {
-                qc.invalidateQueries({ queryKey: QK.dataSources })
-                setAdding(false)
-              }}
-              activeName={activeName}
-              onActivate={name => switchProvider.mutate(name)}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* 插件化提示: 自有数据源接入与切换在设置页, 向导保持极简 */}
+      <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
+        <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
+        <div className="text-[11px] leading-relaxed text-muted">
+          <span className="text-secondary">数据源已插件化</span>
+          ,接入自有行情或切换数据源请前往
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">设置 → 数据源</span>
+          ,方法详见
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
+          与
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
+          。
+        </div>
+      </div>
 
       {/* 底部操作 */}
       <div className="mt-6 flex items-center justify-between">
