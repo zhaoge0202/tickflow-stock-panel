@@ -231,6 +231,18 @@ class FuyaoClient:
             params["date"] = date
         return self._get("/api/a-share/special-data/dragon-tiger-list", params)
 
+    def short_term_benchmark(self, date: str | None = None) -> dict:
+        """短线风向标竞价基准 (同花顺竞价筛选, 每日约 5~6 只)。
+
+        返回 data 原始容器: {date, date_ms, item[]}。item 行:
+        {thscode, ticker, name, auction_pct, tags[]}。支持一年内历史日期;
+        显式传非交易日返回 code=1002 (由调用方做交易日回退)。
+        """
+        params: dict = {}
+        if date:
+            params["date"] = date
+        return self._get("/api/a-share/auction/short-term-benchmark", params)
+
     # ---- 市场 dump ----
     def dump_download_url(self, dump_kind: str) -> dict:
         """获取 dump 预签名下载信息(约 300s 有效)。

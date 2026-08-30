@@ -895,6 +895,14 @@ class FuyaoProvider:
         """
         return self._get_client().dragon_tiger_list(board_type, date)
 
+    def short_term_benchmark(self, date: str | None = None) -> dict:
+        """短线风向标竞价基准 (复盘页卡片 + AI 复盘上下文)。返回原始 data 容器。
+
+        非路由数据集 (tickflow 无对应能力), 不进 plugin.yaml datasets,
+        由 services.auction_benchmark 统一做按日缓存/收益enrich/交易日回退。
+        """
+        return self._get_client().short_term_benchmark(date)
+
     def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
         """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
 

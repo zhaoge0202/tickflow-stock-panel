@@ -1,4 +1,4 @@
-"""AI 大盘复盘 API — 流式复盘 + 报告持久化 + 龙虎榜。
+"""AI 大盘复盘 API — 流式复盘 + 报告持久化 + 龙虎榜 + 盘前风向标。
 
 路由前缀: /api/market-recap
 
@@ -8,6 +8,7 @@
   POST /reports                保存一条复盘报告
   DELETE /reports/{report_id}  删除一条复盘报告
   GET  /dragon-tiger           龙虎榜三榜 (fuyao 专有, 历史按日缓存)
+  GET  /auction-benchmark      盘前风向标 (fuyao 专有, 含当日/次日真实收益)
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services import dragon_tiger, market_recap_reports
+from app.services import auction_benchmark, dragon_tiger, market_recap_reports
 from app.services.market_recap import recap_market_stream
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,26 @@ def get_dragon_tiger(
         except ValueError:
             raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
     return dragon_tiger.get_dragon_tiger(
+        request.app.state.repo.store.data_dir, target
+    )
+
+
+@router.get("/auction-benchmark")
+def get_auction_benchmark(
+    request: Request,
+    date: str | None = Query(default=None, description="复盘目标日 YYYY-MM-DD, 缺省取最近交易日"),
+):
+    """盘前风向标 (同花顺竞价筛选名单 + 当日/次日真实收益)。
+
+    fuyao 专有, 未配置时 state=source_unavailable; 非交易日由服务层自动回退。
+    """
+    target = None
+    if date:
+        try:
+            target = date_cls.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
+    return auction_benchmark.get_auction_benchmark(
         request.app.state.repo.store.data_dir, target
     )
 
