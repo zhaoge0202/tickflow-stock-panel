@@ -1,10 +1,10 @@
 import type { MinuteKlineRow } from '@/lib/api'
 
+/** 从 datetime 串取 HH:MM。契约: 分钟K datetime 已在后端入口统一为北京墙钟, 前端不做时区换算。 */
 export function formatMinuteTime(datetime: string): string {
   const match = datetime.match(/(\d{2}):(\d{2})/)
   if (!match) return datetime.slice(11, 16)
-  const hour = (parseInt(match[1]) + 8) % 24
-  return `${String(hour).padStart(2, '0')}:${match[2]}`
+  return `${match[1]}:${match[2]}`
 }
 
 export function computeIntradayAverage(data: MinuteKlineRow[]): number[] {

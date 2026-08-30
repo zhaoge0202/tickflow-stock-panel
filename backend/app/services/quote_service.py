@@ -425,15 +425,18 @@ class QuoteService:
 
     @classmethod
     def realtime_mode(cls) -> str:
-        """当前实时行情模式: none / watchlist / full_market。"""
+        """当前实时行情模式: none / full_market。
+
+        TickFlow 免费档不再提供"自选前 5 只"降级实时(自定义源 fuyao 的全市场
+        快照已全面覆盖且免费); TickFlow 免费档 = 无实时, 接入自定义实时源
+        (如 fuyao)或升级 TickFlow 后恢复全市场模式。
+        """
         from app.services import preferences
         if preferences.get_realtime_data_provider() != "tickflow":
             return "full_market"
         tier = cls._current_tier()
-        if tier == "none":
+        if tier in ("none", "free"):
             return "none"
-        if tier == "free":
-            return "watchlist"
         return "full_market"
 
     @classmethod
@@ -501,7 +504,6 @@ class QuoteService:
 
     def status(self) -> dict:
         """返回行情服务状态。"""
-        from app.services import preferences
         age = (time.perf_counter() - self._fetch_time) * 1000 if self._fetch_time else -1
         mode = self.realtime_mode()
         phase = self._market_phase()
@@ -514,7 +516,6 @@ class QuoteService:
             "paused": self._paused,
             "mode": mode,
             "realtime_allowed": mode != "none",
-            "watchlist_symbol_count": len(preferences.get_realtime_watchlist_symbols()),
             "interval_s": self._interval,
             "symbol_count": self._symbol_count,
             "index_symbol_count": self._index_symbol_count,
@@ -568,15 +569,12 @@ class QuoteService:
                 waited += 0.5
 
     def _fetch_quotes(self, *, final: bool = False) -> bool:
-        """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
+        """拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
         with self._fetch_lock:
             before = self._fetched_at
             if final:
                 logger.info("最终行情同步开始")
-            if self.realtime_mode() == "watchlist":
-                self._fetch_watchlist_quotes()
-            else:
-                self._fetch_full_market_quotes()
+            self._fetch_full_market_quotes()
             return self._fetched_at > before
 
     def _fetch_full_market_quotes(self) -> None:
@@ -772,150 +770,11 @@ class QuoteService:
         # ---- 策略监控 + 告警评估 ----
         self._evaluate_monitors(daily_df, quote_extra)
 
-    def _fetch_watchlist_quotes(self) -> None:
-        """Free 档自选股实时: 按 capability batch 上限分批拉取。"""
-        from app.services import preferences
-        from app.tickflow.client import get_paid_realtime_client
-        from app.tickflow.capabilities import Cap
-        from app.tickflow.policy import detect_capabilities
-        from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
-
-        symbols = preferences.get_realtime_watchlist_symbols()
-        # 指数监控规则标的并入轮询 (与股票共享 batch 额度)
-        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-        if engine:
-            for _r in list(engine.rules.values()):
-                if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
-                    for _s in _r.get("symbols", []):
-                        if _s and _s not in symbols:
-                            symbols.append(_s)
-        if not symbols:
-            logger.info("自选实时未配置标的, 跳过行情拉取")
-            return
-
-        tf = get_paid_realtime_client()
-        if tf is None:
-            logger.warning("自选实时拉取失败:未配置付费服务器 API Key")
-            return
-
-        # 按 capability batch 上限分批: 股票+指数共享额度, 超过上限会导致整轮失败
-        capset = detect_capabilities()
-        lim = resolve_limit(capset, Cap.QUOTE_BY_SYMBOL, default_batch=5)
-        batches = chunked(symbols, lim.batch)
-
-        t0 = time.perf_counter()
-        now_ts = time.perf_counter()
-        resp = []
-        for i, batch in enumerate(batches):
-            sleep_between_batches(i, lim.rpm)
-            try:
-                resp.extend(tf.quotes.get(symbols=batch) or [])
-            except Exception as e:  # noqa: BLE001
-                logger.warning("自选实时批次 %d/%d 拉取失败: %s", i + 1, len(batches), e)
-
-        if not resp:
-            logger.warning("自选实时行情数据为空")
-            return
-
-        records = []
-        for q in resp:
-            ext = q.get("ext") or {}
-            last_price = q.get("last_price")
-            prev_close = q.get("prev_close")
-            change_amount = ext.get("change_amount")
-            change_pct = ext.get("change_pct")
-            if change_amount is None and last_price is not None and prev_close is not None:
-                change_amount = float(last_price) - float(prev_close)
-            if change_pct is None and change_amount is not None and prev_close not in (None, 0):
-                # 小数制, 与 ext.change_pct / enriched 口径一致 (不乘 100)
-                change_pct = float(change_amount) / float(prev_close)
-            records.append({
-                "symbol": q.get("symbol"),
-                "name": q.get("name") or ext.get("name"),
-                "last_price": last_price,
-                "prev_close": prev_close,
-                "open": q.get("open"),
-                "high": q.get("high"),
-                "low": q.get("low"),
-                "volume": q.get("volume"),
-                "amount": q.get("amount"),
-                "change_pct": change_pct,
-                "change_amount": change_amount,
-                "amplitude": ext.get("amplitude"),
-                "turnover_rate": ext.get("turnover_rate"),
-                "timestamp": q.get("timestamp"),
-                "session": q.get("session"),
-            })
-
-        index_set = self._repo.get_index_symbol_set() if self._repo else set()
-        etf_set = self._repo.get_etf_symbol_set() if self._repo else set()
-        index_records, etf_records, stock_records = self._split_records_by_asset(records, index_set, etf_set)
-
-        fetch_ms = (time.perf_counter() - t0) * 1000
-        fetched_at = time.time() * 1000
-        with self._lock:
-            self._fetch_time = now_ts
-            self._fetch_ms = fetch_ms
-            self._fetched_at = fetched_at
-            self._symbol_count = len(stock_records)
-            self._index_symbol_count = len(index_records)
-            self._etf_symbol_count = len(etf_records)
-            self._index_quotes_cache = self._build_index_quotes(index_records) if index_records else None
-
-        _persist_last_fetch(fetched_at)
-        logger.info("自选实时刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms",
-                    len(stock_records), len(etf_records), len(index_records), fetch_ms)
-
-        daily_df = self._build_daily(stock_records)
-        quote_extra = self._build_quote_extra(stock_records)
-        if not daily_df.is_empty() and self._repo:
-            try:
-                self._repo.merge_live_daily_asset("stock", daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("自选实时日K写盘失败: %s", e)
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
-
-        # ETF/指数进自选前5时按各自资产落盘, 不污染股票表
-        etf_daily_df = self._build_daily(etf_records)
-        if not etf_daily_df.is_empty() and self._repo:
-            try:
-                self._repo.merge_live_daily_asset("etf", etf_daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("自选实时 ETF 日K写盘失败: %s", e)
-            self._flush_live_enriched(etf_daily_df, self._build_quote_extra(etf_records), asset_type="etf", merge=True)
-        index_daily_df = self._build_daily(index_records)
-        if not index_daily_df.is_empty() and self._repo:
-            try:
-                self._repo.merge_live_daily_asset("index", index_daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("自选实时指数日K写盘失败: %s", e)
-            self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
-
-        self._broadcast_quote_updated()
-        self._evaluate_monitors(daily_df, quote_extra)
-
     # ================================================================
     # 工具
     # ================================================================
 
     @staticmethod
-    def _split_records_by_asset(
-        records: list[dict], index_set: set[str], etf_set: set[str],
-    ) -> tuple[list[dict], list[dict], list[dict]]:
-        """把行情 records 按资产拆成 (index, etf, stock)。判定顺序与 resolve_asset_type 一致: 先 ETF 后指数。"""
-        index_records: list[dict] = []
-        etf_records: list[dict] = []
-        stock_records: list[dict] = []
-        for r in records:
-            sym = r.get("symbol")
-            if sym in etf_set:
-                etf_records.append(r)
-            elif sym in index_set:
-                index_records.append(r)
-            else:
-                stock_records.append(r)
-        return index_records, etf_records, stock_records
-
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
         """将 API records 转为日K格式 DataFrame (OHLCV + quote_ts, 写 kline_daily 用)。"""

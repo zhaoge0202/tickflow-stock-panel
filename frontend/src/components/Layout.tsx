@@ -575,10 +575,6 @@ export function Layout() {
         toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
         return
       }
-      if (fresh.mode === 'watchlist' && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
-        navigate('/watchlist')
-        return
-      }
     }
     await toggleQuote.mutateAsync(enabled)
     // 仅在交易时段立即获取一次行情
