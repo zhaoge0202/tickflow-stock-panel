@@ -608,6 +608,43 @@ export interface AiReviewReport {
   created_at: string
 }
 
+// ===== 龙虎榜 (fuyao 专有, 复盘页) =====
+export interface DragonTigerStockItem {
+  thscode: string
+  ticker?: string | null
+  name?: string | null
+  change?: number | null      // 当日涨跌幅 (小数制)
+  net_value?: number | null   // 龙虎榜净买入 (元)
+  net_rate?: number | null    // 净买占比 (小数制)
+  buy_value?: number | null   // 买入额 (元)
+  sell_value?: number | null  // 卖出额 (元)
+  hot_rank?: number | null    // 同花顺人气排名 (小=靠前)
+  range_days?: number | null  // 1=当日榜 3=3日榜
+  hot_money_net_value?: number | null
+  hot_money_item_net_value?: number | null  // 游资榜 rows 专用: 该席位在该股的净买入
+  org_net_value?: number | null
+  org_net_rate?: number | null
+  org_buy_num?: number | null
+  org_sell_num?: number | null
+  concept_list?: { name?: string }[] | null
+}
+
+export interface DragonTigerHotMoney {
+  name?: string | null
+  buying?: number | null                    // 席位合计净买入 (元)
+  rows?: DragonTigerStockItem[] | null      // 关联股票 (字段同 stock item)
+}
+
+export interface DragonTigerPayload {
+  state: 'ok' | 'fallback_prev' | 'source_unavailable' | 'no_data'
+  requested_date?: string | null
+  trade_date?: string | null
+  message?: string
+  all?: { trade_date?: string | null; stock_count?: number | null; count?: number | null; stock_items?: DragonTigerStockItem[] }
+  org?: { trade_date?: string | null; stock_count?: number | null; count?: number | null; stock_items?: DragonTigerStockItem[] }
+  hot_money?: { trade_date?: string | null; count?: number | null; hot_money_items?: DragonTigerHotMoney[] }
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -2767,6 +2804,12 @@ export const api = {
   // ===== 大盘复盘 =====
   reviewReportsList: () =>
     request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
+
+  /** 龙虎榜三榜 (fuyao 专有; 历史日按服务端缓存, 当日未发布自动回退上一期) */
+  dragonTiger: (date?: string) =>
+    request<DragonTigerPayload>(
+      `/api/market-recap/dragon-tiger${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
 
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string

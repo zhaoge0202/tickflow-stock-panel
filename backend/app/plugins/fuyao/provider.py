@@ -887,6 +887,14 @@ class FuyaoProvider:
             if d is not None
         }
 
+    def dragon_tiger(self, board_type: str = "all", date: str | None = None) -> dict:
+        """龙虎榜单榜 (复盘页卡片 + AI 复盘上下文)。返回原始 data 容器。
+
+        非路由数据集 (tickflow 无对应能力), 不进 plugin.yaml datasets,
+        由 services.dragon_tiger 统一做三榜聚合/缓存/交易日回退。
+        """
+        return self._get_client().dragon_tiger_list(board_type, date)
+
     def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
         """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
 

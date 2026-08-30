@@ -179,8 +179,8 @@ def _build_emotion_block(overview: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_user_prompt(overview: dict, news: list[dict], focus: str) -> str:
-    """构建用户消息:复盘日期 + 市场数据精简切片 + 新闻 + 关注点。"""
+def _build_user_prompt(overview: dict, news: list[dict], focus: str, lhb_context: str = "") -> str:
+    """构建用户消息:复盘日期 + 市场数据精简切片 + 龙虎榜(可选) + 新闻 + 关注点。"""
     as_of = overview.get("as_of") or "今日"
 
     parts: list[str] = [
@@ -201,6 +201,14 @@ def _build_user_prompt(overview: dict, news: list[dict], focus: str) -> str:
         "## 行业板块排名",
         _build_sector_block(overview.get("industry_rank"), "行业"),
     ]
+
+    # 龙虎榜资金动向 (fuyao 数据源, 摘要自带数据日期; 无数据源/失败时为空不占段)
+    if lhb_context:
+        parts.extend([
+            "",
+            "## 龙虎榜资金动向",
+            lhb_context,
+        ])
 
     if news:
         news_lines = []
@@ -300,7 +308,11 @@ async def recap_market_stream(
     try:
         from app.services.ai_provider import stream_ai_text
 
-        user_prompt = _build_user_prompt(overview, news or [], focus)
+        # 龙虎榜摘要 (fuyao 专有): 拉取失败/未配置 → 空串, 复盘主流程不受影响
+        from app.services import dragon_tiger as dragon_tiger_svc
+
+        lhb_ctx = dragon_tiger_svc.build_recap_context(repo.store.data_dir)
+        user_prompt = _build_user_prompt(overview, news or [], focus, lhb_ctx)
         got_content = False
         async for delta in stream_ai_text(
             [

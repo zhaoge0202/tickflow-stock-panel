@@ -217,6 +217,20 @@ class FuyaoClient:
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
 
+    def dragon_tiger_list(self, board_type: str = "all", date: str | None = None) -> dict:
+        """龙虎榜榜单 (特色数据)。board_type: all | org | hot_money。
+
+        返回 data 原始容器: {trade_date, count, stock_count, stock_items[],
+        hot_money_items[]}。省略 date 时服务端自动取最近已发布交易日;
+        显式传非交易日返回 code=1002 (由调用方做交易日回退)。
+        实测字段(2026-08): stock_items 12 个基础字段, org 榜额外带 4 个机构字段;
+        文档中的 limit_reason / amount 实际不返回。
+        """
+        params: dict = {"board_type": board_type}
+        if date:
+            params["date"] = date
+        return self._get("/api/a-share/special-data/dragon-tiger-list", params)
+
     # ---- 市场 dump ----
     def dump_download_url(self, dump_kind: str) -> dict:
         """获取 dump 预签名下载信息(约 300s 有效)。
