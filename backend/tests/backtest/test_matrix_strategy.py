@@ -319,13 +319,10 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
 
-    # 非 matrix 后端的内置策略白名单 (当前仅分钟形态策略)
-    non_matrix = {"minute_red_streak"}
-    assert len(strategy_files) == 19 + len(non_matrix)
+    # 分钟形态策略 (minute_red_streak) 已迁至自定义策略目录, 内置策略全部 matrix 后端
+    assert len(strategy_files) == 19
     for strategy_path in strategy_files:
         strategy = StrategyEngine._load_file(strategy_path)
-        if strategy_path.stem in non_matrix:
-            continue
         assert strategy.execution_backend == "matrix_native"
         assert strategy.matrix_strategy is not None
         assert strategy.matrix_strategy.__class__.__module__ == strategy_path.stem

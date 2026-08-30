@@ -12,14 +12,23 @@
 from __future__ import annotations
 
 import datetime as _dt
+import importlib.util
 from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
 
 from app.services.screener import ScreenerService
-from app.strategy.builtin import minute_red_streak
 from app.strategy.engine import StrategyDataContext, StrategyEngine
+
+# 分钟红7 已从内置策略改为自定义策略 (运行时 data/strategies/custom/, 不入库);
+# 测试通过仓库内的参考实现夹具加载, 覆盖同一份策略逻辑。
+STRATEGY_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "strategies"
+_spec = importlib.util.spec_from_file_location(
+    "minute_red_streak_fixture", STRATEGY_FIXTURE_DIR / "minute_red_streak.py"
+)
+minute_red_streak = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(minute_red_streak)
 
 
 def _bars(symbol: str, candles: list[tuple[float, float, float]], start_hour: int = 9) -> pl.DataFrame:
@@ -261,15 +270,15 @@ def test_pattern_limit_up_disabled_ignores_daily():
 # ── 引擎加载与运行 ──────────────────────────────────────────────────
 
 
-def test_builtin_minute_strategy_loads_with_minute_filter_backend():
-    engine = StrategyEngine(
-        strategy_dirs=[Path(__file__).resolve().parent.parent / "app" / "strategy" / "builtin"]
-    )
+def test_custom_minute_strategy_loads_with_minute_filter_backend():
+    # 自定义策略与内置策略共用同一加载器: 夹具目录即一个 custom 目录
+    engine = StrategyEngine(strategy_dirs=[STRATEGY_FIXTURE_DIR])
     assert not [e for e in engine.load_errors() if "minute" in e["file"]]
     s = engine.get("minute_red_streak")
     assert s.execution_backend == "minute_filter"
     assert s.filter_minute_history_fn is not None
     assert s.meta["timeframes"] == ["1m"]
+    assert s.source == "custom"
 
 
 def _minute_code(sid: str, timeframes: str = '["1m"]', extra: str = "") -> str:

@@ -41,8 +41,8 @@ def test_all_builtin_strategies_declare_asset_types_and_timeframes():
     assert engine.load_errors() == []
     for meta in engine.list_strategies():
         assert meta["asset_types"]
-        # 分钟策略 timeframes 为 ["1m"], 日线内置策略为 ["1d"]
-        assert meta["timeframes"] in (["1d"], ["1m"])
+        # 分钟红7已迁至自定义策略目录, 内置策略均为日线
+        assert meta["timeframes"] == ["1d"]
 
 
 def test_all_builtin_strategies_use_matrix_backend_only():
@@ -54,10 +54,8 @@ def test_all_builtin_strategies_use_matrix_backend_only():
     assert all(s.matrix_strategy is not None for s in matrix_strategies)
     assert all(s.filter_fn is None for s in matrix_strategies)
     assert all(s.filter_history_fn is None for s in matrix_strategies)
-    # 分钟形态策略 (minute_filter) 不参与日线矩阵不变量
-    assert [s.meta["id"] for s in strategies if s.execution_backend == "minute_filter"] == [
-        "minute_red_streak"
-    ]
+    # 分钟形态策略 (minute_filter) 已迁至自定义策略目录, 不在 builtin 加载范围
+    assert [s.meta["id"] for s in strategies if s.execution_backend == "minute_filter"] == []
 
 
 def test_all_builtin_matrix_formulas_accept_base_market_matrix():
