@@ -129,6 +129,16 @@
 - 插件加载失败、字段缺失和空数据必须有隔离测试，不能导致应用启动失败或其他数据源不可用。
 - 新增数据源适配应同步更新 `docs/custom-data-source.md` 或 `docs/plugin-development.md` 中对应契约。
 
+### 能力路由矩阵契约
+
+能力矩阵（`backend/app/data_providers/capabilities.py` 注册表 + `/api/settings/capability-matrix`）是能力路由的单一权威，遵循以下不变量：
+
+- 注册表集中声明每个能力的展示元数据、路由偏好字段与 TickFlow 档位要求；前端不硬编码能力清单。新增能力按既有模式扩展：注册表 + preferences getter + capability-matrix 注入 + 矩阵测试。
+- 各页面能力门控统一以矩阵的 `usable` 为准（生效源当前能否真正提供该能力），不是 TickFlow 套餐视角；缺能力提示统一引导到数据源配置。
+- 能力层中立：通用界面（侧栏徽章、能力路由卡、各页门控提示）不得出现 TickFlow 档位/订阅词汇；档位信息只在 TickFlow 专属详情卡展示。provider 名称作为路由事实可以出现。
+- 每个能力独立路由，禁止跟随/派生特殊值（`same_as_daily` 已下线）；存量非法偏好值由 preferences getter 回退默认自愈，不做迁移。
+- 边界注记：分时监控由分钟能力兜底（`intraday_monitor_support`），不单设分时能力；`depth5` 已进矩阵但插件数据集白名单暂未开放，当前仅 TickFlow 提供。
+
 ## 5. 领域专项要求
 
 ### 5.1 策略

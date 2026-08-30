@@ -226,7 +226,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
 5. 保存数据源选择:
 
 - 日K: `mock_source`
-- 除权因子: `same_as_daily` 或 `mock_source`
+- 除权因子: `mock_source` (或保持默认 `tickflow`)
 - 实时行情: `mock_source`
 
 6. 触发同步或开启实时行情。

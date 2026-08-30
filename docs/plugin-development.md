@@ -33,6 +33,7 @@ api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
 description: "数据源描述"
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
+homepage: "https://example.com"          # (可选)官网/申请地址, 显示在设置页 Key 配置说明中
 ```
 
 只声明真实提供的数据集;未声明的数据集 `provider_has_dataset` 返回 False,自动回退
