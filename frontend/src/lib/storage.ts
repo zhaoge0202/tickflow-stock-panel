@@ -24,8 +24,10 @@ export const storage = {
   /** 查询轮询 / SSE 配置 */
   queryConfig:          kv<unknown>('tf-stocks-query-config'),
 
-  /** 策略池 (screener) */
+  /** 策略池 (screener) — 日线池 */
   strategyPool:         kv<string[]>('strategy-pool'),
+  /** 策略池 (screener) — 分钟池 (与日线池按周期隔离) */
+  strategyPoolMinute:   kv<string[]>('strategy-pool-1m'),
 
   /** 自选列表列配置 */
   watchlistColumns:     kv<unknown[]>('watchlist_columns'),

@@ -55,7 +55,7 @@ export function Screener() {
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
   const [showComposite, setShowComposite] = useState(false)
-  const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
+  const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool(timeframe)
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
   const [dailyKChartVisible, setDailyKChartVisible] = useState<boolean>(() => storage.screenerCandle.get(true))
@@ -203,14 +203,13 @@ export function Screener() {
   // 关键: 仅当本次拉取成功且返回非空列表时才 prune。
   // 拉取中/失败/返回空(如引擎 reload 瞬时把某策略跳过)时一律不碰池,
   // 否则会把用户池里仍有效的 ID 永久清空并写入 localStorage,导致卡片全没。
+  // 日线/分钟池按周期隔离, 各自用自身周期的列表清理, 互不影响。
   useEffect(() => {
     if (strategies.isError) return        // 拉取失败: 不 prune
     if (!strategies.isSuccess) return     // 加载中: 不 prune
     if (allStrategyIds.size === 0) return  // 空列表: 不 prune
-    // 分钟模式的列表只含分钟策略, prune 会误删池中的日线策略 → 仅日线模式清理
-    if (timeframe !== '1d') return
     prune(allStrategyIds)
-  }, [allStrategyIds, prune, strategies.isError, strategies.isSuccess, timeframe])
+  }, [allStrategyIds, prune, strategies.isError, strategies.isSuccess])
 
   // 策略文件加载失败时提示用户(避免"策略静默消失"被误判为正常)
   const loadErrors = strategies.data?.load_errors ?? []
@@ -1056,7 +1055,7 @@ export function Screener() {
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
-          addToPool(id)
+          addToPool(id, '1d')  // 构建器创建的是日线策略, 即使在分钟页保存也入日线池
         }}
       />
 
@@ -1065,7 +1064,7 @@ export function Screener() {
         onClose={() => setShowComposite(false)}
         onSavedId={async id => {
           await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
-          addToPool(id)
+          addToPool(id, '1d')  // 叠加策略为日线策略, 固定入日线池
         }}
       />
 
