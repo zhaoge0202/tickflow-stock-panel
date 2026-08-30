@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.market_time import cn_today, is_trading_weekday
 from app.plugins.tdxapi.provider import TDXAPIProvider
 from app.services.trade_tick_ingest import trade_tick_ingestor
 from app.services.trade_tick_mysql import CREATE_TABLE_SQL, trade_tick_mysql_store
@@ -39,13 +40,17 @@ def list_trade_ticks(
     - auto: 历史日期优先 MySQL; 今天优先 live, live 失败时回退 MySQL
     """
     symbol = symbol.strip().upper()
-    day = trade_date or dt.date.today()
+    day = trade_date or cn_today()
+    # 非交易日没有真实逐笔成交: 数据源会把上一交易日快照冒充"当日"返回,
+    # 标成周末日期就是假分笔 (如 2026-08-30 复制 08-28)。fail-closed 返回空。
+    if not is_trading_weekday(day):
+        return _response(symbol, day, "none", mode, [], order, warning="非交易日无逐笔成交")
 
     if source == "mysql":
         rows = _mysql_rows(symbol, day, limit, order)
         return _response(symbol, day, "mysql", mode, rows, order)
 
-    if source == "auto" and day < dt.date.today() and trade_tick_mysql_store.configured():
+    if source == "auto" and day < cn_today() and trade_tick_mysql_store.configured():
         try:
             rows = _mysql_rows(symbol, day, limit, order)
             if rows:

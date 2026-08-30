@@ -77,3 +77,14 @@ def trading_minutes_elapsed_from_ts(ts_ms: int | float | None) -> float:
         return float(_TRADING_TOTAL_MINUTES)
     return trading_minutes_elapsed_from_dt(dt)
 
+
+def is_trading_weekday(d: date | None = None) -> bool:
+    """是否为 A 股可能交易的星期 (周一~周五)。
+
+    只拦截确定性的周末: 行情数据源在非交易日仍会返回以上一交易日快照
+    冒充的"当日"行情, 按 cn_today() 落盘会产生日期错误的假日K
+    (如周日分区复制周五, 2026-08-30 假K 的根因)。
+    不含节假日日历 — 工作日节假日由盘后管道的工作日调度兜底, 这里不重复实现。
+    """
+    return (d or cn_today()).weekday() < 5
+

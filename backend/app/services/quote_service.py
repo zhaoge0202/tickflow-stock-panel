@@ -34,7 +34,7 @@ from typing import ClassVar
 
 import polars as pl
 
-from app.market_time import cn_now, cn_today
+from app.market_time import cn_now, cn_today, is_trading_weekday
 from app.parquet import scan_daily_parquet
 
 logger = logging.getLogger(__name__)
@@ -832,15 +832,17 @@ class QuoteService:
         del records
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
+        # 周末快照是上一交易日的复制品, 落盘会产生日期错误的假日K, 先拦掉。
+        flush_daily_today = is_trading_weekday()
         daily_df = self._build_daily(stock_records)
-        if not daily_df.is_empty() and self._repo:
+        if not daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.flush_live_daily(daily_df)
             except Exception as e:
                 logger.warning("日K写盘失败: %s", e)
 
         etf_daily_df = self._build_daily(etf_records)
-        if not etf_daily_df.is_empty() and self._repo:
+        if not etf_daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.flush_live_daily_asset("etf", etf_daily_df)
             except Exception as e:
@@ -851,7 +853,7 @@ class QuoteService:
         # 看板回退到 kline_index_daily 最新分区 → 显示昨日点位 (如上证 3864 变 3796)。
         # 这里补落当日指数日K, 让盘中/盘后重启都能读到今日点位。
         index_daily_df = self._build_daily(index_records)
-        if not index_daily_df.is_empty() and self._repo:
+        if not index_daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.flush_live_daily_asset("index", index_daily_df)
             except Exception as e:
@@ -864,14 +866,14 @@ class QuoteService:
         del stock_records, etf_records, index_records
 
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
-        if not daily_df.is_empty() and self._repo:
+        if not daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
-        if not etf_daily_df.is_empty() and self._repo:
+        if not etf_daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
         # ---- 指数: 仅有指数监控规则时才写盘 (无规则零成本) ----
         # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-        if engine and engine.has_asset_rules("index") and self._repo:
+        if engine and engine.has_asset_rules("index") and self._repo and flush_daily_today:
             index_daily_df = self._build_daily(index_records)
             if not index_daily_df.is_empty():
                 use_flush = preferences.get_realtime_index_mode() == "all"
@@ -986,9 +988,12 @@ class QuoteService:
         logger.info("自选实时刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms",
                     len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
+        # 周末快照是上一交易日的复制品, 落盘会产生日期错误的假日K, 先拦掉
+        # (与 _process_full_market_records 的守卫一致)。
+        flush_daily_today = is_trading_weekday()
         daily_df = self._build_daily(stock_records)
         quote_extra = self._build_quote_extra(stock_records)
-        if not daily_df.is_empty() and self._repo:
+        if not daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.merge_live_daily_asset("stock", daily_df)
             except Exception as e:
@@ -997,14 +1002,14 @@ class QuoteService:
 
         # ETF/指数进自选前5时按各自资产落盘, 不污染股票表
         etf_daily_df = self._build_daily(etf_records)
-        if not etf_daily_df.is_empty() and self._repo:
+        if not etf_daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.merge_live_daily_asset("etf", etf_daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("自选实时 ETF 日K写盘失败: %s", e)
             self._flush_live_enriched(etf_daily_df, self._build_quote_extra(etf_records), asset_type="etf", merge=True)
         index_daily_df = self._build_daily(index_records)
-        if not index_daily_df.is_empty() and self._repo:
+        if not index_daily_df.is_empty() and self._repo and flush_daily_today:
             try:
                 self._repo.merge_live_daily_asset("index", index_daily_df)
             except Exception as e:  # noqa: BLE001
