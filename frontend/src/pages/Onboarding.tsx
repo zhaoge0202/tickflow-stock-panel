@@ -682,11 +682,11 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
                 </div>
                 {!r.usable && (
                   <div className="mt-1 pl-5 text-[10px] text-warning/80 leading-relaxed">
-                    {r.candidates.length > 0
-                      ? `可切换候选:${r.candidates.map(c => c.display).join(' / ')}`
-                      : isTickflow && !hasKey
-                        ? '配置 TickFlow Key 后可解锁'
-                        : '暂无可用候选,可在设置中排查该源'}
+    {r.candidates.length > 0
+      ? `可切换候选:${r.candidates.map(c => c.display).join(' / ')}`
+      : isTickflow && !hasKey
+        ? '该能力目前不可用'
+        : '暂无可用候选,可在设置中排查该源'}
                   </div>
                 )}
               </div>
