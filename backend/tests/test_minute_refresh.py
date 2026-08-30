@@ -34,7 +34,8 @@ class _FakeCapSet:
     def has(self, cap) -> bool:
         from app.tickflow.capabilities import Cap
 
-        return self._has and cap == Cap.INTRADAY_BATCH
+        # 服务门控挂 INTRADAY_UNIVERSE, 修复轮用 INTRADAY_BATCH — 两者同档, 一起授/不授
+        return self._has and cap in (Cap.INTRADAY_BATCH, Cap.INTRADAY_UNIVERSE)
 
 
 class _FakeAppState:
@@ -160,13 +161,101 @@ def test_run_round_records_error_when_burst_empty(tmp_path, monkeypatch):
     assert st["last_requests"] == 3
 
 
+# ── 两段式模式选择: 冷启动全天 → 稳态增量 ───────────────────────────
+
+
+def _patch_round(monkeypatch, *, lag, inc_df, burst_df):
+    calls: dict = {"modes": []}
+
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        lambda self: lag, raising=True,
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync.fetch_intraday_universe_increment",
+        lambda *a, **k: (calls["modes"].append("increment"), (inc_df, 1))[1],
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync.fetch_intraday_full_market_burst",
+        lambda symbols, capset, *, count=300: (calls["modes"].append("full"), (burst_df, 28))[1],
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: df.height,
+    )
+    return calls
+
+
+def _inc_df():
+    return pl.DataFrame({
+        "symbol": ["600000.SH", "000001.SZ"],
+        "datetime": [datetime(2026, 8, 25, 10, 0)] * 2,
+        "open": [10.0] * 2, "high": [10.5] * 2, "low": [9.9] * 2, "close": [10.2] * 2,
+        "volume": [1000.0] * 2, "amount": [10200.0] * 2,
+    })
+
+
+def _full_df():
+    return _inc_df()
+
+
+def test_cold_start_no_local_data_uses_full_mode(tmp_path, monkeypatch):
+    """当日无数据 (lag=None, 如 10 点冷启动) → 全天修复轮。"""
+    svc = _svc(tmp_path, monkeypatch)
+    calls = _patch_round(monkeypatch, lag=None, inc_df=_inc_df(), burst_df=_full_df())
+    svc._run_round()
+    assert calls["modes"] == ["full"]
+    st = svc.status()
+    assert st["last_mode"] == "full"
+    assert st["last_rows"] == 2
+
+
+def test_healthy_coverage_uses_increment_mode(tmp_path, monkeypatch):
+    """当日覆盖新鲜 (lag ≤ 3 分钟) → universe 单请求增量, 不打 burst。"""
+    svc = _svc(tmp_path, monkeypatch)
+    calls = _patch_round(monkeypatch, lag=0.2, inc_df=_inc_df(), burst_df=_full_df())
+    svc._run_round()
+    assert calls["modes"] == ["increment"]
+    st = svc.status()
+    assert st["last_mode"] == "increment"
+    assert st["last_requests"] == 1
+    assert st["last_symbols"] == 2
+    assert st["last_rows"] == 2
+
+
+def test_stale_coverage_beyond_bar_headroom_falls_back_to_full(tmp_path, monkeypatch):
+    """覆盖滞后超过 3 分钟 (超过 universe 3 根余量) → 全天修复轮。"""
+    svc = _svc(tmp_path, monkeypatch)
+    calls = _patch_round(monkeypatch, lag=5.0, inc_df=_inc_df(), burst_df=_full_df())
+    svc._run_round()
+    assert calls["modes"] == ["full"]
+
+
+def test_consecutive_empty_rounds_escalate_to_full(tmp_path, monkeypatch):
+    """universe 连续 2 轮空返回 → 第 3 轮自动升级全天修复 (自愈)。"""
+    svc = _svc(tmp_path, monkeypatch)
+    calls = _patch_round(
+        monkeypatch,
+        lag=0.2,
+        inc_df=pl.DataFrame(),   # 增量恒空 (模拟 universe 端点持续异常)
+        burst_df=_full_df(),
+    )
+    svc._run_round()
+    svc._run_round()
+    assert calls["modes"] == ["increment", "increment"]
+    assert svc.status()["rounds"] == 0
+    svc._run_round()
+    assert calls["modes"] == ["increment", "increment", "full"]
+    assert svc.status()["last_mode"] == "full"
+
+
 def test_status_reports_gate_reason_when_stopped(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch, enabled=False)
     st = svc.status()
     assert st["enabled"] is False
     assert st["running"] is False
     assert st["gate_reason"] == "disabled"
-    assert st["interval_seconds"] == 60
+    assert st["interval_seconds"] == 6
 
 
 # ── 偏好 ────────────────────────────────────────────────────────────
@@ -175,27 +264,27 @@ def test_status_reports_gate_reason_when_stopped(tmp_path, monkeypatch):
 def test_refresh_preferences_defaults_and_clamp(tmp_path, monkeypatch):
     _isolated_prefs(tmp_path, monkeypatch)
     assert preferences.get_minute_refresh_enabled() is False
-    assert preferences.get_minute_refresh_interval() == 60
-    preferences.save({"minute_refresh_interval": 5})
-    assert preferences.get_minute_refresh_interval() == 60  # 下限
+    assert preferences.get_minute_refresh_interval() == 6
+    preferences.save({"minute_refresh_interval": 1})
+    assert preferences.get_minute_refresh_interval() == 3  # 下限
     preferences.save({"minute_refresh_interval": 999})
     assert preferences.get_minute_refresh_interval() == 300  # 上限
-    preferences.save({"minute_refresh_interval": 90})
-    assert preferences.get_minute_refresh_interval() == 90
+    preferences.save({"minute_refresh_interval": 15})
+    assert preferences.get_minute_refresh_interval() == 15
 
 def test_realtime_monitor_config_owns_refresh_keys(tmp_path, monkeypatch):
-    """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [60,300]。"""
+    """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [3,300]。"""
     _isolated_prefs(tmp_path, monkeypatch)
     saved = preferences.set_realtime_monitor_config({
         "minute_refresh_enabled": True,
-        "minute_refresh_interval": 10,   # 越界 → clamp 到下限
+        "minute_refresh_interval": 1,   # 越界 → clamp 到下限
     })
     assert saved["minute_refresh_enabled"] is True
-    assert saved["minute_refresh_interval"] == 60
+    assert saved["minute_refresh_interval"] == 3
     saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 400})
     assert saved["minute_refresh_interval"] == 300
-    saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 120})
-    assert saved["minute_refresh_interval"] == 120
+    saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 6})
+    assert saved["minute_refresh_interval"] == 6
 
 
 def test_status_endpoint_without_service():

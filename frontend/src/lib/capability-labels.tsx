@@ -10,6 +10,7 @@ export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'kline.daily.batch':       { name: '日 K(批量)',      hint: '一次拿多只股票的日 K — 选股 / 信号扫描 必需' },
   'kline.minute.by_symbol':  { name: '分钟 K(按标的)',  hint: '单股 1m/5m/15m/30m/60m K 线' },
   'kline.minute.batch':      { name: '分钟 K(批量)',    hint: '多股分钟 K' },
+  'intraday.universe':       { name: '全量分钟',        hint: '标的池单请求拉全市场当日分钟K (盘中增量落盘, Expert 专有)' },
 
   'depth5':                  { name: '五档盘口',          hint: '买卖五档报价' },
   'depth5.batch':            { name: '五档盘口(批量)',   hint: '批量买卖五档快照' },

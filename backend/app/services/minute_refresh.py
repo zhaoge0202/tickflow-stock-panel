@@ -1,26 +1,39 @@
 """盘中分钟K增量落盘服务 (Expert 专有)。
 
-每轮用 intraday.batch (日内分时批量, 独立限流池) 并发脉冲拉全市场当日分钟K,
-单次合并写入当日 kline_minute 分区, 供分钟策略 (minute_filter) 读到新鲜数据。
+两段式拉取 (见 feat/minute-strategy 方案):
+- 全天修复轮: intraday.batch (日内分时批量) 并发脉冲一次拉全市场当日全部
+  分钟K — 冷启动 (如 10 点才开服务, 补 9:30 起缺口) / 覆盖滞后超阈值 /
+  连续空轮自愈时触发。
+- 稳态增量轮: intraday.universe 传 CN_Equity_A 标的池, 单请求返回全市场
+  每只最新 3 根 (服务端上限), 靠 _write_minute_partition 的
+  unique(symbol,datetime) 幂等合并滚出全天。
 
-设计约束 (见 feat/minute-strategy 方案):
-- Expert 专有: 能力门控 Cap.INTRADAY_BATCH — 该能力仅 Expert 档具备, 天然排他。
-- 并发脉冲: 全市场按 batch_size 分块 (5546/200 = 28 块), ThreadPoolExecutor 一次
-  打出全部块 (≤28 并发)。任何 60s 滑动窗口至多一个脉冲 (28 < 48 安全 rpm)。
-- 固定节奏: 默认 60s 一轮 (clamp [60, 300]), 下一轮 = max(本轮起点+间隔, 上轮完成),
-  不补跑 (missed 轮次直接跳过), 轮内失败不重试。
-- 仅连续竞价时段运行 (9:30-11:30 / 13:00-15:00), 午休/收盘自动暂停与恢复。
+单轮合并写入当日 kline_minute 分区, 供分钟策略 (minute_filter) 读到新鲜数据。
+
+设计约束:
+- Expert 专有: 能力门控 Cap.INTRADAY_UNIVERSE (全量分钟) — 仅 TickFlow
+  Expert 档具备, 天然排他 (自定义分钟源无此能力, 且服务本就让位插件)。
+- 修复轮并发脉冲: 全市场按 batch_size 分块 (5546/200 = 28 块) 一次打出。
+  任何 60s 滑动窗口至多一个脉冲 (28 < 48 安全 rpm); 单块失败不拖垮整轮,
+  失败块单独重试一次 (见 fetch_intraday_full_market_burst)。
+- 稳态轮单请求: 无脉冲并发, 间隔可低至 3s; 实际节奏 = max(间隔, 单轮完成),
+  服务端响应 ~5s 时自动退化为响应节奏, 不会重叠请求。
+- 固定节奏: 默认 6s 一轮 (clamp [3, 300]), 不补跑 (missed 轮次直接跳过)。
+- 仅连续竞价时段运行 (9:30-11:30 / 13:00-15:00), 午休/收盘自动暂停与恢复;
+  午休后恢复因覆盖滞后会多跑一次修复轮, 幂等无害。
 - 不与其他分钟能力冲突: 与 盘后分钟同步 (kline.minute.batch) / 分时监控路径
-  (fetch_intraday_monitor_batch) 分属不同限流池; 落盘走 _write_minute_partition
-  的 unique(symbol,datetime) 合并, 与盘后同步写同一分区安全幂等。
+  分属不同限流池; 落盘走 _write_minute_partition 的 unique(symbol,datetime)
+  合并, 与盘后同步写同一分区安全幂等。
 - 数据源插件化让位: 配置了自定义分钟源 (minute_data_provider != tickflow) 时
   服务不启动 — 盘中增量交由插件自管, 本服务不抢占。
 
 分层: 本模块只做调度/落盘/状态; TickFlow SDK 调用全部在 kline_sync 边界层
-(fetch_intraday_full_market_burst), 保持插件化边界不泄漏。
+(fetch_intraday_full_market_burst / fetch_intraday_universe_increment),
+保持插件化边界不泄漏。
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,14 +41,18 @@ from typing import Any
 
 import polars as pl
 
-from app.market_time import in_continuous_session
+from app.market_time import cn_now, cn_today, in_continuous_session
 from app.services import preferences
 
-# 轮询间隔允许范围 (秒): 下限 60s 保证任何滑动窗口 ≤1 个脉冲, 上限防误配。
-REFRESH_INTERVAL_MIN = 60
+# 轮询间隔允许范围 (秒): 稳态轮单请求无并发脉冲, 下限 3s; 上限防误配。
+REFRESH_INTERVAL_MIN = 3
 REFRESH_INTERVAL_MAX = 300
 # 等待步长 (秒): 循环小步睡眠, 便于快速停止与偏好热生效。
 _LOOP_STEP_S = 2.0
+# 当日覆盖滞后超过该分钟数 (≈ universe 单请求 3 根余量) → 触发全天修复轮。
+_REPAIR_LAG_MINUTES = 3.0
+# 连续空轮达到该次数 → 强制全天修复轮 (自愈 universe 端点持续异常)。
+_EMPTY_ROUNDS_TO_REPAIR = 2
 
 
 def _in_continuous_session(now=None) -> bool:
@@ -52,7 +69,8 @@ class _RefreshState:
     last_round_ms: float | None = None      # 单轮耗时
     last_rows: int = 0                      # 上轮写入行数 (合并后)
     last_symbols: int = 0                   # 上轮覆盖标的数
-    last_requests: int = 0                  # 上轮请求数 (分块数)
+    last_requests: int = 0                  # 上轮请求数 (增量恒 1, 修复=分块数+重试)
+    last_mode: str | None = None            # 上轮模式: "increment" / "full"
     last_error: str | None = None
     next_round_at: float | None = None      # epoch 秒
     extra: dict[str, Any] = field(default_factory=dict)
@@ -68,6 +86,7 @@ class MinuteRefreshService:
         self._stop = threading.Event()
         self._state = _RefreshState()
         self._round_lock = threading.Lock()  # 同时只允许一轮 (手动触发与定时轮互斥)
+        self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -98,14 +117,18 @@ class MinuteRefreshService:
     # ------------------------------------------------------------------
 
     def capability_ok(self) -> bool:
-        """Cap.INTRADAY_BATCH 存在 (Expert)。能力探测结果缓存在 app.state。"""
+        """Cap.INTRADAY_UNIVERSE (全量分钟) 存在。能力探测结果缓存在 app.state。
+
+        门控挂在稳态增量的主能力上; 全天修复轮用的 intraday.batch 与其
+        同属 Expert 档 (tiers.yaml), 目前两者必然同时持有。
+        """
         capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
         if capset is None:
             return False
         try:
             from app.tickflow.capabilities import Cap
 
-            return capset.has(Cap.INTRADAY_BATCH)
+            return capset.has(Cap.INTRADAY_UNIVERSE)
         except Exception:
             return False
 
@@ -162,23 +185,64 @@ class MinuteRefreshService:
     # 单轮
     # ------------------------------------------------------------------
 
+    def _today_coverage_lag_minutes(self) -> float | None:
+        """当日分区最新K距现在的分钟数; None = 当日无数据。
+
+        覆盖度探测只读当日分区文件 (毫秒级); 任何异常按无数据处理 →
+        本轮走全天修复, 不会因探测失败而丢增量。
+        """
+        with contextlib.suppress(Exception):
+            part = (
+                self._repo.store.data_dir / "kline_minute"
+                / f"date={cn_today().isoformat()}" / "part.parquet"
+            )
+            if not part.exists():
+                return None
+            mx = pl.read_parquet(part, columns=["datetime"])["datetime"].max()
+            if mx is None:
+                return None
+            # 分区 datetime 为北京墙钟 naive, cn_now 带时区 → 剥齐再比
+            return (cn_now().replace(tzinfo=None) - mx).total_seconds() / 60
+        return None
+
+    def _select_mode(self) -> str:
+        """选轮次模式: 稳态增量 (universe 单请求) vs 全天修复 (burst 脉冲)。
+
+        当日已有数据且覆盖滞后 ≤ _REPAIR_LAG_MINUTES (≈ 3 根余量) → 增量;
+        冷启动 / 断档超阈值 / 连续空轮 → 全天修复。
+        """
+        if self._empty_rounds >= _EMPTY_ROUNDS_TO_REPAIR:
+            return "full"
+        lag = self._today_coverage_lag_minutes()
+        if lag is None or lag > _REPAIR_LAG_MINUTES:
+            return "full"
+        return "increment"
+
     def _run_round(self) -> None:
         from app.services import kline_sync
 
         t0 = time.perf_counter()
-        symbols = self._universe()
-        self._state.last_symbols = len(symbols)
-        if not symbols:
-            self._state.last_error = "empty universe (instruments 未加载)"
-            return
-
-        capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+        mode = self._select_mode()
         with self._round_lock:
-            df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
+            if mode == "increment":
+                df, requests = kline_sync.fetch_intraday_universe_increment()
+                self._state.last_symbols = (
+                    df["symbol"].n_unique() if not df.is_empty() else 0
+                )
+            else:
+                symbols = self._universe()
+                self._state.last_symbols = len(symbols)
+                if not symbols:
+                    self._state.last_error = "empty universe (instruments 未加载)"
+                    return
+                capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+                df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
             self._state.last_requests = requests
             if df.is_empty():
-                self._state.last_error = "intraday burst returned no data"
+                self._empty_rounds += 1
+                self._state.last_error = f"intraday {mode} returned no data"
                 return
+            self._empty_rounds = 0
             written = kline_sync._write_minute_partition(
                 df, self._repo.store.data_dir / "kline_minute",
             )
@@ -187,6 +251,7 @@ class MinuteRefreshService:
         self._state.last_round_at = time.time()
         self._state.last_round_ms = (time.perf_counter() - t0) * 1000
         self._state.last_rows = written
+        self._state.last_mode = mode
         self._state.last_error = None
 
     def _universe(self) -> list[str]:
@@ -221,6 +286,7 @@ class MinuteRefreshService:
             "last_rows": self._state.last_rows,
             "last_symbols": self._state.last_symbols,
             "last_requests": self._state.last_requests,
+            "last_mode": self._state.last_mode,
             "next_round_at": self._state.next_round_at,
             "last_error": self._state.last_error,
         }

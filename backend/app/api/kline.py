@@ -1095,9 +1095,11 @@ async def clear_minute(request: Request):
     removed = 0
     if minute_dir.exists():
         try:
-            result = repo.db.execute("SELECT COUNT(*) AS cnt FROM kline_minute").fetchone()
+            # execute_one (cursor+close): 直连 db.execute 的未消费结果集会在 Windows 上
+            # 钉住分区句柄, 导致下方 rmtree 静默删不掉被钉文件
+            result = repo.execute_one("SELECT COUNT(*) AS cnt FROM kline_minute")
             removed = result[0] if result else 0
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         # 仅删 kline_minute 目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)

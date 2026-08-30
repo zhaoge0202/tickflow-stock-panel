@@ -20,6 +20,7 @@ class Cap(StrEnum):
     KLINE_MINUTE_BATCH     = "kline.minute.batch"
     INTRADAY               = "intraday"
     INTRADAY_BATCH         = "intraday.batch"
+    INTRADAY_UNIVERSE      = "intraday.universe"
     DEPTH5                 = "depth5"
     DEPTH5_BATCH           = "depth5.batch"
     WEBSOCKET              = "websocket"

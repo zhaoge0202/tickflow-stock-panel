@@ -192,7 +192,8 @@ export interface AiStockReport {
 // ===== Kline =====
 export interface MinuteKlineRow {
   datetime: string
-  open: number
+  /** 分钟开盘价; 部分数据源(stock-sdk 历史日)无真实分钟 open, 为 null */
+  open: number | null
   high: number
   low: number
   close: number
@@ -1407,7 +1408,7 @@ export interface CapabilityRoute {
   id: string
   label: string
   desc: string
-  field: ProviderField
+  field: ProviderField | null                    // null = 不可路由能力 (仅 TickFlow 提供)
   default: string
   tf_tier: string                                  // TickFlow 所需最低订阅档位
   tf_available: boolean                            // 当前 TickFlow 档位是否提供该能力
@@ -1508,12 +1509,13 @@ export interface Preferences {
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
+  /** 分钟源 1 分钟历史深度(交易日); null/缺省 = 深历史 (如 tickflow)。分时档位据此收窄 */
+  minute_history_days?: number | null
   depth5_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
   data_source_job_timeout_s: number
   data_source_long_job_timeout_s: number
-  realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
   realtime_pull_index?: boolean
@@ -1704,7 +1706,7 @@ export const api = {
       }),
     }),
 
-  /** 盘中分钟增量刷新服务状态 (Expert 专有) */
+  /** 全量分钟 (盘中全市场分钟落盘) 服务状态 (TickFlow Expert 专有) */
   minuteRefreshStatus: () =>
     request<{
       available: boolean
