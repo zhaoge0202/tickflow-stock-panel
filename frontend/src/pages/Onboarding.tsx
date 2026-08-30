@@ -22,6 +22,7 @@ import {
   Database,
   Plus,
   Puzzle,
+  KeyRound,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useCapabilities, usePreferences, useSettings } from '@/lib/useSharedQueries'
@@ -298,6 +299,10 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
   const [picked, setPicked] = useState<string | null>(null)
   // 是否展开「添加自有数据源」编辑器
   const [adding, setAdding] = useState(false)
+  // 正在内联配置 Key 的插件名 (仅 api_key_env 声明型, 如 fuyao)
+  const [keyFor, setKeyFor] = useState<string | null>(null)
+  const [keyInput, setKeyInput] = useState('')
+  const [keyError, setKeyError] = useState<string | null>(null)
 
   const builtin = sources.data?.builtin ?? []
   const plugins = sources.data?.plugins ?? []
@@ -345,6 +350,28 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     switchProvider.mutate(name)
   }
 
+  // 内联 Key 配置 (先探后存): 验证通过才落盘 secrets.json, 成功即自动选用该源
+  const keyPlugin = keyFor ? plugins.find(p => p.name === keyFor) : undefined
+  const saveKey = useMutation({
+    mutationFn: (name: string) => api.savePluginKey(name, keyInput.trim()),
+    onSuccess: (data, name) => {
+      qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      if (data.ok) {
+        setKeyFor(null)
+        setKeyInput('')
+        setKeyError(null)
+        if (data.plugin_available) {
+          setPicked(name)
+          switchProvider.mutate(name)
+        }
+      } else {
+        setKeyError(data.error || (data.reason === 'invalid' ? 'Key 验证失败,请检查后重试' : '保存失败,请重试'))
+      }
+    },
+    onError: (e: Error) => setKeyError(`保存失败: ${e.message}`),
+  })
+
   return (
     <div>
       <div className="flex items-center gap-2.5">
@@ -369,23 +396,35 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {items.map(item => {
             const isSelected = selected === item.name
-            const unavailable = item.kind === 'plugin' && !item.available
             const plugin = item.kind === 'plugin' ? plugins.find(p => p.name === item.name) : undefined
+            // 缺 Key 型 (声明了 api_key_env) 不算不可用: 引导页内联填写验证即可启用
+            const needsKey = item.kind === 'plugin' && !item.available && !!plugin?.api_key_env
+            const unavailable = item.kind === 'plugin' && !item.available && !needsKey
             // 切换中的目标卡片: 圆点位置显示转圈, 其余卡片压暗
             const switchingToThis = switchProvider.isPending && switchProvider.variables === item.name
             return (
               <button
                 key={item.name}
                 type="button"
-                onClick={() => choose(item.name, !unavailable)}
+                onClick={() => {
+                  if (needsKey) {
+                    setKeyFor(keyFor === item.name ? null : item.name)
+                    setKeyInput('')
+                    setKeyError(null)
+                    return
+                  }
+                  choose(item.name, !unavailable)
+                }}
                 disabled={unavailable || switchProvider.isPending}
-                title={unavailable ? plugin?.status || '依赖未安装' : item.display_name}
+                title={unavailable ? plugin?.status || '依赖未安装' : needsKey ? '需配置 API Key,点击填写' : item.display_name}
                 className={`relative text-left rounded-card border px-3.5 py-3 transition-all ${
                   unavailable
                     ? 'border-border/40 bg-elevated/10 opacity-60 cursor-not-allowed'
-                    : isSelected
-                      ? 'border-accent/50 bg-accent/[0.06] ring-1 ring-accent/20 cursor-pointer'
-                      : 'border-border/60 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
+                    : needsKey
+                      ? 'border-warning/30 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
+                      : isSelected
+                        ? 'border-accent/50 bg-accent/[0.06] ring-1 ring-accent/20 cursor-pointer'
+                        : 'border-border/60 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
                 } ${switchProvider.isPending && !switchingToThis ? 'opacity-50' : ''}`}
               >
                 <div className="flex items-center gap-2">
@@ -409,6 +448,8 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                 <div className="mt-1.5 flex items-center gap-1 pl-3.5">
                   {unavailable ? (
                     <span className="text-[10px] text-muted">需安装依赖,见 设置 → 数据源</span>
+                  ) : needsKey ? (
+                    <span className="text-[10px] text-warning">需配置 API Key,点击填写</span>
                   ) : item.datasets.length > 0 ? (
                     item.datasets.slice(0, 4).map(ds => (
                       <span key={ds} className="rounded bg-elevated/60 px-1 py-0.5 text-[10px] text-muted">
@@ -460,6 +501,69 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         <div className="mt-3 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
           <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
           <span>数据源切换失败:{String((switchProvider.error as any)?.message ?? '')}</span>
+        </div>
+      )}
+
+      {/* 内联 Key 配置 (缺 Key 型插件, 如 fuyao): 先探后存, 成功即自动选用 */}
+      {keyFor && keyPlugin && (
+        <div className="mt-3 rounded-card border border-warning/30 bg-warning/[0.04] px-3.5 py-3">
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-3.5 w-3.5 text-warning" />
+            <span className="text-xs font-medium text-foreground">
+              配置 {keyPlugin.display_name.replace(/（.*?）|\(.*?\)/g, '').trim()} API Key
+            </span>
+            <span className="rounded bg-elevated/70 px-1 py-px font-mono text-[9px] text-muted">{keyPlugin.api_key_env}</span>
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted leading-relaxed">
+            {keyPlugin.homepage ? (
+              <>
+                在{' '}
+                <a href={keyPlugin.homepage} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                  官网
+                </a>
+                {' '}申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后将自动选用该数据源。
+              </>
+            ) : (
+              '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
+            )}
+          </p>
+          <form
+            className="mt-2.5 flex items-center gap-2"
+            onSubmit={e => {
+              e.preventDefault()
+              if (keyInput.trim() && !saveKey.isPending) saveKey.mutate(keyFor)
+            }}
+          >
+            <input
+              type="password"
+              value={keyInput}
+              onChange={e => { setKeyInput(e.target.value); setKeyError(null) }}
+              placeholder={`粘贴 ${keyPlugin.api_key_env}`}
+              autoFocus
+              className="h-8 flex-1 rounded-input border border-border bg-surface px-3 font-mono text-xs text-foreground placeholder:text-muted/60 focus:border-accent/60 focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!keyInput.trim() || saveKey.isPending}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
+            >
+              {saveKey.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+              {saveKey.isPending ? '验证中…' : '验证并保存'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setKeyFor(null); setKeyInput(''); setKeyError(null) }}
+              className="h-8 shrink-0 rounded-btn px-3 text-xs text-secondary hover:text-foreground hover:bg-elevated transition-colors"
+            >
+              取消
+            </button>
+          </form>
+          {keyError && (
+            <p className="mt-1.5 flex items-center gap-1 text-[11px] text-danger">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              {keyError}
+            </p>
+          )}
         </div>
       )}
 
