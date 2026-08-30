@@ -308,6 +308,7 @@ export function Review() {
               {/* ===== 市场摘要条(轻量上下文,非重复看板)===== */}
               <MarketSummaryBar data={data} />
 
+
               {/* ===== 龙虎榜 (fuyao 专有, 资金动向上下文; 复盘日联动) ===== */}
               <DragonTigerCard date={dtDate} onOpenStock={setPreviewSymbol} />
 
@@ -1134,6 +1135,8 @@ function _DtSeatList({ seats, onOpenStock }: {
     </div>
   )
 }
+
+/** 追高风险阈值: 60日回测高开≥5%子集当日开盘买 -1.97% (温和高开才是名单 alpha 来源) */
 
 function DragonTigerCard({ date, onOpenStock }: {
   date?: string

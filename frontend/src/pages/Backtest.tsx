@@ -6,6 +6,7 @@ import { FactorDiscovery } from './backtest/FactorDiscovery'
 import { ResearchCandidatesDialog } from './backtest/ResearchCandidatesDialog'
 import { RobustnessValidation } from './backtest/RobustnessValidation'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
+import { type ResearchCandidate } from '@/lib/api'
 
 type Tab = 'factor' | 'strategy' | 'robustness'
 
@@ -31,6 +32,8 @@ export function Backtest() {
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedTab = searchParams.get('tab')
   const [candidatesOpen, setCandidatesOpen] = useState(false)
+  // 候选「载入复测」: 弹窗选定 → 关闭弹窗切到策略页 → StrategyBacktest 消费后清空
+  const [pendingLoad, setPendingLoad] = useState<ResearchCandidate | null>(null)
 
   // 旧链接兼容: 挖掘已升级为一级路由 /mining, 保留 run/candidate 参数重定向
   if (requestedTab === 'mining') {
@@ -99,11 +102,25 @@ export function Backtest() {
 
       <main className="min-h-0 flex-1 px-3 pb-3 pt-3 lg:px-4 lg:pb-4">
         {activeTab === 'factor' && <FactorDiscovery />}
-        {activeTab === 'strategy' && <StrategyBacktest />}
+        {activeTab === 'strategy' && (
+          <StrategyBacktest
+            loadCandidate={pendingLoad}
+            onLoadConsumed={() => setPendingLoad(null)}
+          />
+        )}
         {activeTab === 'robustness' && <RobustnessValidation />}
       </main>
 
-      {candidatesOpen && <ResearchCandidatesDialog onClose={() => setCandidatesOpen(false)} />}
+      {candidatesOpen && (
+        <ResearchCandidatesDialog
+          onClose={() => setCandidatesOpen(false)}
+          onLoadStrategy={candidate => {
+            setPendingLoad(candidate)
+            setCandidatesOpen(false)
+            if (activeTab !== 'strategy') changeTab('strategy')
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -7,6 +7,7 @@ import { DatePicker } from '@/components/DatePicker'
 import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
+import { DimensionMembersDialog, dimensionKindForSourceField, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -465,18 +466,36 @@ function StockList({ title, rows, mode, onStockClick }: {
   )
 }
 
-function RankColumn({ title, rows, tone, onStockClick }: {
+function RankColumn({ title, rows, tone, onStockClick, onDimensionClick }: {
   title: string; rows: OverviewDimensionRankItem[]; tone: 'bull' | 'bear';
-  onStockClick?: (symbol: string, name?: string) => void;
+  onStockClick?: (symbol: string, name?: string) => void
+  onDimensionClick?: (target: DimensionMembersTarget) => void
 }) {
   return (
     <div className="min-w-0 space-y-1">
       <div className={`text-[10px] font-medium ${tone === 'bull' ? 'text-bull' : 'text-bear'}`}>{title}</div>
-      {rows.slice(0, 5).map((r, idx) => (
-        <div key={`${title}-${r.name}-${idx}`} className="grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md bg-elevated/40 px-1.5 py-1 border border-transparent hover:border-border/60 transition-colors">
+      {rows.slice(0, 5).map((r, idx) => {
+        const kind = r.source_field ? dimensionKindForSourceField(r.source_field) : null
+        const clickable = !!(r.source_field && kind && onDimensionClick)
+        return (
+        <div
+          key={`${title}-${r.name}-${idx}`}
+          onClick={() => clickable && onDimensionClick!({
+            kind: kind!,
+            value: r.name,
+            sourceField: r.source_field!,
+          })}
+          title={clickable ? `查看「${r.name}」成分股` : undefined}
+          className={`grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md bg-elevated/40 px-1.5 py-1 border border-transparent transition-colors ${
+            clickable ? 'cursor-pointer hover:border-accent/40 hover:bg-elevated/70' : 'hover:border-border/60'
+          }`}
+        >
           <span className="text-center font-mono text-[9px] text-muted">{idx + 1}</span>
           <div className="min-w-0">
-            <div className="truncate text-[11px] text-foreground" title={r.name}>{r.name}</div>
+            <div className="truncate text-[11px] text-foreground" title={r.name}>
+              {r.name}
+              {clickable && <span className="ml-1 text-[8px] text-muted/50">↗</span>}
+            </div>
             <div className="mt-0.5 flex items-center gap-1">
               <span className="shrink-0 font-mono text-[9px] text-muted">{r.count}只</span>
               <span className="text-muted">·</span>
@@ -488,6 +507,11 @@ function RankColumn({ title, rows, tone, onStockClick }: {
                 >{r.leader?.name ?? '—'}</button>
               ) : (
                 <span className="truncate text-[10px] text-muted">{r.leader?.name ?? '—'}</span>
+              )}
+              {r.leader?.change_pct != null && (
+                <span className={`shrink-0 font-mono text-[9px] tabular-nums ${pctClass(r.leader.change_pct)}`}>
+                  {fmtStockPct(r.leader.change_pct)}
+                </span>
               )}
               {r.leader?.symbol && (() => {
                 const board = boardTag(r.leader!.symbol!)
@@ -501,24 +525,26 @@ function RankColumn({ title, rows, tone, onStockClick }: {
           </div>
           <div className={`font-mono text-[10px] font-semibold ${pctClass(r.avg_pct)}`}>{fmtStockPct(r.avg_pct)}</div>
         </div>
-      ))}
+        )
+      })}
       {rows.length === 0 && <div className="rounded border border-dashed border-border py-4 text-center text-xs text-muted">暂无数据</div>}
     </div>
   )
 }
 
-function HotRankCard({ title, rank, configUrl, onStockClick }: {
+function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick }: {
   title: string; rank?: OverviewMarket['concept_rank']; configUrl: string;
-  onStockClick?: (symbol: string, name?: string) => void;
+  onStockClick?: (symbol: string, name?: string) => void
+  onDimensionClick?: (target: DimensionMembersTarget) => void
 }) {
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   return (
     <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
-      <SectionTitle icon={Flame} title={title} hint="领涨/领跌" />
+      <SectionTitle icon={Flame} title={title} hint="领涨/领跌 · 点击板块看成分股" />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
-          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} />
-          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} />
+          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onDimensionClick={onDimensionClick} />
+          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} onDimensionClick={onDimensionClick} />
         </div>
       ) : (
         <div className="py-4 text-center">
@@ -540,6 +566,8 @@ export function Dashboard() {
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
   const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
+  // 板块成分股弹窗 (概念/行业热度卡片行点击)
+  const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
   const [showWelcomeModal, setShowWelcomeModal] = useState(false)
   const dataStatus = useDataStatus({ staleTime: 60_000 })
@@ -820,8 +848,12 @@ export function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
+            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis"
+              onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
+              onDimensionClick={setDimensionTarget} />
+            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis"
+              onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
+              onDimensionClick={setDimensionTarget} />
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
@@ -866,6 +898,14 @@ export function Dashboard() {
           message: previewStock.alert.message,
         } : null}
         onClose={() => setPreviewStock(null)}
+      />
+      <DimensionMembersDialog
+        target={dimensionTarget}
+        onClose={() => setDimensionTarget(null)}
+        onStockClick={(symbol, name) => {
+          setDimensionTarget(null)
+          setPreviewStock({ symbol, name })
+        }}
       />
     </div>
   )

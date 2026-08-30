@@ -380,6 +380,8 @@ export interface OverviewDimensionRankItem {
   up_count: number
   down_count: number
   amount: number
+  /** 该维度组首个命中的扩展字段 "configId.field" (成分股弹窗直连; 无扩展源时缺失) */
+  source_field?: string | null
   leader?: {
     symbol?: string | null
     name?: string | null
@@ -645,6 +647,27 @@ export interface DragonTigerPayload {
   hot_money?: { trade_date?: string | null; count?: number | null; hot_money_items?: DragonTigerHotMoney[] }
 }
 
+// ===== 盘前风向标 (fuyao 专有, 复盘页) =====
+export interface AuctionBenchmarkItem {
+  thscode: string
+  ticker?: string | null
+  name?: string | null
+  auction_pct?: number | null   // 竞价涨跌幅 (百分数原值, 如 9.97 = +9.97%)
+  tags?: string[]               // 同花顺概念标签
+  day0_oc?: number | null       // 当日开盘买→收盘卖 (小数制, 服务端由本地日K enrich)
+  day0_pct?: number | null      // 当日全天涨跌幅 (小数制)
+  d1_pct?: number | null        // 次日收盘→收盘 (小数制; 最新交易日无次日为 null)
+}
+
+export interface AuctionBenchmarkPayload {
+  state: 'ok' | 'fallback_prev' | 'source_unavailable' | 'no_data'
+  requested_date?: string | null
+  trade_date?: string | null
+  count?: number
+  message?: string
+  items?: AuctionBenchmarkItem[]
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -817,6 +840,28 @@ export interface AbnormalOverview {
   }>
   counts: { triggered: number; edge: number; watch: number }
   rows: AbnormalRow[]
+}
+
+// ===== 盘中异动 (enriched 当日信号聚合, 异动监控「盘中」tab) =====
+export type IntradaySignalKey = 'limit_up' | 'broken' | 'recovery' | 'limit_down'
+  | 'new_high' | 'new_low' | 'volume_surge'
+
+export interface AbnormalIntradayRow {
+  symbol: string
+  name?: string | null
+  close?: number | null
+  change_pct?: number | null      // 今日涨跌幅 (小数制)
+  amplitude?: number | null       // 日振幅 (小数制)
+  vol_ratio_5d?: number | null    // 5日量比
+  turnover_rate?: number | null   // 换手率 (百分数原值)
+  consecutive_limit_ups?: number | null
+  signals: IntradaySignalKey[]    // 命中信号 (按优先级排序)
+}
+
+export interface AbnormalIntradayPayload {
+  cache_date?: string | null
+  counts?: Partial<Record<IntradaySignalKey, number>>
+  rows?: AbnormalIntradayRow[]
 }
 
 export interface MonitorRule {
@@ -2521,6 +2566,12 @@ export const api = {
     return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
   },
 
+  dimensionIntraday: (id: string, opts: { field: string; value: string; date?: string }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    return request<DimensionIntradayResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-intraday?${qs.toString()}`)
+  },
+
   analysisMenus: () =>
     request<{ items: AnalysisMenu[] }>('/api/analysis-menus'),
 
@@ -2811,6 +2862,12 @@ export const api = {
       `/api/market-recap/dragon-tiger${date ? `?date=${encodeURIComponent(date)}` : ''}`,
     ),
 
+  /** 盘前风向标 (fuyao 专有; 同花顺竞价筛选名单, 含当日/次日真实收益) */
+  auctionBenchmark: (date?: string) =>
+    request<AuctionBenchmarkPayload>(
+      `/api/market-recap/auction-benchmark${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
+
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
@@ -2981,11 +3038,15 @@ export const api = {
       body: JSON.stringify({ description }),
     }),
 
-  // ===== Abnormal Moves (异动边缘) =====
+  // ===== Abnormal Moves (异动监控: 竞价/盘中/偏移) =====
   abnormalOverview: (minCloseness = 0.5, limit = 200) =>
     request<AbnormalOverview>(
       `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}`,
     ),
+
+  /** 盘中异动: enriched 当日信号命中行 (涨停/炸板/翘板/跌停/新高/新低/放量) */
+  abnormalIntraday: (limit = 500) =>
+    request<AbnormalIntradayPayload>(`/api/abnormal/intraday?limit=${limit}`),
 
   // ===== Monitor Rules (监控规则) =====
   monitorRulesList: () =>
@@ -3334,6 +3395,22 @@ export interface DimensionMembersResult {
   total: number
   limit: number
   rows: Record<string, any>[]
+}
+
+export interface DimensionIntradayPoint {
+  time: string
+  sector: number | null
+  market: number | null
+}
+
+export interface DimensionIntradayResult {
+  status: 'ok' | 'no_data' | 'empty'
+  reason?: string | null
+  date?: string | null
+  basis?: 'prev_close' | 'first_close' | 'mixed' | null
+  member_count?: number
+  members_with_minute?: number
+  points: DimensionIntradayPoint[]
 }
 
 export interface AnalysisColumn {

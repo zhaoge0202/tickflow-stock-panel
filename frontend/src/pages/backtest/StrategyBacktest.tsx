@@ -1,10 +1,11 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
+  type ResearchCandidate,
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
@@ -525,6 +526,12 @@ function fmtDuration(ms: number): string {
   return `${m}分${rest}秒`
 }
 
+/** CSV 字段转义: 含逗号/引号/换行的字段加引号并翻倍内部引号 */
+function csvEsc(v: string | number | null | undefined): string {
+  const s = v == null ? '' : String(v)
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
 const METRIC_HELP = {
   avgReturn: {
     title: '平均收益',
@@ -905,7 +912,11 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
   )
 }
 
-export function StrategyBacktest() {
+export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
+  /** 候选方案「载入复测」: 回填保存的回测配置 (消费后由父组件清空) */
+  loadCandidate?: ResearchCandidate | null
+  onLoadConsumed?: () => void
+}) {
   const queryClient = useQueryClient()
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
@@ -954,6 +965,48 @@ export function StrategyBacktest() {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
+
+  // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
+  useEffect(() => {
+    if (!loadCandidate) return
+    const cfg = (loadCandidate.config ?? {}) as Record<string, any>
+    if (cfg.strategy_id) setSelectedStrategy(String(cfg.strategy_id))
+    if (cfg.asset_type === 'stock' || cfg.asset_type === 'etf') setAssetType(cfg.asset_type)
+    if (cfg.symbols != null) {
+      setSymbols(Array.isArray(cfg.symbols) ? cfg.symbols.join(',') : String(cfg.symbols))
+    }
+    if (cfg.start) setStart(String(cfg.start).slice(0, 10))
+    if (cfg.end) setEnd(String(cfg.end).slice(0, 10))
+    if (cfg.entry_fill === 'close_t' || cfg.entry_fill === 'open_t+1') setEntryFill(cfg.entry_fill)
+    if (cfg.exit_fill === 'close_t' || cfg.exit_fill === 'open_t+1' || cfg.exit_fill === 'signal_next_minute') {
+      setExitFill(cfg.exit_fill)
+    }
+    if (cfg.commission_pct != null) setFees(String(Math.round(Number(cfg.commission_pct) * 10000)))
+    if (cfg.stamp_tax_pct != null) setStampTax(String(Number(cfg.stamp_tax_pct) * 1000))
+    if (cfg.slippage_bps != null) setSlippage(String(cfg.slippage_bps))
+    if (cfg.max_positions != null) setMaxPositions(String(cfg.max_positions))
+    if (cfg.max_exposure_pct != null) setMaxExposure(String(Math.round(Number(cfg.max_exposure_pct) * 100)))
+    if (cfg.initial_capital != null) setInitialCapital(String(cfg.initial_capital))
+    if (cfg.position_sizing === 'equal' || cfg.position_sizing === 'score_weight') {
+      setPositionSizing(cfg.position_sizing)
+    }
+    if (cfg.mode === 'position' || cfg.mode === 'full') setSimMode(cfg.mode)
+    if (cfg.holding_days != null) setHoldingDays(String(cfg.holding_days))
+    if (cfg.minute_fill != null) setHighGranularity(Boolean(cfg.minute_fill))
+    if (cfg.params && typeof cfg.params === 'object') setStrategyParams(cfg.params)
+    if (cfg.overrides && typeof cfg.overrides === 'object') setOverrides(cfg.overrides)
+    const rf = cfg.regime_filter
+    if (rf && typeof rf === 'object' && !Array.isArray(rf)) {
+      setRegimeStates(Array.isArray(rf.states) ? rf.states.map(String) : [])
+      setRegimeMinScore(rf.min_score != null ? Number(rf.min_score) : '')
+    } else {
+      setRegimeStates([])
+      setRegimeMinScore('')
+    }
+    toast(`已载入「${loadCandidate.name}」配置，可直接复测`, 'success')
+    onLoadConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在切换候选时执行一次性回填
+  }, [loadCandidate])
   const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
@@ -1157,6 +1210,67 @@ export function StrategyBacktest() {
   const excessReturn = strategyReturn != null && benchmarkReturn != null
     ? strategyReturn - benchmarkReturn
     : null
+
+  /** 导出回测结果 CSV (带 BOM, Excel 可直接打开): 概要 + 净值曲线 + 交易明细 + 分标的统计 */
+  const exportResultCsv = () => {
+    if (!result) return
+    const s = result.stats ?? {}
+    const name = result.strategy_info?.name ?? result.strategy_info?.id ?? '策略'
+    const start = String(result.config?.start ?? resultStartDate).slice(0, 10)
+    const end = String(result.config?.end ?? resultEndDate).slice(0, 10)
+    const pct = (v: unknown) => (v == null ? '' : fmtPct(Number(v)))
+    const num = (v: unknown) => (v == null || Number.isNaN(Number(v)) ? '' : String(v))
+
+    const lines: string[] = []
+    lines.push('# 概要', '指标,数值')
+    lines.push(`策略名称,${name}`)
+    if (result.strategy_info?.id) lines.push(`策略ID,${result.strategy_info.id}`)
+    lines.push(`回测区间,${start} ~ ${end}`)
+    lines.push(`净值曲线天数,${result.equity_curve?.length ?? 0}`)
+    lines.push(`完成交易数,${result.trades?.length ?? 0}`)
+    lines.push(`总收益,${pct(strategyReturn)}`)
+    lines.push(`年化收益,${pct(s.annual_return)}`)
+    lines.push(`同期基准,${pct(benchmarkReturn)}`)
+    lines.push(`超额收益,${pct(excessReturn)}`)
+    for (const [label, key] of [
+      ['夏普比率', 'sharpe'], ['索提诺', 'sortino'], ['最大回撤', 'max_drawdown'],
+      ['胜率', 'win_rate'], ['平均收益', 'avg_return'], ['中位数收益', 'median_return'],
+      ['盈亏比', 'profit_factor'], ['最终权益', 'final_equity'], ['平均持仓天数', 'avg_duration'],
+    ] as const) {
+      const v = s[key as keyof typeof s]
+      if (v != null) lines.push(`${label},${key.includes('return') || key === 'win_rate' || key === 'max_drawdown' ? pct(v) : num(v)}`)
+    }
+
+    const ddMap = new Map((result.drawdown_curve ?? []).map(r => [r.date, r.value]))
+    const benchMap = new Map((result.benchmark_curve ?? []).map(r => [r.date, r.close ?? r.value]))
+    lines.push('', '# 净值曲线', 'date,equity,cash,positions,exposure,drawdown,benchmark')
+    for (const r of result.equity_curve ?? []) {
+      lines.push([r.date, num(r.value), num(r.cash), num(r.positions), num(r.exposure),
+        num(ddMap.get(r.date)), num(benchMap.get(r.date))].join(','))
+    }
+
+    lines.push('', '# 交易明细',
+      'symbol,name,entry_date,entry_price,exit_date,exit_price,pnl_pct,duration,exit_reason,shares,entry_value,exit_value,pnl_amount')
+    for (const t of result.trades ?? []) {
+      lines.push([t.symbol, t.name ?? '', t.entry_date, num(t.entry_price), t.exit_date,
+        num(t.exit_price), num(t.pnl_pct), num(t.duration), t.exit_reason ?? '',
+        num(t.shares), num(t.entry_value), num(t.exit_value), num(t.pnl_amount)].map(csvEsc).join(','))
+    }
+
+    lines.push('', '# 分标的统计', 'symbol,n_trades,total_return,win_rate,best,worst')
+    for (const p of result.per_symbol_stats ?? []) {
+      lines.push([p.symbol, num(p.n_trades), num(p.total_return), num(p.win_rate),
+        num(p.best), num(p.worst)].join(','))
+    }
+
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `回测_${name.replace(/[\\/:*?"<>|]/g, '_')}_${start}_${end}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const applyRange = (months: number) => {
     setStart(monthsAgo(months))
@@ -1981,6 +2095,15 @@ export function StrategyBacktest() {
                 </span>
               )}
               <span className="text-[10px] text-secondary">持有 {result.config?.holding_days ?? 5} 天</span>
+              <button
+                type="button"
+                onClick={exportResultCsv}
+                title="导出回测结果 CSV (概要 + 净值曲线 + 交易明细 + 分标的统计)"
+                className="ml-1 inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-base px-2 text-[10px] text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+              >
+                <Download className="h-3 w-3" />
+                导出
+              </button>
               <span className="ml-auto text-[11px] text-muted font-mono">
                 {String(result.config?.start).slice(0,10)} ~ {String(result.config?.end).slice(0,10)}
               </span>
@@ -2097,6 +2220,15 @@ export function StrategyBacktest() {
                     <span className="num">{fmtDuration(result.elapsed_ms)}</span>
                   </span>
                 )}
+                <button
+                  type="button"
+                  onClick={exportResultCsv}
+                  title="导出回测结果 CSV (概要 + 净值曲线 + 交易明细 + 分标的统计)"
+                  className="ml-1 inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-base px-2 text-[10px] text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+                >
+                  <Download className="h-3 w-3" />
+                  导出
+                </button>
               </div>
             )}
 
