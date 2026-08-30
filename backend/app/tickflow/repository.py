@@ -1866,6 +1866,29 @@ class KlineRepository:
             return None
         return None
 
+    def list_minute_dates(self, start: date, end: date, asset_type: str = "stock") -> list[date]:
+        """枚举 [start, end] 内存在的分钟K分区日 (目录名直读, 零 parquet 扫描)。
+
+        分钟回测按交易日精确对日: 缺分区的日子由调用方显式跳过,
+        不做"回退最近分区" (那是实盘选股的语义, 回放会串日)。
+        """
+        dirname = "kline_minute" if asset_type == "stock" else f"kline_{asset_type}_minute"
+        minute_dir = self.store.data_dir / dirname
+        if not minute_dir.exists():
+            return []
+        out: list[date] = []
+        for entry in minute_dir.iterdir():
+            if not (entry.is_dir() and entry.name.startswith("date=")):
+                continue
+            try:
+                day = date.fromisoformat(entry.name[5:])
+            except ValueError:
+                continue
+            if start <= day <= end:
+                out.append(day)
+        out.sort()
+        return out
+
     def latest_daily_date(self) -> date | None:
         """本地日K数据的最新日期。"""
         try:
