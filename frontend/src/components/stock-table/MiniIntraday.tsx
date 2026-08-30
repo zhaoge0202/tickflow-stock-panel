@@ -36,23 +36,23 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   const n = rows.length
 
   // 涨跌着色: 优先用 changePct (后端 enriched 字段, 最可靠);
-  // 其次用 prevClose vs lastClose; 最后回退到第一根 open
+  // 其次用 prevClose vs lastClose; 最后回退到首根 open(可能为 null, 再退首根 close)
   const lastClose = rows[n - 1].close
-  const firstOpen = rows[0].open
+  const firstRef = rows[0].open ?? rows[0].close
   const isUp = changePct != null
     ? changePct >= 0
     : prevClose != null && prevClose > 0
       ? lastClose >= prevClose
-      : lastClose >= firstOpen
+      : lastClose >= firstRef
   const color = isUp ? BULL : BEAR
 
   // 昨收基准线: 优先用 prevClose; 其次用 changePct 反算 (close/(1+changePct));
-  // 最后回退到第一根 open
+  // 最后回退到首根 open(为 null 时退首根 close)
   const baseline = (prevClose != null && prevClose > 0)
     ? prevClose
     : (changePct != null && changePct !== 0)
       ? lastClose / (1 + changePct)
-      : firstOpen
+      : firstRef
 
   // 价格区间: close + 昨收 + 均线 全部纳入, 确保都在可视范围
   let hi = -Infinity, lo = Infinity

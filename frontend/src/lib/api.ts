@@ -192,7 +192,8 @@ export interface AiStockReport {
 // ===== Kline =====
 export interface MinuteKlineRow {
   datetime: string
-  open: number
+  /** 分钟开盘价; 部分数据源(stock-sdk 历史日)无真实分钟 open, 为 null */
+  open: number | null
   high: number
   low: number
   close: number
@@ -319,6 +320,8 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
+  /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
+  timeframes?: string[]
 }
 
 export interface StrategyLoadError {
@@ -377,6 +380,8 @@ export interface OverviewDimensionRankItem {
   up_count: number
   down_count: number
   amount: number
+  /** 该维度组首个命中的扩展字段 "configId.field" (成分股弹窗直连; 无扩展源时缺失) */
+  source_field?: string | null
   leader?: {
     symbol?: string | null
     name?: string | null
@@ -605,6 +610,64 @@ export interface AiReviewReport {
   created_at: string
 }
 
+// ===== 龙虎榜 (fuyao 专有, 复盘页) =====
+export interface DragonTigerStockItem {
+  thscode: string
+  ticker?: string | null
+  name?: string | null
+  change?: number | null      // 当日涨跌幅 (小数制)
+  net_value?: number | null   // 龙虎榜净买入 (元)
+  net_rate?: number | null    // 净买占比 (小数制)
+  buy_value?: number | null   // 买入额 (元)
+  sell_value?: number | null  // 卖出额 (元)
+  hot_rank?: number | null    // 同花顺人气排名 (小=靠前)
+  range_days?: number | null  // 1=当日榜 3=3日榜
+  hot_money_net_value?: number | null
+  hot_money_item_net_value?: number | null  // 游资榜 rows 专用: 该席位在该股的净买入
+  org_net_value?: number | null
+  org_net_rate?: number | null
+  org_buy_num?: number | null
+  org_sell_num?: number | null
+  concept_list?: { name?: string }[] | null
+}
+
+export interface DragonTigerHotMoney {
+  name?: string | null
+  buying?: number | null                    // 席位合计净买入 (元)
+  rows?: DragonTigerStockItem[] | null      // 关联股票 (字段同 stock item)
+}
+
+export interface DragonTigerPayload {
+  state: 'ok' | 'fallback_prev' | 'source_unavailable' | 'no_data'
+  requested_date?: string | null
+  trade_date?: string | null
+  message?: string
+  all?: { trade_date?: string | null; stock_count?: number | null; count?: number | null; stock_items?: DragonTigerStockItem[] }
+  org?: { trade_date?: string | null; stock_count?: number | null; count?: number | null; stock_items?: DragonTigerStockItem[] }
+  hot_money?: { trade_date?: string | null; count?: number | null; hot_money_items?: DragonTigerHotMoney[] }
+}
+
+// ===== 盘前风向标 (fuyao 专有, 复盘页) =====
+export interface AuctionBenchmarkItem {
+  thscode: string
+  ticker?: string | null
+  name?: string | null
+  auction_pct?: number | null   // 竞价涨跌幅 (百分数原值, 如 9.97 = +9.97%)
+  tags?: string[]               // 同花顺概念标签
+  day0_oc?: number | null       // 当日开盘买→收盘卖 (小数制, 服务端由本地日K enrich)
+  day0_pct?: number | null      // 当日全天涨跌幅 (小数制)
+  d1_pct?: number | null        // 次日收盘→收盘 (小数制; 最新交易日无次日为 null)
+}
+
+export interface AuctionBenchmarkPayload {
+  state: 'ok' | 'fallback_prev' | 'source_unavailable' | 'no_data'
+  requested_date?: string | null
+  trade_date?: string | null
+  count?: number
+  message?: string
+  items?: AuctionBenchmarkItem[]
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -630,7 +693,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai' | 'composite'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
   asset_types: string[]
   timeframes: string[]
   version: string
@@ -779,11 +842,33 @@ export interface AbnormalOverview {
   rows: AbnormalRow[]
 }
 
+// ===== 盘中异动 (enriched 当日信号聚合, 异动监控「盘中」tab) =====
+export type IntradaySignalKey = 'limit_up' | 'broken' | 'recovery' | 'limit_down'
+  | 'new_high' | 'new_low' | 'volume_surge'
+
+export interface AbnormalIntradayRow {
+  symbol: string
+  name?: string | null
+  close?: number | null
+  change_pct?: number | null      // 今日涨跌幅 (小数制)
+  amplitude?: number | null       // 日振幅 (小数制)
+  vol_ratio_5d?: number | null    // 5日量比
+  turnover_rate?: number | null   // 换手率 (百分数原值)
+  consecutive_limit_ups?: number | null
+  signals: IntradaySignalKey[]    // 命中信号 (按优先级排序)
+}
+
+export interface AbnormalIntradayPayload {
+  cache_date?: string | null
+  counts?: Partial<Record<IntradaySignalKey, number>>
+  rows?: AbnormalIntradayRow[]
+}
+
 export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal' | 'volume_delta'
   asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
@@ -812,9 +897,23 @@ export interface MonitorRule {
   webhook_channels?: string[]  // 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
   runtime_warning?: string
-  // ladder 专属: 封单监控
-  metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 额(元)
+  // ladder 专属: 封单监控; volume_delta 复用 metric 表示阈值口径 (volume=手数, amount=金额)
+  metric?: 'sealed_vol' | 'sealed_amount' | 'volume' | 'amount'
   threshold?: number                        // 封单 <= 此值时报警
+  // volume_delta 专属 (轮询放量): 相邻两次全市场快照的成交量增量(手)
+  threshold_volume?: number                 // 单轮增量 >= 此值时报警
+  threshold_amount?: number                 // metric=amount 时: 单轮增量 >= 此值(元)时报警
+  basic_filter?: VDBasicFilter             // 基础过滤 (与策略 basic_filter 语义对齐)
+}
+
+export interface VDBasicFilter {
+  price_min?: number | null                 // 股价下限 (元)
+  price_max?: number | null                 // 股价上限 (元)
+  market_cap_min?: number | null            // 总市值下限 (元)
+  float_cap_min?: number | null             // 流通市值下限 (元)
+  float_cap_max?: number | null             // 流通市值上限 (元)
+  amount_min?: number | null                // 当日成交额下限 (元)
+  exclude_st?: boolean                      // 剔除 ST
 }
 
 export interface MonitorRuleOptions {
@@ -1376,7 +1475,51 @@ export interface PluginDataSourceItem {
   status: string           // 可用性原因 (供 UI 显示)
   description: string
   install_hint: string     // 未装依赖时显示的安装命令
+  homepage?: string        // 插件官网/申请地址 (manifest 可选声明)
   api_key_env?: string     // 声明后设置页提供 Key 输入框 (先探后存)
+  api_key_masked?: string  // 当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底; 与 TickFlow Key 同一展示契约)
+}
+
+/** 数据源路由偏好字段 (每个能力一个, 与后端能力注册表一一对应) */
+export type ProviderField =
+  | 'daily_data_provider'
+  | 'adj_factor_provider'
+  | 'minute_data_provider'
+  | 'depth5_data_provider'
+  | 'realtime_data_provider'
+  | 'financial_data_provider'
+
+/** 能力路由矩阵中的一个候选源 (candidates 只含当前确实可提供该能力的源) */
+export interface CapabilityCandidate {
+  name: string
+  display: string
+  kind: 'builtin' | 'plugin' | 'custom'
+  available: boolean
+  status: string
+  note?: string | null
+}
+
+/** 一个能力 (标准化数据集) 的路由视图 */
+export interface CapabilityRoute {
+  id: string
+  label: string
+  desc: string
+  field: ProviderField | null                    // null = 不可路由能力 (仅 TickFlow 提供)
+  default: string
+  tf_tier: string                                  // TickFlow 所需最低订阅档位
+  tf_available: boolean                            // 当前 TickFlow 档位是否提供该能力
+  usable: boolean                                  // 生效源当前能否真正提供 (各页能力门控的统一判定)
+  current: string                                  // 原始偏好值
+  current_display: string
+  effective: string                                // 当前生效源 (独立路由, current 即生效)
+  effective_display: string
+  candidates: CapabilityCandidate[]                // 当前可用候选 (按当前 TickFlow 档位过滤)
+  pending: CapabilityCandidate[]                   // 声明了该能力但未就绪的源 (置灰提示)
+}
+
+export interface CapabilityMatrix {
+  tickflow_tier?: string                           // TickFlow 当前档位基础名 (none/free/...)
+  capabilities: CapabilityRoute[]
 }
 
 export interface DataSourceLoadError {
@@ -1457,14 +1600,18 @@ export interface Preferences {
   minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
+  minute_refresh_enabled: boolean
+  minute_refresh_interval: number
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
+  /** 分钟源 1 分钟历史深度(交易日); null/缺省 = 深历史 (如 tickflow)。分时档位据此收窄 */
+  minute_history_days?: number | null
+  depth5_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
   data_source_job_timeout_s: number
   data_source_long_job_timeout_s: number
-  realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
   realtime_pull_index?: boolean
@@ -1583,6 +1730,7 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
+  capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
@@ -1628,8 +1776,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, dataset, symbols, config }),
     }),
-  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
-    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+  updateDataProviders: (cfg: Partial<Pick<Preferences, ProviderField>>) =>
+    request<Pick<Preferences, ProviderField>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
@@ -1653,6 +1801,27 @@ export const api = {
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
       }),
     }),
+
+  /** 全量分钟 (盘中全市场分钟落盘) 服务状态 (TickFlow Expert 专有) */
+  minuteRefreshStatus: () =>
+    request<{
+      available: boolean
+      enabled?: boolean
+      running?: boolean
+      interval_seconds?: number
+      capability_ok?: boolean
+      custom_provider_active?: boolean
+      in_trading_hours?: boolean
+      gate_reason?: string | null
+      rounds?: number
+      last_round_at?: number | null
+      last_round_ms?: number | null
+      last_rows?: number
+      last_symbols?: number
+      last_requests?: number
+      next_round_at?: number | null
+      last_error?: string | null
+    }>('/api/settings/minute-refresh/status'),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{
       pipeline_pull_a_share: boolean
@@ -1911,7 +2080,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(symbols),
     }),
-  klineMinute: (symbol: string, date?: string) =>
+  klineMinute: (symbol: string, date?: string, live?: boolean) =>
     request<{
       symbol: string
       name?: string
@@ -1923,7 +2092,7 @@ export const api = {
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
     }>(
-      `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
+      `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
@@ -2091,16 +2260,17 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index') => {
+  // timeframe='all' 时不传参数 → 后端不过滤周期, 返回日线+分钟合并列表
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', timeframe: '1d' | '1m' | 'all' = '1d') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
+      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}${timeframe !== 'all' ? `timeframe=${timeframe}` : ''}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
-      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType }),
+      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe }),
     }),
   screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run', {
@@ -2410,6 +2580,12 @@ export const api = {
     return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
   },
 
+  dimensionIntraday: (id: string, opts: { field: string; value: string; date?: string }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    return request<DimensionIntradayResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-intraday?${qs.toString()}`)
+  },
+
   analysisMenus: () =>
     request<{ items: AnalysisMenu[] }>('/api/analysis-menus'),
 
@@ -2694,6 +2870,18 @@ export const api = {
   reviewReportsList: () =>
     request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
 
+  /** 龙虎榜三榜 (fuyao 专有; 历史日按服务端缓存, 当日未发布自动回退上一期) */
+  dragonTiger: (date?: string) =>
+    request<DragonTigerPayload>(
+      `/api/market-recap/dragon-tiger${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
+
+  /** 盘前风向标 (fuyao 专有; 同花顺竞价筛选名单, 含当日/次日真实收益) */
+  auctionBenchmark: (date?: string) =>
+    request<AuctionBenchmarkPayload>(
+      `/api/market-recap/auction-benchmark${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
+
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
@@ -2795,10 +2983,10 @@ export const api = {
   },
 
   // ===== Strategy Engine =====
-  strategyList: (assetType?: 'stock' | 'etf', timeframe = '1d') => {
+  strategyList: (assetType?: 'stock' | 'etf', timeframe: '1d' | '1m' | 'all' = '1d') => {
     const params = new URLSearchParams()
     if (assetType) params.set('asset_type', assetType)
-    if (timeframe) params.set('timeframe', timeframe)
+    if (timeframe && timeframe !== 'all') params.set('timeframe', timeframe)
     const qs = params.toString()
     return request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies${qs ? `?${qs}` : ''}`,
@@ -2864,11 +3052,15 @@ export const api = {
       body: JSON.stringify({ description }),
     }),
 
-  // ===== Abnormal Moves (异动边缘) =====
+  // ===== Abnormal Moves (异动监控: 竞价/盘中/偏移) =====
   abnormalOverview: (minCloseness = 0.5, limit = 200) =>
     request<AbnormalOverview>(
       `/api/abnormal/overview?min_closeness=${minCloseness}&limit=${limit}`,
     ),
+
+  /** 盘中异动: enriched 当日信号命中行 (涨停/炸板/翘板/跌停/新高/新低/放量) */
+  abnormalIntraday: (limit = 500) =>
+    request<AbnormalIntradayPayload>(`/api/abnormal/intraday?limit=${limit}`),
 
   // ===== Monitor Rules (监控规则) =====
   monitorRulesList: () =>
@@ -3217,6 +3409,22 @@ export interface DimensionMembersResult {
   total: number
   limit: number
   rows: Record<string, any>[]
+}
+
+export interface DimensionIntradayPoint {
+  time: string
+  sector: number | null
+  market: number | null
+}
+
+export interface DimensionIntradayResult {
+  status: 'ok' | 'no_data' | 'empty'
+  reason?: string | null
+  date?: string | null
+  basis?: 'prev_close' | 'first_close' | 'mixed' | null
+  member_count?: number
+  members_with_minute?: number
+  points: DimensionIntradayPoint[]
 }
 
 export interface AnalysisColumn {

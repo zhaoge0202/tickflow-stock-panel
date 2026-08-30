@@ -38,6 +38,33 @@ from app.parquet import scan_enriched_parquet
 logger = logging.getLogger(__name__)
 
 
+def replace_with_retry(src: Path, dst: Path, *, attempts: int = 10, delay_s: float = 0.5) -> None:
+    """os.replace 的 Windows 读锁重试版。
+
+    分区 parquet 的读端 (polars scan_parquet / DuckDB read_parquet 视图) 在扫描进行
+    期间持有句柄; Windows 不允许替换"仍被读端打开"的目标文件 (PermissionError,
+    WinError 5), Linux 的 inode 交换语义则无此限制。读端扫描通常亚秒级完成,
+    短退避重试即可穿过并发读窗口; attempts 次仍被占用则原样抛出, 由上层记录失败。
+    """
+    last: PermissionError | None = None
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            if i:
+                logger.info("parquet replace succeeded after %d blocked attempt(s): %s", i, dst)
+            return
+        except PermissionError as e:
+            last = e
+            if i == 0:
+                logger.warning(
+                    "parquet replace blocked by concurrent reader, retrying (total <= %.1fs): %s",
+                    attempts * delay_s, dst,
+                )
+            if i < attempts - 1:
+                time.sleep(delay_s)
+    raise last  # type: ignore[misc]  # attempts >= 1 时 last 必已赋值
+
+
 def enriched_dirname(asset_type: str) -> str:
     """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
     return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
@@ -1813,13 +1840,15 @@ class KlineRepository:
     # ================================================================
 
     def latest_minute_date(self, symbol: str, asset_type: str = "stock") -> date | None:
+        # 注意: 必须走 execute_one (cursor+close)。直连 self.db.execute(...).fetchone()
+        # 的未消费结果集会把首个分区 parquet 的句柄钉在共享连接上, Windows 下阻塞
+        # 同步写入的 os.replace → 个股分时"补齐数据"500。
         table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
         try:
-            with self._lock:
-                row = self.db.execute(
-                    f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
-                    [symbol],
-                ).fetchone()
+            row = self.execute_one(
+                f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
+                [symbol],
+            )
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
         except duckdb.CatalogException:
@@ -1829,10 +1858,9 @@ class KlineRepository:
     def latest_minute_date_global(self) -> date | None:
         """全市场最近分钟K日期 (不分 symbol)。用于非交易日回退到上一交易日。"""
         try:
-            with self._lock:
-                row = self.db.execute(
-                    "SELECT max(CAST(datetime AS DATE)) FROM kline_minute",
-                ).fetchone()
+            row = self.execute_one(
+                "SELECT max(CAST(datetime AS DATE)) FROM kline_minute",
+            )
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
         except Exception:  # noqa: BLE001
@@ -1841,10 +1869,9 @@ class KlineRepository:
     def earliest_daily_date(self) -> date | None:
         """本地日K数据的最早日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT min(date) FROM kline_daily",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT min(date) FROM kline_daily",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1855,10 +1882,9 @@ class KlineRepository:
     def earliest_minute_date(self) -> date | None:
         """本地分钟K数据的最早日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT min(CAST(datetime AS DATE)) FROM kline_minute",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT min(CAST(datetime AS DATE)) FROM kline_minute",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1866,13 +1892,35 @@ class KlineRepository:
             return None
         return None
 
+    def list_minute_dates(self, start: date, end: date, asset_type: str = "stock") -> list[date]:
+        """枚举 [start, end] 内存在的分钟K分区日 (目录名直读, 零 parquet 扫描)。
+
+        分钟回测按交易日精确对日: 缺分区的日子由调用方显式跳过,
+        不做"回退最近分区" (那是实盘选股的语义, 回放会串日)。
+        """
+        dirname = "kline_minute" if asset_type == "stock" else f"kline_{asset_type}_minute"
+        minute_dir = self.store.data_dir / dirname
+        if not minute_dir.exists():
+            return []
+        out: list[date] = []
+        for entry in minute_dir.iterdir():
+            if not (entry.is_dir() and entry.name.startswith("date=")):
+                continue
+            try:
+                day = date.fromisoformat(entry.name[5:])
+            except ValueError:
+                continue
+            if start <= day <= end:
+                out.append(day)
+        out.sort()
+        return out
+
     def latest_daily_date(self) -> date | None:
         """本地日K数据的最新日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT max(date) FROM kline_daily",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT max(date) FROM kline_daily",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1924,10 +1972,9 @@ class KlineRepository:
 
     def _latest_enriched_date_duckdb(self) -> date | None:
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT max(date) FROM kline_enriched",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT max(date) FROM kline_enriched",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -2095,10 +2142,11 @@ class KlineRepository:
         直接 write_parquet(out) 在进程被 kill (dev.sh 清端口用 kill -9)
         或断电时会留下半截文件, 之后 scan_parquet glob 整条链路报错。
         临时文件后缀 .tmp 不匹配 *.parquet glob, 不会被扫描误读。
+        Windows 下目标正被并发读取时由 replace_with_retry 短退避穿过。
         """
         tmp = out.with_name(out.name + ".tmp")
         df.write_parquet(tmp)
-        tmp.replace(out)  # 同目录 rename, POSIX/NTFS 均为原子操作
+        replace_with_retry(tmp, out)
 
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""

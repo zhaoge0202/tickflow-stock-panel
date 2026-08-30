@@ -5,8 +5,9 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { MissingCapChip } from '@/lib/capability-labels'
 
-export function ExtendHistoryPanel({ caps, isRunning, earliestDate, onStart }: {
-  caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined
+// hasCap: 日K批量能力当前是否可用 (路由矩阵判定, 生效源含插件/自定义源)
+export function ExtendHistoryPanel({ hasCap, isRunning, earliestDate, onStart }: {
+  hasCap: boolean
   isRunning: boolean
   earliestDate: string | null
   onStart: () => void
@@ -14,7 +15,7 @@ export function ExtendHistoryPanel({ caps, isRunning, earliestDate, onStart }: {
   const qc = useQueryClient()
   const [value, setValue] = useState(6)
   const [unit, setUnit] = useState<'month' | 'year'>('month')
-  const hasBatchCap = !!caps?.capabilities?.['kline.daily.batch']
+  const hasBatchCap = hasCap
 
   const extend = useMutation({
     mutationFn: () => api.extendHistory(value, unit),

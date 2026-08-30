@@ -6,6 +6,7 @@ import { QK } from '@/lib/queryKeys'
 import { BUILTIN_SIGNAL_DEFINITIONS, type SignalKind } from '@/lib/signals'
 import { CustomSignalDialog } from '@/components/signals/CustomSignalDialog'
 import { Skeleton } from '@/components/data/Skeleton'
+import { AnchorWrap } from '@/lib/useCardFlash'
 
 type SignalSection = 'builtin' | 'custom'
 
@@ -16,7 +17,7 @@ const KIND_CLASS: Record<SignalKind, string> = {
   both: 'bg-muted/10 text-muted',
 }
 
-export function SettingsCustomSignalsPanel() {
+export function SettingsCustomSignalsPanel({ highlight }: { highlight?: string } = {}) {
   const qc = useQueryClient()
   const list = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
   const options = useQuery({ queryKey: QK.customSignalsOptions, queryFn: api.customSignalsOptions })
@@ -87,6 +88,7 @@ export function SettingsCustomSignalsPanel() {
 
   return (
     <div className="max-w-6xl space-y-6">
+      <AnchorWrap highlight={highlight} anchor="signals">
       <section className="rounded-2xl border border-border bg-surface p-6 bg-[radial-gradient(circle_at_top_right,rgba(234,179,8,0.12),transparent_38%)]">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
@@ -133,6 +135,7 @@ export function SettingsCustomSignalsPanel() {
           </div>
         </div>
       </section>
+      </AnchorWrap>
 
       {activeSection === 'builtin' && (
         <section className="rounded-card border border-border bg-surface p-5 space-y-4">

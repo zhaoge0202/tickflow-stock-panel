@@ -13,8 +13,10 @@ export function fmtPct(v: number | null | undefined, digits = 2): string {
 
 export function fmtVolume(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
-  if (v >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
-  if (v >= 1e4) return `${(v / 1e4).toFixed(2)}万`
+  const sign = v < 0 ? '-' : ''
+  const a = Math.abs(v)
+  if (a >= 1e8) return `${sign}${(a / 1e8).toFixed(2)}亿`
+  if (a >= 1e4) return `${sign}${(a / 1e4).toFixed(2)}万`
   return v.toFixed(0)
 }
 

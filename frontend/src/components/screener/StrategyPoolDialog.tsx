@@ -24,6 +24,8 @@ const SOURCE_LABEL: Record<string, string> = {
   invalid: '失效',
 }
 
+const TF_BADGE_CLS = 'text-[8px] px-1 py-px rounded border leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400'
+
 type SourceTab = 'all' | 'builtin' | 'custom' | 'ai'
 
 const TABS: { id: SourceTab; label: string }[] = [
@@ -57,7 +59,8 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
-      const d = await api.strategyList()
+      // 不按周期过滤: 日线+分钟策略合并展示, 分钟策略以徽章区分
+      const d = await api.strategyList(undefined, 'all')
       setAllStrategies(d.strategies)
     } catch {
       setAllStrategies([])
@@ -236,6 +239,9 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                       <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
                         {SOURCE_LABEL[s.source] ?? '内置'}
                       </span>
+                      {s.timeframes?.includes('1m') && (
+                        <span className={TF_BADGE_CLS}>分钟</span>
+                      )}
                       <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
                     </button>
                   ))}
@@ -280,6 +286,9 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                             <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[src] ?? SOURCE_CLS.builtin}`}>
                               {SOURCE_LABEL[src] ?? '内置'}
                             </span>
+                            {s?.timeframes?.includes('1m') && (
+                              <span className={TF_BADGE_CLS}>分钟</span>
+                            )}
                             <button
                               onClick={(e) => { e.stopPropagation(); handleRemove(id) }}
                               className="text-muted/40 hover:text-danger transition-colors cursor-pointer leading-none shrink-0"

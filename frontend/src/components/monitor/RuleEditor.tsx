@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Siren, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
+import { Activity, BarChart3, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Siren, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type SectorKind, type SectorMonitorTarget, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
@@ -9,7 +9,7 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { MONITOR_INTRADAY_SIGNAL_OPTIONS, SIGNAL_OPTIONS, cnSignal } from '@/lib/signals'
-import { usePreferences } from '@/lib/useSharedQueries'
+import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 
 interface Props {
   /** 编辑现有规则;null=新建 */
@@ -23,7 +23,7 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控', sector: '板块监控', abnormal: '异动监控',
+  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控', sector: '板块监控', abnormal: '异动监控', volume_delta: '轮询放量监控',
 }
 
 const TYPE_ICONS = {
@@ -33,6 +33,7 @@ const TYPE_ICONS = {
   strategy: Waypoints,
   sector: Layers3,
   abnormal: Siren,
+  volume_delta: BarChart3,
 }
 
 const SECTOR_KIND_OPTIONS: Array<{ key: SectorKind; label: string; icon: typeof ChartNoAxesCombined }> = [
@@ -73,6 +74,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   cooldown_seconds: 3600,
   severity: 'info',
   message: '',
+  threshold_volume: 9000,
   ...preset,
 })
 
@@ -80,6 +82,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const qc = useQueryClient()
   const options = useQuery({ queryKey: QK.monitorRuleOptions, queryFn: api.monitorRuleOptions })
   const { data: prefs } = usePreferences()
+  const { data: quoteStatus } = useQuoteStatus()
+  const quoteInterval = quoteStatus?.interval_s
   const feishuConfigured = !!(prefs?.feishu_webhook_url)
   const wecomConfigured = !!(prefs?.wecom_webhook_url)
   const [editing] = useState(!!rule)
@@ -210,6 +214,18 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         delete d.notify_events
         if ((d.threshold_pct ?? 0) < 1 || (d.threshold_pct ?? 0) > 150) {
           throw new Error('接近度阈值必须在 1 到 150 之间 (70=边缘, 100=已触发)')
+        }
+      } else if (d.type === 'volume_delta') {
+        delete d.score_min
+        delete d.score_max
+        d.conditions = []
+        delete d.notify_events
+        if (d.metric === 'amount') {
+          if (!Number.isFinite(d.threshold_amount) || (d.threshold_amount ?? 0) < 1) {
+            throw new Error('金额阈值必须是 ≥1 的数字 (万元)')
+          }
+        } else if (!Number.isFinite(d.threshold_volume) || (d.threshold_volume ?? 0) < 1) {
+          throw new Error('单轮放量阈值必须是 ≥1 的手数')
         }
       } else {
         delete d.score_min
@@ -591,12 +607,24 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   return {
                     ...d,
                     type,
+                    // 轮询放量依赖全市场股票快照, 仅支持个股
+                    asset_type: type === 'volume_delta' ? 'stock' : d.asset_type,
                     notify_events: type === 'strategy'
                       ? [...(d.notify_events ?? DEFAULT_STRATEGY_NOTIFY_EVENTS)]
                       : undefined,
-                    scope: type === 'sector' || type === 'abnormal'
+                    scope: type === 'sector' || type === 'abnormal' || type === 'volume_delta'
                       ? 'all'
                       : type === 'strategy' && d.scope === 'symbols' && d.symbols.length === 0 ? 'all' : d.scope,
+                    // 轮询放量: 冷却期默认 300s (持续放量会连续多轮达标); 切走时还原 3600
+                    cooldown_seconds: type === 'volume_delta' && d.type !== 'volume_delta' ? 300
+                      : type !== 'volume_delta' && d.type === 'volume_delta' ? 3600
+                      : d.cooldown_seconds,
+                    // 轮询放量: metric / 金额阈值 / 基础过滤默认 (与策略 basic_filter 对齐)
+                    metric: type === 'volume_delta' && d.type !== 'volume_delta' ? 'volume' : d.metric,
+                    threshold_amount: type === 'volume_delta' && d.type !== 'volume_delta' ? 1e6 : d.threshold_amount,
+                    basic_filter: type === 'volume_delta' && d.type !== 'volume_delta'
+                      ? { price_min: 3, price_max: 300, market_cap_min: 10e8, float_cap_min: null, float_cap_max: null, amount_min: 0.2e8, exclude_st: true }
+                      : d.basic_filter,
                     direction: type === 'sector' ? 'up'
                       : type === 'abnormal' ? 'both'
                       : d.type === 'sector' || d.type === 'abnormal' ? 'entry' : d.direction,
@@ -895,6 +923,119 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </div>
       )}
 
+      {draft.type === 'volume_delta' && (
+        <div className="space-y-4 border-t border-border/60 pt-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <span className="text-[11px] text-muted">阈值口径</span>
+              <div className="grid h-9 grid-cols-2 overflow-hidden rounded-btn border border-border bg-base">
+                {([['volume', '按手数'], ['amount', '按金额']] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={(draft.metric ?? 'volume') === key}
+                    onClick={() => setDraft(d => ({ ...d, metric: key }))}
+                    className={`text-[11px] font-medium transition-colors cursor-pointer ${
+                      (draft.metric ?? 'volume') === key ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="space-y-1.5">
+              <span className="text-[11px] text-muted">
+                单轮放量阈值{draft.metric === 'amount' ? ' (万元)' : ' (手)'}
+              </span>
+              <span className="relative block">
+                <input
+                  type="number"
+                  min="1"
+                  step={draft.metric === 'amount' ? 10 : 1000}
+                  value={draft.metric === 'amount'
+                    ? Math.round((draft.threshold_amount ?? 1e6) / 1e4)
+                    : (draft.threshold_volume ?? 9000)}
+                  onChange={event => setDraft(d => {
+                    const v = Number(event.target.value)
+                    return d.metric === 'amount'
+                      ? { ...d, threshold_amount: v * 1e4 }
+                      : { ...d, threshold_volume: v }
+                  })}
+                  className="h-9 w-full rounded-btn border border-border bg-base pl-3 pr-12 text-xs font-mono text-foreground"
+                />
+                <span className="absolute right-3 top-2.5 text-xs text-muted">
+                  {draft.metric === 'amount' ? '万元' : '手'}
+                </span>
+              </span>
+              <span className="block text-[10px] text-muted/70">
+                相邻两次全市场轮询 (当前间隔 {Math.round(quoteInterval ?? 6)} 秒) 间的增量 ≥ 此值即提醒;
+                金额口径对不同股价更公平
+              </span>
+            </label>
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-[11px] text-muted">基础过滤 (与策略选股口径对齐, 留空不过滤)</span>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="space-y-1">
+                <span className="text-[10px] text-muted/70">股价区间 (元)</span>
+                <div className="flex items-center gap-1">
+                  <input type="number" min="0" step="0.5" placeholder="下限"
+                    value={draft.basic_filter?.price_min ?? ''}
+                    onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, price_min: e.target.value === '' ? null : Number(e.target.value) } }))}
+                    className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+                  <span className="text-[10px] text-muted">—</span>
+                  <input type="number" min="0" step="0.5" placeholder="上限"
+                    value={draft.basic_filter?.price_max ?? ''}
+                    onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, price_max: e.target.value === '' ? null : Number(e.target.value) } }))}
+                    className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+                </div>
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] text-muted/70">总市值下限 (亿元)</span>
+                <input type="number" min="0" step="1" placeholder="不限"
+                  value={draft.basic_filter?.market_cap_min != null ? draft.basic_filter.market_cap_min / 1e8 : ''}
+                  onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, market_cap_min: e.target.value === '' ? null : Number(e.target.value) * 1e8 } }))}
+                  className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] text-muted/70">当日成交额下限 (万元)</span>
+                <input type="number" min="0" step="100" placeholder="不限"
+                  value={draft.basic_filter?.amount_min != null ? draft.basic_filter.amount_min / 1e4 : ''}
+                  onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, amount_min: e.target.value === '' ? null : Number(e.target.value) * 1e4 } }))}
+                  className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] text-muted/70">流通市值下限 (亿元)</span>
+                <input type="number" min="0" step="1" placeholder="不限"
+                  value={draft.basic_filter?.float_cap_min != null ? draft.basic_filter.float_cap_min / 1e8 : ''}
+                  onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, float_cap_min: e.target.value === '' ? null : Number(e.target.value) * 1e8 } }))}
+                  className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] text-muted/70">流通市值上限 (亿元)</span>
+                <input type="number" min="0" step="1" placeholder="不限"
+                  value={draft.basic_filter?.float_cap_max != null ? draft.basic_filter.float_cap_max / 1e8 : ''}
+                  onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, float_cap_max: e.target.value === '' ? null : Number(e.target.value) * 1e8 } }))}
+                  className="h-8 w-full rounded border border-border bg-base px-2 text-xs font-mono text-foreground" />
+              </label>
+              <label className="flex items-center gap-2 pt-4">
+                <input type="checkbox" checked={draft.basic_filter?.exclude_st ?? true}
+                  onChange={e => setDraft(d => ({ ...d, basic_filter: { ...d.basic_filter, exclude_st: e.target.checked } }))}
+                  className="h-3.5 w-3.5 accent-[hsl(var(--accent))]" />
+                <span className="text-[11px] text-secondary">剔除 ST / 风险警示</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-btn bg-base px-3 py-2 text-[10px] leading-relaxed text-muted">
+            捕捉单次轮询间隔内的突发放量 (大单连续扫货)。开盘首轮与暂停恢复后的第一轮不触发,
+            防止集合竞价撮合量误报; 冷却期内同一标的不重复提醒, 命中超过 5 只时合并为一条批量通知。
+          </div>
+        </div>
+      )}
+
       {/* 作用范围 */}
       {draft.type !== 'sector' && <div className="space-y-2">
         <span className="text-[11px] text-muted">作用范围</span>
@@ -1106,7 +1247,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       </div>}
 
       {/* 触发条件 (非 strategy) */}
-      {draft.type !== 'strategy' && draft.type !== 'sector' && draft.type !== 'abnormal' && (
+      {draft.type !== 'strategy' && draft.type !== 'sector' && draft.type !== 'abnormal' && draft.type !== 'volume_delta' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted">触发条件</span>
@@ -1402,7 +1543,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           return (
             <p className="text-[10px] leading-relaxed text-warning/80">
               {unconfigured.join('、')}尚未配置,
-              <Link to="/settings?tab=monitoring" className="text-accent hover:text-accent/80">前往设置页配置 →</Link>
+              <Link to="/settings?tab=monitoring&highlight=webhooks" className="text-accent hover:text-accent/80">前往设置页配置 →</Link>
             </p>
           )
         })()}

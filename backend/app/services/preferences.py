@@ -84,29 +84,6 @@ def get_realtime_quote_interval() -> float:
     return load().get("realtime_quote_interval", 6.0)
 
 
-def get_realtime_watchlist_symbols() -> list[str]:
-    """Free 档自选实时监控标的:直接取自选页前 5 个。"""
-    try:
-        from app.services import watchlist
-        rows = watchlist.list_symbols()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("load watchlist for realtime failed: %s", e)
-        return []
-    out: list[str] = []
-    for row in rows:
-        symbol = str((row or {}).get("symbol") or "").strip().upper()
-        if symbol and symbol not in out:
-            out.append(symbol)
-        if len(out) >= 5:
-            break
-    return out
-
-
-def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: ARG001
-    """兼容旧接口: Free 实时标的现在由自选页前 5 个决定。"""
-    return get_realtime_watchlist_symbols()
-
-
 def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
     current = load()
@@ -214,6 +191,27 @@ def get_minute_sync_segment_days() -> int:
     """
     return max(5, min(30, load().get("minute_sync_segment_days", 20)))
 
+# ===== 盘中分钟增量刷新 (Expert 专有) =====
+
+# 稳态轮为 intraday.universe 单请求增量, 无脉冲并发, 间隔可低至 3s;
+# 全天修复轮 (intraday.batch 28 块爆发) 的 rpm 安全与间隔无关, 由轮次
+# 调度 max(间隔, 单轮完成) 天然防重叠。
+_MINUTE_REFRESH_INTERVAL_MIN = 3
+_MINUTE_REFRESH_INTERVAL_MAX = 300
+
+
+def get_minute_refresh_enabled() -> bool:
+    """盘中分钟K增量落盘开关。默认关闭; 能力门控 (Expert) 在服务层判断。"""
+    return bool(load().get("minute_refresh_enabled", False))
+
+
+def get_minute_refresh_interval() -> int:
+    """盘中分钟增量刷新间隔(秒)。默认 6,范围 [3, 300]。"""
+    return max(
+        _MINUTE_REFRESH_INTERVAL_MIN,
+        min(_MINUTE_REFRESH_INTERVAL_MAX, int(load().get("minute_refresh_interval", 6))),
+    )
+
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
@@ -260,14 +258,18 @@ def get_daily_data_provider() -> str:
 
 
 def get_adj_factor_provider() -> str:
-    provider = str(load().get("adj_factor_provider", "same_as_daily") or "same_as_daily").lower()
-    if provider == "same_as_daily":
-        return provider
-    return provider if provider in _allowed_data_providers() else "same_as_daily"
+    # 「跟随日K」(same_as_daily) 特殊值已下线: 存量配置里的旧值按非法值回退 tickflow
+    provider = str(load().get("adj_factor_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 def get_minute_data_provider() -> str:
     provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
+
+
+def get_depth5_data_provider() -> str:
+    provider = str(load().get("depth5_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 
@@ -921,6 +923,13 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["minute_intraday_refresh_interval"] = max(
             _INTRADAY_REFRESH_INTERVAL_MIN,
             min(_INTRADAY_REFRESH_INTERVAL_MAX, int(cfg["minute_intraday_refresh_interval"])))
+    if "minute_refresh_enabled" in cfg:
+        updates["minute_refresh_enabled"] = bool(cfg["minute_refresh_enabled"])
+    if "minute_refresh_interval" in cfg:
+        # clamp 到 [3, 300], 与 getter 一致, 防前端传越界值
+        updates["minute_refresh_interval"] = max(
+            _MINUTE_REFRESH_INTERVAL_MIN,
+            min(_MINUTE_REFRESH_INTERVAL_MAX, int(cfg["minute_refresh_interval"])))
     if "monitor_ext_fields" in cfg:
         raw = cfg["monitor_ext_fields"] or {}
         updates["monitor_ext_fields"] = {
@@ -942,6 +951,8 @@ def get_realtime_monitor_config() -> dict:
         "screener_auto_run": get_screener_auto_run(),
         "minute_intraday_refresh": get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": get_minute_intraday_refresh_interval(),
+        "minute_refresh_enabled": get_minute_refresh_enabled(),
+        "minute_refresh_interval": get_minute_refresh_interval(),
         "monitor_ext_fields": get_monitor_ext_fields(),
     }
 

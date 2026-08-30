@@ -2493,15 +2493,15 @@ wheels = [
 
 [[package]]
 name = "tickflow"
-version = "0.1.24"
+version = "0.1.25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/aa/56/d911f7d03363a06f69838878df4f92dd01235c899431197f94fb4c0e36ad/tickflow-0.1.24.tar.gz", hash = "sha256:13f6464a9dd1bdf98a312bc8c313fcc24ad0ad83c16d4f83b76bee83df6e11df", size = 36867, upload-time = "2026-06-20T02:39:35.891Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d1/c9/facd0cd7568ea3c7dcfb0d52ded7d0b52ad871ca45fa97d7df0925b26091/tickflow-0.1.25.tar.gz", hash = "sha256:a86929bc99167014567c3d8b99af1c2f498922ad476bb4507edb57164c576d04", size = 37357, upload-time = "2026-08-29T04:43:27.255Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/9d/6c03706054f3bcca8a7113a60258e1a52a762077a555d52a5a84e4f6895f/tickflow-0.1.24-py3-none-any.whl", hash = "sha256:e898867b0e3e668618135c78e3a367542f81b7a289567335d298c707452e5f42", size = 43031, upload-time = "2026-06-20T02:39:34.307Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/37/f80b8f6e435f1825ea8384b1605a01c323998f00b1c112c59e72a9d7dd9a/tickflow-0.1.25-py3-none-any.whl", hash = "sha256:69687235e85b44eae077262325ddef15e82d5adafda075945612f8cf0815a44c", size = 43510, upload-time = "2026-08-29T04:43:25.785Z" },
 ]
 
 [package.optional-dependencies]
@@ -2513,7 +2513,7 @@ all = [
 
 [[package]]
 name = "tickflow-stock-panel-backend"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },

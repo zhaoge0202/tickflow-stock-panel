@@ -37,7 +37,8 @@ export function StockMultiDayIntradayChart({
   })
   const latest = useQuery({
     queryKey: QK.klineMinute(symbol, ''),
-    queryFn: () => api.klineMinute(symbol),
+    // live: 当日盘中直接实时拉取, 不被分钟增量落盘的本地分区(≥60s一轮)拖慢
+    queryFn: () => api.klineMinute(symbol, undefined, true),
     enabled: !!symbol,
     refetchInterval: refetchIntervalMs,
   })

@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
-from app.market_time import cn_now, cn_today
+from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
@@ -780,11 +780,15 @@ def get_minute(
     request: Request,
     symbol: str = Query(..., description="标的代码"),
     trade_date: date | None = Query(None, alias="date", description="交易日期, 默认最新"),
+    live: bool = Query(False, description="当日盘中跳过本地优先, 直接实时拉取(个股详情分时轮询用)"),
 ):
     """读取某只股票某天的分钟 K 线。
 
     - 本地有完整数据(240条) → 直接返回
     - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
+    - live=true 且当日连续竞价时段 → 跳过本地优先直接实时拉取:
+      盘中分钟增量落盘的本地分区按 ≥60s 轮次更新, 90% 完整度启发式会让
+      详情分时图停在上一增量轮, 与行情列表的节奏脱节
     """
     repo = request.app.state.repo
     asset_type = repo.resolve_asset_type(symbol)
@@ -834,6 +838,19 @@ def get_minute(
     price_limit = _get_price_limit_info(
         repo, symbol, trade_date, asset_type, stock_name,
     )
+
+    if live and trade_date == cn_today() and in_continuous_session():
+        # 详情分时轮询: 当日盘中实时拉取最新一根K, 不落盘; 拉空(源侧延迟/
+        # 时段边界)则落回下方本地优先路径。
+        live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
+        if not live_df.is_empty():
+            return {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(trade_date), "rows": live_df.to_dicts(),
+                "source": "live", "asset_type": asset_type,
+                "price_limit": price_limit, "prev_close": prev_close,
+            }
+
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
     # 完整交易日应有 240 条分钟K；如果是今天(盘中)，期望条数按已交易分钟估算
@@ -1078,9 +1095,11 @@ async def clear_minute(request: Request):
     removed = 0
     if minute_dir.exists():
         try:
-            result = repo.db.execute("SELECT COUNT(*) AS cnt FROM kline_minute").fetchone()
+            # execute_one (cursor+close): 直连 db.execute 的未消费结果集会在 Windows 上
+            # 钉住分区句柄, 导致下方 rmtree 静默删不掉被钉文件
+            result = repo.execute_one("SELECT COUNT(*) AS cnt FROM kline_minute")
             removed = result[0] if result else 0
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         # 仅删 kline_minute 目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)

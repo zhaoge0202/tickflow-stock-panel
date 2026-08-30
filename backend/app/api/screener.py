@@ -317,7 +317,10 @@ def run_preset(req: PresetRequest, request: Request):
         raise HTTPException(status_code=status_code, detail=str(e)) from e
 
     safe_data = _safe(asdict(result))
-    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+    # 分钟周期结果不写入盘后缓存 (strategy_cache 是日线语义, as_of/updated_at
+    # 混入分钟结果会污染页面秒加载路径)。
+    if req.timeframe == "1d":
+        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
     return _result_with_ext(safe_data, ext_values)
 
@@ -583,8 +586,8 @@ def run_all(request: Request, body: Optional[dict] = None):
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
-    # 写入策略缓存 (供页面秒加载)
-    if results:
+    # 写入策略缓存 (供页面秒加载); 分钟周期结果不落盘 (日线语义缓存)
+    if results and timeframe == "1d":
         try:
             strategy_cache.write_cache(data_dir, str(as_of), results)
         except Exception:  # noqa: BLE001

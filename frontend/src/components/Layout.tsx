@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, Suspense } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -10,7 +10,7 @@ import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import {
-  useCapabilities,
+  useCapabilityMatrix,
   useSettings,
   usePreferences,
   useQuoteStatus,
@@ -53,7 +53,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
-import { api, type IndexQuote } from '@/lib/api'
+import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
@@ -171,80 +171,140 @@ function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; i
   )
 }
 
-// ===== 档位卡片 =====
-function TierBadge({ label, hasKey, providerName, isTickflow }: { label: string; hasKey?: boolean; providerName: string; isTickflow: boolean }) {
-  const base = label.split(' ')[0].split('+')[0].toLowerCase()
-  const isNone = base === 'none'
+// ===== 数据源能力健康卡 =====
+// 能力路由架构下的侧栏状态: 不再展示「主数据源 + TickFlow 档位」(单源时代遗留 —
+// 五个能力各自路由, 拿日K的源代表全局是随意的), 改为回答「各能力当前是否都有源在供」。
+// 档位/订阅信息归设置页 TickFlow 介绍卡 (档位词仅出现在 TickFlow 专属界面的设计规则)。
+// 单能力方格: 可用=绿 / 日K缺失=红 / 其他缺失=琥珀 (与悬浮卡中同色, 一眼对应)
+function capSquareCls(c: { id: string; usable: boolean }) {
+  return c.usable ? 'bg-accent' : c.id === 'daily' ? 'bg-danger' : 'bg-warning/80'
+}
 
-  const tierConfig: Record<string, {
-    desc: string
-    dotStyle: React.CSSProperties
-    tagBg: React.CSSProperties
-    labelTextStyle: React.CSSProperties
-  }> = {
-    none: {
-      desc: '未配置 Key · 仅历史日K',
-      dotStyle: { background: '#52525b' },
-      tagBg: { background: 'rgba(113,113,122,0.15)' },
-      labelTextStyle: { color: '#71717a' },
-    },
-    free: {
-      desc: '基础日K · 自选实时',
-      dotStyle: { background: '#71717a' },
-      tagBg: { background: 'rgba(113,113,122,0.3)' },
-      labelTextStyle: { color: '#a1a1aa' },
-    },
-    starter: {
-      desc: '批量同步 · 行情池',
-      dotStyle: { background: '#3b82f6' },
-      tagBg: { background: 'rgba(59,130,246,0.2)' },
-      labelTextStyle: { color: '#60a5fa' },
-    },
-    pro: {
-      desc: '分钟K · 实时行情 · 盘口',
-      dotStyle: { background: 'linear-gradient(135deg, #a855f7, #7c3aed)' },
-      tagBg: { background: 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(124,58,237,0.15))' },
-      labelTextStyle: { background: 'linear-gradient(135deg, #c084fc, #a855f7)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' },
-    },
-    expert: {
-      desc: 'WebSocket · 财务数据',
-      dotStyle: { background: 'linear-gradient(135deg, #3b82f6, #a855f7, #f59e0b)' },
-      tagBg: { background: 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(168,85,247,0.2), rgba(245,158,11,0.2))' },
-      labelTextStyle: { background: 'linear-gradient(135deg, #60a5fa, #c084fc, #fbbf24)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' },
-    },
+function DataSourceHealthBadge({ matrix }: { matrix: CapabilityMatrix | undefined }) {
+  const caps = matrix?.capabilities ?? []
+  const loading = caps.length === 0
+  const usableCount = caps.filter(c => c.usable).length
+  const down = caps.filter(c => !c.usable)
+  // 日K是核心能力 (其他一切派生于它): 挂了用危险色; 一般缺项琥珀; 全可用绿
+  const level = loading
+    ? 'loading'
+    : down.length === 0 ? 'ok' : down.some(c => c.id === 'daily') ? 'danger' : 'warn'
+  const countCls = level === 'ok' ? 'text-accent/80'
+    : level === 'danger' ? 'text-danger'
+    : level === 'warn' ? 'text-warning'
+    : 'text-muted'
+
+  // 悬浮卡: 侧栏 aside 是 overflow-hidden, 用 fixed 定位逃逸裁剪 (坐标取自徽标实时位置)。
+  // 徽标靠近屏幕顶部时居中定位会把卡片上半截推出视口 → 渲染后按实际高度钳制进视口。
+  const linkRef = useRef<HTMLAnchorElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const closeTimer = useRef<number | undefined>(undefined)
+  const [popPos, setPopPos] = useState<{ left: number; top: number } | null>(null)
+  const openPop = () => {
+    window.clearTimeout(closeTimer.current)
+    const rect = linkRef.current?.getBoundingClientRect()
+    if (rect) setPopPos({ left: rect.right, top: rect.top + rect.height / 2 })
   }
-
-  const t = tierConfig[base] || tierConfig.none
-  const displayLabel = isNone ? 'None' : (label || 'None')
-  const descText = isNone && !hasKey ? '配置 Key 解锁更多能力' : t.desc
+  const closePop = () => {
+    closeTimer.current = window.setTimeout(() => setPopPos(null), 80)
+  }
+  useEffect(() => () => window.clearTimeout(closeTimer.current), [])
+  useLayoutEffect(() => {
+    if (!popPos || !popRef.current) return
+    const h = popRef.current.offsetHeight
+    const margin = 8
+    const minCenter = margin + h / 2
+    const maxCenter = window.innerHeight - margin - h / 2
+    const clamped = Math.min(maxCenter, Math.max(minCenter, popPos.top))
+    if (clamped !== popPos.top) setPopPos({ ...popPos, top: clamped })
+  }, [popPos])
 
   return (
-    <NavLink
-      to="/settings?tab=data-sources"
-      className="group relative flex items-center gap-2 overflow-hidden rounded-md py-1.5 pl-2.5 pr-2 transition-colors duration-150 hover:bg-elevated/70"
-      title={`数据源 · ${providerName} — ${descText}`}
-    >
-      <span
-        className="pointer-events-none absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-accent/50 transition-colors group-hover:bg-accent"
-        style={base === 'expert' ? { background: 'linear-gradient(180deg, #60a5fa, #c084fc, #fbbf24)' } : undefined}
-      />
-      <DatabaseZap className="h-3.5 w-3.5 shrink-0 text-muted group-hover:text-accent transition-colors" />
-      <span className="min-w-0 truncate text-[11px] font-medium text-secondary group-hover:text-foreground transition-colors">
-        {providerName || '数据源'}
-      </span>
-      <span
-        className="h-1.5 w-1.5 rounded-full shrink-0"
-        style={{ ...t.dotStyle, ...(base === 'expert' ? { animation: 'pulse 2s infinite' } : {}) }}
-      />
-      {isTickflow && (
-        <span
-          className="ml-auto inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold font-mono leading-none shrink-0"
-          style={t.tagBg}
-        >
-          <span className="truncate" style={t.labelTextStyle}>{displayLabel}</span>
+    <>
+      <NavLink
+        ref={linkRef}
+        to="/settings?tab=data-sources"
+        aria-label={`数据源能力 ${usableCount}/${caps.length || 5} 可用, 点击前往数据源配置`}
+        onMouseEnter={openPop}
+        onMouseLeave={closePop}
+        onFocus={openPop}
+        onBlur={closePop}
+        onKeyDown={e => { if (e.key === 'Escape') setPopPos(null) }}
+        className="group relative flex items-center gap-2 overflow-hidden rounded-md py-1.5 pl-2.5 pr-2 transition-colors duration-150 hover:bg-elevated/70"
+      >
+        <span className="pointer-events-none absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-accent/50 transition-colors group-hover:bg-accent" />
+        <DatabaseZap className="h-3.5 w-3.5 shrink-0 text-muted group-hover:text-accent transition-colors" />
+        {/* 能力方格 (按注册顺序: 实时/日K/分钟/除权/财务), 与悬浮卡逐格同色对应 */}
+        <span className="flex items-center gap-1 shrink-0">
+          {loading
+            ? Array.from({ length: 5 }, (_, i) => (
+                <span key={i} className="h-2 w-2 rounded-[2px] bg-muted animate-pulse" />
+              ))
+            : caps.map(c => (
+                <span key={c.id} className={`h-2 w-2 rounded-[2px] ${capSquareCls(c)}`} />
+              ))}
         </span>
+        {!loading && (
+          <span className={`ml-auto text-[10px] font-mono font-bold leading-none shrink-0 ${countCls}`}>
+            {usableCount}/{caps.length}
+          </span>
+        )}
+      </NavLink>
+      {popPos && (
+        <div
+          ref={popRef}
+          className="fixed z-50 -translate-y-1/2 pl-3"
+          style={{ left: popPos.left, top: popPos.top }}
+          onMouseEnter={() => window.clearTimeout(closeTimer.current)}
+          onMouseLeave={closePop}
+        >
+          <motion.div
+            initial={{ opacity: 0, x: -6 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+            className="w-64 rounded-md border border-border bg-surface py-2.5 pl-3 pr-3.5 shadow-2xl shadow-black/40"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                <DatabaseZap className="h-3.5 w-3.5 text-accent" />
+                数据源能力
+              </span>
+              <span className={`text-[10px] font-mono font-bold ${countCls}`}>
+                {loading ? '获取中…' : `${usableCount}/${caps.length} 可用`}
+              </span>
+            </div>
+            <div className="space-y-1.5 border-t border-border/60 pt-2">
+              {loading ? (
+                <div className="py-0.5 text-[11px] text-muted">正在获取能力路由状态…</div>
+              ) : caps.map(c => (
+                <div key={c.id} className="flex min-w-0 items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-[2px] ${capSquareCls(c)}`} />
+                  <span className="shrink-0 text-xs font-medium text-secondary">{c.label}</span>
+                  <span className="ml-auto flex min-w-0 shrink items-center gap-1.5">
+                    {c.usable ? (
+                      <>
+                        <span className="truncate text-[11px] text-muted">{c.effective_display}</span>
+                        <CheckCircle2 className="h-3 w-3 shrink-0 text-accent" />
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-muted/70">未接入</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {/* 分时有分钟K功能替身 (intraday_monitor_support 三路可达), 不单独占能力格, 在此备注 */}
+            <div className="mt-1.5 text-[10px] leading-relaxed text-muted/70">
+              分时信号监控可由分钟 K 数据驱动，不单独设能力格
+            </div>
+            <div className="mt-2 flex items-center gap-1 border-t border-border/60 pt-1.5 text-[10px] text-muted">
+              点击前往数据源配置
+              <ChevronRight className="h-3 w-3" />
+            </div>
+          </motion.div>
+        </div>
       )}
-    </NavLink>
+    </>
   )
 }
 
@@ -275,8 +335,8 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 
 export function Layout() {
   // ===== 共享 hooks (替代内联 useQuery) =====
-  const { data: caps } = useCapabilities()
   const { data: settingsState } = useSettings()
+  const { data: matrix } = useCapabilityMatrix()
   const { data: versionData } = useVersion()
   const { data: prefs } = usePreferences()
   // 数据源列表 (用于实时行情状态显示当前数据源名称)
@@ -446,13 +506,6 @@ export function Layout() {
         ? '关闭实时行情'
         : '开启实时行情'
 
-  // 当前主数据源 (用于侧边栏数据源状态卡)
-  const activeProvider = prefs?.daily_data_provider || 'tickflow'
-  const activeProviderName = activeProvider === 'tickflow'
-    ? 'TickFlow'
-    : (dataSources?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
-  const isCustomActive = activeProvider !== 'tickflow'
-
   // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒; 后台标签页由 SSE 事件驱动, 不轮询)
   const alertsTotalQuery = useQuery({
     queryKey: ['alerts-total'],
@@ -522,10 +575,6 @@ export function Layout() {
         toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
         return
       }
-      if (fresh.mode === 'watchlist' && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
-        navigate('/watchlist')
-        return
-      }
     }
     await toggleQuote.mutateAsync(enabled)
     // 仅在交易时段立即获取一次行情
@@ -572,15 +621,10 @@ export function Layout() {
             </button>
           </div>
 
-          {/* 状态卡 — 收起时隐藏 */}
-          {!navCollapsed && (
-            <div className="mt-2.5 border-t border-border/60 pt-1">
-              <TierBadge
-                label={caps?.label ?? ''}
-                hasKey={settingsState?.mode !== 'none'}
-                providerName={activeProviderName}
-                isTickflow={!isCustomActive}
-              />
+            {/* 状态卡 — 收起时隐藏 */}
+            {!navCollapsed && (
+              <div className="mt-2.5 border-t border-border/60 pt-1">
+                <DataSourceHealthBadge matrix={matrix} />
               <div className="mx-2 border-t border-border/45" aria-hidden="true" />
               <AIConfigBadge
                 configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
@@ -754,7 +798,7 @@ export function Layout() {
                 当前数据源无实时行情权限,
                 <button
                   type="button"
-                  onClick={() => navigate('/settings?tab=data-sources')}
+                  onClick={() => navigate('/settings?tab=data-sources&highlight=data-sources')}
                   className="mx-0.5 text-accent/80 hover:text-accent hover:underline"
                 >
                   去配置数据源
@@ -777,7 +821,7 @@ export function Layout() {
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button
-                  onClick={() => navigate('/settings?tab=monitoring')}
+                  onClick={() => navigate('/settings?tab=monitoring&highlight=quotes')}
                   aria-label="打开实时监控设置"
                   className="flex h-7 w-7 items-center justify-center rounded-btn text-muted transition-colors hover:bg-elevated hover:text-foreground"
                   title="实时监控设置"

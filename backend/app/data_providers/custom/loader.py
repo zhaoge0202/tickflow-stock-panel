@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from app import secrets_store
 from app.config import settings
 from app.data_providers.custom.config import (
     DEFAULT_TIMEOUT,
@@ -87,6 +88,19 @@ def list_sources() -> list[dict]:
 def list_plugins() -> list[dict]:
     """返回所有内置插件的状态 (含已装/未装), 供设置页独立分类显示。"""
     return list(_PLUGIN_STATUS.values())
+
+
+def _plugin_key_masked(name: str, api_key_env: str) -> str:
+    """插件当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底), 未配置返回空。
+
+    与 TickFlow Key 的展示契约一致 (settings API 的 tickflow_api_key_masked):
+    完整 Key 永不出后端, 只出 mask() 结果, 供设置页常驻显示。
+    """
+    env = str(api_key_env or "").strip()
+    if not env:
+        return ""
+    key = secrets_store.get_env_backed_secret(f"{name.lower()}_api_key", env)
+    return secrets_store.mask(key) if key else ""
 
 
 def plugin_manifest(name: str) -> dict | None:
@@ -353,6 +367,7 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             } if ds_name != "realtime" else {}),
             **({"asset_type_param": ds.asset_type_param} if ds_name == "minute" and ds.asset_type_param else {}),
             **({"freq_param": ds.freq_param} if ds_name == "minute" and ds.freq_param else {}),
+            **({"pct_unit": ds.pct_unit} if ds_name == "realtime" and ds.pct_unit else {}),
         }
     return out
 
@@ -476,6 +491,13 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
             out["start_param"] = start_param
         if end_param:
             out["end_param"] = end_param
+    pct_unit = str(ds_cfg.get("pct_unit") or "").strip().lower()
+    if pct_unit:
+        if ds_name != "realtime":
+            raise ValueError(f"{ds_name}: pct_unit 仅用于 realtime 数据集")
+        if pct_unit not in ("percent", "decimal"):
+            raise ValueError(f"{ds_name}: pct_unit 必须是 percent 或 decimal")
+        out["pct_unit"] = pct_unit
     if ds_name == "minute":
         asset_type_param = str(ds_cfg.get("asset_type_param") or "").strip()
         freq_param = str(ds_cfg.get("freq_param") or "").strip()
@@ -552,7 +574,9 @@ def _register_one_plugin(manifest: dict) -> None:
         "status": reason,
         "description": manifest.get("description", ""),
         "install_hint": manifest.get("install_hint", ""),
+        "homepage": manifest.get("homepage", ""),
         "api_key_env": manifest.get("api_key_env", ""),
+        "api_key_masked": _plugin_key_masked(name, manifest.get("api_key_env", "")),
     }
     if not available:
         return  # 依赖没装: 不注册, 但状态已记录供 UI 显示

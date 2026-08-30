@@ -551,6 +551,9 @@ class MarketMatrix:
     exit_signal_code: np.ndarray
     entry_signal_ids: tuple[str, ...]
     exit_signal_ids: tuple[str, ...]
+    # 逐格入场价覆盖 (time x asset, NaN=回退 open/close 惯例)。分钟策略回测用:
+    # 信号在盘中第 m 根触发, 入场价 = 触发分钟收盘价, 而非当日开盘/收盘。
+    entry_price: np.ndarray | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -2302,11 +2305,14 @@ def build_market_matrix_from_signals(
     exit_delay_bars: int = 0,
     reference_price: np.ndarray | None = None,
     minute_exit_trigger: bool = False,
+    entry_price_override: np.ndarray | None = None,
 ) -> MarketMatrix:
     """Combine base data and strategy signals into the matcher input matrix."""
     if entry_delay_bars not in (0, 1) or exit_delay_bars not in (0, 1):
         raise ValueError("phase-two MarketMatrix supports only zero or one bar delay")
     validate_signal_matrix(signals, market.shape)
+    if entry_price_override is not None and entry_price_override.shape != market.shape:
+        raise ValueError("entry_price_override shape does not match MarketDataMatrix")
 
     present = _present_matrix(market.open, market.high, market.low, market.close, market.volume)
     entry, entry_signal_time, entry_signal_code = _delay_signal_matrix(
@@ -2379,6 +2385,11 @@ def build_market_matrix_from_signals(
         exit_signal_code=exit_signal_code,
         entry_signal_ids=signals.entry_signal_ids,
         exit_signal_ids=signals.exit_signal_ids,
+        entry_price=(
+            np.array(entry_price_override, dtype=np.float32, copy=True)
+            if entry_price_override is not None
+            else None
+        ),
     )
 
 

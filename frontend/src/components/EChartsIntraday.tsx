@@ -72,6 +72,9 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
 
   const volNeutral = 'rgba(161,161,170,0.5)'
+  // 量柱着色基准: 前一分钟 close; 第一根用昨收。
+  // 不用 row.open — stock-sdk 历史日无真实分钟 open(为 null), close-vs-open 会全偏。
+  let prevRef: number | null = prevClose ?? null
   for (let i = 0; i < data.length; i++) {
     const timeKey = formatMinuteTime(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
@@ -83,9 +86,16 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       volumes[idx] = {
         value: data[i].volume,
         itemStyle: {
-          color: data[i].close > data[i].open ? THEME.volUp : data[i].close < data[i].open ? THEME.volDown : volNeutral,
+          color: prevRef == null
+            ? volNeutral
+            : data[i].close > prevRef
+              ? THEME.volUp
+              : data[i].close < prevRef
+                ? THEME.volDown
+                : volNeutral,
         },
       }
+      prevRef = data[i].close
     }
   }
 
@@ -570,7 +580,7 @@ export function EChartsIntraday({
             <>
               {date && <span className="text-muted">{date}</span>}
               <span className="text-muted">开</span>
-              <span style={{ color: priceClr }}>{d.open.toFixed(2)}</span>
+              <span style={{ color: priceClr }}>{d.open != null ? d.open.toFixed(2) : '—'}</span>
               <span className="text-muted">高</span>
               <span style={{ color: priceClr }}>{d.high.toFixed(2)}</span>
               <span className="text-muted">低</span>

@@ -1,12 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Building2, ChevronRight, RefreshCw, Search, Tags, Users, X } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import {
+  createChart,
+  LineStyle,
+  type IChartApi,
+  type ISeriesApi,
+  type LineData,
+  type Time,
+} from 'lightweight-charts'
+import { Activity, Building2, ChevronRight, Database, RefreshCw, Search, Tags, Users, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { boardTag } from '@/components/stock-table/primitives'
-import { api, type MarketSnapshotRow } from '@/lib/api'
+import { api, type DimensionIntradayPoint, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
+import { useChartTheme } from '@/lib/theme'
 
 export type DimensionKind = 'concept' | 'industry'
 
@@ -218,6 +228,16 @@ function DimensionMembersDialogContent({ target, onClose, onStockClick }: Omit<P
             <Summary label="平均涨跌" value={fmtPct(stats.average)} className={priceColorClass(stats.average)} />
           </div>
 
+          {source && (
+            <DimensionIntradaySection
+              configId={source.configId}
+              field={source.field}
+              value={target.value}
+              date={target.date}
+              kind={target.kind}
+            />
+          )}
+
           <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2.5">
             <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
@@ -297,6 +317,222 @@ function Summary({ label, value, className }: { label: string; value: string | n
     <div className="flex items-baseline justify-center gap-1.5 px-2 py-2.5">
       <span className="text-[10px] text-muted">{label}</span>
       <span className={`text-xs font-semibold tabular-nums ${className}`}>{value}</span>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 板块分时 (等权): 点击触发 + 60s 轮询续期, 不预计算
+// ---------------------------------------------------------------------------
+
+const INTRADAY_SECTOR_COLOR: Record<DimensionKind, string> = {
+  concept: '#F97316',
+  industry: '#0EA5E9',
+}
+const INTRADAY_MARKET_COLOR = '#94A3B8'
+// 横轴伪时间戳基点 (2020-01-01 UTC), 每点 +60s 保持均匀间距
+const INTRADAY_BASE_TS = 1577836800
+
+function lastNonNull(points: DimensionIntradayPoint[], key: 'sector' | 'market'): number | null {
+  for (let i = points.length - 1; i >= 0; i--) {
+    const value = points[i]?.[key]
+    if (value != null) return value
+  }
+  return null
+}
+
+function DimensionIntradaySection({ configId, field, value, date, kind }: {
+  configId: string
+  field: string
+  value: string
+  date?: string
+  kind: DimensionKind
+}) {
+  const query = useQuery({
+    queryKey: QK.dimensionIntraday(configId, field, value, date),
+    queryFn: () => api.dimensionIntraday(configId, { field, value, date }),
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+  })
+  const data = query.data
+
+  return (
+    <section className="shrink-0 border-b border-border bg-surface/30">
+      <div className="flex items-center gap-2 px-4 pt-2">
+        <Activity className="h-3 w-3 text-muted" />
+        <span className="text-[10px] font-medium text-muted">分时走势 · 等权</span>
+        {data?.member_count != null && data.members_with_minute != null && (
+          <span className="rounded bg-elevated px-1 py-px font-mono text-[9px] text-muted" title="有当日分钟数据的成分股数">
+            {data.members_with_minute}/{data.member_count}只
+          </span>
+        )}
+        {data?.basis && data.basis !== 'prev_close' && (
+          <span
+            className="rounded bg-amber-500/10 px-1 py-px text-[9px] text-amber-600 dark:text-amber-400"
+            title="前一交易日收盘缺失, 部分标的以当日首根分钟价为基准, 曲线起点约为 0"
+          >
+            基准:当日首价
+          </span>
+        )}
+        {data?.status === 'ok' && (
+          <div className="ml-auto flex items-center gap-2.5 font-mono text-[10px]">
+            <span className="inline-flex items-center gap-1">
+              <span className="h-[3px] w-3 rounded-full" style={{ background: INTRADAY_SECTOR_COLOR[kind] }} />
+              <span className="text-muted">板块</span>
+              <span className={priceColorClass(lastNonNull(data.points, 'sector'))}>
+                {fmtPct(lastNonNull(data.points, 'sector'))}
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="h-[3px] w-3 rounded-full" style={{ background: INTRADAY_MARKET_COLOR }} />
+              <span className="text-muted">全市场</span>
+              <span className={priceColorClass(lastNonNull(data.points, 'market'))}>
+                {fmtPct(lastNonNull(data.points, 'market'))}
+              </span>
+            </span>
+            {data.date && <span className="text-muted">{data.date}</span>}
+          </div>
+        )}
+      </div>
+
+      {query.isLoading ? (
+        <div className="mx-4 mb-2 mt-1.5 h-[132px] animate-pulse rounded-md bg-elevated/50" />
+      ) : query.isError ? (
+        <div className="mx-4 mb-2 mt-1 grid h-[72px] place-items-center rounded-md border border-dashed border-border px-4 text-center text-[11px] text-muted">
+          分时加载失败:{String((query.error as Error).message)}
+        </div>
+      ) : data?.status === 'no_data' ? (
+        <div className="mx-4 mb-2 mt-1 flex h-[96px] flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border">
+          <Database className="h-4 w-4 text-muted" />
+          <p className="text-[11px] text-muted">分钟数据未落盘, 暂无分时走势</p>
+          <p className="text-[10px] text-muted/70">需 TickFlow Pro+ 盘后分钟同步 / Expert 盘中增量, 或自定义分钟源</p>
+          <Link to="/data" className="text-[10px] text-accent hover:text-accent/80">前往数据页 →</Link>
+        </div>
+      ) : !data || data.status === 'empty' || data.points.length < 2 ? (
+        <div className="grid h-[44px] place-items-center text-[11px] text-muted">
+          {data?.reason === 'no_member_bars' ? '成分股当日无分钟数据 (ETF 等标的无分钟落盘)' : '暂无成分股分时数据'}
+        </div>
+      ) : (
+        <IntradayChart points={data.points} kind={kind} />
+      )}
+    </section>
+  )
+}
+
+function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kind: DimensionKind }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const sectorRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const marketRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const ct = useChartTheme()
+  const ctRef = useRef(ct)
+  ctRef.current = ct
+  // v4 不支持字符串时间: 用均匀伪时间戳作横轴, 标签经 formatter 映射回 HH:MM
+  const labelsRef = useRef<string[]>([])
+  const labelAt = (time: number) => labelsRef.current[time - INTRADAY_BASE_TS] ?? ''
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const chart = createChart(el, {
+      width: el.clientWidth,
+      height: 132,
+      layout: {
+        // 关闭 TV 角标 (licence 归属改由 README 技术栈外链承担)
+        attributionLogo: false,
+        background: { color: 'transparent' },
+        textColor: ctRef.current.text,
+        fontFamily: 'JetBrains Mono, monospace',
+        fontSize: 10,
+      },
+      grid: {
+        vertLines: { color: ctRef.current.grid },
+        horzLines: { color: ctRef.current.grid },
+      },
+      rightPriceScale: { borderColor: ctRef.current.border, scaleMargins: { top: 0.12, bottom: 0.04 } },
+      timeScale: {
+        borderColor: ctRef.current.border,
+        rightOffset: 2,
+        barSpacing: 4,
+        tickMarkFormatter: (time: number) => labelAt(time),
+      },
+      localization: {
+        timeFormatter: (time: number) => labelAt(time),
+      },
+      crosshair: {
+        vertLine: { labelVisible: false },
+        horzLine: { labelVisible: true },
+      },
+      handleScroll: false,
+      handleScale: false,
+    })
+    const sector = chart.addLineSeries({
+      color: INTRADAY_SECTOR_COLOR[kind],
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      priceFormat: { type: 'custom', formatter: (v: number) => `${(v * 100).toFixed(2)}%`, minMove: 0.0001 },
+      crosshairMarkerRadius: 3,
+    })
+    const market = chart.addLineSeries({
+      color: INTRADAY_MARKET_COLOR,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerRadius: 2,
+    })
+    sector.createPriceLine({
+      price: 0,
+      color: ctRef.current.border,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: false,
+    })
+    chartRef.current = chart
+    sectorRef.current = sector
+    marketRef.current = market
+
+    const observer = new ResizeObserver(() => {
+      chart.applyOptions({ width: el.clientWidth })
+    })
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
+      chart.remove()
+      chartRef.current = null
+      sectorRef.current = null
+      marketRef.current = null
+    }
+  }, [kind])
+
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      layout: { textColor: ct.text },
+      grid: { vertLines: { color: ct.grid }, horzLines: { color: ct.grid } },
+      rightPriceScale: { borderColor: ct.border },
+      timeScale: { borderColor: ct.border },
+    })
+  }, [ct])
+
+  useEffect(() => {
+    const sectorSeries = sectorRef.current
+    const marketSeries = marketRef.current
+    if (!sectorSeries || !marketSeries) return
+    labelsRef.current = points.map(p => p.time)
+    const toData = (key: 'sector' | 'market'): LineData[] =>
+      points
+        .map((p, i) => ({ time: (INTRADAY_BASE_TS + i * 60) as Time, value: p[key] }))
+        .filter((d): d is LineData => d.value != null)
+    sectorSeries.setData(toData('sector'))
+    marketSeries.setData(toData('market'))
+    chartRef.current?.timeScale().fitContent()
+  }, [points])
+
+  return (
+    <div className="px-2 pb-2 pt-1">
+      <div ref={containerRef} className="w-full" />
     </div>
   )
 }

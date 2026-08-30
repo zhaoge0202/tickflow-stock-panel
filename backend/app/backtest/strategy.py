@@ -28,12 +28,19 @@ from app.backtest.matrix import (
     MatrixPipelineConfig,
     MatrixPrewarmCancelledError,
     MatrixStrategyPipeline,
+    SignalMatrix,
     apply_time_masks,
+    build_market_data_matrix,
     build_market_matrix,
     build_market_matrix_from_signals,
     rolling_mean,
     slice_market_data_matrix,
     slice_signal_matrix,
+)
+from app.backtest.minute_replay import (
+    MinuteSignalReplayer,
+    minute_panel_start,
+    minute_replay_feature_plan,
 )
 from app.backtest.minute_trigger import unsupported_minute_exit_signals
 from app.config import settings
@@ -995,7 +1002,7 @@ class StrategyBacktestService:
                 s,
                 StrategyDataContext(
                     asset_type=config.asset_type,
-                    timeframe="1d",
+                    timeframe="1m" if s.execution_backend == "minute_filter" else "1d",
                     as_of=config.end,
                 ),
             )
@@ -1043,6 +1050,26 @@ class StrategyBacktestService:
             overrides.get("score_min"),
             overrides.get("score_max"),
         )
+
+        if s.execution_backend == "minute_filter":
+            # 分钟策略回测: 逐交易日回放 filter_minute_history (与实盘选股同源),
+            # 信号分钟收盘价入场, 之后复用日K矩阵模拟的离场与组合管理。
+            return self._run_minute_backtest(
+                config, s, params, overrides,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                trailing_stop=trailing_stop,
+                trailing_take_profit_activate=trailing_take_profit_activate,
+                trailing_take_profit_drawdown=trailing_take_profit_drawdown,
+                max_hold_days=max_hold_days,
+                score_min=score_min,
+                score_max=score_max,
+                progress_cb=progress_cb,
+                cancel_event=cancel_event,
+                result_policy=result_policy,
+                run_id=run_id,
+                t0=t0,
+            )
 
         try:
             if s.execution_backend == "composite":
@@ -1620,6 +1647,300 @@ class StrategyBacktestService:
                 if result_policy.include_trades
                 else []
             ),
+            per_symbol_stats=(
+                result.per_symbol_stats
+                if result_policy.include_per_symbol_stats
+                else []
+            ),
+            strategy_info=strategy_info,
+            elapsed_ms=round(elapsed, 1),
+        )
+
+    # ── 分钟策略回测: 逐日回放入场 + 日K矩阵离场 ──
+
+    def _run_minute_backtest(
+        self,
+        config: StrategyBacktestConfig,
+        s: StrategyDef,
+        params: dict,
+        overrides: dict,
+        *,
+        stop_loss,
+        take_profit,
+        trailing_stop,
+        trailing_take_profit_activate,
+        trailing_take_profit_drawdown,
+        max_hold_days,
+        score_min,
+        score_max,
+        progress_cb,
+        cancel_event,
+        result_policy: BacktestResultPolicy,
+        run_id: str,
+        t0: float,
+    ) -> StrategyBacktestResult:
+        def _err(msg: str) -> StrategyBacktestResult:
+            return StrategyBacktestResult(
+                run_id=run_id,
+                config=self._config_to_dict(config),
+                error=msg,
+                elapsed_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        if config.asset_type != "stock":
+            return _err("分钟策略回测当前仅支持 A 股 (stock)")
+        if config.exit_fill == "signal_next_minute":
+            return _err("分钟策略回测暂不支持「信号触发卖出」离场口径")
+
+        minute_days = self.engine.repo.list_minute_dates(config.start, config.end, "stock")
+        if not minute_days:
+            earliest = self.engine.repo.earliest_minute_date()
+            hint = f"本地分钟K最早到 {earliest}, " if earliest else "本地无分钟K数据, "
+            return _err(
+                f"回测区间内无分钟K数据: {hint}请先用「扩展分钟K历史」拉取, 或开启盘中分钟增量"
+            )
+
+        # 日线面板一次加载: 覆盖首个回测日的日线窗口 + 模拟区间 (含 full 模式尾部)。
+        daily_bars = int(s.minute_daily_bars or 0)
+        feature_plan = minute_replay_feature_plan(daily_bars)
+        load_start = minute_panel_start(config.start, daily_bars)
+        full_horizon_days = int(max_hold_days or config.holding_days or 5)
+        load_end = config.end
+        if config.mode == "full":
+            load_end = config.end + timedelta(days=(full_horizon_days + 5) * 2)
+        sim_end = load_end if config.mode == "full" else config.end
+
+        timing_ms: dict[str, float] = {}
+        t_load = time.perf_counter()
+        try:
+            panel = self.engine.load_panel_for_backtest(
+                config.symbols,
+                load_start,
+                load_end,
+                feature_plan,
+                asset_type="stock",
+            )
+        except (ValueError, OSError, pl.exceptions.PolarsError) as e:
+            return _err(f"回测特征准备失败: {e}")
+        timing_ms["load_panel"] = round((time.perf_counter() - t_load) * 1000, 1)
+        if panel.is_empty():
+            return _err("无日线数据, 请检查日期范围或先运行盘后管道")
+
+        replayer = MinuteSignalReplayer(self.engine, self.strategy_engine)
+        replay = replayer.replay(
+            s,
+            panel=panel,
+            start=config.start,
+            end=config.end,
+            params=params,
+            overrides=overrides,
+            symbols=config.symbols,
+            progress_cb=progress_cb,
+            cancel_event=cancel_event,
+        )
+        timing_ms["minute_replay"] = replay.elapsed_ms
+        if cancel_event is not None and cancel_event.is_set():
+            return StrategyBacktestResult(
+                run_id=run_id,
+                config=self._config_to_dict(config),
+                error="cancelled",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            )
+        if not replay.hits:
+            skipped_hint = (
+                f" (区间内 {len(replay.skipped_days)} 个交易日缺分钟K分区被跳过)"
+                if replay.skipped_days else ""
+            )
+            return _err("在指定区间内未产生买入信号" + skipped_hint)
+
+        # 日频信号网格: 正式区间面板 → time x asset 矩阵, 命中格写入入场价覆盖。
+        sim_panel = panel.filter(
+            (pl.col("date") >= config.start) & (pl.col("date") <= sim_end)
+        )
+        if sim_panel.is_empty():
+            return _err("正式回测区间内无数据")
+        axis_dates = sim_panel.get_column("date").unique().sort().to_list()
+        # 轴顺序必须与 build_market_data_matrix 的 _encode_axes 一致 (unique().sort()),
+        # 否则 (time, asset) 下标指向错误的标的。
+        axis_symbols = sim_panel.get_column("symbol").cast(pl.Utf8).unique().sort().to_list()
+        time_index = {day: i for i, day in enumerate(axis_dates)}
+        asset_index = {sym: i for i, sym in enumerate(axis_symbols)}
+        shape = (len(axis_dates), len(axis_symbols))
+
+        entry = np.zeros(shape, dtype=np.uint8)
+        score = np.zeros(shape, dtype=np.float32)
+        entry_price_override = np.full(shape, np.nan, dtype=np.float32)
+        trigger_times: dict[tuple[str, date], str] = {}
+        dropped_axis_hits = 0
+        for hit in replay.hits:
+            time_id = time_index.get(hit.trade_date)
+            asset_id = asset_index.get(hit.symbol)
+            if time_id is None or asset_id is None:
+                dropped_axis_hits += 1
+                continue
+            entry[time_id, asset_id] = 1
+            score[time_id, asset_id] = hit.score
+            entry_price_override[time_id, asset_id] = hit.entry_price
+            trigger_times[(hit.symbol, hit.trade_date)] = hit.trigger_time
+        raw_candidates = int(entry.sum())
+        entry.setflags(write=False)
+        score.setflags(write=False)
+        entry_price_override.setflags(write=False)
+        exit_mask = np.zeros(shape, dtype=np.uint8)
+        exit_mask.setflags(write=False)
+        codes = np.zeros(shape, dtype=np.int16)
+        codes.setflags(write=False)
+        signals = SignalMatrix(
+            entry=entry,
+            exit=exit_mask,
+            score=score,
+            entry_signal_code=codes,
+            exit_signal_code=codes,
+            entry_signal_ids=(),
+            exit_signal_ids=(),
+        )
+
+        matcher_config = MatcherConfig(
+            matching=config.matching,
+            entry_fill="close_t",
+            exit_fill=config.exit_fill,
+            fees_pct=config.fees_pct,
+            commission_pct=config.commission_pct,
+            stamp_tax_pct=config.stamp_tax_pct,
+            slippage_bps=config.slippage_bps,
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
+            trailing_stop_pct=trailing_stop,
+            trailing_take_profit_activate_pct=trailing_take_profit_activate,
+            trailing_take_profit_drawdown_pct=trailing_take_profit_drawdown,
+            max_hold_days=max_hold_days,
+            max_positions=config.max_positions,
+            max_exposure_pct=config.max_exposure_pct,
+            score_min=score_min,
+            score_max=score_max,
+            initial_capital=config.initial_capital,
+            position_sizing=config.position_sizing,
+            # 分钟策略的成交价由 entry_price_override 提供 (触发分钟收盘),
+            # 不再叠加日线口径的分钟成交细化。
+            minute_fill=False,
+        )
+
+        t_matrix = time.perf_counter()
+        market_data = build_market_data_matrix(sim_panel)
+        market_matrix = build_market_matrix_from_signals(
+            market_data,
+            signals,
+            # 入场即信号日盘中 (分钟价覆盖), 离场沿用日K口径。
+            entry_delay_bars=0,
+            exit_delay_bars=1 if matcher_config.exit_fill == "open_t+1" else 0,
+            entry_price_override=entry_price_override,
+        )
+        timing_ms["matrix_build"] = round((time.perf_counter() - t_matrix) * 1000, 1)
+        del sim_panel, market_data
+
+        t_sim = time.perf_counter()
+        if config.mode == "full":
+            result = self.engine.simulate_independent_market_matrix(
+                market_matrix,
+                raw_candidates,
+                matcher_config,
+                progress_cb,
+                cancel_event,
+                result_policy.simulation_options(),
+            )
+        else:
+            result = self.engine.simulate_market_matrix(
+                market_matrix,
+                matcher_config,
+                progress_cb,
+                cancel_event,
+                result_policy.simulation_options(),
+            )
+        timing_ms["simulate"] = round((time.perf_counter() - t_sim) * 1000, 1)
+        timing_ms["statistics"] = float(result.stats.pop("statistics_ms", 0.0))
+
+        if cancel_event is not None and cancel_event.is_set():
+            return StrategyBacktestResult(
+                run_id=run_id,
+                config=self._config_to_dict(config),
+                error="cancelled",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            )
+        if result.stats.get("error"):
+            return _err(result.stats["error"])
+
+        execution = result.stats.get("execution") or {}
+        execution["buy_limit_up"] = int(execution.get("buy_limit_up", 0)) + replay.buy_limit_up
+        result.stats["execution"] = execution
+        timing_ms["total"] = round((time.perf_counter() - t0) * 1000, 1)
+        result.stats["timing_ms"] = timing_ms
+        result.stats["panel_rows"] = int(len(axis_dates) * len(axis_symbols))
+        result.stats["panel_columns"] = 0
+        result.stats["feature_columns"] = 0
+        result.stats["execution_backend"] = s.execution_backend
+        result.stats["selection"] = {
+            "strategy_matches": replay.strategy_matches,
+            "entry_candidates": raw_candidates,
+            "entry_trigger_filtered": max(replay.strategy_matches - raw_candidates, 0),
+            "entry_trigger_enabled": False,
+        }
+        result.stats["minute_replay"] = {
+            "replayed_days": replay.replayed_days,
+            "skipped_days": [str(day) for day in replay.skipped_days[:50]],
+            "skipped_day_count": len(replay.skipped_days),
+            "dropped_axis_hits": dropped_axis_hits,
+        }
+
+        benchmark_curve = (
+            self._build_benchmark_curve(config.start, config.end)
+            if result_policy.include_benchmark
+            else []
+        )
+        strategy_info = {
+            "id": s.meta.get("id", config.strategy_id),
+            "name": s.meta.get("name", config.strategy_id),
+            "description": s.meta.get("description", ""),
+            "entry_signals": [],
+            "exit_signals": [],
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_stop": trailing_stop,
+            "trailing_take_profit_activate": trailing_take_profit_activate,
+            "trailing_take_profit_drawdown": trailing_take_profit_drawdown,
+            "max_hold_days": max_hold_days,
+            "full_horizon_days": full_horizon_days,
+            "score_min": score_min,
+            "score_max": score_max,
+            "source": s.source,
+            "execution_backend": s.execution_backend,
+        } if result_policy.include_strategy_info else {}
+
+        trades = (
+            [self._trade_to_dict(t) for t in result.trades]
+            if result_policy.include_trades
+            else []
+        )
+        # 入场时间戳补分钟: 交易记录携带触发分钟 (HH:MM), 与日线回测的纯日期区分。
+        for trade in trades:
+            entry_text = str(trade.get("entry_date") or "")
+            try:
+                key = (str(trade.get("symbol")), date.fromisoformat(entry_text[:10]))
+            except ValueError:
+                continue
+            trigger = trigger_times.get(key)
+            if trigger:
+                trade["entry_date"] = f"{entry_text[:10]} {trigger}"
+
+        selected_stats = result_policy.select_stats(result.stats)
+        elapsed = (time.perf_counter() - t0) * 1000
+        return StrategyBacktestResult(
+            run_id=run_id,
+            config=self._config_to_dict(config),
+            stats=selected_stats,
+            equity_curve=result.equity_curve if result_policy.include_curves else [],
+            drawdown_curve=result.drawdown_curve if result_policy.include_curves else [],
+            benchmark_curve=benchmark_curve,
+            trades=trades,
             per_symbol_stats=(
                 result.per_symbol_stats
                 if result_policy.include_per_symbol_stats

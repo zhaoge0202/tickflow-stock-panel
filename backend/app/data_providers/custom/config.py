@@ -37,6 +37,9 @@ class DatasetConfig:
     end_param: str = "end_time"
     asset_type_param: str | None = None
     freq_param: str | None = None
+    # realtime 比例字段(change_pct/amplitude/turnover_rate)的单位声明:
+    # "percent"(返回 3.66 表示 3.66%)或 "decimal"(返回 0.0366 表示 3.66%)。
+    pct_unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,10 @@ def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
         if not 0 < timeout <= MAX_TIMEOUT:
             raise ValueError(f"timeout must be between 0 and {MAX_TIMEOUT:g} seconds")
 
+    pct_unit = str(raw.get("pct_unit") or "").strip().lower() or None
+    if pct_unit not in (None, "percent", "decimal"):
+        raise ValueError(f"pct_unit must be 'percent' or 'decimal', got {pct_unit!r}")
+
     return DatasetConfig(
         url=str(raw.get("url", "") or ""),
         method=str(raw.get("method", "GET") or "GET").upper(),
@@ -91,6 +98,7 @@ def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
         end_param=str(raw.get("end_param", "end_time") or "end_time").strip() or "end_time",
         asset_type_param=(str(raw.get("asset_type_param") or "").strip() or None),
         freq_param=(str(raw.get("freq_param") or "").strip() or None),
+        pct_unit=pct_unit,
     )
 
 
