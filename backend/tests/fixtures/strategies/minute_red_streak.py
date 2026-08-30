@@ -9,6 +9,10 @@ META["daily_history_bars"] 声明叠加日线维度的条件 (N 日内涨停过)
 引擎会以 daily= 关键字注入日线 enriched 窗口, 涨停判定直接复用
 enriched 预计算信号 — signal_limit_up (收盘封板) 或 signal_broken_limit_up
 (炸板: 盘中触及涨停未封住), 任一命中即算"盘中涨停过"。
+
+本文件是分钟红7的参考实现 (测试夹具): 该策略按用户要求以自定义策略形态
+交付, 正式位置为运行时 data/strategies/custom/minute_red_streak.py
+(gitignore, 用户可自行修改); 引擎按 id 加载, 参数覆盖不受位置影响。
 """
 
 import polars as pl
