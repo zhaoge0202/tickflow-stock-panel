@@ -128,7 +128,7 @@ export function StrategyCard({
             <div className="flex items-center gap-1.5 max-w-full">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
               {timeframeBadge && (
-                <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-purple-500/30 bg-purple-500/10 text-purple-400">{timeframeBadge}</span>
+                <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
             </div>
@@ -170,7 +170,7 @@ export function StrategyCard({
             <div className="flex items-center gap-1.5 min-w-0">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
               {timeframeBadge && (
-                <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-purple-500/30 bg-purple-500/10 text-purple-400">{timeframeBadge}</span>
+                <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
               {count != null && !loading && (

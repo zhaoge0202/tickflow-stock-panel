@@ -24,7 +24,7 @@ const SOURCE_LABEL: Record<string, string> = {
   invalid: '失效',
 }
 
-const TF_BADGE_CLS = 'text-[8px] px-1 py-px rounded border leading-tight shrink-0 border-purple-500/30 bg-purple-500/10 text-purple-400'
+const TF_BADGE_CLS = 'text-[8px] px-1 py-px rounded border leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400'
 
 type SourceTab = 'all' | 'builtin' | 'custom' | 'ai'
 
