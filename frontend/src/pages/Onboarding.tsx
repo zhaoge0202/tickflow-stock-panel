@@ -350,18 +350,27 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     switchProvider.mutate(name)
   }
 
-  // 内联 Key 配置 (先探后存): 验证通过才落盘 secrets.json, 成功即自动选用该源
-  const keyPlugin = keyFor ? plugins.find(p => p.name === keyFor) : undefined
-  const saveKey = useMutation({
-    mutationFn: (name: string) => api.savePluginKey(name, keyInput.trim()),
-    onSuccess: (data, name) => {
+  // 内联 Key 配置 (先探后存): 验证通过才落盘, 插件成功即自动选用该源
+  // tickflow 走独立端点: 填 Key 解锁更高档位, 不改变数据源选择
+  const TICKFLOW_KEY_META = {
+    name: 'tickflow', display_name: 'TickFlow', api_key_env: 'TICKFLOW_API_KEY',
+    homepage: 'https://tickflow.org/auth/register?ref=V3KDKGXPEA',
+  }
+  const keyPlugin = keyFor
+    ? (plugins.find(p => p.name === keyFor) ?? (keyFor === 'tickflow' ? TICKFLOW_KEY_META : undefined))
+    : undefined
+  const saveKey = useMutation<any, Error, string>({
+    mutationFn: (name: string) => (name === 'tickflow'
+      ? api.saveTickflowKey(keyInput.trim())
+      : api.savePluginKey(name, keyInput.trim())),
+    onSuccess: (data: any, name) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.capabilities })
       if (data.ok) {
         setKeyFor(null)
         setKeyInput('')
         setKeyError(null)
-        if (data.plugin_available) {
+        if (name !== 'tickflow' && data.plugin_available) {
           setPicked(name)
           switchProvider.mutate(name)
         }
@@ -480,6 +489,18 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
+      {/* TickFlow Key 入口: 不改变数据源选择, 仅解锁更高档位 */}
+      {!keyFor && (
+        <button
+          type="button"
+          onClick={() => { setKeyFor('tickflow'); setKeyInput(''); setKeyError(null) }}
+          className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-muted hover:text-accent transition-colors"
+        >
+          <KeyRound className="h-3 w-3" />
+          为 TickFlow 填写 API Key(可选, 解锁更高数据档位)
+        </button>
+      )}
+
       {/* 插件化提示: 标识数据源体系已插件化, 并给出两条接入路径与文档指引 */}
       <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
         <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
@@ -504,7 +525,7 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         </div>
       )}
 
-      {/* 内联 Key 配置 (缺 Key 型插件, 如 fuyao): 先探后存, 成功即自动选用 */}
+      {/* 内联 Key 配置 (缺 Key 型插件如 fuyao / TickFlow 档位 Key): 先探后存 */}
       {keyFor && keyPlugin && (
         <div className="mt-3 rounded-card border border-warning/30 bg-warning/[0.04] px-3.5 py-3">
           <div className="flex items-center gap-2">
@@ -515,16 +536,25 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
             <span className="rounded bg-elevated/70 px-1 py-px font-mono text-[9px] text-muted">{keyPlugin.api_key_env}</span>
           </div>
           <p className="mt-1.5 text-[11px] text-muted leading-relaxed">
-            {keyPlugin.homepage ? (
+            {keyFor === 'tickflow' ? (
               <>
-                在{' '}
-                <a href={keyPlugin.homepage} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                  官网
-                </a>
-                {' '}申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后将自动选用该数据源。
+                留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。
+                仅存本地 (secrets.json),先验证后保存。
               </>
             ) : (
-              '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
+              <>
+                {keyPlugin.homepage ? (
+                  <>
+                    在{' '}
+                    <a href={keyPlugin.homepage} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                      官网
+                    </a>
+                    {' '}申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后将自动选用该数据源。
+                  </>
+                ) : (
+                  '向数据源官方申请 Key;仅存本地 (secrets.json),先验证后保存,成功后自动选用该数据源。'
+                )}
+              </>
             )}
           </p>
           <form
