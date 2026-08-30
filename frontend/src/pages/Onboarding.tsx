@@ -459,17 +459,15 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                 <span className="ml-auto text-[10px] text-muted/70">可选</span>
               )}
             </div>
-            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">
-              {f.copy}{' '}
-              <a
-                href={f.register.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-accent hover:underline"
-              >
-                {f.register.label} ↗
-              </a>
-            </p>
+            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">{f.copy}</p>
+            <a
+              href={f.register.url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+            >
+              {f.register.label} ↗
+            </a>
             <form
               className="mt-2.5 flex items-center gap-2"
               onSubmit={e => {
