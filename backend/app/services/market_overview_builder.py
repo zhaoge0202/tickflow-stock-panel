@@ -258,10 +258,12 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
 
     store = ExtConfigStore(repo.store.data_dir)
     groups: dict[str, dict[str, dict]] = {}
+    group_source: dict[str, str] = {}  # 组名 → 首个命中的扩展字段 "configId.field" (看板成分股弹窗用)
     for config in store.load_all():
         field = _dimension_field(config, kind)
         if not field:
             continue
+        source_field = f"{config.id}.{field}"
         for ext_row in _read_ext_rows(repo.store.data_dir, config, field):
             quote = None
             for key in _symbol_keys(ext_row, config):
@@ -277,6 +279,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
                     parts = value.split("-")
                     value = parts[level - 1] if level <= len(parts) else parts[-1]
                 groups.setdefault(value, {})[symbol] = quote
+                group_source.setdefault(value, source_field)
 
     items = []
     for name, by_symbol in groups.items():
@@ -293,6 +296,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
             "up_count": sum(1 for v in changes if v > 0),
             "down_count": sum(1 for v in changes if v < 0),
             "amount": sum(_finite(s.get("amount")) or 0 for s in stocks),
+            "source_field": group_source.get(name),
             "leader": {
                 "symbol": leader.get("symbol"),
                 "name": leader.get("name"),
