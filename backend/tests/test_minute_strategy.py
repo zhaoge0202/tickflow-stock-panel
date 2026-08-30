@@ -2,7 +2,7 @@
 
 覆盖:
 - minute_red_streak 形态: 命中 / 不足根数不触发 / 最高K不红 / rank_by 两口径 /
-  乱序输入 / 最高价并列取更晚K线
+  乱序输入 / 最高价并列取更晚K线 / 开盘窗口(当日最早N根, 与最近N根区分)
 - 引擎加载校验: 只能声明 filter_minute_history、timeframes 必须且只能是 ["1m"]
 - 引擎 1m 运行: enriched 联表基础过滤 (剔除ST / 股价区间)、entry hits、
   日线 context 拒绝
@@ -143,6 +143,45 @@ def test_pattern_min_red_threshold_respected():
     bars = _bars("600000.SH", candles)
     assert minute_red_streak.filter_minute_history(bars, {"min_red": 5}).is_empty()
     assert not minute_red_streak.filter_minute_history(bars, {"min_red": 4}).is_empty()
+
+
+def test_pattern_uses_opening_bars_even_if_day_turns_green():
+    # 开盘7根 = 5红2绿命中; 第8/9根大绿回落 → 开盘窗口语义下仍命中,
+    # 且 close 取窗口末根 (10.8) 而非全天最新价
+    candles = [
+        (10.0, 10.2, 10.30),  # 红
+        (10.2, 10.1, 10.25),  # 绿 (低高点)
+        (10.1, 10.4, 10.50),  # 红
+        (10.4, 10.6, 10.70),  # 红 (次高)
+        (10.6, 10.5, 10.65),  # 绿 (低高点)
+        (10.5, 10.7, 10.80),  # 红
+        (10.7, 10.8, 10.90),  # 红 (最高) ← 窗口末根
+        (10.8, 10.0, 10.85),  # 开盘窗口外的绿
+        (10.0, 9.5, 10.05),   # 开盘窗口外的绿
+    ]
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    assert out["symbol"].to_list() == ["600000.SH"]
+    row = out.row(0, named=True)
+    assert row["red_count"] == 5
+    assert row["close"] == 10.8  # 窗口末根收盘, 不是第9根的 9.5
+    assert row["last_datetime"] == datetime(2026, 8, 25, 9, 36)
+
+
+def test_pattern_opening_window_miss_not_rescued_by_late_reds():
+    # 开盘7根仅4红不命中; 第8/9根转红 (最近7根口径会命中) → 开盘窗口仍不触发
+    candles = [
+        (10.0, 10.2, 10.30),  # 红
+        (10.2, 10.1, 10.25),  # 绿
+        (10.1, 10.4, 10.50),  # 红
+        (10.4, 10.3, 10.45),  # 绿
+        (10.3, 10.6, 10.70),  # 红
+        (10.6, 10.5, 10.65),  # 绿
+        (10.5, 10.8, 10.90),  # 红
+        (10.8, 10.9, 11.00),  # 红 (窗口外)
+        (10.9, 11.0, 11.10),  # 红 (窗口外)
+    ]
+    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {})
+    assert out.is_empty()
 
 
 # ── 引擎加载与运行 ──────────────────────────────────────────────────

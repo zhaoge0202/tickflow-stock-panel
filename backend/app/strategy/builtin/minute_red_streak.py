@@ -1,4 +1,4 @@
-"""分钟红7 — 最近 N 根分钟K多数收红, 且最高的 top_red 根全红。
+"""分钟红7 — 开盘 N 根 (当日最早) 分钟K多数收红, 且最高的 top_red 根全红。
 
 数据契约: filter_minute_history 接收当日全市场分钟K窗口
 (symbol, datetime, open, high, low, close, volume, amount),
@@ -11,14 +11,14 @@ import polars as pl
 META = {
     "id": "minute_red_streak",
     "name": "分钟红7",
-    "description": "最近7根1分钟K至少5根收红, 且最高的2根(按最高价)都是红K",
+    "description": "开盘前7根1分钟K至少5根收红, 且最高的2根(按最高价)都是红K",
     "tags": ["分钟", "形态", "短线"],
     "asset_types": ["stock"],
     "timeframes": ["1m"],
     "params": [
         {
             "id": "bars",
-            "label": "检查K线数",
+            "label": "开盘K线数",
             "type": "int",
             "default": 7,
             "min": 5,
@@ -63,7 +63,7 @@ EXIT_SIGNALS: list[str] = []
 def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     """红K形态过滤: 全向量化, 无逐行 Python 循环。
 
-    - 每标的按时间取最近 bars 根; 不足 bars 根不触发
+    - 每标的按时间取当日最早 bars 根 (开盘窗口); 不足 bars 根不触发
     - 红 = close > open; 窗口内红K数 >= min_red
     - 按 rank_by (high / close) 降序取前 top_red 根, 同值取时间更晚者, 需全红
     """
@@ -74,17 +74,17 @@ def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     if rank_by not in df.columns:
         rank_by = "high"
 
-    tailed = (
+    windowed = (
         df.sort(["symbol", "datetime"])
-        .filter(pl.int_range(pl.len()).over("symbol") >= pl.len().over("symbol") - bars)
+        .filter(pl.int_range(pl.len()).over("symbol") < bars)
         .with_columns(_red=(pl.col("close") > pl.col("open")).cast(pl.Int32))
     )
 
-    window = tailed.group_by("symbol").agg(
+    window = windowed.group_by("symbol").agg(
         bars_checked=pl.len(),
         red_count=pl.col("_red").sum(),
         last_datetime=pl.col("datetime").max(),
-        # 输出列名用 close: 基础过滤的股价区间直接作用于最新分钟价
+        # 输出列名用 close: 基础过滤的股价区间作用于开盘窗口末根收盘价
         close=pl.col("close").sort_by("datetime").last(),
         window_high=pl.col("high").max(),
         window_low=pl.col("low").min(),
@@ -93,7 +93,7 @@ def filter_minute_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     )
 
     top = (
-        tailed.sort([rank_by, "datetime"], descending=[True, True])
+        windowed.sort([rank_by, "datetime"], descending=[True, True])
         .filter(pl.int_range(pl.len()).over("symbol") < top_red)
         .group_by("symbol")
         .agg(top_red_count=pl.col("_red").sum())
