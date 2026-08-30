@@ -8,8 +8,6 @@ interface Props {
   pool: string[]
   onConfirm: (newPool: string[]) => void
   onClose: () => void
-  /** 列表周期: 1d 日线 / 1m 分钟, 与策略页当前周期一致 */
-  timeframe?: '1d' | '1m'
 }
 
 const SOURCE_CLS: Record<string, string> = {
@@ -25,6 +23,8 @@ const SOURCE_LABEL: Record<string, string> = {
   ai: 'AI',
   invalid: '失效',
 }
+
+const TF_BADGE_CLS = 'text-[8px] px-1 py-px rounded border leading-tight shrink-0 border-purple-500/30 bg-purple-500/10 text-purple-400'
 
 type SourceTab = 'all' | 'builtin' | 'custom' | 'ai'
 
@@ -44,7 +44,7 @@ function fileStem(name: string): string {
   return name.replace(/\.py$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '')
 }
 
-export function StrategyPoolDialog({ pool, onConfirm, onClose, timeframe = '1d' }: Props) {
+export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const backdrop = useDialogBackdrop(onClose)
   // 草稿状态: 打开时从 pool 复制, 操作只改草稿, 点确定才提交
   const [draftPool, setDraftPool] = useState<string[]>(() => [...pool])
@@ -59,7 +59,8 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose, timeframe = '1d' 
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
-      const d = await api.strategyList(undefined, timeframe)
+      // 不按周期过滤: 日线+分钟策略合并展示, 分钟策略以徽章区分
+      const d = await api.strategyList(undefined, 'all')
       setAllStrategies(d.strategies)
     } catch {
       setAllStrategies([])
@@ -238,6 +239,9 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose, timeframe = '1d' 
                       <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
                         {SOURCE_LABEL[s.source] ?? '内置'}
                       </span>
+                      {s.timeframes?.includes('1m') && (
+                        <span className={TF_BADGE_CLS}>分钟</span>
+                      )}
                       <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
                     </button>
                   ))}
@@ -282,6 +286,9 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose, timeframe = '1d' 
                             <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[src] ?? SOURCE_CLS.builtin}`}>
                               {SOURCE_LABEL[src] ?? '内置'}
                             </span>
+                            {s?.timeframes?.includes('1m') && (
+                              <span className={TF_BADGE_CLS}>分钟</span>
+                            )}
                             <button
                               onClick={(e) => { e.stopPropagation(); handleRemove(id) }}
                               className="text-muted/40 hover:text-danger transition-colors cursor-pointer leading-none shrink-0"

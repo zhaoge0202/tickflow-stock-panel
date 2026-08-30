@@ -17,6 +17,9 @@ function kv<T>(key: string) {
     set(val: T) {
       try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
     },
+    remove() {
+      try { localStorage.removeItem(key) } catch { /* ignore */ }
+    },
   }
 }
 
@@ -24,9 +27,9 @@ export const storage = {
   /** 查询轮询 / SSE 配置 */
   queryConfig:          kv<unknown>('tf-stocks-query-config'),
 
-  /** 策略池 (screener) — 日线池 */
+  /** 策略池 (screener) — 统一池 (日线+分钟共用, 执行按各自声明周期路由) */
   strategyPool:         kv<string[]>('strategy-pool'),
-  /** 策略池 (screener) — 分钟池 (与日线池按周期隔离) */
+  /** 旧分钟隔离池 — 仅作一次性迁移读取源, 迁移完成后移除该 key */
   strategyPoolMinute:   kv<string[]>('strategy-pool-1m'),
 
   /** 自选列表列配置 */
