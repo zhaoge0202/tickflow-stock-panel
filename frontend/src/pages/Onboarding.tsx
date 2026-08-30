@@ -357,10 +357,12 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
     {
       name: 'tickflow', display: 'TickFlow', env: 'TICKFLOW_API_KEY', configured: tfConfigured, autoFocus: true,
       copy: '留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。仅存本地 (secrets.json),先验证后保存。',
+      register: { label: '前往 TickFlow 注册获取 Key', url: 'https://tickflow.org/auth/register?ref=V3KDKGXPEA' },
     },
     {
       name: 'fuyao', display: 'fuyao', env: 'FUYAO_API_KEY', configured: fuyaoConfigured, autoFocus: false,
-      copy: '在官网申请 Key;仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。',
+      copy: '仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。',
+      register: { label: '前往 fuyao 官网申请 Key', url: 'https://fuyao.aicubes.cn' },
     },
   ]
 
@@ -457,7 +459,17 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                 <span className="ml-auto text-[10px] text-muted/70">可选</span>
               )}
             </div>
-            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">{f.copy}</p>
+            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">
+              {f.copy}{' '}
+              <a
+                href={f.register.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline"
+              >
+                {f.register.label} ↗
+              </a>
+            </p>
             <form
               className="mt-2.5 flex items-center gap-2"
               onSubmit={e => {
