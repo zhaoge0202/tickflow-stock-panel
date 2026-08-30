@@ -208,7 +208,7 @@ def build_recap_context(data_dir: Path) -> str:
         top_sell = sorted(
             [i for i in items if (i.get("net_value") or 0) < 0],
             key=lambda x: x.get("net_value") or 0,
-        )[:3]
+        )[:5]
         if top_sell:
             lines.append("净卖出居前: " + "; ".join(
                 f"{i.get('name')} 净卖{abs(float(i.get('net_value') or 0))/1e8:.2f}亿"
@@ -216,11 +216,11 @@ def build_recap_context(data_dir: Path) -> str:
         if org_items:
             lines.append("机构净买居前: " + "; ".join(
                 f"{i.get('name')} 机构净买{float(i.get('org_net_value') or 0)/1e8:.2f}亿"
-                for i in sorted(org_items, key=lambda x: x.get("org_net_value") or 0, reverse=True)[:3]))
+                for i in sorted(org_items, key=lambda x: x.get("org_net_value") or 0, reverse=True)[:5]))
         if hm_items:
             lines.append("活跃游资: " + "; ".join(
                 f"{h.get('name')} 净买{float(h.get('buying') or 0)/1e8:.2f}亿"
-                for h in sorted(hm_items, key=lambda x: x.get('buying') or 0, reverse=True)[:3]))
+                for h in sorted(hm_items, key=lambda x: x.get('buying') or 0, reverse=True)[:5]))
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — 摘要失败不影响复盘主流程
         logger.debug("龙虎榜复盘摘要构建失败: %s", e)

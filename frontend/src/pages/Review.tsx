@@ -12,7 +12,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   BookOpenCheck, RefreshCw, Sparkles, Trash2, History, ChevronRight, AlertTriangle,
-  Database, Wand2, Copy, Download, Clock, X, Check, Trophy, ChevronDown,
+  Database, Wand2, Copy, Download, Clock, X, Check, Trophy, ChevronDown, ChevronUp,
 } from 'lucide-react'
 
 import { api, type OverviewMarket, type AiReviewReport, type DragonTigerStockItem } from '@/lib/api'
@@ -20,6 +20,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { fmtPct, fmtVolume, priceColorClass } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { boardTag } from '@/components/stock-table/primitives'
 import { fmtBigNum } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
@@ -870,8 +871,9 @@ const _DT_TABS: { key: _DtTabKey; label: string }[] = [
   { key: 'hot_money', label: '游资' },
 ]
 
-function _dtSorted(items: DragonTigerStockItem[], key: 'net_value' | 'org_net_value'): DragonTigerStockItem[] {
-  return [...items].sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity))
+function _dtSorted(items: DragonTigerStockItem[], key: 'net_value' | 'org_net_value', asc = false): DragonTigerStockItem[] {
+  const s = [...items].sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity))
+  return asc ? s.reverse() : s
 }
 
 /** 排名序号色: 前三用暖色系奖牌感, 其余弱化 */
@@ -901,6 +903,11 @@ function _DtPill({ item, idx, value, onOpenStock }: {
       <span className="text-[11px] text-foreground/90 transition-colors group-hover:text-accent">
         {item.name ?? item.thscode}
       </span>
+      {(() => { const b = boardTag(item.thscode); return b && (
+        <span className={`inline-flex items-center rounded border px-1 text-[8px] font-bold leading-tight ${b.color}`}>
+          {b.label}
+        </span>
+      ) })()}
       <span className={cn('font-mono text-[10px] tabular-nums', priceColorClass(value ?? null))}>
         {fmtVolume(value ?? null)}
       </span>
@@ -909,7 +916,7 @@ function _DtPill({ item, idx, value, onOpenStock }: {
 }
 
 function _DtSummaryRow({ label, items, pick, onOpenStock }: {
-  label: string
+  label?: string
   items: DragonTigerStockItem[]
   pick: (i: DragonTigerStockItem) => number | null | undefined
   onOpenStock: (s: string) => void
@@ -917,13 +924,48 @@ function _DtSummaryRow({ label, items, pick, onOpenStock }: {
   if (!items.length) return null
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-      <span className="shrink-0 rounded-full bg-base/70 px-2 py-0.5 text-[9px] font-medium tracking-wide text-muted">
-        {label}
+      {/* 固定宽度标签槽: 无标签行(净卖)也占位, 保证四行药丸左缘对齐 */}
+      <span className="flex w-16 shrink-0">
+        {label && (
+          <span className="rounded-full bg-base/70 px-2 py-0.5 text-[9px] font-medium tracking-wide text-muted">
+            {label}
+          </span>
+        )}
       </span>
       {items.map((i, idx) => (
-        <_DtPill key={i.thscode} item={i} idx={idx} value={pick(i)} onOpenStock={onOpenStock} />
+        <_DtPill key={`${i.thscode}-${idx}`} item={i} idx={idx} value={pick(i)} onOpenStock={onOpenStock} />
       ))}
     </div>
+  )
+}
+
+/** 可排序列 key — 与 DragonTigerStockItem 数值字段对应 */
+type _DtSortKey = 'change' | 'net_value' | 'net_rate' | 'org_net_value' | 'buy_value' | 'sell_value'
+
+/** 排序表头: 点击切换列/方向, 箭头指示当前排序 (hover 才显隐未激活箭头) */
+function _DtTh({ label, sortKey, sort, onSort, className }: {
+  label: string
+  sortKey: _DtSortKey
+  sort: { key: _DtSortKey; desc: boolean }
+  onSort: (k: _DtSortKey) => void
+  className?: string
+}) {
+  const active = sort.key === sortKey
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className={cn('inline-flex items-center gap-0.5 transition-colors hover:text-foreground', active && 'text-foreground', className)}
+    >
+      {label}
+      {active ? (
+        sort.desc
+          ? <ChevronDown className="h-2.5 w-2.5 opacity-80" />
+          : <ChevronUp className="h-2.5 w-2.5 opacity-80" />
+      ) : (
+        <ChevronDown className="h-2.5 w-2.5 opacity-0 transition-opacity group-hover:opacity-40" />
+      )}
+    </button>
   )
 }
 
@@ -933,24 +975,35 @@ function _DtStockTable({ items, tab, onOpenStock }: {
   onOpenStock: (s: string) => void
 }) {
   const isOrg = tab === 'org'
+  const [sort, setSort] = useState<{ key: _DtSortKey; desc: boolean }>({ key: isOrg ? 'org_net_value' : 'net_value', desc: true })
+  const onSort = (k: _DtSortKey) =>
+    setSort(s => (s.key === k ? { key: k, desc: !s.desc } : { key: k, desc: true }))
+  const sorted = [...items].sort((a, b) => {
+    const av = a[sort.key] ?? null
+    const bv = b[sort.key] ?? null
+    if (av == null && bv == null) return 0
+    if (av == null) return 1 // 空值恒垫底, 不随方向翻转
+    if (bv == null) return -1
+    return (av - bv) * (sort.desc ? -1 : 1)
+  })
   const maxAbs = Math.max(1e-12, ...items.map(i => Math.abs(i.net_value ?? 0)))
   return (
     <div className="overflow-hidden rounded-btn border border-border/60">
       {/* 表头 */}
       <div className={cn(
-        'flex items-center gap-2 bg-elevated/50 px-2.5 py-1.5 text-[9px] font-medium uppercase tracking-wider text-muted/70',
+        'group flex items-center gap-2 bg-elevated/50 px-2.5 py-1.5 text-[9px] font-medium uppercase tracking-wider text-muted/70',
       )}>
         <span className="w-5 shrink-0 text-center">#</span>
-        <span className="w-14 shrink-0">涨跌幅</span>
+        <span className="w-14 shrink-0"><_DtTh label="涨跌幅" sortKey="change" sort={sort} onSort={onSort} /></span>
         <span className="min-w-0 flex-1">股票</span>
-        <span className="w-24 shrink-0 text-right">净买额</span>
-        <span className="w-14 shrink-0 text-right">占比</span>
-        {isOrg && <span className="w-20 shrink-0 text-right">机构净买</span>}
-        <span className="w-20 shrink-0 text-right">买入额</span>
-        <span className="w-20 shrink-0 text-right">卖出额</span>
+        <span className="w-24 shrink-0"><_DtTh label="净买额" sortKey="net_value" sort={sort} onSort={onSort} className="w-full justify-end" /></span>
+        <span className="w-14 shrink-0"><_DtTh label="占比" sortKey="net_rate" sort={sort} onSort={onSort} className="w-full justify-end" /></span>
+        {isOrg && <span className="w-20 shrink-0"><_DtTh label="机构净买" sortKey="org_net_value" sort={sort} onSort={onSort} className="w-full justify-end" /></span>}
+        <span className="w-20 shrink-0"><_DtTh label="买入额" sortKey="buy_value" sort={sort} onSort={onSort} className="w-full justify-end" /></span>
+        <span className="w-20 shrink-0"><_DtTh label="卖出额" sortKey="sell_value" sort={sort} onSort={onSort} className="w-full justify-end" /></span>
         <span className="w-11 shrink-0 text-right">榜期</span>
       </div>
-      {items.map((i, idx) => {
+      {sorted.map((i, idx) => {
         const barPct = Math.max(2, Math.min(100, (Math.abs(i.net_value ?? 0) / maxAbs) * 100))
         const positive = (i.net_value ?? 0) >= 0
         return (
@@ -970,6 +1023,11 @@ function _DtStockTable({ items, tab, onOpenStock }: {
             <span className="min-w-0 flex-1">
               <span className="text-foreground">{i.name ?? '—'}</span>
               <span className="ml-1.5 font-mono text-[9px] text-muted">{i.ticker ?? i.thscode}</span>
+              {(() => { const b = boardTag(i.thscode); return b && (
+                <span className={`ml-1 inline-flex items-center rounded border px-1 text-[8px] font-bold leading-tight ${b.color}`}>
+                  {b.label}
+                </span>
+              ) })()}
               {i.hot_rank != null && i.hot_rank > 0 && i.hot_rank <= 99 && (
                 <span
                   className={cn(
@@ -1046,7 +1104,7 @@ function _DtSeatList({ seats, onOpenStock }: {
             <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
               <span className="text-[11px] font-medium text-foreground" title={s.name ?? ''}>{s.name ?? '—'}</span>
               <span className={cn('font-mono text-[10px] tabular-nums', priceColorClass(s.buying ?? null))}>
-                净买 {fmtVolume(s.buying ?? null)}
+                {fmtVolume(s.buying ?? null)}
               </span>
             </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
@@ -1059,6 +1117,11 @@ function _DtSeatList({ seats, onOpenStock }: {
                   title={`查看 ${r.name ?? r.thscode} 详情`}
                 >
                   <span>{r.name ?? r.thscode}</span>
+                  {(() => { const b = boardTag(r.thscode); return b && (
+                    <span className={`inline-flex items-center self-center rounded border px-1 text-[8px] font-bold leading-tight ${b.color}`}>
+                      {b.label}
+                    </span>
+                  ) })()}
                   <span className={cn('font-mono text-[9px] tabular-nums', priceColorClass(r.hot_money_item_net_value ?? r.net_value ?? null))}>
                     {fmtVolume(r.hot_money_item_net_value ?? r.net_value ?? null)}
                   </span>
@@ -1132,8 +1195,10 @@ function DragonTigerCard({ date, onOpenStock }: {
   const allItems = d.all?.stock_items ?? []
   const orgItems = d.org?.stock_items ?? []
   const seats = d.hot_money?.hot_money_items ?? []
-  const topBuy = _dtSorted(allItems.filter(i => (i.net_value ?? 0) > 0), 'net_value').slice(0, 3)
-  const topOrg = _dtSorted(orgItems, 'org_net_value').slice(0, 3)
+  const topBuy = _dtSorted(allItems.filter(i => (i.net_value ?? 0) > 0), 'net_value').slice(0, 5)
+  const topOrg = _dtSorted(orgItems, 'org_net_value').slice(0, 5)
+  const topSell = _dtSorted(allItems.filter(i => (i.net_value ?? 0) < 0), 'net_value', true).slice(0, 5)
+  const botOrg = _dtSorted(orgItems.filter(i => (i.org_net_value ?? 0) < 0), 'org_net_value', true).slice(0, 5)
   const isFallback = d.state === 'fallback_prev'
 
   return (
@@ -1171,8 +1236,10 @@ function DragonTigerCard({ date, onOpenStock }: {
       {/* 收起态: 排名药丸摘要 */}
       {!expanded && (
         <div className="flex flex-col gap-1.5 px-4 pb-3">
-          <_DtSummaryRow label="净买 Top3" items={topBuy} pick={i => i.net_value} onOpenStock={onOpenStock} />
-          <_DtSummaryRow label="机构 Top3" items={topOrg} pick={i => i.org_net_value} onOpenStock={onOpenStock} />
+          <_DtSummaryRow label="净买 Top5" items={topBuy} pick={i => i.net_value} onOpenStock={onOpenStock} />
+          <_DtSummaryRow items={topSell} pick={i => i.net_value} onOpenStock={onOpenStock} />
+          <_DtSummaryRow label="机构 Top5" items={topOrg} pick={i => i.org_net_value} onOpenStock={onOpenStock} />
+          <_DtSummaryRow items={botOrg} pick={i => i.org_net_value} onOpenStock={onOpenStock} />
         </div>
       )}
 
@@ -1210,6 +1277,7 @@ function DragonTigerCard({ date, onOpenStock }: {
                 <_DtSeatList seats={seats} onOpenStock={onOpenStock} />
               ) : (
                 <_DtStockTable
+                  key={tab}
                   items={_dtSorted(tab === 'org' ? orgItems : allItems, tab === 'org' ? 'org_net_value' : 'net_value')}
                   tab={tab}
                   onOpenStock={onOpenStock}
