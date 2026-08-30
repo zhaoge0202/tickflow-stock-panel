@@ -1082,7 +1082,7 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet, onSwitch, swit
 }
 
 /** TickFlow 详情: 介绍 + 能力档位表 + Key/可用功能左右两栏。
- *  检测档位不再单独设面板 — 以头部「档位徽章 + ? 说明 + 重新检测」小集群呈现。 */
+ *  检测档位集群 (档位徽章 + ? 说明 + 重新检测 + 可用功能悬停) 挂在 API Key 标题行右侧。 */
 function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: CapabilityMatrix }) {
   const caps = matrix?.capabilities ?? []
   const tier = matrix?.tickflow_tier
@@ -1093,6 +1093,57 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
     mutationFn: () => api.redetectCapabilities(),
     onSuccess: () => invalidate(),
   })
+  // 检测档位集群: API Key 标题行右侧 (检测档位徽章 + 档位说明 + 重检测 + 可用功能悬停)
+  const tierCluster = tier ? (
+    <div className="flex items-center gap-1.5 shrink-0">
+      <span className="text-[10px] text-muted/80">检测档位</span>
+      <TierTag label={tier} />
+      <TierHelpPopover currentLabel={tfCaps?.label ?? tier} />
+      <button
+        type="button"
+        onClick={() => redetect.mutate()}
+        disabled={redetect.isPending}
+        title="根据 API Key 重新检测订阅档位"
+        className="inline-flex h-5 w-5 items-center justify-center rounded text-muted/60 hover:text-foreground hover:bg-elevated/70 transition-colors duration-150"
+      >
+        <RefreshCw className={`h-3 w-3 ${redetect.isPending ? 'animate-spin' : ''}`} />
+      </button>
+      {/* 可用功能: 收进悬停浮层, 不占版面 (能力清单 + 限频)。图标在标题行右侧, 浮层向左展开 */}
+      <div className="relative group/caps shrink-0" aria-label="可用功能">
+        <span className="flex h-5 w-5 items-center justify-center rounded text-muted/60 transition-colors group-hover/caps:text-foreground">
+          <ListChecks className="h-3 w-3" />
+        </span>
+        <div className="pointer-events-none invisible absolute right-0 top-full z-20 mt-1.5 w-64 rounded-md border border-border bg-surface py-2 pl-3 pr-3.5 opacity-0 shadow-2xl shadow-black/40 transition-all duration-150 group-hover/caps:visible group-hover/caps:opacity-100">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-xs font-medium text-foreground">可用功能</span>
+            <span className="text-[10px] font-mono text-muted">{capEntries.length} 项</span>
+          </div>
+          {capEntries.length > 0 ? (
+            <div className="max-h-56 space-y-1 overflow-y-auto border-t border-border/60 pt-1.5">
+              {capEntries.map(([cap, lim]) => (
+                <div key={cap} className="flex min-w-0 items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">
+                    {CAP_LABELS[cap]?.name ?? cap}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted">
+                    {lim.rpm ? `${lim.rpm}/min` : lim.subscribe ? `${lim.subscribe} 订阅` : '—'}
+                    {lim.batch ? ` · ${lim.batch}/次` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted">
+              暂无 — 配置 API Key 后自动检测
+            </div>
+          )}
+          <div className="mt-1.5 border-t border-border/60 pt-1.5 text-[10px] text-muted/70">
+            根据 API Key 自动检测
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null
   return (
     <section className="rounded-card border border-border bg-surface p-6">
       {/* 介绍 */}
@@ -1104,56 +1155,6 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-base font-semibold text-foreground">TickFlow</h2>
             <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">第三方</span>
-            {tier && (
-              <>
-                <span className="text-[10px] text-muted/80">检测档位</span>
-                <TierTag label={tier} />
-                <TierHelpPopover currentLabel={tfCaps?.label ?? tier} />
-                <button
-                  type="button"
-                  onClick={() => redetect.mutate()}
-                  disabled={redetect.isPending}
-                  title="根据 API Key 重新检测订阅档位"
-                  className="inline-flex h-5 w-5 items-center justify-center rounded text-muted/60 hover:text-foreground hover:bg-elevated/70 transition-colors duration-150"
-                >
-                  <RefreshCw className={`h-3 w-3 ${redetect.isPending ? 'animate-spin' : ''}`} />
-                </button>
-                {/* 可用功能: 收进悬停浮层, 不占版面 (能力清单 + 限频) */}
-                <div className="relative group/caps shrink-0" aria-label="可用功能">
-                  <span className="flex h-5 w-5 items-center justify-center rounded text-muted/60 transition-colors group-hover/caps:text-foreground">
-                    <ListChecks className="h-3 w-3" />
-                  </span>
-                  <div className="pointer-events-none invisible absolute left-0 top-full z-20 mt-1.5 w-64 rounded-md border border-border bg-surface py-2 pl-3 pr-3.5 opacity-0 shadow-2xl shadow-black/40 transition-all duration-150 group-hover/caps:visible group-hover/caps:opacity-100">
-                    <div className="mb-1.5 flex items-center justify-between">
-                      <span className="text-xs font-medium text-foreground">可用功能</span>
-                      <span className="text-[10px] font-mono text-muted">{capEntries.length} 项</span>
-                    </div>
-                    {capEntries.length > 0 ? (
-                      <div className="max-h-56 space-y-1 overflow-y-auto border-t border-border/60 pt-1.5">
-                        {capEntries.map(([cap, lim]) => (
-                          <div key={cap} className="flex min-w-0 items-baseline gap-2">
-                            <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">
-                              {CAP_LABELS[cap]?.name ?? cap}
-                            </span>
-                            <span className="shrink-0 font-mono text-[10px] text-muted">
-                              {lim.rpm ? `${lim.rpm}/min` : lim.subscribe ? `${lim.subscribe} 订阅` : '—'}
-                              {lim.batch ? ` · ${lim.batch}/次` : ''}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted">
-                        暂无 — 配置 API Key 后自动检测
-                      </div>
-                    )}
-                    <div className="mt-1.5 border-t border-border/60 pt-1.5 text-[10px] text-muted/70">
-                      根据 API Key 自动检测
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
             <AllTiersBadge />
             {active && (
               <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-2 py-1 rounded">
@@ -1171,7 +1172,7 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
       {/* 主体: API Key 配置 (左) | 能力档位表 (右) */}
       <div className="mt-5 pt-5 border-t border-border grid grid-cols-1 lg:grid-cols-[1fr_1.15fr] gap-6 items-start">
         <div className="min-w-0">
-          <TickFlowKeySection />
+          <TickFlowKeySection right={tierCluster} />
         </div>
         <div className="min-w-0">
           {/* 能力档位表: 各能力所需档位 + 当前档位可用性 */}

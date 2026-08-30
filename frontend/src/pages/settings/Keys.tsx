@@ -56,7 +56,7 @@ export function useInvalidateTierRelated() {
 }
 
 /** API Key 配置区块: 状态 + 输入 + 保存并检测 (先探后存) */
-export function TickFlowKeySection() {
+export function TickFlowKeySection({ right }: { right?: React.ReactNode }) {
   const settings = useSettings()
   const invalidate = useInvalidateTierRelated()
 
@@ -93,7 +93,7 @@ export function TickFlowKeySection() {
 
   return (
     <div>
-      <SectionHeading icon={Key} title="TickFlow API Key" />
+      <SectionHeading icon={Key} title="TickFlow API Key" right={right} />
 
       <p className="text-xs text-secondary leading-relaxed mb-4">
         在{' '}
