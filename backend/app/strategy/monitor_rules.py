@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal"}
+RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal", "volume_delta"}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
@@ -45,6 +45,19 @@ SECTOR_WINDOWS = {1, 3, 5, 10, 15}
 # abnormal 规则 (异动边缘): 接近度方向 / 关注窗口
 ABNORMAL_DIRECTIONS = {"up", "down", "both"}
 ABNORMAL_WINDOWS = {"any", "3d", "10d", "30d"}
+# volume_delta 规则 (轮询放量): 阈值口径 (手数 / 成交额)
+VD_METRICS = {"volume", "amount"}
+# volume_delta 基础过滤默认值 (与策略 DEFAULT_BASIC_FILTER 核心子集对齐:
+# 价格 3-300 元, 总市值 >=10 亿, 当日成交额 >=2000 万, 剔除 ST)
+VD_BASIC_FILTER_DEFAULTS: dict = {
+    "price_min": 3,
+    "price_max": 300,
+    "market_cap_min": 10e8,
+    "float_cap_min": None,
+    "float_cap_max": None,
+    "amount_min": 0.2e8,
+    "exclude_st": True,
+}
 
 # 布尔信号列前缀 (op=truth 时 field 取这些)
 _SIGNAL_PREFIXES = ("signal_", "csg_")
@@ -190,6 +203,39 @@ def validate(rule: dict) -> None:
         threshold_pct = rule.get("threshold_pct")
         if not isinstance(threshold_pct, (int, float)) or not 1 <= threshold_pct <= 150:
             raise ValueError("异动接近度阈值必须是 1 到 150 之间的百分比数字")
+    elif rule.get("type") == "volume_delta":
+        # 轮询放量监控: 相邻两次全市场快照的成交量/成交额差值, 不用 conditions
+        if rule.get("asset_type", "stock") != "stock":
+            raise ValueError("轮询放量监控仅支持个股 (依赖全市场股票快照)")
+        if rule.get("scope", "all") == "sector":
+            raise ValueError("轮询放量监控不支持板块作用域")
+        if rule.get("metric", "volume") not in VD_METRICS:
+            raise ValueError(f"metric 必须是 {VD_METRICS} 之一 (volume=手数, amount=金额)")
+        if rule.get("metric", "volume") == "amount":
+            thr = rule.get("threshold_amount")
+            if isinstance(thr, bool) or not isinstance(thr, (int, float)) or not math.isfinite(thr) or thr < 1:
+                raise ValueError("threshold_amount 必须是 >=1 的数字 (单轮成交额增量, 单位元)")
+        else:
+            thr = rule.get("threshold_volume")
+            if isinstance(thr, bool) or not isinstance(thr, (int, float)) or not math.isfinite(thr) or thr < 1:
+                raise ValueError("threshold_volume 必须是 >=1 的数字 (单轮成交量增量, 单位手)")
+        bf = rule.get("basic_filter")
+        if bf is not None:
+            if not isinstance(bf, dict):
+                raise ValueError("basic_filter 必须是对象")
+            for key, value in bf.items():
+                if key == "exclude_st":
+                    if not isinstance(value, bool):
+                        raise ValueError("basic_filter.exclude_st 必须是布尔值")
+                elif key in ("price_min", "price_max", "market_cap_min", "float_cap_min",
+                             "float_cap_max", "amount_min"):
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value <= 0
+                    ):
+                        raise ValueError(f"basic_filter.{key} 必须是正数字或 null")
+                else:
+                    raise ValueError(f"basic_filter 不支持字段: {key}")
     else:
         # 信号/价格/市场类型: 需要 conditions
         conds = rule.get("conditions")
@@ -254,7 +300,7 @@ def normalize(rule: dict) -> dict:
     r.setdefault("enabled", True)
     r.setdefault("asset_type", "stock")
     # sector/abnormal 默认全市场 (sector 随后强制 all; abnormal 支持指定标的)
-    r.setdefault("scope", "all" if r.get("type") in {"sector", "abnormal"} else "symbols")
+    r.setdefault("scope", "all" if r.get("type") in {"sector", "abnormal", "volume_delta"} else "symbols")
     r.setdefault("symbols", [])
     r.setdefault("group_id", None)
     # watchlist_group 作用域: 成员动态来自分组, symbols 不参与; 其他作用域清掉残留 group_id
@@ -290,6 +336,15 @@ def normalize(rule: dict) -> dict:
     # ladder 专属默认字段
     r.setdefault("metric", "sealed_vol")
     r.setdefault("threshold", 0)
+    # volume_delta 专属默认字段 (轮询放量): 冷却期默认 300s 而非 3600s --
+    # 持续放量会连续多轮达标, 1 小时只提醒一次太迟钝。
+    if r.get("type") == "volume_delta":
+        if r.get("cooldown_seconds") is None:
+            r["cooldown_seconds"] = 300
+        r["metric"] = r["metric"] if r.get("metric") in VD_METRICS else "volume"
+        r.setdefault("threshold_volume", 9000)
+        r.setdefault("threshold_amount", 1e6)
+        r["basic_filter"] = {**VD_BASIC_FILTER_DEFAULTS, **(r.get("basic_filter") or {})}
     if r.get("type") == "sector":
         r["scope"] = "all"
         r["symbols"] = []

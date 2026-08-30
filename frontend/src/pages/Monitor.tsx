@@ -23,7 +23,7 @@ import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
-  abnormal: '异动监控',
+  abnormal: '异动监控', volume_delta: '轮询放量',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -39,6 +39,7 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   market:   'bg-purple-500/10 text-purple-400 border-purple-500/20',
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
   abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
+  volume_delta: 'bg-rose-500/10 text-rose-400 border-rose-500/20 dark:text-rose-300',
 }
 
 /**
@@ -132,7 +133,7 @@ export function Monitor() {
   }, [searchParams, setSearchParams])
 
   // 触发记录: 过滤 + 统计 (提升到主组件, 供 header 行使用)
-  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal'>('all')
+  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal' | 'volume_delta'>('all')
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
@@ -213,7 +214,7 @@ export function Monitor() {
               <SectionHeader icon={BellRing} title="触发记录" />
               {/* 过滤标签 */}
               <div className="flex flex-wrap items-center gap-0.5">
-                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal'] as const).map(f => (
+                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal', 'volume_delta'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setFilter(f)}
@@ -870,6 +871,22 @@ function RulesList({ rulesQuery, onEdit }: {
                   <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
                     {r.direction === 'up' ? '涨势偏离' : r.direction === 'down' ? '跌势偏离' : '涨跌双向'}
                   </span>
+                </div>
+              ) : r.type === 'volume_delta' ? (
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
+                  <span className="rounded bg-rose-500/8 px-1.5 py-0.5 text-[9px] font-mono text-rose-500 dark:text-rose-300">
+                    {r.metric === 'amount'
+                      ? `单轮增量 ≥ ${Math.round((r.threshold_amount ?? 1e6) / 1e4).toLocaleString()} 万元`
+                      : `单轮增量 ≥ ${(r.threshold_volume ?? 9000).toLocaleString()} 手`}
+                  </span>
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                    冷却 {Math.round((r.cooldown_seconds ?? 300) / 60)} 分钟
+                  </span>
+                  {r.basic_filter && Object.values(r.basic_filter).some(v => v !== null && v !== false) && (
+                    <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
+                      基础过滤{r.basic_filter.exclude_st ? ' · 剔除ST' : ''}
+                    </span>
+                  )}
                 </div>
               ) : r.type === 'strategy' && r.strategy_id ? (
                 <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
