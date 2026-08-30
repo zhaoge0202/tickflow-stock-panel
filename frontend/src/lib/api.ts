@@ -632,7 +632,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai' | 'composite'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
   asset_types: string[]
   timeframes: string[]
   version: string

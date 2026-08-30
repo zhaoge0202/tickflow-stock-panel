@@ -476,7 +476,10 @@ function DailyTradeChip({ trade, side, strategyName, onClick, signalNames }: { t
 
 function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; signalNames?: Record<string, string> }) {
   const isBuy = side === 'buy'
-  const date = String(isBuy ? trade.entry_date : trade.exit_date).slice(0, 10)
+  // 分钟策略入场携带 "YYYY-MM-DD HH:MM" (盘中触发分钟); 日线口径为纯日期
+  const raw = String(isBuy ? trade.entry_date : trade.exit_date)
+  const date = raw.slice(0, 10)
+  const minuteTime = raw.length > 10 ? raw.slice(11, 16) : ''
   const signalDate = String(isBuy ? trade.entry_signal_date ?? '' : trade.exit_signal_date ?? '').slice(0, 10)
   const price = isBuy ? trade.entry_price : trade.exit_price
   const amount = isBuy ? trade.entry_value : trade.exit_value
@@ -487,7 +490,12 @@ function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTra
   return (
     <div className="min-w-[8.25rem] rounded-btn border border-border/60 bg-base/35 px-2 py-1 text-xs leading-4">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-secondary">成交 {date}</span>
+        <span className="font-mono text-secondary">
+          成交 {date}
+          {minuteTime && (
+            <span className="ml-1 rounded border border-sky-500/30 bg-sky-500/10 px-1 py-px text-[9px] font-medium text-sky-400">{minuteTime}</span>
+          )}
+        </span>
         <span className={`rounded px-1.5 py-px text-[10px] font-medium ${
           isBuy ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'
         }`}>
@@ -954,8 +962,8 @@ export function StrategyBacktest() {
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType),
-    queryFn: () => api.screenerStrategies(assetType),
+    queryKey: QK.screenerStrategies(assetType, 'all'),
+    queryFn: () => api.screenerStrategies(assetType, 'all'),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
@@ -1080,7 +1088,7 @@ export function StrategyBacktest() {
         positionSizing,
         mode: simMode,
         holdingDays,
-        minuteFill: highGranularity,
+        minuteFill: isMinuteStrategy ? false : highGranularity,
         regimeStates,
         regimeMinScore,
         params: strategyParams,
@@ -1118,7 +1126,7 @@ export function StrategyBacktest() {
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
-      minute_fill: highGranularity,
+      minute_fill: isMinuteStrategy ? false : highGranularity,
       regime_filter: regimeStates.length > 0 || regimeMinScore !== ''
         ? {
             ...(regimeStates.length > 0 ? { states: regimeStates } : {}),
@@ -1286,11 +1294,22 @@ export function StrategyBacktest() {
   const minuteTriggerSignals = detail?.minute_exit_trigger_supported_signals ?? []
   const unsupportedMinuteExitSignals = effectiveExitSignals.filter(signal => !minuteTriggerSignals.includes(signal))
   const minuteExitTriggerSupported = effectiveExitSignals.length > 0 && unsupportedMinuteExitSignals.length === 0
+  // 分钟策略: 入场在盘中触发分钟成交, 日线专属的成交口径选项不适用
+  const isMinuteStrategy = detail?.execution_backend === 'minute_filter'
+  const { data: minuteDataStatus } = useQuery({
+    queryKey: QK.dataStatus,
+    queryFn: api.dataStatus,
+    enabled: isMinuteStrategy,
+    staleTime: 60_000,
+  })
+  // 分钟回测窗口守卫: 开始日期早于本地分钟K起点会被后端拒绝, 前置警示
+  const minuteEarliest = minuteDataStatus?.minute?.earliest_date
+  const minuteStartMismatch = isMinuteStrategy && !!minuteEarliest && start < minuteEarliest
 
   useEffect(() => {
-    if (highGranularity && minuteExitTriggerSupported) return
+    if (highGranularity && minuteExitTriggerSupported && !isMinuteStrategy) return
     if (exitFill === 'signal_next_minute') setExitFill('close_t')
-  }, [exitFill, highGranularity, minuteExitTriggerSupported])
+  }, [exitFill, highGranularity, minuteExitTriggerSupported, isMinuteStrategy])
 
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoringDirections = useMemo(
@@ -1395,7 +1414,8 @@ export function StrategyBacktest() {
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
-            {/* 分钟K成交 */}
+            {/* 分钟K成交 — 日线策略专属 (分钟策略入场天然按触发分钟成交) */}
+            {!isMinuteStrategy && (
             <div className="flex items-center gap-1">
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
@@ -1420,9 +1440,28 @@ export function StrategyBacktest() {
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">分钟K</span>
               )}
             </div>
+            )}
           </div>
+          {/* 分钟策略提示条: 数据窗口 + 成交语义 */}
+          {isMinuteStrategy && (
+            <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-sky-500/30 bg-sky-500/5 px-2 py-1.5">
+              <Clock className="h-3 w-3 text-sky-400 shrink-0 mt-px" />
+              <div className="text-[10px] leading-snug text-sky-400/90">
+                <span className="font-medium">分钟策略回测</span>
+                ：逐日回放分钟K，信号分钟收盘价买入；日线条件按 T-1 完成态评估。
+                {minuteDataStatus?.minute?.earliest_date
+                  ? ` 本地分钟K ${minuteDataStatus.minute.earliest_date} ~ ${minuteDataStatus.minute.latest_date}（${minuteDataStatus.minute.trading_days} 个交易日），缺分区的日子自动跳过。`
+                  : ' 本地暂无分钟K数据，请先在数据页拉取。'}
+                {minuteStartMismatch && (
+                  <span className="mt-0.5 block text-amber-400">
+                    当前开始日期 {start} 早于分钟数据起点 {minuteEarliest}，运行会被拒绝 — 请把开始日期调整到 {minuteEarliest} 之后，或先用「扩展分钟K历史」拉取。
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           {/* 分钟K开启时的提示条 */}
-          {highGranularity && hasMinuteBatch && (
+          {highGranularity && hasMinuteBatch && !isMinuteStrategy && (
             <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
               <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
               <div className="text-[10px] leading-snug text-amber-400/90">
@@ -1465,6 +1504,9 @@ export function StrategyBacktest() {
                   }`}
               >
                 <span className="font-medium">{st.name}</span>
+                {st.timeframes?.includes('1m') && (
+                  <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
+                )}
                 {st.source && st.source !== 'builtin' && (
                   <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
                     {SRC_MAP[st.source] ?? ''}
@@ -1619,10 +1661,18 @@ export function StrategyBacktest() {
               <label className="text-xs font-medium text-secondary">建仓口径</label>
               <FillRuleHint />
             </div>
-            <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
-              <option value="open_t+1">次日开盘（推荐）</option>
-              <option value="close_t">信号日收盘</option>
-            </select>
+            {isMinuteStrategy ? (
+              <div className={`${INPUT_CLS} flex items-center gap-1.5`} title="信号在盘中触发分钟成交，无次日开盘口径">
+                <Clock className="h-3 w-3 text-sky-400 shrink-0" />
+                <span className="text-secondary">信号分钟收盘</span>
+                <span className="text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
+              </div>
+            ) : (
+              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
+                <option value="open_t+1">次日开盘（推荐）</option>
+                <option value="close_t">信号日收盘</option>
+              </select>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label>
@@ -1633,12 +1683,12 @@ export function StrategyBacktest() {
             >
               <option value="close_t">信号日收盘（推荐）</option>
               <option value="open_t+1">次日开盘</option>
-              {highGranularity && minuteExitTriggerSupported && (
+              {highGranularity && minuteExitTriggerSupported && !isMinuteStrategy && (
                 <option value="signal_next_minute">信号触发卖出 BETA</option>
               )}
             </select>
           </div>
-          {(entryFill === 'close_t' || exitFill === 'close_t') && (
+          {!isMinuteStrategy && (entryFill === 'close_t' || exitFill === 'close_t') && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
               <span>信号日收盘仅适合收盘前已确认的信号</span>
