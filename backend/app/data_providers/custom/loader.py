@@ -353,6 +353,7 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             } if ds_name != "realtime" else {}),
             **({"asset_type_param": ds.asset_type_param} if ds_name == "minute" and ds.asset_type_param else {}),
             **({"freq_param": ds.freq_param} if ds_name == "minute" and ds.freq_param else {}),
+            **({"pct_unit": ds.pct_unit} if ds_name == "realtime" and ds.pct_unit else {}),
         }
     return out
 
@@ -476,6 +477,13 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
             out["start_param"] = start_param
         if end_param:
             out["end_param"] = end_param
+    pct_unit = str(ds_cfg.get("pct_unit") or "").strip().lower()
+    if pct_unit:
+        if ds_name != "realtime":
+            raise ValueError(f"{ds_name}: pct_unit 仅用于 realtime 数据集")
+        if pct_unit not in ("percent", "decimal"):
+            raise ValueError(f"{ds_name}: pct_unit 必须是 percent 或 decimal")
+        out["pct_unit"] = pct_unit
     if ds_name == "minute":
         asset_type_param = str(ds_cfg.get("asset_type_param") or "").strip()
         freq_param = str(ds_cfg.get("freq_param") or "").strip()
