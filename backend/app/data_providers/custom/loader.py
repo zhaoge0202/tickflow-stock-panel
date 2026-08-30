@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from app import secrets_store
 from app.config import settings
 from app.data_providers.custom.config import (
     DEFAULT_TIMEOUT,
@@ -87,6 +88,19 @@ def list_sources() -> list[dict]:
 def list_plugins() -> list[dict]:
     """返回所有内置插件的状态 (含已装/未装), 供设置页独立分类显示。"""
     return list(_PLUGIN_STATUS.values())
+
+
+def _plugin_key_masked(name: str, api_key_env: str) -> str:
+    """插件当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底), 未配置返回空。
+
+    与 TickFlow Key 的展示契约一致 (settings API 的 tickflow_api_key_masked):
+    完整 Key 永不出后端, 只出 mask() 结果, 供设置页常驻显示。
+    """
+    env = str(api_key_env or "").strip()
+    if not env:
+        return ""
+    key = secrets_store.get_env_backed_secret(f"{name.lower()}_api_key", env)
+    return secrets_store.mask(key) if key else ""
 
 
 def plugin_manifest(name: str) -> dict | None:
@@ -560,7 +574,9 @@ def _register_one_plugin(manifest: dict) -> None:
         "status": reason,
         "description": manifest.get("description", ""),
         "install_hint": manifest.get("install_hint", ""),
+        "homepage": manifest.get("homepage", ""),
         "api_key_env": manifest.get("api_key_env", ""),
+        "api_key_masked": _plugin_key_masked(name, manifest.get("api_key_env", "")),
     }
     if not available:
         return  # 依赖没装: 不注册, 但状态已记录供 UI 显示

@@ -335,8 +335,6 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
         return 0, []
 
     provider_name = preferences.get_adj_factor_provider()
-    if provider_name == "same_as_daily":
-        provider_name = preferences.get_daily_data_provider()
     if provider_name != "tickflow":
         from app.data_providers import custom as custom_sources
         if custom_sources.provider_has_dataset(provider_name, "adj_factor"):

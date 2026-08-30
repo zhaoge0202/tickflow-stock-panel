@@ -279,14 +279,18 @@ def get_daily_data_provider() -> str:
 
 
 def get_adj_factor_provider() -> str:
-    provider = str(load().get("adj_factor_provider", "same_as_daily") or "same_as_daily").lower()
-    if provider == "same_as_daily":
-        return provider
-    return provider if provider in _allowed_data_providers() else "same_as_daily"
+    # 「跟随日K」(same_as_daily) 特殊值已下线: 存量配置里的旧值按非法值回退 tickflow
+    provider = str(load().get("adj_factor_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 def get_minute_data_provider() -> str:
     provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
+
+
+def get_depth5_data_provider() -> str:
+    provider = str(load().get("depth5_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 

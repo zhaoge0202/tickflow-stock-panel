@@ -397,6 +397,7 @@ class DataProvidersIn(BaseModel):
     daily_data_provider: str | None = None
     adj_factor_provider: str | None = None
     minute_data_provider: str | None = None
+    depth5_data_provider: str | None = None
     realtime_data_provider: str | None = None
     financial_data_provider: str | None = None
 
@@ -483,6 +484,7 @@ def get_preferences() -> dict:
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
+        "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
         "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
@@ -541,6 +543,31 @@ def list_data_sources() -> dict:
         "errors": custom_sources.errors(),
         "config_dir": str(custom_sources.data_sources_dir()),
     }
+
+
+@router.get("/capability-matrix")
+def get_capability_matrix() -> dict:
+    """能力 x 源路由矩阵: 能力注册表 + 各源能力声明 + 当前路由偏好, 设置页一次拉全。
+
+    偏好值经 preferences getters 注入 (自带合法源校验, 非法值回退默认),
+    TickFlow 当前档位由 tickflow policy 注入 (候选按档位过滤),
+    组装逻辑在 data_providers.capabilities, 本层保持薄。
+    """
+    from app.data_providers.capabilities import build_capability_matrix
+    from app.services import preferences
+    from app.tickflow import policy
+
+    return build_capability_matrix(
+        {
+            "realtime_data_provider": preferences.get_realtime_data_provider(),
+            "daily_data_provider": preferences.get_daily_data_provider(),
+            "minute_data_provider": preferences.get_minute_data_provider(),
+            "depth5_data_provider": preferences.get_depth5_data_provider(),
+            "adj_factor_provider": preferences.get_adj_factor_provider(),
+            "financial_data_provider": preferences.get_financial_provider(),
+        },
+        tickflow_tier=policy.base_tier_name(),
+    )
 
 
 @router.post("/plugin-key")
@@ -689,9 +716,8 @@ def delete_data_source(name: str, request: Request) -> dict:
         updates["realtime_data_provider"] = "tickflow"
     if preferences.get_financial_provider() == name:
         updates["financial_data_provider"] = "tickflow"
-    adj = preferences.get_adj_factor_provider()
-    if adj == name:
-        updates["adj_factor_provider"] = "same_as_daily"
+    if preferences.get_adj_factor_provider() == name:
+        updates["adj_factor_provider"] = "tickflow"
     if updates:
         preferences.save(updates)
     # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
@@ -737,6 +763,7 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
+        "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
     }

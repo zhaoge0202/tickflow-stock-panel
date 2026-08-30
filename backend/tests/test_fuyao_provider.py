@@ -369,13 +369,52 @@ def test_manifest_declares_realtime_dataset():
 
 
 def test_hidden_plugin_not_registered():
-    """hidden: true 的插件不注册、不在数据源页展示 (优化完成前隐藏 fuyao)。"""
+    """fuyao 已取消隐藏 (plugin.yaml 不再声明 hidden); hidden 机制本身仍生效。
+
+    用合成清单验证: hidden: true 的插件不注册、不在数据源页展示。
+    """
     from app.data_providers.custom import loader
     manifest = loader.plugin_manifest("fuyao")
-    assert manifest.get("hidden") is True
+    assert manifest is not None and not manifest.get("hidden"), (
+        "fuyao 应保持可见; 如需重新隐藏请在 plugin.yaml 声明 hidden 并更新本测试"
+    )
     loader._register_one_plugin(manifest)
-    assert "fuyao" not in loader._PLUGIN_STATUS
-    assert "fuyao" not in loader._PROVIDERS
+    assert "fuyao" in loader._PLUGIN_STATUS
+
+    hidden_manifest = dict(manifest, name="hidden_probe", hidden=True)
+    loader._register_one_plugin(hidden_manifest)
+    assert "hidden_probe" not in loader._PLUGIN_STATUS
+    assert "hidden_probe" not in loader._PROVIDERS
+
+
+# ---- 插件 Key 脱敏展示 (与 TickFlow Key 契约一致) ----
+
+def test_plugin_key_masked_from_secrets_then_env(monkeypatch):
+    """api_key_masked 随插件状态返回: secrets.json 优先, .env 兜底, 未配置为空。
+
+    完整 Key 不出后端, 只出 mask() 结果 — 与 settings API 的
+    tickflow_api_key_masked 同一展示契约。
+    """
+    from app import secrets_store
+    from app.data_providers.custom import loader
+
+    # 未声明 api_key_env / 未配置 Key → 空
+    assert loader._plugin_key_masked("x", "") == ""
+    monkeypatch.setattr(secrets_store, "load", lambda: {})
+    monkeypatch.delenv(fp.API_KEY_ENV, raising=False)
+    assert loader._plugin_key_masked("fuyao", fp.API_KEY_ENV) == ""
+
+    # .env 兜底
+    monkeypatch.setenv(fp.API_KEY_ENV, "env-secret-key-123456")
+    assert loader._plugin_key_masked("fuyao", fp.API_KEY_ENV) == "env-••••••3456"
+
+    # secrets.json 优先于 .env
+    monkeypatch.setattr(secrets_store, "load", lambda: {"fuyao_api_key": "stored-secret-key-999"})
+    assert loader._plugin_key_masked("fuyao", fp.API_KEY_ENV) == "stor••••••-999"
+
+    # 注册进插件状态: 数据源列表接口据此常驻展示 (而非仅保存后瞬时显示)
+    loader._register_one_plugin(loader.plugin_manifest("fuyao"))
+    assert loader._PLUGIN_STATUS["fuyao"]["api_key_masked"] == "stor••••••-999"
 
 
 # ---- 设置页试拉 ----

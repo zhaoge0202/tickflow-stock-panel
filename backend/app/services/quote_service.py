@@ -167,13 +167,15 @@ class QuoteService:
 
     CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
 
-    # 档位 → 最小轮询间隔 (秒)
+    # 档位 → 最小轮询间隔 (秒) — TickFlow 档位限速保护, 仅实时源为 tickflow 时适用
     TIER_MIN_INTERVAL = {
         "expert": 1.0,
         "pro": 3.0,
         "starter": 6.0,
         "free": 6.0,
     }
+    # 插件/自定义源: 不受 TickFlow 档位保护约束, 通用下限 1s (默认间隔仍为 DEFAULT_INTERVAL)
+    CUSTOM_PROVIDER_MIN_INTERVAL = 1.0
     DEFAULT_INTERVAL = 6.0
     MAX_INTERVAL = 60.0
 
@@ -441,6 +443,11 @@ class QuoteService:
 
     @classmethod
     def _tier_min_interval(cls) -> float:
+        # 实时源路由到插件/自定义源时, TickFlow 档位限速不适用 (中立能力原则):
+        # 下限放宽到通用 1s, 默认/已保存间隔不变
+        from app.services import preferences
+        if preferences.get_realtime_data_provider() != "tickflow":
+            return cls.CUSTOM_PROVIDER_MIN_INTERVAL
         tier = cls._current_tier()
         return cls.TIER_MIN_INTERVAL.get(tier, cls.DEFAULT_INTERVAL)
 

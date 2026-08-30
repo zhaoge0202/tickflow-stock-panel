@@ -316,8 +316,6 @@ def _augment_custom_sources(capset: CapabilitySet) -> None:
 
         daily_provider = preferences.get_daily_data_provider()
         adj_provider = preferences.get_adj_factor_provider()
-        if adj_provider == "same_as_daily":
-            adj_provider = daily_provider
         active_providers = {
             "daily": daily_provider,
             "adj_factor": adj_provider,
