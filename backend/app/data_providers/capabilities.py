@@ -1,7 +1,7 @@
 """能力注册表与能力路由矩阵 — 数据集维度的单一权威定义。
 
 能力 (capability) = 一个标准化数据集 (CONTRIBUTING「数据源插件化要求」):
-realtime / daily / minute / depth5 / adj_factor / financial。注册表集中声明每个
+daily / adj_factor / realtime / minute / depth5 / financial (注册表顺序即设置页卡片顺序)。注册表集中声明每个
 能力的展示元数据、路由偏好字段与 TickFlow 档位要求, 前端设置页不再各自硬编码。
 depth5 目前仅 TickFlow 供 (插件数据集白名单未开放, 见 loader), 仍进矩阵是为了
 可用性门控诚实: 五档不可用时连板梯队封单/看板封单缺数据应有提示。
@@ -27,20 +27,30 @@ from app.data_providers import custom as custom_sources
 
 CAPABILITY_REGISTRY: list[dict] = [
     {
-        "id": "realtime",
-        "label": "实时行情",
-        "desc": "全市场实时快照",
-        "field": "realtime_data_provider",
-        "default": "tickflow",
-        "tf_tier": "starter",
-    },
-    {
         "id": "daily",
         "label": "日K",
         "desc": "历史K线与实时覆写",
         "field": "daily_data_provider",
         "default": "tickflow",
         "tf_tier": "none",
+    },
+    {
+        "id": "adj_factor",
+        "label": "除权因子",
+        "desc": "前复权计算基准",
+        "field": "adj_factor_provider",
+        "default": "tickflow",
+        "tf_tier": "starter",
+        # 独立路由 (曾经的「跟随日K」特殊值已下线: 每个能力单独配置,
+        # 复权口径一致性改由未来的一致性警示保障, 不做路由耦合)
+    },
+    {
+        "id": "realtime",
+        "label": "实时行情",
+        "desc": "全市场实时快照",
+        "field": "realtime_data_provider",
+        "default": "tickflow",
+        "tf_tier": "starter",
     },
     {
         "id": "minute",
@@ -60,22 +70,22 @@ CAPABILITY_REGISTRY: list[dict] = [
         # 插件契约暂未开放 depth5 数据集 (loader 白名单), 当前仅 TickFlow 供
     },
     {
-        "id": "adj_factor",
-        "label": "除权因子",
-        "desc": "前复权计算基准",
-        "field": "adj_factor_provider",
-        "default": "tickflow",
-        "tf_tier": "starter",
-        # 独立路由 (曾经的「跟随日K」特殊值已下线: 每个能力单独配置,
-        # 复权口径一致性改由未来的一致性警示保障, 不做路由耦合)
-    },
-    {
         "id": "financial",
         "label": "财务数据",
         "desc": "财务指标与三大报表",
         "field": "financial_data_provider",
         "default": "tickflow",
         "tf_tier": "expert",
+    },
+    {
+        "id": "full_minute",
+        "label": "全量分钟",
+        "desc": "盘中全市场当日分钟落盘 (冷启动全天 + 标的池增量)",
+        "field": None,
+        "default": "tickflow",
+        "tf_tier": "expert",
+        # intraday.universe 能力 (TickFlow Expert 专有): 插件契约不开放此数据集,
+        # 生效源恒为 TickFlow — 不可路由, 无对应 provider 偏好字段
     },
 ]
 
@@ -152,7 +162,8 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
 
     capabilities = []
     for cap in CAPABILITY_REGISTRY:
-        effective = current.get(cap["field"], cap["default"])
+        # field=None → 不可路由能力 (仅 TickFlow 提供, 无路由偏好), 生效源恒为默认
+        effective = current.get(cap["field"], cap["default"]) if cap["field"] else cap["default"]
         tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
         candidates: list[dict] = []
         pending: list[dict] = []

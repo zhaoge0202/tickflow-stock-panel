@@ -50,7 +50,9 @@ const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
   minute: '分钟',
   adj_factor: '除权',
+  depth5: '五档',
   financial: '财务',
+  full_minute: '全量分钟',
 }
 
 /** 能力图标 (纯展示; 能力清单本身由后端注册表驱动) */
@@ -58,6 +60,7 @@ const CAP_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
   realtime: Radio,
   daily: CandlestickIcon,
   minute: Timer,
+  full_minute: Zap,
   adj_factor: Scale,
   financial: Landmark,
 }
@@ -103,9 +106,10 @@ function AllTiersBadge({ size = 'text-[10px]' }: { size?: string }) {
 }
 
 /** 提供方标签样式: 当前项高亮(accent), 其余弱化可点; 未就绪源禁用置灰 */
-function tagCls(active: boolean, disabled = false) {
+function tagCls(active: boolean, disabled = false, interactive = true) {
   const base = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] transition-colors select-none'
   if (disabled) return `${base} bg-elevated/40 text-muted/50 cursor-not-allowed`
+  if (!interactive) return `${base} cursor-default ${active ? 'bg-accent/15 text-accent font-medium' : 'bg-elevated/60 text-muted/70'}`
   return `${base} cursor-pointer disabled:opacity-50 ${
     active
       ? 'bg-accent/15 text-accent font-medium'
@@ -131,7 +135,7 @@ function patchMatrix(
 ): CapabilityMatrix {
   const caps = matrix.capabilities.map(c => ({ ...c }))
   for (const cap of caps) {
-    const value = changes[cap.field]
+    const value = cap.field != null ? changes[cap.field] : undefined
     if (value !== undefined) {
       cap.current = value
       cap.current_display = displayOfName({ capabilities: caps }, value)
@@ -197,12 +201,26 @@ function CapabilityCard({ cap, pendingKey, onSelect }: {
       <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t border-border/50 min-h-[26px] items-center">
         {cap.candidates.map(c => {
           const active = cap.current === c.name
+          // field=null → 不可路由能力 (仅 TickFlow 提供): 渲染为非交互标签,
+          // 保持激活高亮但不可点击 (用 button+disabled 会被 opacity-50 冲淡成灰色)
+          const routable = cap.field != null
+          if (!routable) {
+            return (
+              <span
+                key={c.name}
+                title={`「${cap.label}」仅 ${c.display} 提供 (不可路由)`}
+                className={tagCls(active, false, false)}
+              >
+                {c.display}
+              </span>
+            )
+          }
           return (
             <button
               key={c.name}
               type="button"
               disabled={pendingKey != null}
-              onClick={() => onSelect(cap.field, c.name)}
+              onClick={() => cap.field != null && onSelect(cap.field, c.name)}
               title={`「${cap.label}」由 ${c.display} 提供`}
               className={tagCls(active)}
             >
@@ -595,10 +613,18 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     adj_factor: adjPref === 'same_as_daily' ? dailyPref : adjPref,
     minute: prefs.data?.minute_data_provider || 'tickflow',
     realtime: prefs.data?.realtime_data_provider || 'tickflow',
+    depth5: prefs.data?.depth5_data_provider || 'tickflow',
     financial: prefs.data?.financial_data_provider || 'tickflow',
   }
-  const servingDatasets = (name: string) =>
-    Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
+  const servingDatasets = (name: string) => {
+    const ids = Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
+    if (name === 'tickflow') {
+      // 不可路由能力 (field=null, 如全量分钟): 仅 TickFlow 提供, usable 即服务中
+      ids.push(...(matrix.data?.capabilities ?? [])
+        .filter(c => c.field == null && c.usable).map(c => c.id))
+    }
+    return ids
+  }
   const servingSetOf = (name: string) => new Set(servingDatasets(name))
 
   const matrixCaps = matrix.data?.capabilities ?? []
@@ -884,7 +910,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
         )}
 
         <div className="mt-3 flex items-center gap-3 text-[10px] text-muted/50 flex-wrap">
-          <span>芯片: 高亮=服务中 · 灰=已适配 · <Lock className="inline h-2.5 w-2.5" />=需更高 TickFlow 档位</span>
+          <span>芯片: 高亮=服务中 · 灰=已适配 · <Lock className="inline h-2.5 w-2.5" />=需更高档位</span>
           <span className="text-muted/30">·</span>
           <span>单击卡片查看介绍与配置, 点「套用」让该源接管其适配的全部能力</span>
         </div>
@@ -938,8 +964,6 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
               isActive={servingDatasets(selected).length > 0}
               matrixCaps={matrixCaps}
               servingSet={servingSetOf(selected)}
-              onSwitch={() => switchProvider.mutate(selected)}
-              switching={switchProvider.isPending}
             />
           ) : null}
         </motion.div>
@@ -980,13 +1004,11 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
 }
 
 /** 插件详情: 介绍 + 适配能力 + Key 配置合并为单一卡片 */
-function PluginDetail({ plugin, isActive, matrixCaps, servingSet, onSwitch, switching }: {
+function PluginDetail({ plugin, isActive, matrixCaps, servingSet }: {
   plugin: PluginDataSourceItem
   isActive: boolean
   matrixCaps: CapabilityRoute[]
   servingSet: Set<string>
-  onSwitch: () => void
-  switching: boolean
 }) {
   const declared = new Set(plugin.datasets)
   return (
@@ -1021,22 +1043,12 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet, onSwitch, swit
       {/* 主体: 操作 + Key 配置 (左) | 能力适配表 (右), 布局对齐 TickFlow 详情 */}
       <div className="mt-5 pt-5 border-t border-border grid grid-cols-1 lg:grid-cols-[1fr_1.15fr] gap-6 items-start">
         <div className="min-w-0">
-          <div className="flex items-center gap-3">
-            {plugin.available ? (
-              !isActive && (
-                <button
-                  onClick={onSwitch}
-                  disabled={switching}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
-                >
-                  <Zap className="h-3.5 w-3.5" />
-                  一键接管其适配的能力
-                </button>
-              )
-            ) : (
+          {/* 独立状态行仅用于无 Key 配置区的插件; 有 Key 区时「状态」行已展示, 避免重复 */}
+          {!plugin.available && !plugin.api_key_env && (
+            <div className="flex items-center gap-3">
               <span className="text-xs text-muted">{plugin.status}</span>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* API Key 配置 (声明了 api_key_env 的插件) */}
           {plugin.api_key_env && (
@@ -1108,37 +1120,41 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
       >
         <RefreshCw className={`h-3 w-3 ${redetect.isPending ? 'animate-spin' : ''}`} />
       </button>
-      {/* 可用功能: 收进悬停浮层, 不占版面 (能力清单 + 限频)。图标在标题行右侧, 浮层向左展开 */}
+      {/* 可用功能: 收进悬停浮层, 不占版面 (能力清单 + 限频)。图标在标题行右侧, 浮层向左展开。
+          外层 top-full + pt-1.5: 间隙用内边距做, hover 区与图标无缝衔接 (mt 间隙会断 hover 链);
+          不设 pointer-events-none, 否则鼠标移不进浮层、列表无法滚动。 */}
       <div className="relative group/caps shrink-0" aria-label="可用功能">
         <span className="flex h-5 w-5 items-center justify-center rounded text-muted/60 transition-colors group-hover/caps:text-foreground">
           <ListChecks className="h-3 w-3" />
         </span>
-        <div className="pointer-events-none invisible absolute right-0 top-full z-20 mt-1.5 w-64 rounded-md border border-border bg-surface py-2 pl-3 pr-3.5 opacity-0 shadow-2xl shadow-black/40 transition-all duration-150 group-hover/caps:visible group-hover/caps:opacity-100">
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-xs font-medium text-foreground">可用功能</span>
-            <span className="text-[10px] font-mono text-muted">{capEntries.length} 项</span>
-          </div>
-          {capEntries.length > 0 ? (
-            <div className="max-h-56 space-y-1 overflow-y-auto border-t border-border/60 pt-1.5">
-              {capEntries.map(([cap, lim]) => (
-                <div key={cap} className="flex min-w-0 items-baseline gap-2">
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">
-                    {CAP_LABELS[cap]?.name ?? cap}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted">
-                    {lim.rpm ? `${lim.rpm}/min` : lim.subscribe ? `${lim.subscribe} 订阅` : '—'}
-                    {lim.batch ? ` · ${lim.batch}/次` : ''}
-                  </span>
-                </div>
-              ))}
+        <div className="invisible absolute right-0 top-full z-20 pt-1.5 opacity-0 transition-all duration-150 group-hover/caps:visible group-hover/caps:opacity-100">
+          <div className="w-64 rounded-md border border-border bg-surface py-2 pl-3 pr-3.5 shadow-2xl shadow-black/40">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs font-medium text-foreground">可用功能</span>
+              <span className="text-[10px] font-mono text-muted">{capEntries.length} 项</span>
             </div>
-          ) : (
-            <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted">
-              暂无 — 配置 API Key 后自动检测
+            {capEntries.length > 0 ? (
+              <div className="max-h-56 space-y-1 overflow-y-auto border-t border-border/60 pt-1.5">
+                {capEntries.map(([cap, lim]) => (
+                  <div key={cap} className="flex min-w-0 items-baseline gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">
+                      {CAP_LABELS[cap]?.name ?? cap}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-muted">
+                      {lim.rpm ? `${lim.rpm}/min` : lim.subscribe ? `${lim.subscribe} 订阅` : '—'}
+                      {lim.batch ? ` · ${lim.batch}/次` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted">
+                暂无 — 配置 API Key 后自动检测
+              </div>
+            )}
+            <div className="mt-1.5 border-t border-border/60 pt-1.5 text-[10px] text-muted/70">
+              根据 API Key 自动检测
             </div>
-          )}
-          <div className="mt-1.5 border-t border-border/60 pt-1.5 text-[10px] text-muted/70">
-            根据 API Key 自动检测
           </div>
         </div>
       </div>

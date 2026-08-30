@@ -33,13 +33,17 @@ def _by_id(matrix: dict) -> dict[str, dict]:
 
 
 def test_registry_covers_all_routing_fields():
-    """注册表是能力的单一权威: 六个能力、字段名与偏好键一一对应、无重复。"""
-    fields = [c["field"] for c in CAPABILITY_REGISTRY]
-    assert sorted(fields) == sorted(DEFAULT_CURRENT)
-    assert len(set(fields)) == len(fields)
+    """注册表是能力的单一权威: 可路由能力与偏好键一一对应、无重复;
+    full_minute 为不可路由能力 (field=None, 仅 TickFlow Expert 提供)。"""
+    routable = [c["field"] for c in CAPABILITY_REGISTRY if c["field"] is not None]
+    assert sorted(routable) == sorted(DEFAULT_CURRENT)
+    assert len(set(routable)) == len(routable)
     assert {c["id"] for c in CAPABILITY_REGISTRY} == {
-        "realtime", "daily", "minute", "depth5", "adj_factor", "financial",
+        "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
     }
+    full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
+    assert full_minute["field"] is None
+    assert full_minute["tf_tier"] == "expert"
     for cap in CAPABILITY_REGISTRY:
         assert cap["default"] == "tickflow"
         assert cap["tf_tier"] in ("none", "starter", "pro", "expert")
@@ -51,7 +55,7 @@ def test_matrix_without_third_party_sources(monkeypatch):
     _fake_sources(monkeypatch, [])
     matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert")
     assert matrix["tickflow_tier"] == "expert"
-    assert len(matrix["capabilities"]) == 6
+    assert len(matrix["capabilities"]) == 7
     for cap in matrix["capabilities"]:
         names = [c["name"] for c in cap["candidates"]]
         assert names == ["tickflow"]
@@ -231,3 +235,22 @@ def test_unknown_current_display_falls_back_to_name(monkeypatch):
     assert caps["realtime"]["current"] == "ghost"
     assert caps["realtime"]["current_display"] == "ghost"
     assert caps["realtime"]["effective_display"] == "ghost"
+
+
+def test_full_minute_row_is_non_routable_expert_only(monkeypatch):
+    """全量分钟行: field=None 不可路由, 生效源恒为 TickFlow, 按 expert 档判定可用。"""
+    _fake_sources(monkeypatch, [])
+    # 即使有插件声明别的数据集也不会成为全量分钟候选 (契约不开放该数据集)
+    caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert"))
+    fm = caps["full_minute"]
+    assert fm["field"] is None
+    assert [c["name"] for c in fm["candidates"]] == ["tickflow"]
+    assert fm["usable"] is True
+    assert fm["tf_available"] is True
+    assert fm["effective"] == "tickflow"
+
+    caps_pro = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="pro"))
+    fm_pro = caps_pro["full_minute"]
+    assert fm_pro["candidates"] == []
+    assert fm_pro["usable"] is False
+    assert fm_pro["tf_available"] is False
