@@ -878,6 +878,15 @@ class FuyaoProvider:
             rows_out.append(row)
         return pl.DataFrame(rows_out) if rows_out else pl.DataFrame()
 
+    def trading_days(self) -> set:
+        """近一年交易日集合 (供交易日探针)。失败抛 FuyaoError, 由探针兜为未知。"""
+        rows = self._get_client().trading_days()
+        return {
+            d
+            for d in (_date_of_ms(r.get("date_ms")) for r in rows)
+            if d is not None
+        }
+
     def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
         """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
 

@@ -149,6 +149,12 @@ class MinuteRefreshService:
             return "capability"
         if not _in_continuous_session():
             return "outside_trading_hours"
+        # 节假日 (工作日但休市): 周几门控覆盖不到, 由交易日探针剔除。
+        # 未知 (None) 维持现状 — 空轮升级机制兜底 (探针失灵时的第二道防线)。
+        from app.services import trading_day
+
+        if trading_day.is_trading_day() is False:
+            return "holiday"
         return None
 
     # ------------------------------------------------------------------

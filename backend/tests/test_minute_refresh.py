@@ -79,6 +79,10 @@ def _svc(tmp_path, monkeypatch, *, enabled=True, custom_provider=False, capabili
     svc = MinuteRefreshService(_FakeRepo(["600000.SH"]))
     svc.set_app_state(_FakeAppState(capability))
     monkeypatch.setattr(minute_refresh, "_in_continuous_session", lambda now=None: in_hours)
+    # 交易日探针默认未知 (None → 放行): 隔离真实网络探测, holiday 分支在
+    # test_trading_day.py 单独覆盖
+    from app.services import trading_day
+    monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: None)
     return svc
 
 

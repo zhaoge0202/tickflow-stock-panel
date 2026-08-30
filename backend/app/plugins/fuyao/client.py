@@ -207,6 +207,16 @@ class FuyaoClient:
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
 
+    def trading_days(self) -> list[dict]:
+        """近一年 A 股交易日序列 (固定窗口 [今日-1年, 今日], 无入参)。
+
+        返回 data.item 原始行: {date_ms(上海零点), date(yyyyMMdd)}。
+        供交易日探针判定「今天在列表内 ⇔ 交易日」。
+        """
+        data = self._get("/api/a-share/calendar/trading-days", {})
+        rows = data.get("item")
+        return rows if isinstance(rows, list) else []
+
     # ---- 市场 dump ----
     def dump_download_url(self, dump_kind: str) -> dict:
         """获取 dump 预签名下载信息(约 300s 有效)。

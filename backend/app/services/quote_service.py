@@ -220,6 +220,7 @@ class QuoteService:
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        self._holiday_active = False  # 交易日探针当前是否判休市 (日志去重)
 
     # ================================================================
     # 生命周期
@@ -907,8 +908,29 @@ class QuoteService:
             return (cn_today(), "close")
         return None
 
+    def _holiday_gate(self) -> bool:
+        """交易日探针门控: 确定休市 → False (停止轮询, 含 final 定版)。
+
+        探针未知 (None, 未配置 fuyao 且 tickflow 不可用/开盘缓冲窗内) → True,
+        维持周几近似现状行为。探针是纯读, 不落盘; 休市结论带 TTL 定期复探,
+        误判自愈。首次判定变化打一条日志, 避免每拍刷屏。
+        """
+        from app.services import trading_day
+
+        holiday = trading_day.is_trading_day() is False
+        if holiday != self._holiday_active:
+            self._holiday_active = holiday
+            if holiday:
+                logger.info("交易日探针判定休市, 行情轮询暂停 (30 分钟复探)")
+        return not holiday
+
     def _should_poll_for_phase(self, phase: str) -> bool:
-        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。"""
+        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。
+
+        节假日 (工作日但休市) 由交易日探针剔除 — 周几门控覆盖不到的部分。
+        """
+        if not self._holiday_gate():
+            return False
         if phase in {"preopen", "morning", "pre_afternoon", "afternoon"}:
             return True
         key = self._final_sync_key(phase)
