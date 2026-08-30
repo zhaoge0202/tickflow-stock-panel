@@ -118,25 +118,24 @@ def sync_daily_batch(symbols: list[str],
                     start_time=_datetime_to_ms(start_time),
                     end_time=_datetime_to_ms(end_time),
                     count=10000,
-                    as_dataframe=True, show_progress=False,
+                    as_dataframe=False, show_progress=False,
                 )
             else:
                 raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
-                                      as_dataframe=True, show_progress=False)
+                                      as_dataframe=False, show_progress=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
                            len(chunk), i + 1, len(chunks), e)
             failed_syms.extend(chunk)
             continue
 
-        # 兼容两种形态:dict[sym → df] 和扁平 df
-        if isinstance(raw, dict):
-            for sym, sub in raw.items():
-                if sub is None or len(sub) == 0:
-                    continue
-                out.append(_normalize_daily(sub, default_symbol=sym))
-        elif raw is not None and len(raw) > 0:
-            out.append(_normalize_daily(raw))
+        # False 直转: timestamp(UTC 毫秒) → 北京墙钟 datetime 列,
+        # _normalize_daily 将 datetime 映射为 date — 与 SDK True 路径的
+        # trade_date 字符串列同口径 (fromtimestamp(ts/1000, Asia/Shanghai))。
+        seg = _compact_klines_to_df(raw)
+        if not seg.is_empty():
+            seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")).drop("timestamp")
+            out.append(_normalize_daily(seg))
 
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
@@ -308,8 +307,11 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
     df = df.rename(rename_map)
     if "trade_date" in df.columns:
         if df.schema["trade_date"] in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
+            # 毫秒时间戳 → 北京墙钟日期。不能直接 from_epoch().dt.date():
+            # 那是 UTC 日期, 除权事件时间戳为北京零点 (= UTC 前一日 16:00),
+            # 会整体早一天 (与 SDK True 路径 fromtimestamp(ts/1000, Asia/Shanghai) 不一致)。
             df = df.with_columns(
-                pl.from_epoch(pl.col("trade_date").cast(pl.Int64), time_unit="ms").dt.date().alias("trade_date")
+                _timestamp_to_beijing_datetime(pl.col("trade_date")).dt.date().alias("trade_date")
             )
         else:
             df = df.with_columns(pl.col("trade_date").cast(pl.Date, strict=False))
@@ -377,8 +379,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
         default_rpm_when_unset=False,
     )
 
-    # 构建 SDK 参数
-    sdk_kwargs: dict = {"as_dataframe": True, "batch_size": limit.batch, "show_progress": False}
+    # 构建 SDK 参数 (False: _normalize_adj_factor 的 dict 分支原生支持)
+    sdk_kwargs: dict = {"as_dataframe": False, "batch_size": limit.batch, "show_progress": False}
     if start_time:
         sdk_kwargs["start_time"] = _datetime_to_ms(start_time)
     if end_time:
@@ -577,6 +579,53 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
 
     keep = [c for c in CANONICAL_MINUTE_COLS if c in df.columns]
     return df.select(keep)
+
+
+def _compact_klines_to_df(raw, default_symbol: str | None = None) -> pl.DataFrame:
+    """SDK as_dataframe=False 的 K 线原始数据 (CompactKlineData, 列式) → polars 直转。
+
+    raw 两种形态: {symbol: Compact} (batch/universe) 或顶层 Compact (单标的)。
+    列数组本身就是 polars 的原生形状 — 无 pandas 中转, 也无 SDK True 路径对
+    每根 K 做的 datetime.fromtimestamp + trade_date/trade_time 字符串拼接。
+    这里只搬运原始列 (timestamp 毫秒 Int64 + OHLCV), datetime/类型收口交给
+    _normalize_minute / _normalize_daily — 与 True 路径同一契约。
+    """
+    if isinstance(raw, dict) and "timestamp" in raw:
+        items: list[tuple[str | None, dict]] = [(None, raw)]
+    elif isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        return pl.DataFrame()
+    frames: list[pl.DataFrame] = []
+    for sym, kd in items:
+        if not isinstance(kd, dict):
+            continue
+        ts = kd.get("timestamp") or []
+        if not ts:
+            continue
+        key = sym if sym is not None else default_symbol
+        cols: dict[str, object] = {"timestamp": ts}
+        if key:
+            cols["symbol"] = [key] * len(ts)
+        for field in ("open", "high", "low", "close", "volume", "amount"):
+            values = kd.get(field)
+            if values is not None:
+                cols[field] = values
+        frames.append(pl.DataFrame(cols))
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+
+def _timestamp_to_beijing_datetime(col: pl.Expr) -> pl.Expr:
+    """timestamp (UTC 毫秒) → 北京墙钟 naive datetime 表达式。
+
+    与 SDK True 路径 trade_date 列同口径: datetime.fromtimestamp(ts/1000, Asia/Shanghai)。
+    """
+    return (
+        pl.from_epoch(col.cast(pl.Int64), time_unit="ms")
+        .dt.replace_time_zone("UTC")
+        .dt.convert_time_zone("Asia/Shanghai")
+        .dt.replace_time_zone(None)
+    )
 
 
 def _datetime_to_ms(dt: datetime) -> int:
@@ -786,23 +835,19 @@ def sync_minute_batch(
                         end_time=_datetime_to_ms(cur_end),
                         count=10000,
                         adjust="forward",
-                        as_dataframe=True, show_progress=False,
+                        as_dataframe=False, show_progress=False,
                     )
                 else:
                     raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
                                           adjust="forward",
-                                          as_dataframe=True, show_progress=False)
+                                          as_dataframe=False, show_progress=False)
             except Exception as e:  # noqa: BLE001
                 logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
                 continue
 
-            if isinstance(raw, dict):
-                for sym, sub in raw.items():
-                    if sub is None or len(sub) == 0:
-                        continue
-                    seg_out.append(_normalize_minute(sub, default_symbol=sym))
-            elif raw is not None and len(raw) > 0:
-                seg_out.append(_normalize_minute(raw))
+            seg = _normalize_minute(_compact_klines_to_df(raw))
+            if not seg.is_empty():
+                seg_out.append(seg)
 
             if on_chunk_done:
                 on_chunk_done(step, total_steps, seg_label)
@@ -862,17 +907,6 @@ def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
     }
 
 
-def _normalize_intraday_raw(raw, default_symbol: str | None = None) -> list[pl.DataFrame]:
-    frames: list[pl.DataFrame] = []
-    if isinstance(raw, dict):
-        for symbol, sub in raw.items():
-            if sub is not None and len(sub) > 0:
-                frames.append(_normalize_minute(sub, default_symbol=str(symbol)))
-    elif raw is not None and len(raw) > 0:
-        frames.append(_normalize_minute(raw, default_symbol=default_symbol))
-    return [frame for frame in frames if not frame.is_empty()]
-
-
 def fetch_intraday_monitor_batch(
     symbols: list[str], capset: CapabilitySet | None, *, now: datetime | None = None,
 ) -> pl.DataFrame:
@@ -900,16 +934,20 @@ def fetch_intraday_monitor_batch(
         if source == "intraday_batch":
             limits = capset.limits(Cap.INTRADAY_BATCH) if capset else None
             raw = tf.klines.intraday_batch(
-                symbols, count=300, as_dataframe=True, show_progress=False,
+                symbols, count=300, as_dataframe=False, show_progress=False,
                 batch_size=limits.batch if limits and limits.batch else 100,
             )
-            frames.extend(_normalize_intraday_raw(raw))
+            df = _normalize_minute(_compact_klines_to_df(raw))
         elif source == "intraday_single":
-            raw = tf.klines.intraday(symbols[0], count=300, as_dataframe=True)
-            frames.extend(_normalize_intraday_raw(raw, default_symbol=symbols[0]))
+            raw = tf.klines.intraday(symbols[0], count=300, as_dataframe=False)
+            df = _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbols[0]))
         elif source == "minute_single":
-            raw = tf.klines.get(symbols[0], period="1m", count=300, as_dataframe=True)
-            frames.extend(_normalize_intraday_raw(raw, default_symbol=symbols[0]))
+            raw = tf.klines.get(symbols[0], period="1m", count=300, as_dataframe=False)
+            df = _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbols[0]))
+        else:
+            df = pl.DataFrame()
+        if not df.is_empty():
+            frames.append(df)
     except Exception as e:  # noqa: BLE001
         logger.warning("intraday monitor fetch failed (%s, %d symbols): %s", source, len(symbols), e)
         return pl.DataFrame()
@@ -954,10 +992,11 @@ def fetch_intraday_full_market_burst(
         # 已成功的数据一起拖垮 (pool.map 迭代中抛异常会废弃全部已收 frames)
         try:
             raw = tf.klines.intraday_batch(
-                chunk, count=count, as_dataframe=True, show_progress=False,
+                chunk, count=count, as_dataframe=False, show_progress=False,
                 batch_size=len(chunk),
             )
-            return (_normalize_intraday_raw(raw), None)
+            seg = _normalize_minute(_compact_klines_to_df(raw))
+            return ([seg] if not seg.is_empty() else [], None)
         except Exception as e:
             return ([], e)
 
@@ -1007,17 +1046,22 @@ def fetch_intraday_universe_increment(
     的 intraday.batch 脉冲 (请求量 28→1, 传输量 ~40 倍降)。缺口回补
     (冷启动/长时间断档/全天修复) 仍走 fetch_intraday_full_market_burst。
     返回 (增量分钟K, 请求数); 拉取失败返回空 df 由调用方按失败轮处理。
+
+    as_dataframe=False: raw 的 CompactKlineData 已按列组织 (字段→数组),
+    直接用列数组建 polars 帧 — 无 pandas 中转、无逐行转换、无 _resolve_names
+    名称解析, 全市场单轮本地转换 ~1.1s → ~0.1s。时区/dtype/列序契约
+    复用 _normalize_minute (timestamp→北京墙钟 datetime, 输出 canonical 8 列)。
     """
     tf = get_client()
     try:
-        raw = tf.klines.intraday_universe(universe, count=count, as_dataframe=True)
+        raw = tf.klines.intraday_universe(universe, count=count, as_dataframe=False)
     except Exception as e:
         logger.warning("intraday universe fetch failed (%s): %s", universe, e)
         return (pl.DataFrame(), 0)
-    frames = _normalize_intraday_raw(raw)
-    if not frames:
+    seg = _compact_klines_to_df(raw)
+    if seg.is_empty():
         return (pl.DataFrame(), 0)
-    return (pl.concat(frames, how="diagonal_relaxed"), 1)
+    return (_normalize_minute(seg), 1)
 
 
 def fetch_minute_single(
@@ -1050,18 +1094,13 @@ def fetch_minute_single(
             end_time=_datetime_to_ms(end_time),
             count=10000,
             adjust="forward",
-            as_dataframe=True, show_progress=False,
+            as_dataframe=False, show_progress=False,
         )
     except Exception as e:
         logger.warning("fetch_minute_single(%s, %s) failed: %s", symbol, trade_date, e)
         return pl.DataFrame()
 
-    if isinstance(raw, dict):
-        sub = raw.get(symbol)
-        return _normalize_minute(sub) if sub is not None and len(sub) > 0 else pl.DataFrame()
-    if raw is not None and len(raw) > 0:
-        return _normalize_minute(raw)
-    return pl.DataFrame()
+    return _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbol))
 
 
 def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
@@ -1072,7 +1111,7 @@ def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
     """
     tf = get_client()
     try:
-        raw = tf.klines.ex_factors([symbol], as_dataframe=True, show_progress=False)
+        raw = tf.klines.ex_factors([symbol], as_dataframe=False, show_progress=False)
     except Exception as e:  # noqa: BLE001
         logger.warning("fetch_adj_factor_single(%s) failed: %s", symbol, e)
         return pl.DataFrame()

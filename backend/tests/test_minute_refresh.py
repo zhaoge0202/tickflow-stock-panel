@@ -272,12 +272,12 @@ def test_refresh_preferences_defaults_and_clamp(tmp_path, monkeypatch):
     preferences.save({"minute_refresh_interval": 1})
     assert preferences.get_minute_refresh_interval() == 3  # 下限
     preferences.save({"minute_refresh_interval": 999})
-    assert preferences.get_minute_refresh_interval() == 300  # 上限
+    assert preferences.get_minute_refresh_interval() == 120  # 上限
     preferences.save({"minute_refresh_interval": 15})
     assert preferences.get_minute_refresh_interval() == 15
 
 def test_realtime_monitor_config_owns_refresh_keys(tmp_path, monkeypatch):
-    """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [3,300]。"""
+    """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [3,120]。"""
     _isolated_prefs(tmp_path, monkeypatch)
     saved = preferences.set_realtime_monitor_config({
         "minute_refresh_enabled": True,
@@ -286,7 +286,7 @@ def test_realtime_monitor_config_owns_refresh_keys(tmp_path, monkeypatch):
     assert saved["minute_refresh_enabled"] is True
     assert saved["minute_refresh_interval"] == 3
     saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 400})
-    assert saved["minute_refresh_interval"] == 300
+    assert saved["minute_refresh_interval"] == 120
     saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 6})
     assert saved["minute_refresh_interval"] == 6
 
