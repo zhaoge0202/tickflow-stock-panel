@@ -1260,7 +1260,10 @@ class MonitorRuleEngine:
                 pool_key, "buy_signal", result.as_of, entry_signal_hits,
             ),
             "sell_signal": self._new_strategy_signals(
-                pool_key, "sell_signal", result.as_of, result.exit_signal_hits,
+                pool_key,
+                "sell_signal",
+                result.as_of,
+                self._sell_hits_for_tracked_symbols(sid, prev_pool, result.exit_signal_hits),
             ),
             "pool_entry": set() if prev_pool is None else current_pool - prev_pool,
             "pool_exit": set() if prev_pool is None else prev_pool - current_pool,
@@ -1316,6 +1319,39 @@ class MonitorRuleEngine:
                 ))
 
         return results
+
+    def _sell_hits_for_tracked_symbols(
+        self,
+        strategy_id: str,
+        previous_pool: set[str] | None,
+        hits: list[dict],
+    ) -> list[dict]:
+        """卖出提醒只针对历史候选或用户明确跟踪的股票。
+
+        策略的退出条件可以在全市场任意股票上成立，但把它们全部推送会在
+        盘中造成卖出消息洪水。用户持仓和策略页买入标记作为两个显式例外。
+        """
+        tracked = set(previous_pool or ())
+        if self._data_dir:
+            try:
+                from app.services import manual_positions, strategy_purchase_marks
+
+                tracked.update(
+                    str(row.get("symbol") or "").strip().upper()
+                    for row in manual_positions.load_all(self._data_dir)
+                    if row.get("symbol")
+                )
+                tracked.update(
+                    str(row.get("symbol") or "").strip().upper()
+                    for row in strategy_purchase_marks.load_all(self._data_dir)
+                    if row.get("strategy_id") == strategy_id and row.get("symbol")
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("读取策略跟踪股票失败 %s: %s", strategy_id, exc)
+        return [
+            hit for hit in hits
+            if str(hit.get("symbol") or "").strip().upper() in tracked
+        ]
 
     def _new_strategy_signals(
         self,

@@ -1524,6 +1524,13 @@ class QuoteService:
                             )
                         except Exception as e:
                             logger.warning("告警落盘失败: %s", e)
+                        try:
+                            from app.services import strategy_history
+                            strategy_history.record_monitor_events(
+                                self._app_state.repo.store.data_dir, rule_events,
+                            )
+                        except Exception as e:
+                            logger.warning("策略节点历史记录失败: %s", e)
                         # 转为 SSE 推送格式 (兼容旧 alert schema)
                         for ev in rule_events:
                             alert = {

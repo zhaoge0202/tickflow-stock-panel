@@ -42,6 +42,7 @@ from app.api import (
     signal_frame,
     stock_analysis,
     strategy,
+    strategy_history,
     strategy_purchase_marks,
     trade_ticks,
     watchlist,
@@ -544,6 +545,7 @@ app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
+app.include_router(strategy_history.router)
 app.include_router(strategy_purchase_marks.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)

@@ -1,6 +1,7 @@
 """Preselect candidates for next-day auction confirmation."""
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -28,6 +29,7 @@ MAX_LIMIT_PER_STRATEGY = 30
 _CACHE_TTL_SECONDS = 60.0
 _preselect_cache_lock = threading.Lock()
 _preselect_cache: dict[tuple[Any, ...], tuple[float, dict]] = {}
+logger = logging.getLogger(__name__)
 
 
 def build_preselect_payload(
@@ -143,6 +145,23 @@ def build_preselect_payload(
 
     payload = {**base, "status": "ready", "results": results}
     _cache_set(cache_key, payload)
+    try:
+        from app.services import strategy_history
+
+        for sid, item in results.items():
+            strategy = engine.get(sid)
+            strategy_name = (strategy.meta.get("name") if strategy else None) or sid
+            strategy_history.record_selection_snapshot(
+                data_dir,
+                strategy_id=sid,
+                strategy_name=strategy_name,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+                mode="preselect",
+                rows=item.get("rows") or [],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("盘后预选历史记录失败: %s", exc)
     return payload
 
 

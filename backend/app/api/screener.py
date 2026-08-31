@@ -5,7 +5,6 @@ import glob as _glob
 import logging
 import math
 import os
-import re
 import time
 from dataclasses import asdict
 from datetime import date, datetime
@@ -16,8 +15,8 @@ from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache
-from app.services.auction_preselect import build_preselect_payload
 from app.services.auction_confirmation import confirm_cached_strategy_results
+from app.services.auction_preselect import build_preselect_payload
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
@@ -245,6 +244,30 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
         strategy_cache.write_cache(data_dir, as_of, results)
 
 
+def _record_strategy_selections(
+    data_dir,
+    engine,
+    signal_date: str,
+    results: dict[str, dict],
+) -> None:
+    """把正式日线选股结果写入生命周期历史，不影响缓存主流程。"""
+    try:
+        from app.services import strategy_history
+
+        for sid, result in results.items():
+            strategy = engine.get(sid)
+            strategy_name = (strategy.meta.get("name") if strategy else None) or sid
+            strategy_history.record_selection_snapshot(
+                data_dir,
+                strategy_id=sid,
+                strategy_name=strategy_name,
+                signal_date=signal_date,
+                rows=result.get("rows") or [],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("策略候选历史记录失败: %s", exc)
+
+
 @router.get("/strategies")
 def strategies(
     request: Request,
@@ -341,6 +364,12 @@ def run_preset(req: PresetRequest, request: Request):
     # 混入分钟结果会污染页面秒加载路径)。
     if req.timeframe == "1d":
         _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+        _record_strategy_selections(
+            data_dir,
+            engine,
+            str(as_of),
+            {req.strategy_id: safe_data},
+        )
 
     return _result_with_ext(safe_data, ext_values)
 
@@ -1173,6 +1202,7 @@ def run_all(request: Request, body: Optional[dict] = None):
             strategy_cache.write_cache(data_dir, str(as_of), results)
         except Exception:  # noqa: BLE001
             pass
+        _record_strategy_selections(data_dir, engine, str(as_of), results)
 
     if body.get("summary_only"):
         return {

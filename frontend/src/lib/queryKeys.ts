@@ -52,6 +52,8 @@ export const QK = {
     ['screener-preselect', asOf ?? '', tradeDate ?? '', strategyIds ?? '', limitPerStrategy ?? 5, ext ?? ''] as const,
   screenerAuctionReplay: (asOf?: string, tradeDate?: string, strategyIds?: string, asOfTs?: number | 'live', mode?: string) =>
     ['screener-auction-replay', asOf ?? '', tradeDate ?? '', strategyIds ?? '', asOfTs ?? 'live', mode ?? 'cache_replay'] as const,
+  strategyHistory: (strategyId?: string, days: number = 180) =>
+    ['strategy-history', strategyId ?? '', days] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       (asOf?: string | null, asOfTs?: number | 'live' | null) =>
                            ['market-snapshot', asOf ?? 'latest', asOfTs ?? 'latest'] as const,

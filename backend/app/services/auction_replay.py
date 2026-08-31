@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.market_time import cn_today
-from app.services import quote_tick_store
+from app.services import quote_tick_store, strategy_cache
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ def replay_dynamic_strategy_results(
             asset_type=asset_type,
             timeframe=timeframe,
         )
-        return {
+        payload = {
             **_dynamic_payload_base(_dynamic_status(frame, quality), signal_date, trade_day, now),
             "timeline": timeline,
             "frame": frame,
@@ -281,6 +281,18 @@ def replay_dynamic_strategy_results(
             "data_quality": _dynamic_quality(quality, frame),
             "frame_mode": "single_as_of",
         }
+        _record_dynamic_history(
+            data_dir,
+            engine=engine,
+            signal_date=signal_date,
+            trade_day=trade_day,
+            final_frame=frame,
+            classified=classified,
+            final_ts=int(as_of_ts),
+            requested_ids=requested_ids,
+            params_map=params_map,
+        )
+        return payload
 
     frames = []
     if include_frames:
@@ -326,7 +338,7 @@ def replay_dynamic_strategy_results(
         timeframe=timeframe,
         point=final_point,
     )
-    return {
+    payload = {
         **_dynamic_payload_base(_dynamic_status(final_frame, quality), signal_date, trade_day, now),
         "timeline": timeline,
         "frames": frames,
@@ -337,6 +349,243 @@ def replay_dynamic_strategy_results(
         "frames_truncated": include_frames and len(timeline) > max_frames,
         "max_frames": max_frames,
     }
+    _record_dynamic_history(
+        data_dir,
+        engine=engine,
+        signal_date=signal_date,
+        trade_day=trade_day,
+        final_frame=final_frame,
+        classified=classified,
+        final_ts=final_ts,
+        requested_ids=requested_ids,
+        params_map=params_map,
+    )
+    return payload
+
+
+def _record_dynamic_history(
+    data_dir: Path,
+    *,
+    engine,
+    signal_date: date,
+    trade_day: date,
+    final_frame: dict,
+    classified: dict,
+    final_ts: int,
+    requested_ids: list[str],
+    params_map: dict[str, dict],
+) -> None:
+    """把盘后候选与收盘前动态结果对齐，记录确认或淘汰原因。
+
+    竞价窗口尚未结束时不写淘汰结论，避免股票在 09:25~09:30 的波动被过早
+    固化。动态请求在确认窗口结束后，才把最终状态写入历史。
+    """
+    trade_end_ts = _window_start_ms(trade_day, TRADE_END)
+    # 当前日的动态重算使用的是盘中实时 bar，不对应“前一交易日候选→次日确认”
+    # 生命周期；只有 signal_date < trade_day 的跨日确认才落盘。
+    if signal_date >= trade_day:
+        return
+    if final_ts < trade_end_ts - 1:
+        return
+    cached = strategy_cache.read_cache(data_dir)
+    if not isinstance(cached, dict) or str(cached.get("as_of") or "") != signal_date.isoformat():
+        return
+    cache_results = cached.get("results") or {}
+    if not isinstance(cache_results, dict):
+        return
+
+    from app.services import strategy_history
+
+    auction_map = _latest_by_symbol(
+        classified.get("auction_rows") or [],
+        as_of_ts=min(final_ts, _window_start_ms(trade_day, AUCTION_END) - 1),
+    )
+    trade_map = _latest_by_symbol(
+        classified.get("trade_rows") or [],
+        as_of_ts=final_ts,
+    )
+    events: list[dict] = []
+    selection_records: list[tuple[str, str, list[dict]]] = []
+    for sid in requested_ids:
+        raw = cache_results.get(sid)
+        if not isinstance(raw, dict) or str(raw.get("as_of") or "") != signal_date.isoformat():
+            continue
+        base_rows = [row for row in raw.get("rows") or [] if isinstance(row, dict)]
+        strategy = engine.get(sid) if hasattr(engine, "get") else None
+        strategy_meta = getattr(strategy, "meta", {}) or {}
+        strategy_name = strategy_meta.get("name") or sid
+        selection_records.append((sid, strategy_name, base_rows))
+        dynamic = (final_frame.get("results") or {}).get(sid) or {}
+        candidate_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in dynamic.get("dual_rows") or []
+            if row.get("symbol")
+        }
+        confirmed_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in dynamic.get("rows") or []
+            if row.get("symbol")
+        }
+        for base_row in base_rows:
+            symbol = str(base_row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            auction_row = auction_map.get(symbol)
+            trade_row = trade_map.get(symbol)
+            if symbol in confirmed_symbols:
+                events.append(_outcome_event(
+                    event_type="auction_confirmed",
+                    status="confirmed",
+                    strategy_id=sid,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    base_row=base_row,
+                    signal_date=signal_date,
+                    trade_day=trade_day,
+                    reason_code="auction_confirmed",
+                    reason="竞价和开盘动态确认通过",
+                    auction_row=auction_row,
+                    trade_row=trade_row,
+                ))
+                continue
+            if symbol in candidate_symbols and (auction_row is None or trade_row is None):
+                reason_code = (
+                    "auction_data_incomplete"
+                    if auction_row is None
+                    else "open_snapshot_incomplete"
+                )
+                reason = "竞价或开盘快照不完整，暂未形成最终确认"
+            else:
+                reason_code, reason = _dynamic_rejection_reason(
+                    sid,
+                    base_row,
+                    auction_row,
+                    trade_row,
+                    params_map.get(sid) or {},
+                )
+            events.append(_outcome_event(
+                event_type="auction_rejected",
+                status="rejected",
+                strategy_id=sid,
+                strategy_name=strategy_name,
+                symbol=symbol,
+                base_row=base_row,
+                signal_date=signal_date,
+                trade_day=trade_day,
+                reason_code=reason_code,
+                reason=reason,
+                auction_row=auction_row,
+                trade_row=trade_row,
+            ))
+    try:
+        for sid, strategy_name, rows in selection_records:
+            strategy_history.record_selection_snapshot(
+                data_dir,
+                strategy_id=sid,
+                strategy_name=strategy_name,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+                rows=rows,
+            )
+        strategy_history.record_auction_outcomes(data_dir, events)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("竞价结果历史记录失败: %s", exc)
+
+
+def _outcome_event(
+    *,
+    event_type: str,
+    status: str,
+    strategy_id: str,
+    strategy_name: str,
+    symbol: str,
+    base_row: dict,
+    signal_date: date,
+    trade_day: date,
+    reason_code: str,
+    reason: str,
+    auction_row: dict | None,
+    trade_row: dict | None,
+) -> dict:
+    auction_price = _snapshot_price(auction_row) if auction_row else None
+    trade_price = _snapshot_price(trade_row) if trade_row else None
+    observed = trade_row or auction_row or {}
+    event_key = (
+        f"auction:{event_type}:{strategy_id}:{symbol}:"
+        f"{signal_date.isoformat()}:{trade_day.isoformat()}"
+    )
+    return {
+        "event_key": event_key,
+        "event_type": event_type,
+        "status": status,
+        "strategy_id": strategy_id,
+        "strategy_name": strategy_name,
+        "symbol": symbol,
+        "name": base_row.get("name") or observed.get("name"),
+        "signal_date": signal_date.isoformat(),
+        "trade_date": trade_day.isoformat(),
+        "phase": "open_confirm",
+        "price": trade_price or auction_price,
+        "change_pct": _float_or_none(observed.get("change_pct")),
+        "score": base_row.get("score"),
+        "signals": base_row.get("signals") or [],
+        "reason_code": reason_code,
+        "reason": reason,
+        "metadata": {
+            "base_price": base_row.get("close"),
+            "base_change_pct": base_row.get("change_pct"),
+            "auction_price": auction_price,
+            "open_confirm_price": trade_price,
+            "auction_event_ts": int((auction_row or {}).get("event_ts") or 0) or None,
+            "open_confirm_event_ts": int((trade_row or {}).get("event_ts") or 0) or None,
+        },
+    }
+
+
+def _dynamic_rejection_reason(
+    strategy_id: str,
+    base_row: dict,
+    auction_row: dict | None,
+    trade_row: dict | None,
+    params: dict,
+) -> tuple[str, str]:
+    if auction_row is None:
+        return "auction_data_missing", "未取得 09:25 前竞价快照，无法确认"
+    if trade_row is None:
+        return "open_snapshot_missing", "未取得 09:25~09:30 开盘快照，无法确认"
+    base_price = _float_or_none(base_row.get("close"))
+    auction_price = _snapshot_price(auction_row)
+    trade_price = _snapshot_price(trade_row)
+    if base_price in (None, 0) or auction_price is None or trade_price is None:
+        return "dynamic_data_invalid", "竞价/开盘价格数据不完整，未形成确认"
+
+    open_value = _positive_float(trade_row.get("open")) or auction_price
+    open_gap = open_value / base_price - 1.0
+    current_change = trade_price / base_price - 1.0
+    if strategy_id in {"custom_dual_edge", "custom_dual_edge_focus", "custom_dual_edge_prime"}:
+        default_gap_max = 4.0 if strategy_id == "custom_dual_edge_prime" else 3.5
+        gap_min = float(params.get("gap_min", 2.0)) / 100.0
+        gap_max = float(params.get("gap_max", default_gap_max)) / 100.0
+        min_change = float(params.get("auction_min_change", 3.5)) / 100.0
+        if open_gap < gap_min:
+            return (
+                "auction_gap_failed",
+                f"竞价开盘 {open_gap * 100:+.2f}%，"
+                f"低于最低高开 {gap_min * 100:.1f}%",
+            )
+        if open_gap > gap_max:
+            return (
+                "auction_gap_failed",
+                f"竞价开盘 {open_gap * 100:+.2f}%，"
+                f"超过最高高开 {gap_max * 100:.1f}%",
+            )
+        if current_change < min_change:
+            return (
+                "auction_strength_failed",
+                f"开盘后涨跌 {current_change * 100:+.2f}%，"
+                f"低于最低收涨 {min_change * 100:.1f}%",
+            )
+    return "dynamic_strategy_rejected", "竞价/开盘动态重算后未满足该策略条件"
 
 
 def _empty_dynamic_payload(

@@ -458,6 +458,42 @@ export interface ScreenerPreselectResponse {
   results: Record<string, ScreenerPreselectResult>
 }
 
+export type StrategyHistoryEventType =
+  | 'selected'
+  | 'preselect'
+  | 'auction_confirmed'
+  | 'auction_rejected'
+  | 'buy_signal'
+  | 'sell_signal'
+  | 'pool_entry'
+  | 'pool_exit'
+
+export interface StrategyHistoryEvent {
+  ts: number
+  event_key: string
+  event_type: StrategyHistoryEventType
+  status?: string | null
+  strategy_id: string
+  strategy_name?: string
+  symbol: string
+  name?: string | null
+  signal_date: string
+  trade_date?: string | null
+  phase?: string | null
+  price?: number | null
+  change_pct?: number | null
+  score?: number | null
+  signals?: string[]
+  reason_code?: string | null
+  reason?: string
+  metadata?: Record<string, any>
+}
+
+export interface StrategyHistoryResponse {
+  events: StrategyHistoryEvent[]
+  total: number
+}
+
 export interface AuctionReplayStrategyResult {
   strategy: string
   as_of: string
@@ -3889,6 +3925,29 @@ export const api = {
       signal_date: signalDate,
     })
     return request<{ ok: boolean }>(`/api/strategy-purchase-marks?${qs.toString()}`, { method: 'DELETE' })
+  },
+
+  strategyHistory: (params?: {
+    strategyId?: string
+    symbol?: string
+    signalDate?: string
+    tradeDate?: string
+    eventType?: string
+    status?: string
+    days?: number
+    limit?: number
+  }) => {
+    const qs = new URLSearchParams()
+    if (params?.strategyId) qs.set('strategy_id', params.strategyId)
+    if (params?.symbol) qs.set('symbol', params.symbol)
+    if (params?.signalDate) qs.set('signal_date', params.signalDate)
+    if (params?.tradeDate) qs.set('trade_date', params.tradeDate)
+    if (params?.eventType) qs.set('event_type', params.eventType)
+    if (params?.status) qs.set('status', params.status)
+    if (params?.days) qs.set('days', String(params.days))
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<StrategyHistoryResponse>(`/api/strategy-history${suffix ? `?${suffix}` : ''}`)
   },
 
   marketBreadthLatest: () =>

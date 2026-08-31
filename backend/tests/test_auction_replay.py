@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from app.api import replay as replay_api
-from app.services import auction_replay, quote_tick_store, strategy_cache
+from app.services import auction_replay, quote_tick_store, strategy_cache, strategy_history
 from app.strategy.engine import StrategyResult
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -442,3 +442,84 @@ def test_auction_dynamic_recomputes_after_trade_snapshot(monkeypatch, tmp_path):
     assert after_result["rows"][0]["auction_event_time"] == "09:24:30"
     assert after_result["rows"][0]["open_confirm_time"] == "09:25:03"
     assert after_result["rows"][0]["amount"] > after_result["rows"][0]["open_confirm_amount"]
+
+
+def test_dynamic_rejection_reason_reports_low_open_gap():
+    reason_code, reason = auction_replay._dynamic_rejection_reason(
+        "custom_dual_edge_focus",
+        {"close": 9.11},
+        {"last_price": 8.95},
+        {"last_price": 8.95, "open": 8.95},
+        {},
+    )
+
+    assert reason_code == "auction_gap_failed"
+    assert "-1.76%" in reason
+    assert "最低高开 2.0%" in reason
+
+
+def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
+    strategy_cache.write_cache(
+        tmp_path,
+        SIGNAL_DATE.isoformat(),
+        {
+            "custom_dual_edge_focus": {
+                "as_of": SIGNAL_DATE.isoformat(),
+                "total": 1,
+                "rows": [{
+                    "symbol": "002758.SZ",
+                    "name": "浙农股份",
+                    "close": 9.11,
+                    "score": 88.0,
+                }],
+            },
+        },
+    )
+
+    class _HistoryEngine:
+        def get(self, strategy_id):
+            assert strategy_id == "custom_dual_edge_focus"
+            return type("Strategy", (), {"meta": {"name": "双刃合-Focus"}})()
+
+    auction_ts = _ms(9, 24, 50)
+    trade_ts = _ms(9, 25, 3)
+    auction_replay._record_dynamic_history(
+        tmp_path,
+        engine=_HistoryEngine(),
+        signal_date=SIGNAL_DATE,
+        trade_day=TRADE_DATE,
+        final_frame={
+            "results": {
+                "custom_dual_edge_focus": {
+                    "rows": [],
+                    "dual_rows": [],
+                },
+            },
+        },
+        classified={
+            "auction_rows": [{
+                "symbol": "002758.SZ",
+                "event_ts": auction_ts,
+                "last_price": 8.95,
+            }],
+            "trade_rows": [{
+                "symbol": "002758.SZ",
+                "event_ts": trade_ts,
+                "last_price": 8.95,
+                "open": 8.95,
+            }],
+        },
+        final_ts=_ms(9, 29, 59, 999),
+        requested_ids=["custom_dual_edge_focus"],
+        params_map={"custom_dual_edge_focus": {}},
+    )
+
+    events = strategy_history.list_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+        symbol="002758.SZ",
+    )
+    assert [event["event_type"] for event in events] == ["auction_rejected", "selected"]
+    assert events[0]["reason_code"] == "auction_gap_failed"
+    assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 2.0%"
+    assert events[1]["strategy_name"] == "双刃合-Focus"
