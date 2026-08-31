@@ -3,7 +3,8 @@
 集中管理全市场行情拉取 + enriched 缓存, 供盘中选股、自选股等所有模块复用。
 
 架构:
-  - 后台线程轮询 TickFlow get_by_universes(["CN_Equity_A", "CN_Index"])
+  - 后台线程轮询 TickFlow get_by_universes(["CN_Equity_A", "CN_ETF"]) + 核心指数按码拉取
+    (自定义源走 provider.get_realtime() + 可选 get_realtime_indices() 指数补充)
   - 拉取行情 → 写 kline_daily (不复权) + 增量计算 enriched → 写盘 + 更新缓存
   - _enriched_cache 是唯一的盘中数据源 (OHLCV + 全套技术指标)
   - _live_agg_cache 是递推状态 (只加载一次, 盘中不变)
@@ -29,13 +30,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
-from datetime import date, time as dt_time
+from datetime import date, datetime, time as dt_time
 from typing import ClassVar
 
 import polars as pl
 
 from app.market_time import cn_now, cn_today, is_trading_weekday
 from app.parquet import scan_daily_parquet
+from app.services.index_const import CORE_INDEX_SYMBOLS as DEFAULT_CORE_INDEX_SYMBOLS
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +201,7 @@ def _monitor_name_map(repo) -> dict[str, str]:
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
-    CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
+    CORE_INDEX_SYMBOLS = DEFAULT_CORE_INDEX_SYMBOLS
 
     # 档位 → 最小轮询间隔 (秒)
     TIER_MIN_INTERVAL: ClassVar[dict[str, float]] = {
@@ -211,6 +213,8 @@ class QuoteService:
     PROVIDER_MIN_INTERVAL: ClassVar[dict[str, float]] = {
         "tdxapi": 3.0,
     }
+    # 插件/自定义源: 不受 TickFlow 档位保护约束, 通用下限 1s (默认间隔仍为 DEFAULT_INTERVAL)
+    CUSTOM_PROVIDER_MIN_INTERVAL = 1.0
     DEFAULT_INTERVAL = 6.0
     MAX_INTERVAL = 60.0
 
@@ -253,6 +257,18 @@ class QuoteService:
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        self._holiday_active = False  # 交易日探针当前是否判休市 (日志去重)
+        # 轮询放量 (volume_delta 规则): 上一轮全市场股票快照的 (累计成交量[手], 累计成交额[元])。
+        # 每轮全量快照后更新 (含非连续竞价时段, 保证 13:00 恢复时 prev 是 12:59
+        # 而非 11:30); 跨交易日清空; cur < prev (数据源重置) 时丢弃该轮差值。
+        self._prev_stock_volume: dict[str, tuple[float, float]] | None = None
+        self._prev_volume_fetched_at: float | None = None   # epoch 毫秒
+        self._prev_volume_date: date | None = None
+        # 最近一轮的有效差值 (vol_delta[手], amt_delta[元]) - 仅连续竞价时段内、
+        # prev 不早于本时段开盘时计算
+        self._volume_delta: dict[str, tuple[float, float]] = {}
+        self._volume_delta_span_s: float = 0.0
+
     # ================================================================
     # 生命周期
     # ================================================================
@@ -460,15 +476,18 @@ class QuoteService:
 
     @classmethod
     def realtime_mode(cls) -> str:
-        """当前实时行情模式: none / watchlist / full_market。"""
+        """当前实时行情模式: none / full_market。
+
+        TickFlow 免费档不再提供"自选前 5 只"降级实时(自定义源 fuyao 的全市场
+        快照已全面覆盖且免费); TickFlow 免费档 = 无实时, 接入自定义实时源
+        (如 fuyao)或升级 TickFlow 后恢复全市场模式。
+        """
         from app.services import preferences
         if preferences.get_realtime_data_provider() != "tickflow":
             return "full_market"
         tier = cls._current_tier()
-        if tier == "none":
+        if tier in ("none", "free"):
             return "none"
-        if tier == "free":
-            return "watchlist"
         return "full_market"
 
     @classmethod
@@ -482,6 +501,11 @@ class QuoteService:
         provider = preferences.get_realtime_data_provider()
         if provider in cls.PROVIDER_MIN_INTERVAL:
             return cls.PROVIDER_MIN_INTERVAL[provider]
+        # 实时源路由到插件/自定义源时, TickFlow 档位限速不适用 (中立能力原则):
+        # 下限放宽到通用 1s, 默认/已保存间隔不变
+        from app.services import preferences
+        if preferences.get_realtime_data_provider() != "tickflow":
+            return cls.CUSTOM_PROVIDER_MIN_INTERVAL
         tier = cls._current_tier()
         return cls.TIER_MIN_INTERVAL.get(tier, cls.DEFAULT_INTERVAL)
 
@@ -535,7 +559,6 @@ class QuoteService:
 
     def status(self) -> dict:
         """返回行情服务状态。"""
-        from app.services import preferences
         age = (time.perf_counter() - self._fetch_time) * 1000 if self._fetch_time else -1
         mode = self.realtime_mode()
         phase = self._market_phase()
@@ -548,7 +571,6 @@ class QuoteService:
             "paused": self._paused,
             "mode": mode,
             "realtime_allowed": mode != "none",
-            "watchlist_symbol_count": len(preferences.get_realtime_watchlist_symbols()),
             "interval_s": self._interval,
             "symbol_count": self._symbol_count,
             "index_symbol_count": self._index_symbol_count,
@@ -663,7 +685,7 @@ class QuoteService:
                 waited += 0.5
 
     def _fetch_quotes(self, *, final: bool = False) -> bool:
-        """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
+        """拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
         with self._fetch_lock:
             before = self._fetched_at
             if final:
@@ -691,8 +713,18 @@ class QuoteService:
                     supplement_symbols = self._custom_realtime_supplement_symbols()
                     if supplement_symbols and self._provider_accepts_realtime_symbols(provider):
                         records.extend(provider.get_realtime(symbols=supplement_symbols) or [])
+                    # 指数补充: A 股快照通常不含指数。插件可选实现
+                    # get_realtime_indices(symbols) 用独立端点补拉 (如 fuyao 指数快照);
+                    # 未实现的源指数缓存为空, 由日K兜底接管。
+                    fetch_indices = getattr(provider, "get_realtime_indices", None)
+                    if callable(fetch_indices):
+                        wanted = sorted(set(DEFAULT_CORE_INDEX_SYMBOLS) | self._collect_monitor_index_symbols())
+                        try:
+                            records.extend(fetch_indices(wanted) or [])
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("自定义源指数行情拉取失败: %s", e)
                     records = self._dedupe_quote_records(records)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
                 self._process_full_market_records(records, t0=t0, now_ts=now_ts)
@@ -711,15 +743,10 @@ class QuoteService:
         try:
             from app.services import preferences
             all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-            core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+            core_index_symbols = set(DEFAULT_CORE_INDEX_SYMBOLS)
             all_index_symbols.update(core_index_symbols)
-            # 指数监控规则标的并入轮询 (mode=core 时 quotes.get 显式拉取覆盖; mode=all 被 CN_Index 全覆盖)
-            monitor_index_symbols: set[str] = set()
-            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-            if engine:
-                for _r in list(engine.rules.values()):
-                    if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
-                        monitor_index_symbols.update(s for s in _r.get("symbols", []) if s)
+            # 指数监控规则标的并入显式拉取 (quotes.get 按码覆盖)
+            monitor_index_symbols = self._collect_monitor_index_symbols()
             all_index_symbols.update(monitor_index_symbols)
             all_etf_symbols = set()
             if self._repo:
@@ -732,8 +759,6 @@ class QuoteService:
                 universes.append("CN_Equity_A")
             if preferences.get_realtime_pull_etf() and all_etf_symbols:
                 universes.append("CN_ETF")
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "all":
-                universes.append("CN_Index")
 
             resp = []
             if universes:
@@ -741,9 +766,10 @@ class QuoteService:
                 logger.info("拉取全市场行情 (universes=%s, SDK超时=30sx重试3)", universes)
                 resp.extend(tf.quotes.get_by_universes(universes=universes) or [])
                 logger.info("全市场行情拉取完成: %d 条 (%.2fs)", len(resp), time.perf_counter() - _u0)
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "core":
+            # 指数: 固定核心四只 + 监控规则标的, 按码显式拉取
+            _core_syms = sorted(core_index_symbols | monitor_index_symbols)
+            if _core_syms:
                 _i0 = time.perf_counter()
-                _core_syms = sorted(core_index_symbols | monitor_index_symbols)
                 resp.extend(tf.quotes.get(symbols=_core_syms) or [])
                 logger.info("核心指数行情拉取完成: %d 只 (%.2fs)", len(_core_syms), time.perf_counter() - _i0)
         except Exception as e:
@@ -790,9 +816,8 @@ class QuoteService:
 
     def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
         """把全市场 records 写盘并增量计算 enriched。"""
-        from app.services import preferences
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-        core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+        core_index_symbols = set(DEFAULT_CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
         all_etf_symbols = set()
         if self._repo:
@@ -829,6 +854,8 @@ class QuoteService:
 
         # MySQL 最新快照 + 关注标的 quote_ticks 先写; 之后不再需要完整 records 列表。
         self._append_quote_ticks_if_tdxapi(records)
+        # 轮询放量状态更新 (volume_delta 规则的差值来源)
+        self._update_volume_delta(stock_records, fetched_at)
         del records
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
@@ -863,28 +890,22 @@ class QuoteService:
         quote_extra = self._build_quote_extra(stock_records)
         etf_quote_extra = self._build_quote_extra(etf_records)
         # dict 列表已转成 Polars, 尽早释放, 降低与 enriched 计算重叠的峰值。
-        del stock_records, etf_records, index_records
-
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
         if not etf_daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
         # ---- 指数: 仅有指数监控规则时才写盘 (无规则零成本) ----
-        # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
+        # 指数为按码显式拉取 (部分标的) → merge 不截断分区
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine and engine.has_asset_rules("index") and self._repo and flush_daily_today:
             index_daily_df = self._build_daily(index_records)
             if not index_daily_df.is_empty():
-                use_flush = preferences.get_realtime_index_mode() == "all"
                 try:
-                    if use_flush:
-                        self._repo.flush_live_daily_asset("index", index_daily_df)
-                    else:
-                        self._repo.merge_live_daily_asset("index", index_daily_df)
+                    self._repo.merge_live_daily_asset("index", index_daily_df)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("指数日K写盘失败: %s", e)
-                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=not use_flush)
+                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -1104,11 +1125,16 @@ class QuoteService:
         """自定义实时源显式补拉指数, 避免核心指数被全市场快照遗漏。"""
         from app.services import preferences
 
-        if not preferences.get_realtime_pull_index():
+        get_pull_index = getattr(preferences, "get_realtime_pull_index", lambda: True)
+        if not get_pull_index():
             return []
 
-        symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
-        if preferences.get_realtime_index_mode() == "all" and self._repo:
+        get_index_symbols = getattr(
+            preferences, "get_realtime_index_symbols", lambda: self.CORE_INDEX_SYMBOLS,
+        )
+        symbols = set(get_index_symbols() or self.CORE_INDEX_SYMBOLS)
+        get_index_mode = getattr(preferences, "get_realtime_index_mode", lambda: "core")
+        if get_index_mode() == "all" and self._repo:
             symbols.update(self._repo.get_index_symbol_set())
         return sorted(symbols)
 
@@ -1203,6 +1229,16 @@ class QuoteService:
             else:
                 stock_records.append(r)
         return index_records, etf_records, stock_records
+    def _collect_monitor_index_symbols(self) -> set[str]:
+        """启用中的指数监控规则标的 (asset_type=index & scope=symbols)。"""
+        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+        if not engine:
+            return set()
+        out: set[str] = set()
+        for _r in list(engine.rules.values()):
+            if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
+                out.update(s for s in _r.get("symbols", []) if s)
+        return out
 
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
@@ -1327,8 +1363,29 @@ class QuoteService:
             return (cn_today(), "close")
         return None
 
+    def _holiday_gate(self) -> bool:
+        """交易日探针门控: 确定休市 → False (停止轮询, 含 final 定版)。
+
+        探针未知 (None, 未配置 fuyao 且 tickflow 不可用/开盘缓冲窗内) → True,
+        维持周几近似现状行为。探针是纯读, 不落盘; 休市结论带 TTL 定期复探,
+        误判自愈。首次判定变化打一条日志, 避免每拍刷屏。
+        """
+        from app.services import trading_day
+
+        holiday = trading_day.is_trading_day() is False
+        if holiday != self._holiday_active:
+            self._holiday_active = holiday
+            if holiday:
+                logger.info("交易日探针判定休市, 行情轮询暂停 (30 分钟复探)")
+        return not holiday
+
     def _should_poll_for_phase(self, phase: str) -> bool:
-        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。"""
+        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。
+
+        节假日 (工作日但休市) 由交易日探针剔除 — 周几门控覆盖不到的部分。
+        """
+        if not self._holiday_gate():
+            return False
         if phase in {"preopen", "morning", "pre_afternoon", "afternoon"}:
             return True
         key = self._final_sync_key(phase)
@@ -1403,6 +1460,8 @@ class QuoteService:
                         eval_df = enriched_today
                         if engine.has_rule_type("ladder"):
                             eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
+                        if engine.has_rule_type("volume_delta"):
+                            eval_df = self._inject_volume_delta(eval_df)
                         eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
                         rule_events = engine.evaluate(eval_df, asset_type="stock")
                         if engine.consume_strategy_result_updates():
@@ -1488,7 +1547,8 @@ class QuoteService:
                                 "window_change_pct", "coverage_ratio", "valid_count",
                                 "total_count", "up_count", "down_count", "leader",
                                 "abnormal_window", "abnormal_value", "abnormal_threshold",
-                                "abnormal_closeness",
+                                "abnormal_closeness", "volume_delta", "volume_delta_span",
+                                "volume_delta_amount",
                             ):
                                 if key in ev:
                                     alert[key] = ev[key]
@@ -1651,6 +1711,88 @@ class QuoteService:
             except Exception:  # noqa: BLE001
                 return enriched_today
 
+    @staticmethod
+    def _continuous_session_start_ms() -> float:
+        """当前连续竞价时段的起点 (北京时间 9:30 或 13:00) 的 epoch 毫秒。"""
+        now = cn_now()
+        start_time = dt_time(13, 0) if now.time() >= dt_time(13, 0) else dt_time(9, 30)
+        return datetime.combine(now.date(), start_time, tzinfo=now.tzinfo).timestamp() * 1000.0
+
+    def _update_volume_delta(self, stock_records: list[dict], fetched_at_ms: float) -> None:
+        """全市场相邻两次快照的股票累计成交量差值 (手), 供 volume_delta 规则。
+
+        - prev 每轮都更新 (含非连续竞价时段); 差值只在连续竞价时段内计算
+        - 开盘保护: prev 早于本时段起点 (9:30/13:00) 时本轮差值无效 -- 避免
+          9:25 集合竞价撮合量 / 午休缺口被当成"突然放量"
+        - cur < prev (数据源重置/口径跳变) 的个股丢弃差值; 跨交易日清空
+        """
+        today = cn_today()
+        if self._prev_volume_date != today:
+            self._prev_stock_volume = None
+            self._prev_volume_fetched_at = None
+            self._prev_volume_date = today
+            self._volume_delta = {}
+
+        cur: dict[str, tuple[float, float]] = {}
+        for r in stock_records:
+            sym = r.get("symbol")
+            vol = r.get("volume")
+            amt = r.get("amount")
+            if not sym or not isinstance(vol, (int, float)):
+                continue
+            cur[str(sym)] = (
+                float(vol),
+                float(amt) if isinstance(amt, (int, float)) else 0.0,
+            )
+
+        prev = self._prev_stock_volume
+        prev_ts = self._prev_volume_fetched_at
+        if (
+            prev is not None
+            and prev_ts is not None
+            and self._is_continuous_trading()
+            and prev_ts >= self._continuous_session_start_ms()
+        ):
+            delta = {
+                sym: (v - prev[sym][0], a - prev[sym][1])
+                for sym, (v, a) in cur.items()
+                if sym in prev and v >= prev[sym][0] and a >= prev[sym][1] and v - prev[sym][0] > 0
+            }
+            self._volume_delta = delta
+            self._volume_delta_span_s = max((fetched_at_ms - prev_ts) / 1000.0, 0.001)
+        else:
+            self._volume_delta = {}
+
+        self._prev_stock_volume = cur
+        self._prev_volume_fetched_at = fetched_at_ms
+
+    def _inject_volume_delta(self, enriched_today: pl.DataFrame) -> pl.DataFrame:
+        """把最近一轮快照差值作为临时列注入 enriched 副本。
+
+        _volume_delta (手) / _volume_delta_amount (元) / _volume_delta_span (秒, 快照间隔)。
+        无有效差值 (首轮/开盘保护/暂停后恢复) 时返回原 df, 规则安全降级不触发。
+        """
+        try:
+            delta = self._volume_delta
+            if not delta:
+                return enriched_today
+            span = self._volume_delta_span_s
+            delta_df = pl.DataFrame({
+                "symbol": list(delta.keys()),
+                "_volume_delta": [v for v, _ in delta.values()],
+                "_volume_delta_amount": [a for _, a in delta.values()],
+                "_volume_delta_span": [span] * len(delta),
+            })
+            drop_cols = [
+                c for c in ("_volume_delta", "_volume_delta_amount", "_volume_delta_span")
+                if c in enriched_today.columns
+            ]
+            df = enriched_today.drop(drop_cols) if drop_cols else enriched_today
+            return df.join(delta_df, on="symbol", how="left")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("快照差值注入失败 (volume_delta 规则将不触发): %s", e)
+            return enriched_today
+
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
         """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。
 
@@ -1712,7 +1854,7 @@ class QuoteService:
             source_labels = {
                 "strategy": "策略", "signal": "信号",
                 "price": "价格", "market": "异动", "ladder": "连板梯队",
-                "sector": "板块",
+                "sector": "板块", "volume_delta": "放量",
             }
             rules = engine.rules if engine is not None else {}
             enqueued = 0

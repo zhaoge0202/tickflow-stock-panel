@@ -66,6 +66,7 @@ expert:
   kline.minute.by_symbol: { rpm: 120, batch: 1 }
   intraday:               { rpm: 120, batch: 1 }
   intraday.batch:         { rpm: 60,  batch: 200 }
+  intraday.universe:      { rpm: 20 }                 # 全量分钟增量: 标的池单请求拉全市场; rpm=20 对应服务 3s 下限
   depth5:                 { rpm: 120, batch: 1 }    # 按标的查(单只):官方 120rpm/1
   depth5.batch:           { rpm: 60,  batch: 200 }  # 批量查(新增):官方 60rpm/200
   adj_factor:             { rpm: 120, batch: 200 }

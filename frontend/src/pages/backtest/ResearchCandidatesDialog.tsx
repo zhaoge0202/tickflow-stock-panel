@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, BookmarkCheck, CheckCircle2, Clock3, Link2, Loader2, Trash2, X, XCircle } from 'lucide-react'
+import { ArrowDown, ArrowUp, BookmarkCheck, CheckCircle2, Clock3, Link2, Loader2, RotateCcw, Trash2, X, XCircle } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
 import { api, type ResearchCandidate, type ResearchCandidateStatus, type ScoringDirection } from '@/lib/api'
@@ -41,7 +41,11 @@ function metricSummary(item: ResearchCandidate) {
   ].filter(Boolean).join(' · ') || '暂无指标摘要'
 }
 
-export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
+export function ResearchCandidatesDialog({ onClose, onLoadStrategy }: {
+  onClose: () => void
+  /** 策略候选「载入复测」: 把保存的 config 回填到回测表单 (由回测页接线) */
+  onLoadStrategy?: (candidate: ResearchCandidate) => void
+}) {
   const queryClient = useQueryClient()
   const [kind, setKind] = useState<'all' | 'factor' | 'strategy'>('all')
   const [linkDraft, setLinkDraft] = useState<LinkDraft | null>(null)
@@ -219,6 +223,17 @@ export function ResearchCandidatesDialog({ onClose }: { onClose: () => void }) {
                 ))}
               </select>
               <div className="flex items-center justify-end gap-1">
+                {item.kind === 'strategy' && onLoadStrategy && (
+                  <button
+                    type="button"
+                    onClick={() => onLoadStrategy(item)}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-btn px-2 text-[11px] text-accent transition-colors hover:bg-accent/10"
+                    title="把此候选保存的回测配置 (策略/区间/参数/费率/仓位/环境过滤) 回填到回测表单, 可直接复测"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    载入复测
+                  </button>
+                )}
                 {item.kind === 'factor' && (
                   <button
                     type="button"

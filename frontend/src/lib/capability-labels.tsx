@@ -1,5 +1,6 @@
 // capability 内部名 → 用户能理解的中文标签
 import { useNavigate } from 'react-router-dom'
+import type { CapabilityMatrix, CapabilityRoute } from './api'
 
 export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'quote.by_symbol':         { name: '自选股实时监控', hint: 'Free 可按标的查询实时行情,用于少量自选股监控' },
@@ -9,6 +10,7 @@ export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'kline.daily.batch':       { name: '日 K(批量)',      hint: '一次拿多只股票的日 K — 选股 / 信号扫描 必需' },
   'kline.minute.by_symbol':  { name: '分钟 K(按标的)',  hint: '单股 1m/5m/15m/30m/60m K 线' },
   'kline.minute.batch':      { name: '分钟 K(批量)',    hint: '多股分钟 K' },
+  'intraday.universe':       { name: '全量分钟',        hint: '标的池单请求拉全市场当日分钟K (盘中增量落盘, Expert 专有)' },
 
   'depth5':                  { name: '五档盘口',          hint: '买卖五档报价' },
   'depth5.batch':            { name: '五档盘口(批量)',   hint: '批量买卖五档快照' },
@@ -57,6 +59,30 @@ export function MissingCapChip({ capKey, label, to = '/settings?tab=data-sources
     </button>
   )
 }
+
+// ===== 能力路由门控 (各页统一判定) =====
+// usable = 生效源当前能否提供该能力 (区别于 TickFlow 套餐视角):
+// 路由到可用插件/自定义源时同样可用; 路由到 TickFlow 但档位不足时不可用。
+// 矩阵未加载时返回 undefined, 调用方回退 TickFlow 套餐视角, 避免首屏闪烁。
+// 数据来自 useCapabilityMatrix (设置页与其他页面共享同一缓存)。
+
+export type RouteCapId = 'realtime' | 'daily' | 'minute' | 'adj_factor' | 'financial'
+
+export function routeCap(matrix: CapabilityMatrix | undefined, id: RouteCapId): CapabilityRoute | undefined {
+  return matrix?.capabilities.find(c => c.id === id)
+}
+
+export function routeCapUsable(matrix: CapabilityMatrix | undefined, id: RouteCapId): boolean | undefined {
+  return routeCap(matrix, id)?.usable
+}
+
+/** 生效源非 TickFlow 且当前可用时返回其展示名 (卡片徽章显示实际数据源), 否则 null */
+export function routeProviderDisplay(matrix: CapabilityMatrix | undefined, id: RouteCapId): string | null {
+  const cap = routeCap(matrix, id)
+  return cap && cap.usable && cap.effective !== 'tickflow' ? cap.effective_display : null
+}
+
+// ===== TickFlow 档位 (仅 TickFlow 专属界面) =====
 
 // 套餐等级 —— 仅用于 TickFlow 专属界面 (Key 配置 / 端点测速 / 引导页 tickflow 分支)。
 // 通用功能门槛一律用能力键 (capName/needCapText/MissingCapChip), 不用档位词。

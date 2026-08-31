@@ -193,6 +193,7 @@ export function StockPanel({
           onDataChange={setDailyResult}
           visibleBars={showIntraday ? 40 : 60}
           extColumns={extColumns}
+          refetchIntervalMs={refetchIntervalMs}
         />
 
         {showIntraday && selectedDate && !intradayDismissed && (

@@ -45,7 +45,13 @@ export function StockIntradayChart({
 
   const minute = useQuery({
     queryKey: QK.klineMinute(symbol, date ?? ''),
-    queryFn: () => api.klineMinute(symbol, date ?? undefined, isToday ? Date.now() : undefined),
+    // 轮询上下文 (个股详情) 传 live: 当日盘中后端直接实时拉取最新K,
+    // 避免读到分钟增量落盘的上一轮本地分区; 历史日期后端自行忽略 live。
+    queryFn: () => api.klineMinute(
+      symbol,
+      date ?? undefined,
+      refetchIntervalMs != null && refetchIntervalMs > 0,
+    ),
     enabled: !!symbol && !!date,
     staleTime: 0,
     retry: false,

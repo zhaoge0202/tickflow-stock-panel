@@ -1,10 +1,11 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
+  type ResearchCandidate,
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
@@ -476,7 +477,10 @@ function DailyTradeChip({ trade, side, strategyName, onClick, signalNames }: { t
 
 function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; signalNames?: Record<string, string> }) {
   const isBuy = side === 'buy'
-  const date = String(isBuy ? trade.entry_date : trade.exit_date).slice(0, 10)
+  // 分钟策略入场携带 "YYYY-MM-DD HH:MM" (盘中触发分钟); 日线口径为纯日期
+  const raw = String(isBuy ? trade.entry_date : trade.exit_date)
+  const date = raw.slice(0, 10)
+  const minuteTime = raw.length > 10 ? raw.slice(11, 16) : ''
   const signalDate = String(isBuy ? trade.entry_signal_date ?? '' : trade.exit_signal_date ?? '').slice(0, 10)
   const price = isBuy ? trade.entry_price : trade.exit_price
   const amount = isBuy ? trade.entry_value : trade.exit_value
@@ -487,7 +491,12 @@ function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTra
   return (
     <div className="min-w-[8.25rem] rounded-btn border border-border/60 bg-base/35 px-2 py-1 text-xs leading-4">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-secondary">成交 {date}</span>
+        <span className="font-mono text-secondary">
+          成交 {date}
+          {minuteTime && (
+            <span className="ml-1 rounded border border-sky-500/30 bg-sky-500/10 px-1 py-px text-[9px] font-medium text-sky-400">{minuteTime}</span>
+          )}
+        </span>
         <span className={`rounded px-1.5 py-px text-[10px] font-medium ${
           isBuy ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'
         }`}>
@@ -515,6 +524,12 @@ function fmtDuration(ms: number): string {
   const m = Math.floor(s / 60)
   const rest = Math.round(s % 60)
   return `${m}分${rest}秒`
+}
+
+/** CSV 字段转义: 含逗号/引号/换行的字段加引号并翻倍内部引号 */
+function csvEsc(v: string | number | null | undefined): string {
+  const s = v == null ? '' : String(v)
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
 const METRIC_HELP = {
@@ -897,7 +912,11 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
   )
 }
 
-export function StrategyBacktest() {
+export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
+  /** 候选方案「载入复测」: 回填保存的回测配置 (消费后由父组件清空) */
+  loadCandidate?: ResearchCandidate | null
+  onLoadConsumed?: () => void
+}) {
   const queryClient = useQueryClient()
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
@@ -946,6 +965,48 @@ export function StrategyBacktest() {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
+
+  // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
+  useEffect(() => {
+    if (!loadCandidate) return
+    const cfg = (loadCandidate.config ?? {}) as Record<string, any>
+    if (cfg.strategy_id) setSelectedStrategy(String(cfg.strategy_id))
+    if (cfg.asset_type === 'stock' || cfg.asset_type === 'etf') setAssetType(cfg.asset_type)
+    if (cfg.symbols != null) {
+      setSymbols(Array.isArray(cfg.symbols) ? cfg.symbols.join(',') : String(cfg.symbols))
+    }
+    if (cfg.start) setStart(String(cfg.start).slice(0, 10))
+    if (cfg.end) setEnd(String(cfg.end).slice(0, 10))
+    if (cfg.entry_fill === 'close_t' || cfg.entry_fill === 'open_t+1') setEntryFill(cfg.entry_fill)
+    if (cfg.exit_fill === 'close_t' || cfg.exit_fill === 'open_t+1' || cfg.exit_fill === 'signal_next_minute') {
+      setExitFill(cfg.exit_fill)
+    }
+    if (cfg.commission_pct != null) setFees(String(Math.round(Number(cfg.commission_pct) * 10000)))
+    if (cfg.stamp_tax_pct != null) setStampTax(String(Number(cfg.stamp_tax_pct) * 1000))
+    if (cfg.slippage_bps != null) setSlippage(String(cfg.slippage_bps))
+    if (cfg.max_positions != null) setMaxPositions(String(cfg.max_positions))
+    if (cfg.max_exposure_pct != null) setMaxExposure(String(Math.round(Number(cfg.max_exposure_pct) * 100)))
+    if (cfg.initial_capital != null) setInitialCapital(String(cfg.initial_capital))
+    if (cfg.position_sizing === 'equal' || cfg.position_sizing === 'score_weight') {
+      setPositionSizing(cfg.position_sizing)
+    }
+    if (cfg.mode === 'position' || cfg.mode === 'full') setSimMode(cfg.mode)
+    if (cfg.holding_days != null) setHoldingDays(String(cfg.holding_days))
+    if (cfg.minute_fill != null) setHighGranularity(Boolean(cfg.minute_fill))
+    if (cfg.params && typeof cfg.params === 'object') setStrategyParams(cfg.params)
+    if (cfg.overrides && typeof cfg.overrides === 'object') setOverrides(cfg.overrides)
+    const rf = cfg.regime_filter
+    if (rf && typeof rf === 'object' && !Array.isArray(rf)) {
+      setRegimeStates(Array.isArray(rf.states) ? rf.states.map(String) : [])
+      setRegimeMinScore(rf.min_score != null ? Number(rf.min_score) : '')
+    } else {
+      setRegimeStates([])
+      setRegimeMinScore('')
+    }
+    toast(`已载入「${loadCandidate.name}」配置，可直接复测`, 'success')
+    onLoadConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在切换候选时执行一次性回填
+  }, [loadCandidate])
   const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
@@ -954,8 +1015,8 @@ export function StrategyBacktest() {
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType),
-    queryFn: () => api.screenerStrategies(assetType),
+    queryKey: QK.screenerStrategies(assetType, 'all'),
+    queryFn: () => api.screenerStrategies(assetType, 'all'),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
@@ -1080,7 +1141,7 @@ export function StrategyBacktest() {
         positionSizing,
         mode: simMode,
         holdingDays,
-        minuteFill: highGranularity,
+        minuteFill: isMinuteStrategy ? false : highGranularity,
         regimeStates,
         regimeMinScore,
         params: strategyParams,
@@ -1118,7 +1179,7 @@ export function StrategyBacktest() {
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
-      minute_fill: highGranularity,
+      minute_fill: isMinuteStrategy ? false : highGranularity,
       regime_filter: regimeStates.length > 0 || regimeMinScore !== ''
         ? {
             ...(regimeStates.length > 0 ? { states: regimeStates } : {}),
@@ -1149,6 +1210,67 @@ export function StrategyBacktest() {
   const excessReturn = strategyReturn != null && benchmarkReturn != null
     ? strategyReturn - benchmarkReturn
     : null
+
+  /** 导出回测结果 CSV (带 BOM, Excel 可直接打开): 概要 + 净值曲线 + 交易明细 + 分标的统计 */
+  const exportResultCsv = () => {
+    if (!result) return
+    const s = result.stats ?? {}
+    const name = result.strategy_info?.name ?? result.strategy_info?.id ?? '策略'
+    const start = String(result.config?.start ?? resultStartDate).slice(0, 10)
+    const end = String(result.config?.end ?? resultEndDate).slice(0, 10)
+    const pct = (v: unknown) => (v == null ? '' : fmtPct(Number(v)))
+    const num = (v: unknown) => (v == null || Number.isNaN(Number(v)) ? '' : String(v))
+
+    const lines: string[] = []
+    lines.push('# 概要', '指标,数值')
+    lines.push(`策略名称,${name}`)
+    if (result.strategy_info?.id) lines.push(`策略ID,${result.strategy_info.id}`)
+    lines.push(`回测区间,${start} ~ ${end}`)
+    lines.push(`净值曲线天数,${result.equity_curve?.length ?? 0}`)
+    lines.push(`完成交易数,${result.trades?.length ?? 0}`)
+    lines.push(`总收益,${pct(strategyReturn)}`)
+    lines.push(`年化收益,${pct(s.annual_return)}`)
+    lines.push(`同期基准,${pct(benchmarkReturn)}`)
+    lines.push(`超额收益,${pct(excessReturn)}`)
+    for (const [label, key] of [
+      ['夏普比率', 'sharpe'], ['索提诺', 'sortino'], ['最大回撤', 'max_drawdown'],
+      ['胜率', 'win_rate'], ['平均收益', 'avg_return'], ['中位数收益', 'median_return'],
+      ['盈亏比', 'profit_factor'], ['最终权益', 'final_equity'], ['平均持仓天数', 'avg_duration'],
+    ] as const) {
+      const v = s[key as keyof typeof s]
+      if (v != null) lines.push(`${label},${key.includes('return') || key === 'win_rate' || key === 'max_drawdown' ? pct(v) : num(v)}`)
+    }
+
+    const ddMap = new Map((result.drawdown_curve ?? []).map(r => [r.date, r.value]))
+    const benchMap = new Map((result.benchmark_curve ?? []).map(r => [r.date, r.close ?? r.value]))
+    lines.push('', '# 净值曲线', 'date,equity,cash,positions,exposure,drawdown,benchmark')
+    for (const r of result.equity_curve ?? []) {
+      lines.push([r.date, num(r.value), num(r.cash), num(r.positions), num(r.exposure),
+        num(ddMap.get(r.date)), num(benchMap.get(r.date))].join(','))
+    }
+
+    lines.push('', '# 交易明细',
+      'symbol,name,entry_date,entry_price,exit_date,exit_price,pnl_pct,duration,exit_reason,shares,entry_value,exit_value,pnl_amount')
+    for (const t of result.trades ?? []) {
+      lines.push([t.symbol, t.name ?? '', t.entry_date, num(t.entry_price), t.exit_date,
+        num(t.exit_price), num(t.pnl_pct), num(t.duration), t.exit_reason ?? '',
+        num(t.shares), num(t.entry_value), num(t.exit_value), num(t.pnl_amount)].map(csvEsc).join(','))
+    }
+
+    lines.push('', '# 分标的统计', 'symbol,n_trades,total_return,win_rate,best,worst')
+    for (const p of result.per_symbol_stats ?? []) {
+      lines.push([p.symbol, num(p.n_trades), num(p.total_return), num(p.win_rate),
+        num(p.best), num(p.worst)].join(','))
+    }
+
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `回测_${name.replace(/[\\/:*?"<>|]/g, '_')}_${start}_${end}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const applyRange = (months: number) => {
     setStart(monthsAgo(months))
@@ -1286,11 +1408,22 @@ export function StrategyBacktest() {
   const minuteTriggerSignals = detail?.minute_exit_trigger_supported_signals ?? []
   const unsupportedMinuteExitSignals = effectiveExitSignals.filter(signal => !minuteTriggerSignals.includes(signal))
   const minuteExitTriggerSupported = effectiveExitSignals.length > 0 && unsupportedMinuteExitSignals.length === 0
+  // 分钟策略: 入场在盘中触发分钟成交, 日线专属的成交口径选项不适用
+  const isMinuteStrategy = detail?.execution_backend === 'minute_filter'
+  const { data: minuteDataStatus } = useQuery({
+    queryKey: QK.dataStatus,
+    queryFn: api.dataStatus,
+    enabled: isMinuteStrategy,
+    staleTime: 60_000,
+  })
+  // 分钟回测窗口守卫: 开始日期早于本地分钟K起点会被后端拒绝, 前置警示
+  const minuteEarliest = minuteDataStatus?.minute?.earliest_date
+  const minuteStartMismatch = isMinuteStrategy && !!minuteEarliest && start < minuteEarliest
 
   useEffect(() => {
-    if (highGranularity && minuteExitTriggerSupported) return
+    if (highGranularity && minuteExitTriggerSupported && !isMinuteStrategy) return
     if (exitFill === 'signal_next_minute') setExitFill('close_t')
-  }, [exitFill, highGranularity, minuteExitTriggerSupported])
+  }, [exitFill, highGranularity, minuteExitTriggerSupported, isMinuteStrategy])
 
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoringDirections = useMemo(
@@ -1395,7 +1528,8 @@ export function StrategyBacktest() {
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
-            {/* 分钟K成交 */}
+            {/* 分钟K成交 — 日线策略专属 (分钟策略入场天然按触发分钟成交) */}
+            {!isMinuteStrategy && (
             <div className="flex items-center gap-1">
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
@@ -1420,9 +1554,28 @@ export function StrategyBacktest() {
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">分钟K</span>
               )}
             </div>
+            )}
           </div>
+          {/* 分钟策略提示条: 数据窗口 + 成交语义 */}
+          {isMinuteStrategy && (
+            <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-sky-500/30 bg-sky-500/5 px-2 py-1.5">
+              <Clock className="h-3 w-3 text-sky-400 shrink-0 mt-px" />
+              <div className="text-[10px] leading-snug text-sky-400/90">
+                <span className="font-medium">分钟策略回测</span>
+                ：逐日回放分钟K，信号分钟收盘价买入；日线条件按 T-1 完成态评估。
+                {minuteDataStatus?.minute?.earliest_date
+                  ? ` 本地分钟K ${minuteDataStatus.minute.earliest_date} ~ ${minuteDataStatus.minute.latest_date}（${minuteDataStatus.minute.trading_days} 个交易日），缺分区的日子自动跳过。`
+                  : ' 本地暂无分钟K数据，请先在数据页拉取。'}
+                {minuteStartMismatch && (
+                  <span className="mt-0.5 block text-amber-400">
+                    当前开始日期 {start} 早于分钟数据起点 {minuteEarliest}，运行会被拒绝 — 请把开始日期调整到 {minuteEarliest} 之后，或先用「扩展分钟K历史」拉取。
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           {/* 分钟K开启时的提示条 */}
-          {highGranularity && hasMinuteBatch && (
+          {highGranularity && hasMinuteBatch && !isMinuteStrategy && (
             <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
               <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
               <div className="text-[10px] leading-snug text-amber-400/90">
@@ -1465,6 +1618,9 @@ export function StrategyBacktest() {
                   }`}
               >
                 <span className="font-medium">{st.name}</span>
+                {st.timeframes?.includes('1m') && (
+                  <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
+                )}
                 {st.source && st.source !== 'builtin' && (
                   <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
                     {SRC_MAP[st.source] ?? ''}
@@ -1619,10 +1775,18 @@ export function StrategyBacktest() {
               <label className="text-xs font-medium text-secondary">建仓口径</label>
               <FillRuleHint />
             </div>
-            <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
-              <option value="open_t+1">次日开盘（推荐）</option>
-              <option value="close_t">信号日收盘</option>
-            </select>
+            {isMinuteStrategy ? (
+              <div className={`${INPUT_CLS} flex items-center gap-1.5`} title="信号在盘中触发分钟成交，无次日开盘口径">
+                <Clock className="h-3 w-3 text-sky-400 shrink-0" />
+                <span className="text-secondary">信号分钟收盘</span>
+                <span className="text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
+              </div>
+            ) : (
+              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
+                <option value="open_t+1">次日开盘（推荐）</option>
+                <option value="close_t">信号日收盘</option>
+              </select>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label>
@@ -1633,12 +1797,12 @@ export function StrategyBacktest() {
             >
               <option value="close_t">信号日收盘（推荐）</option>
               <option value="open_t+1">次日开盘</option>
-              {highGranularity && minuteExitTriggerSupported && (
+              {highGranularity && minuteExitTriggerSupported && !isMinuteStrategy && (
                 <option value="signal_next_minute">信号触发卖出 BETA</option>
               )}
             </select>
           </div>
-          {(entryFill === 'close_t' || exitFill === 'close_t') && (
+          {!isMinuteStrategy && (entryFill === 'close_t' || exitFill === 'close_t') && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
               <span>信号日收盘仅适合收盘前已确认的信号</span>
@@ -1931,6 +2095,15 @@ export function StrategyBacktest() {
                 </span>
               )}
               <span className="text-[10px] text-secondary">持有 {result.config?.holding_days ?? 5} 天</span>
+              <button
+                type="button"
+                onClick={exportResultCsv}
+                title="导出回测结果 CSV (概要 + 净值曲线 + 交易明细 + 分标的统计)"
+                className="ml-1 inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-base px-2 text-[10px] text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+              >
+                <Download className="h-3 w-3" />
+                导出
+              </button>
               <span className="ml-auto text-[11px] text-muted font-mono">
                 {String(result.config?.start).slice(0,10)} ~ {String(result.config?.end).slice(0,10)}
               </span>
@@ -2047,6 +2220,15 @@ export function StrategyBacktest() {
                     <span className="num">{fmtDuration(result.elapsed_ms)}</span>
                   </span>
                 )}
+                <button
+                  type="button"
+                  onClick={exportResultCsv}
+                  title="导出回测结果 CSV (概要 + 净值曲线 + 交易明细 + 分标的统计)"
+                  className="ml-1 inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border bg-base px-2 text-[10px] text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+                >
+                  <Download className="h-3 w-3" />
+                  导出
+                </button>
               </div>
             )}
 

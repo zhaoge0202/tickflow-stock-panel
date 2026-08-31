@@ -125,7 +125,23 @@ datasets:
 
 建议实时接口额外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失时部分字段会由 pipeline 回算,但精度取决于可用输入。
 
-`change_pct` 和 `amplitude` 使用小数制,例如 `0.0366` 表示 `3.66%`(`turnover_rate` 同)。若接口直接返回百分数值 `3.66`,实时行情会按截面中位数自动归一为小数制,但仍建议接口直接提供小数制以避免小样本歧义。
+`change_pct`、`amplitude`、`turnover_rate` 统一使用小数制,例如 `0.0366` 表示 `3.66%`。百分制单位必须在 realtime 数据集上**显式声明**,不做数值猜测(数值无法区分两种单位:`0.05` 既可能是 0.05% 也可能是 5%):
+
+```yaml
+datasets:
+  realtime:
+    url: https://api.example.com/snapshot
+    pct_unit: percent   # 接口返回 3.66 表示 3.66%;小数制源声明 decimal 或省略
+```
+
+处理规则:
+
+| 声明 | 行为 |
+| --- | --- |
+| `pct_unit: percent` | `change_pct` / `amplitude` / `turnover_rate` 无条件 `/100` |
+| `pct_unit: decimal` | 三列原样透传 |
+| 未声明 | `change_pct` 按截面中位数归一(A 股涨跌停 30% 上限使两种单位物理可分);`amplitude` / `turnover_rate` **置 `None`** 交由 pipeline 按价格与股本口径重算,并记录 WARNING |
+| 列已配置 `transforms` | 视为用户已接管该列单位,原样透传 |
 
 ## 请求约定
 
@@ -210,7 +226,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
 5. 保存数据源选择:
 
 - 日K: `mock_source`
-- 除权因子: `same_as_daily` 或 `mock_source`
+- 除权因子: `mock_source` (或保持默认 `tickflow`)
 - 实时行情: `mock_source`
 
 6. 触发同步或开启实时行情。
@@ -273,12 +289,16 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   amount = 成交额
   change_pct = 涨跌幅 (小数, 0.0366 = 3.66%)
   change_amount = 涨跌额
-  amplitude = 振幅
-  turnover_rate = 换手率 (小数, 0.05 = 5%; 若上游返回 5 表示 5%, 配置 transforms: turnover_rate: "value / 100")
+  amplitude = 振幅 (小数, 0.024 = 2.4%)
+  turnover_rate = 换手率 (小数, 0.05 = 5%)
+  # 上游若返回百分数值 (3.66 表示 3.66%), 在 realtime 数据集声明 pct_unit: percent,
+  # 不要依赖数值自动识别; 逐列转换也可用 transforms: turnover_rate: "value / 100"
 
 分钟K (minute):
   symbol = 股票代码
-  datetime = 时间戳 (YYYY-MM-DD HH:MM:SS)
+  # datetime 必须是北京时间墙钟 (如 2026-08-28 09:35:00), 不要返回 UTC;
+  # 入口守卫会自动纠偏 UTC 特征帧, 但契约仍要求源头写对
+  datetime = 北京时间墙钟 (YYYY-MM-DD HH:MM:SS)
   open / high / low / close = OHLC
   volume = 成交量
   amount = 成交额

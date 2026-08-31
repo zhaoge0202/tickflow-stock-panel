@@ -20,19 +20,12 @@ import polars as pl
 
 from app.services.equity_premium import build_equity_premium
 from app.services.ext_data import ExtConfig, ExtConfigStore
+from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
 
 # ================================================================
-# 常量(与 overview.py 保持同步;复盘复盘仅 A 股核心指数)
+# 常量(核心指数清单单一权威: app.services.index_const)
 # ================================================================
-
-CORE_INDEX_NAMES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
-CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 
@@ -259,10 +252,12 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
 
     store = ExtConfigStore(repo.store.data_dir)
     groups: dict[str, dict[str, dict]] = {}
+    group_source: dict[str, str] = {}  # 组名 → 首个命中的扩展字段 "configId.field" (看板成分股弹窗用)
     for config in store.load_all():
         field = _dimension_field(config, kind)
         if not field:
             continue
+        source_field = f"{config.id}.{field}"
         for ext_row in _read_ext_rows(repo.store.data_dir, config, field):
             quote = None
             for key in _symbol_keys(ext_row, config):
@@ -278,6 +273,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
                     parts = value.split("-")
                     value = parts[level - 1] if level <= len(parts) else parts[-1]
                 groups.setdefault(value, {})[symbol] = quote
+                group_source.setdefault(value, source_field)
 
     items = []
     for name, by_symbol in groups.items():
@@ -294,6 +290,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
             "up_count": sum(1 for v in changes if v > 0),
             "down_count": sum(1 for v in changes if v < 0),
             "amount": sum(_finite(s.get("amount")) or 0 for s in stocks),
+            "source_field": group_source.get(name),
             "leader": {
                 "symbol": leader.get("symbol"),
                 "name": leader.get("name"),

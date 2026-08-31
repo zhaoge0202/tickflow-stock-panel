@@ -74,6 +74,9 @@ function buildModel(sessions: MinuteKlineSession[]) {
 
     const dayValues: (number | null)[] = []
     const dayAverages: (number | null)[] = []
+    // 量柱着色基准: 前一分钟 close; 当日第一根用 session 昨收。
+    // 不用 row.open — stock-sdk 历史日无真实分钟 open(为 null), close-vs-open 会全偏。
+    let prevRef: number | null = session.prev_close
     for (const time of FULL_DAY_TIMES) {
       const point = rowsByTime.get(time)
       const index = categories.length
@@ -91,13 +94,16 @@ function buildModel(sessions: MinuteKlineSession[]) {
       volumeData.push({
         value: row.volume,
         itemStyle: {
-          color: row.close > row.open
-            ? COLORS.volumeUp
-            : row.close < row.open
-              ? COLORS.volumeDown
-              : COLORS.volumeFlat,
+          color: prevRef == null
+            ? COLORS.volumeFlat
+            : row.close > prevRef
+              ? COLORS.volumeUp
+              : row.close < prevRef
+                ? COLORS.volumeDown
+                : COLORS.volumeFlat,
         },
       })
+      prevRef = row.close
       priceValues.push(row.low, row.high, average)
       pointByIndex.set(index, {
         date: session.date,
@@ -408,7 +414,7 @@ export function EChartsMultiDayIntraday({
           {info ? (
             <>
               <span className="text-muted">{info.date} {formatMinuteTime(info.row.datetime)}</span>
-              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open.toFixed(2)}</span>
+              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open != null ? info.row.open.toFixed(2) : '—'}</span>
               <span className="text-muted">高</span><span style={{ color: infoColor }}>{info.row.high.toFixed(2)}</span>
               <span className="text-muted">低</span><span style={{ color: infoColor }}>{info.row.low.toFixed(2)}</span>
               <span className="text-muted">收</span><span className="font-semibold" style={{ color: infoColor }}>{info.row.close.toFixed(2)}</span>

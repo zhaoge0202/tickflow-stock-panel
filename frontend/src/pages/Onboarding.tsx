@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -12,7 +12,6 @@ import {
   LineChart,
   ScanSearch,
   Flame,
-  Zap,
   Radar,
   ShieldCheck,
   BellRing,
@@ -20,20 +19,19 @@ import {
   FileText,
   Landmark,
   Database,
-  Plus,
   Puzzle,
+  KeyRound,
+  Route,
 } from 'lucide-react'
-import { api } from '@/lib/api'
-import { useCapabilities, usePreferences, useSettings } from '@/lib/useSharedQueries'
+import { api, type ProviderField } from '@/lib/api'
+import { usePreferences, useSettings } from '@/lib/useSharedQueries'
 import { QK } from '@/lib/queryKeys'
-import { CAP_LABELS } from '@/lib/capability-labels'
 import { Logo } from '@/components/Logo'
-import { DataSourceEditor } from '@/pages/settings/DataSourceEditor'
 
 // ===== 引导页:5 步向导 =====
-// 0. 声明  1. 欢迎  2. 输入 Key(可跳过)  3. 能力探测结果  4. 完成 → 写标记 → 进面板
+// 0. 声明  1. 欢迎  2. 数据源与 Key  3. 能力路由检测  4. 完成 → 写标记 → 进面板
 
-const STEPS = ['声明', '欢迎', '数据源', '能力探测', '完成'] as const
+const STEPS = ['声明', '欢迎', '数据源', '能力路由', '完成'] as const
 
 const BRAND = '#8B5CF6'
 
@@ -287,63 +285,86 @@ const DATASET_LABELS: Record<string, string> = {
 
 function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const qc = useQueryClient()
-  const prefs = usePreferences()
+  const settings = useSettings()
   const sources = useQuery({
     queryKey: QK.dataSources,
     queryFn: api.dataSources,
     staleTime: 60_000,
   })
 
-  // null = 跟随后端当前激活源 (首次使用即默认内置源)
-  const [picked, setPicked] = useState<string | null>(null)
-  // 是否展开「添加自有数据源」编辑器
-  const [adding, setAdding] = useState(false)
+  // 两个常驻 Key 表单 (不收起): 输入/错误/已保存提示按数据源名分槽
+  const [inputs, setInputs] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState<Record<string, string | null>>({})
+  const [savedMsg, setSavedMsg] = useState<Record<string, string | null>>({})
 
-  const builtin = sources.data?.builtin ?? []
   const plugins = sources.data?.plugins ?? []
+  const builtin = sources.data?.builtin ?? []
   const custom = sources.data?.custom ?? []
   const items = [
     ...builtin.map(s => ({ ...s, kind: 'builtin' as const })),
     ...plugins.map(s => ({ ...s, kind: 'plugin' as const })),
     ...custom.map(s => ({ ...s, kind: 'custom' as const })),
   ]
-  const byName = new Map(items.map(s => [s.name, s]))
 
-  const activeName = prefs.data?.daily_data_provider || 'tickflow'
-  const selected = picked ?? activeName
+  // 已配置态徽标: tickflow 看 settings.mode (free/api_key 均为已配 Key), fuyao 看插件 api_key_masked
+  const tfConfigured = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
+  const fuyaoConfigured = !!plugins.find(p => p.name === 'fuyao')?.api_key_masked
 
-  // 切换数据源 —— 与设置页同一套偏好接口:
-  // 内置源 5 个数据集全量切换; 其他源仅切换其声明支持的数据集, 其余回落内置源
-  const switchProvider = useMutation({
-    mutationFn: (name: string) => {
-      if (name === 'tickflow') {
-        return api.updateDataProviders({
-          daily_data_provider: 'tickflow',
-          adj_factor_provider: 'same_as_daily',
-          realtime_data_provider: 'tickflow',
-          minute_data_provider: 'tickflow',
-          financial_data_provider: 'tickflow',
-        })
+  // 内联 Key 配置 (先探后存): 验证通过才落盘
+  const saveKey = useMutation<any, Error, { name: string; key: string }>({
+    mutationFn: ({ name, key }) => (name === 'tickflow'
+      ? api.saveTickflowKey(key)
+      : api.savePluginKey(name, key)),
+    onSuccess: (data: any, vars) => {
+      qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+      qc.invalidateQueries({ queryKey: QK.capabilityMatrix })
+      const setError = (msg: string | null) => setErrors(s => ({ ...s, [vars.name]: msg }))
+      const setSaved = (msg: string | null) => {
+        setSavedMsg(s => ({ ...s, [vars.name]: msg }))
+        if (msg) setTimeout(() => setSavedMsg(s => ({ ...s, [vars.name]: null })), 6000)
       }
-      const supported = new Set(byName.get(name)?.datasets ?? [])
-      const pick = (dataset: string) => (supported.has(dataset) ? name : 'tickflow')
-      return api.updateDataProviders({
-        daily_data_provider: pick('daily'),
-        adj_factor_provider: 'same_as_daily',
-        realtime_data_provider: pick('realtime'),
-        minute_data_provider: pick('minute'),
-        financial_data_provider: pick('financial'),
-      })
+      if (data.ok) {
+        setInputs(s => ({ ...s, [vars.name]: '' }))
+        setError(null)
+        if (vars.name === 'tickflow') {
+          setSaved(`TickFlow Key 已保存${data.tier_label ? `,当前档位:${data.tier_label}` : ''}`)
+        } else if (vars.name === 'fuyao' && data.plugin_available) {
+          // fuyao 定位为增强源: 仅实时行情 + 除权因子路由过去, 其余数据集保持 TickFlow
+          routeFuyaoEnhanced.mutate()
+          setSaved('fuyao Key 已保存:实时行情与除权因子已切换到 fuyao,其余数据集保持 TickFlow')
+        } else if (data.plugin_available) {
+          setSaved('Key 已保存,该数据源已就绪')
+        }
+      } else {
+        setError(data.error || (data.reason === 'invalid' ? 'Key 验证失败,请检查后重试' : '保存失败,请重试'))
+      }
     },
+    onError: (e: Error, vars) => setErrors(s => ({ ...s, [vars.name]: `保存失败: ${e.message}` })),
+  })
+
+  // fuyao 增强路由: 只切实时行情 + 除权因子两个字段 (updateDataProviders 部分更新, 其余不动)
+  const routeFuyaoEnhanced = useMutation({
+    mutationFn: () => api.updateDataProviders({
+      realtime_data_provider: 'fuyao',
+      adj_factor_provider: 'fuyao',
+    }),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
-  const choose = (name: string, available: boolean) => {
-    if (!available || name === selected || switchProvider.isPending) return
-    setAdding(false)
-    setPicked(name)
-    switchProvider.mutate(name)
-  }
+  // 常驻展开的两个 Key 表单元数据 (卡片只读, Key 是向导里唯一可操作项)
+  const keyForms = [
+    {
+      name: 'tickflow', display: 'TickFlow', env: 'TICKFLOW_API_KEY', configured: tfConfigured, autoFocus: true,
+      copy: '留空即免费 None 模式,可直接使用;填写 Key 后按订阅档位解锁实时 / 分钟 / 盘口 / 财务等更多数据集。仅存本地 (secrets.json),先验证后保存。',
+      register: { label: '前往 TickFlow 注册获取 Key', url: 'https://tickflow.org/auth/register?ref=V3KDKGXPEA' },
+    },
+    {
+      name: 'fuyao', display: 'fuyao', env: 'FUYAO_API_KEY', configured: fuyaoConfigured, autoFocus: false,
+      copy: '仅存本地 (secrets.json),先验证后保存。保存成功后仅「实时行情」与「除权因子」切换到 fuyao,其余数据集保持 TickFlow。',
+      register: { label: '前往 fuyao 官网申请 Key', url: 'https://fuyao.aicubes.cn' },
+    },
+  ]
 
   return (
     <div>
@@ -354,12 +375,12 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
         <h2 className="text-xl font-bold text-foreground">配置数据源</h2>
       </div>
       <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-        所有数据源均为第三方服务,按需选择或添加自有接口;随时可在
-        <span className="text-foreground font-medium"> 设置 → 数据源 </span>
-        中调整。
+        默认使用内置 <span className="text-foreground font-medium">TickFlow</span> 数据源(无需 Key 即可同步历史日K)。
+        可按下方的说明填写 API Key 增强数据能力;数据源的切换与增删随时在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>中进行。
       </p>
 
-      {/* 数据源卡片选择器 */}
+      {/* 数据源卡片 (只读展示): 不在向导中切换, 保留设置页完整能力 */}
       {sources.isLoading ? (
         <div className="mt-4 flex items-center gap-2 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -368,47 +389,39 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
       ) : (
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {items.map(item => {
-            const isSelected = selected === item.name
-            const unavailable = item.kind === 'plugin' && !item.available
             const plugin = item.kind === 'plugin' ? plugins.find(p => p.name === item.name) : undefined
-            // 切换中的目标卡片: 圆点位置显示转圈, 其余卡片压暗
-            const switchingToThis = switchProvider.isPending && switchProvider.variables === item.name
+            // 缺 Key 型插件 (如 fuyao): 表单常驻下方, 卡片仅提示, 不可交互
+            const needsKey = item.kind === 'plugin' && !item.available && !!plugin?.api_key_env
+            const unavailable = item.kind === 'plugin' && !item.available && !needsKey
             return (
-              <button
+              <div
                 key={item.name}
-                type="button"
-                onClick={() => choose(item.name, !unavailable)}
-                disabled={unavailable || switchProvider.isPending}
-                title={unavailable ? plugin?.status || '依赖未安装' : item.display_name}
-                className={`relative text-left rounded-card border px-3.5 py-3 transition-all ${
+                className={`relative text-left rounded-card border px-3.5 py-3 ${
                   unavailable
-                    ? 'border-border/40 bg-elevated/10 opacity-60 cursor-not-allowed'
-                    : isSelected
-                      ? 'border-accent/50 bg-accent/[0.06] ring-1 ring-accent/20 cursor-pointer'
-                      : 'border-border/60 bg-elevated/20 hover:bg-elevated/40 cursor-pointer'
-                } ${switchProvider.isPending && !switchingToThis ? 'opacity-50' : ''}`}
+                    ? 'border-border/40 bg-elevated/10 opacity-60'
+                    : needsKey
+                      ? 'border-warning/30 bg-elevated/20'
+                      : 'border-border/60 bg-elevated/20'
+                }`}
               >
                 <div className="flex items-center gap-2">
-                  {switchingToThis ? (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent" />
-                  ) : (
-                    <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                      isSelected ? 'bg-accent' : 'bg-transparent border border-muted/40'
-                    }`} />
-                  )}
-                  <span className={`text-sm truncate flex-1 ${isSelected ? 'font-medium text-foreground' : 'text-secondary'}`}>
+                  <span className="text-sm truncate flex-1 font-medium text-foreground">
                     {/* 卡片展示去掉声明里的括号备注 (如合规提示), 保持名称干净 */}
                     {item.display_name.replace(/（.*?）|\(.*?\)/g, '').trim() || item.display_name}
                   </span>
-                  {item.kind === 'custom' ? (
+                  {item.kind === 'builtin' ? (
+                    <span className="shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] font-medium leading-none text-accent">内置</span>
+                  ) : item.kind === 'custom' ? (
                     <span className="text-[9px] text-muted/50 tracking-wider shrink-0">自有</span>
                   ) : (
                     <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">第三方</span>
                   )}
                 </div>
-                <div className="mt-1.5 flex items-center gap-1 pl-3.5">
+                <div className="mt-1.5 flex items-center gap-1 pl-0.5">
                   {unavailable ? (
                     <span className="text-[10px] text-muted">需安装依赖,见 设置 → 数据源</span>
+                  ) : needsKey ? (
+                    <span className="text-[10px] text-warning">需配置 API Key,见下方表单</span>
                   ) : item.datasets.length > 0 ? (
                     item.datasets.slice(0, 4).map(ds => (
                       <span key={ds} className="rounded bg-elevated/60 px-1 py-0.5 text-[10px] text-muted">
@@ -419,74 +432,99 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
                     <span className="text-[10px] text-muted">未声明数据集</span>
                   )}
                 </div>
-              </button>
+              </div>
             )
           })}
-
-          {/* 添加自有数据源卡片 */}
-          <button
-            type="button"
-            onClick={() => setAdding(v => !v)}
-            className={`rounded-card border border-dashed px-3.5 py-3 transition-all flex items-center justify-center gap-1.5 text-sm ${
-              adding
-                ? 'border-accent/50 bg-accent/5 text-accent'
-                : 'border-border/50 text-muted hover:text-foreground hover:border-border hover:bg-elevated/30'
-            }`}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            添加自有数据源
-          </button>
         </div>
       )}
 
-      {/* 插件化提示: 标识数据源体系已插件化, 并给出两条接入路径与文档指引 */}
+      {/* API Key 配置 (常驻展开, 不收起): TickFlow 解锁档位 + fuyao 实时/除权增强路由 */}
+      {keyForms.map(f => {
+        const val = inputs[f.name] ?? ''
+        const err = errors[f.name] ?? null
+        const msg = savedMsg[f.name] ?? null
+        const pending = saveKey.isPending && saveKey.variables?.name === f.name
+        return (
+          <div key={f.name} className="mt-3 rounded-card border border-border/70 bg-surface/60 px-3.5 py-3">
+            <div className="flex items-center gap-2">
+              <KeyRound className="h-3.5 w-3.5 text-accent/80" />
+              <span className="text-xs font-medium text-foreground">配置 {f.display} API Key</span>
+              <span className="rounded bg-elevated/70 px-1 py-px font-mono text-[9px] text-muted">{f.env}</span>
+              {f.configured ? (
+                <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-bull">
+                  <CheckCircle2 className="h-3 w-3" />
+                  已配置
+                </span>
+              ) : f.name === 'tickflow' && (
+                <span className="ml-auto text-[10px] text-muted/70">可选</span>
+              )}
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted leading-relaxed">{f.copy}</p>
+            <a
+              href={f.register.url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+            >
+              {f.register.label} ↗
+            </a>
+            <form
+              className="mt-2.5 flex items-center gap-2"
+              onSubmit={e => {
+                e.preventDefault()
+                if (val.trim() && !saveKey.isPending) saveKey.mutate({ name: f.name, key: val.trim() })
+              }}
+            >
+              <input
+                type="password"
+                value={val}
+                onChange={e => {
+                  setInputs(s => ({ ...s, [f.name]: e.target.value }))
+                  setErrors(s => ({ ...s, [f.name]: null }))
+                }}
+                placeholder={`粘贴 ${f.env}`}
+                autoFocus={f.autoFocus}
+                className="h-8 flex-1 rounded-input border border-border bg-surface px-3 font-mono text-xs text-foreground placeholder:text-muted/60 focus:border-accent/60 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!val.trim() || saveKey.isPending}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
+              >
+                {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {pending ? '验证中…' : '验证并保存'}
+              </button>
+            </form>
+            {err && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-danger">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                {err}
+              </p>
+            )}
+            {msg && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-bull">
+                <CheckCircle2 className="h-3 w-3 shrink-0" />
+                {msg}
+              </p>
+            )}
+          </div>
+        )
+      })}
+
+      {/* 插件化提示: 自有数据源接入与切换在设置页, 向导保持极简 */}
       <div className="mt-3 flex items-start gap-2 rounded-card border border-border/60 bg-surface/60 px-3 py-2.5">
         <Puzzle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
         <div className="text-[11px] leading-relaxed text-muted">
           <span className="text-secondary">数据源已插件化</span>
-          ,接入自有行情有两条路径:用 YAML 描述自有 HTTP 接口,放入
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">data/data_sources/*.yaml</span>
-          (也可用上方表单配置);或开发插件源,放入
-          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">backend/app/plugins/</span>
-          目录。接入方法与字段映射详见
+          ,接入自有行情或切换数据源请前往
+          <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">设置 → 数据源</span>
+          ,方法详见
           <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/custom-data-source.md</span>
           与
           <span className="mx-0.5 rounded bg-elevated/70 px-1 py-px font-mono text-[10px] text-secondary">docs/plugin-development.md</span>
           。
         </div>
       </div>
-
-      {switchProvider.isError && (
-        <div className="mt-3 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
-          <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
-          <span>数据源切换失败:{String((switchProvider.error as any)?.message ?? '')}</span>
-        </div>
-      )}
-
-      {/* 添加自有数据源: 复用设置页编辑器 (命名/鉴权/数据集字段映射/测试/启用) */}
-      <AnimatePresence mode="wait">
-        {adding && (
-          <motion.div
-            key="ds-editor"
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.15 }}
-            className="mt-4"
-          >
-            <DataSourceEditor
-              initial={null}
-              onCancel={() => setAdding(false)}
-              onSaved={() => {
-                qc.invalidateQueries({ queryKey: QK.dataSources })
-                setAdding(false)
-              }}
-              activeName={activeName}
-              onActivate={name => switchProvider.mutate(name)}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* 底部操作 */}
       <div className="mt-6 flex items-center justify-between">
@@ -509,149 +547,160 @@ function DataSourceStep({ onNext, onBack }: { onNext: () => void; onBack: () => 
   )
 }
 
-// ===== Step 3: 能力探测结果 =====
-// 按当前实际选中的数据源分流:
-// - TickFlow: 提示第三方源性质 + 可配 Key、按 Key 匹配档位, 展示档位与能力探测
-// - 其他源: 弱化 TickFlow (不展示其档位/能力), 只汇总所选源的数据集覆盖与回落规则
+// ===== Step 3: 能力路由检测结果 =====
+// 以能力路由矩阵呈现: 每个标准化数据集一行, 展示当前生效源与可用性,
+// 不再以 TickFlow 档位为中心 —— 多源下各数据集独立路由, 矩阵即真相。
+// 进入本步时按默认优先级自动设置路由: 前者可用的能力归前者, 没有则顺延下一个可用源。
+
+// 自动路由的默认优先级 (前者可用的能力优先归前者)
+const ROUTE_PRIORITY = [
+  { name: 'tickflow', display: 'TickFlow' },
+  { name: 'fuyao', display: 'fuyao' },
+  { name: 'stocksdk', display: 'stock-sdk' },
+]
 
 function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const qc = useQueryClient()
   const settings = useSettings()
-  const caps = useCapabilities()
   const prefs = usePreferences()
-  const sources = useQuery({
-    queryKey: QK.dataSources,
-    queryFn: api.dataSources,
-    staleTime: 60_000,
+  const matrix = useQuery({
+    queryKey: QK.capabilityMatrix,
+    queryFn: api.capabilityMatrix,
+    staleTime: 30_000,
   })
+
+  // 自动路由结果: null=尚未执行/执行中; []=已符合优先级无需调整; 有值=本次改写的路由
+  const appliedRef = useRef(false)
+  const [appliedChanges, setAppliedChanges] = useState<{ label: string; to: string }[] | null>(null)
+  const [applyError, setApplyError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!matrix.data || appliedRef.current) return
+    appliedRef.current = true
+    const desired: Partial<Record<ProviderField, string>> = {}
+    const changes: { label: string; to: string }[] = []
+    for (const cap of matrix.data.capabilities) {
+      if (!cap.field) continue   // 不可路由能力 (仅 TickFlow 提供) 跳过
+      const pick = ROUTE_PRIORITY.find(p => (
+        p.name === 'tickflow'
+          ? cap.tf_available
+          : cap.candidates.some(c => c.name === p.name && c.available)
+      ))
+      if (!pick || pick.name === cap.current) continue   // 全都不可用或无需变化: 保持现状
+      desired[cap.field] = pick.name
+      changes.push({ label: cap.label, to: pick.display })
+    }
+    if (changes.length === 0) {
+      setAppliedChanges([])
+      return
+    }
+    api.updateDataProviders(desired)
+      .then(() => {
+        setAppliedChanges(changes)
+        return qc.invalidateQueries({ queryKey: QK.preferences })
+      })
+      .then(() => qc.invalidateQueries({ queryKey: QK.capabilityMatrix }))
+      .catch(e => setApplyError(`自动设置能力路由失败: ${(e as Error).message}`))
+  }, [matrix.data])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeName = prefs.data?.daily_data_provider || 'tickflow'
   const isTickflow = activeName === 'tickflow'
-  const sourceItem = [
-    ...(sources.data?.builtin ?? []),
-    ...(sources.data?.plugins ?? []),
-    ...(sources.data?.custom ?? []),
-  ].find(s => s.name === activeName)
-
+  const routes = matrix.data?.capabilities ?? []
   // 是否配置成功 —— 免费档(free)或付费档(api_key)都算;None 档算未配置
   const hasKey = settings.data?.mode === 'free' || settings.data?.mode === 'api_key'
-  const capList = caps.data ? Object.entries(caps.data.capabilities) : []
+  const usableCount = routes.filter(r => r.usable).length
 
   return (
     <div>
       <div className="flex items-center gap-2.5">
         <div className="rounded-lg bg-accent/10 p-2">
-          <ScanSearch className="h-4 w-4 text-accent" />
+          <Route className="h-4 w-4 text-accent" />
         </div>
-        <h2 className="text-xl font-bold text-foreground">能力探测结果</h2>
+        <h2 className="text-xl font-bold text-foreground">能力路由检测</h2>
       </div>
+      <p className="mt-2.5 text-sm text-secondary leading-relaxed">
+        进入本步时已按默认优先级
+        <span className="text-foreground font-medium"> TickFlow → fuyao → stock-sdk </span>
+        自动设置各数据集的路由:前者可用的能力归前者,没有则顺延下一个可用源。后续可随时在
+        <span className="text-foreground font-medium"> 设置 → 数据源 </span>按数据集改选。
+      </p>
 
-      {prefs.isLoading ? (
+      {/* 自动路由执行结果 */}
+      {applyError && (
+        <div className="mt-2.5 flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-snug text-danger">
+          <AlertCircle className="h-3.5 w-3.5 mt-px shrink-0" />
+          <span>{applyError}</span>
+        </div>
+      )}
+      {!applyError && appliedChanges !== null && (
+        <div className="mt-2.5 flex items-start gap-1.5 rounded-btn border border-bull/25 bg-bull/[0.06] px-3 py-2 text-[11px] leading-snug text-secondary">
+          <CheckCircle2 className="h-3.5 w-3.5 mt-px shrink-0 text-bull" />
+          {appliedChanges.length > 0 ? (
+            <span>
+              已按优先级自动路由:{appliedChanges.map(c => `${c.label} → ${c.to}`).join('、')}
+            </span>
+          ) : (
+            <span>当前能力路由已符合默认优先级,无需调整。</span>
+          )}
+        </div>
+      )}
+
+      {matrix.isLoading ? (
         <div className="mt-5 flex items-center gap-2 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          正在读取当前数据源…
+          正在检测能力路由…
         </div>
-      ) : isTickflow ? (
+      ) : routes.length === 0 ? (
+        <div className="mt-5 rounded-card border border-border bg-surface/80 p-5 text-center text-xs text-muted">
+          暂未获取到能力路由矩阵,可稍后在 设置 → 数据源 中重新检测。
+        </div>
+      ) : (
         <>
-          {/* TickFlow 源说明: 点明第三方性质 + Key/档位关系 */}
-          <div className="mt-4 flex items-start gap-2.5 rounded-card border border-border/60 bg-surface/60 px-3.5 py-3">
-            <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent/70" />
-            <div className="text-[11px] leading-relaxed text-muted">
-              <span className="text-secondary">当前选择了 TickFlow 第三方数据源</span>
-              。实时行情、监控等能力与订阅档位由 TickFlow Key 决定:可在
-              <span className="text-foreground font-medium"> 设置 → 账户 </span>
-              配置 Key,系统会根据 Key 自动匹配档位;未配置 Key 时按 None 档运行,仅保留内置历史数据能力。
-            </div>
-          </div>
-
-          {hasKey ? (
-            <>
-              <p className="mt-2.5 text-sm text-secondary leading-relaxed">
-                Key 已生效,以下是你当前可用的全部能力。后续可在
-                <span className="text-foreground font-medium"> 设置 → 账户 </span>
-                中重新检测或更换 Key。
-              </p>
-
-              <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
-                <div className="flex items-baseline justify-between">
-                  <span className="text-[10px] uppercase tracking-widest text-muted">订阅档位</span>
-                  <span className="font-mono text-2xl font-bold tracking-tight text-foreground">
-                    {caps.data?.label ?? settings.data?.tier_label ?? '—'}
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {routes.map(r => (
+              <div
+                key={r.id}
+                className={`rounded-card border px-3.5 py-2.5 ${
+                  r.usable ? 'border-border/60 bg-elevated/20' : 'border-warning/25 bg-warning/[0.03]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {r.usable ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bear" />
+                  ) : (
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
+                  )}
+                  <span className="text-sm font-medium text-foreground">{r.label}</span>
+                  <span className="ml-auto shrink-0 text-[10px] font-medium text-secondary">
+                    {r.usable ? '可用' : '不可用'}
                   </span>
                 </div>
-
-                {caps.isLoading ? (
-                  <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    正在探测能力…
+                <div className="mt-1 flex items-center gap-1.5 pl-5 text-[10px] text-muted">
+                  <span className="truncate">生效源:{r.effective_display}</span>
+                  <span className="shrink-0 text-muted/50">·</span>
+                  <span className="shrink-0">{r.desc}</span>
+                </div>
+                {!r.usable && (
+                  <div className="mt-1 pl-5 text-[10px] text-warning/80 leading-relaxed">
+    {r.candidates.length > 0
+      ? `可切换候选:${r.candidates.map(c => c.display).join(' / ')}`
+      : isTickflow && !hasKey
+        ? '该能力目前不可用'
+        : '暂无可用候选,可在设置中排查该源'}
                   </div>
-                ) : capList.length > 0 ? (
-                  <div className="mt-4 grid grid-cols-1 gap-1.5">
-                    {capList.slice(0, 8).map(([cap]) => {
-                      const meta = CAP_LABELS[cap]
-                      return (
-                        <div key={cap} className="flex items-center gap-2 text-xs">
-                          <CheckCircle2 className="h-3.5 w-3.5 text-bear shrink-0" />
-                          <span className="text-foreground">{meta?.name ?? cap}</span>
-                        </div>
-                      )
-                    })}
-                    {capList.length > 8 && (
-                      <div className="text-[11px] text-muted pl-5">…等共 {capList.length} 项</div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="mt-4 text-xs text-muted">暂未探测到能力</div>
                 )}
               </div>
-            </>
-          ) : (
-            <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-6 text-center">
-              <div className="mx-auto w-fit rounded-xl bg-elevated p-3">
-                <Zap className="h-6 w-6 text-warning" />
-              </div>
-              <div className="mt-3 text-sm font-medium text-foreground">将以 None 档继续</div>
-              <p className="mt-2 text-xs text-muted leading-relaxed max-w-sm mx-auto">
-                当前未配置有效 Key,仍可使用看板、选股、回测等功能 —— 进入看板后可直接获取近 1 年历史日K数据。配置 Key 后可解锁实时行情监控等能力,随时在
-                <span className="text-foreground font-medium"> 设置 → 账户 </span>填写。
-              </p>
-            </div>
-          )}
-        </>
-      ) : (
-        /* 其他数据源: 不展示 TickFlow 档位/能力探测, 汇总所选源的数据集覆盖 */
-        <div className="mt-5 rounded-card border border-border bg-surface/80 backdrop-blur-sm p-5">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[10px] uppercase tracking-widest text-muted">当前数据源</span>
-            <span className="flex min-w-0 items-baseline gap-1.5">
-              <span className="truncate text-lg font-bold text-foreground">
-                {(sourceItem?.display_name ?? activeName).replace(/（.*?）|\(.*?\)/g, '').trim() || sourceItem?.display_name || activeName}
-              </span>
-              <span className="shrink-0 rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium leading-none text-warning">
-                {sources.data?.custom?.some(s => s.name === activeName) ? '自有' : '第三方'}
-              </span>
+            ))}
+          </div>
+
+          <div className="mt-3 flex items-center justify-between rounded-btn bg-elevated/50 px-3.5 py-2 text-[11px] text-muted">
+            <span>
+              {usableCount}/{routes.length} 个数据集可用
+              {isTickflow && !hasKey && ' · 未配置 TickFlow Key,按 None 档运行,历史日K不受影响'}
             </span>
+            <LinkMark />
           </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-1">
-            {(sourceItem?.datasets?.length ?? 0) > 0 ? (
-              sourceItem!.datasets.map(ds => (
-                <span key={ds} className="rounded bg-elevated/60 px-1.5 py-0.5 text-[10px] text-secondary">
-                  {DATASET_LABELS[ds] ?? ds}
-                </span>
-              ))
-            ) : (
-              <span className="text-[10px] text-muted">未声明数据集</span>
-            )}
-          </div>
-          <p className="mt-2.5 text-xs text-muted leading-relaxed">
-            行情能力由所选数据源决定:以上数据集由该源提供,未覆盖的数据集自动回落内置源,无需额外配置。
-          </p>
-
-          <div className="mt-3 border-t border-border/60 pt-2.5 text-[11px] leading-relaxed text-muted">
-            TickFlow 的 Key 与档位探测仅在选择 TickFlow 作为数据源时展示;如需切换,前往
-            <span className="text-foreground font-medium"> 设置 → 数据源 </span>。
-          </div>
-        </div>
+        </>
       )}
 
       {/* 底部操作 */}
@@ -673,6 +722,11 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
       </div>
     </div>
   )
+}
+
+/** 指向设置数据源的行内提示 (能力路由可随时调整) */
+function LinkMark() {
+  return <span className="shrink-0">调整: 设置 → 数据源</span>
 }
 
 // ===== Step 4: 完成 =====

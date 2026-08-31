@@ -18,6 +18,19 @@ export function useCapabilities() {
   })
 }
 
+/** 能力路由矩阵 — 设置页与各页能力门控共用。
+
+ * 区别于 useCapabilities 的 TickFlow 套餐视角: 矩阵按「生效源当前能否提供」
+ * 判定 (usable), 路由到可用插件时同样可用。路由偏好 / 档位探测 / 插件装卸
+ * 变化时由设置页失效, 各页共享同一缓存自动刷新。
+ */
+export function useCapabilityMatrix() {
+  return useQuery({
+    queryKey: QK.capabilityMatrix,
+    queryFn: api.capabilityMatrix,
+  })
+}
+
 /** 设置状态 — Layout / Data / Keys 共用 */
 export function useSettings() {
   return useQuery({

@@ -110,28 +110,23 @@ def test_index_targets_are_evaluated_independently(tmp_path):
     assert events[0]["change_pct"] == 0.012
 
 
-def test_index_availability_updates_when_realtime_pool_changes(tmp_path, monkeypatch):
-    selected = ["000001.SH"]
-    monkeypatch.setattr(sector_monitor.preferences, "get_realtime_pull_index", lambda: True)
-    monkeypatch.setattr(sector_monitor.preferences, "get_realtime_index_mode", lambda: "core")
-    monkeypatch.setattr(sector_monitor.preferences, "get_realtime_index_symbols", lambda: selected)
+def test_index_targets_always_available(tmp_path):
+    """指数标的恒可实时监控: quote_service 对核心四只 + 启用规则标的显式拉取,
+    不再有按偏好池翻转 available 的行为。"""
     service = SectorMonitorService(_Repo(tmp_path))
+    targets = {target["symbol"]: target for target in service.list_targets()["index"]}
+    assert targets["000001.SH"]["available"] is True
+    assert targets["399006.SZ"]["available"] is True
 
-    first = {target["symbol"]: target for target in service.list_targets()["index"]}
-    assert first["000001.SH"]["available"] is True
-    assert first["399006.SZ"]["available"] is False
+    first = targets["000001.SH"]
     initial_quote = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.2]})
-    service.build_snapshots(pl.DataFrame(), initial_quote, [first["000001.SH"]], {5}, now=1000.0)
+    service.build_snapshots(pl.DataFrame(), initial_quote, [first], {5}, now=1000.0)
 
-    selected[:] = ["399006.SZ"]
-    second = {target["symbol"]: target for target in service.list_targets()["index"]}
-    assert second["000001.SH"]["available"] is False
-    assert second["399006.SZ"]["available"] is True
     changed_quote = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [1.3]})
     snapshot = service.build_snapshots(
-        pl.DataFrame(), changed_quote, [second["000001.SH"]], {5}, now=1300.0,
+        pl.DataFrame(), changed_quote, [first], {5}, now=1300.0,
     )
-    assert snapshot["index:000001.SH"]["window_changes"][5] is None
+    assert snapshot["index:000001.SH"]["window_changes"][5] is not None
 
 
 def test_concept_snapshot_uses_member_average_and_full_window(tmp_path):
