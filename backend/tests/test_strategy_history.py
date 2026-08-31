@@ -71,8 +71,9 @@ def test_preselect_is_marked_watch_only(tmp_path: Path):
 
 
 def test_existing_strategy_alerts_are_backfilled_and_deduplicated(tmp_path: Path):
-    alert_store.append_many(tmp_path, [{
-        "ts": int(time.time() * 1000),
+    alert_ts = int(time.time() * 1000) - 1000
+    alert = {
+        "ts": alert_ts,
         "rule_id": "mr_strategy_custom_dual_edge_focus",
         "rule_name": "策略监控 · 双刃合-Focus",
         "strategy_id": "custom_dual_edge_focus",
@@ -84,7 +85,17 @@ def test_existing_strategy_alerts_are_backfilled_and_deduplicated(tmp_path: Path
         "price": 34.55,
         "change_pct": 0.05,
         "signals": ["signal_fenqi"],
-    }])
+    }
+    alert_store.append_many(tmp_path, [alert])
+
+    strategy_history.record_monitor_events(tmp_path, [{**alert, "ts": alert_ts + 1000}])
+    wrong_event = strategy_history.list_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+        symbol="300516.SZ",
+        event_type="buy_signal",
+    )[0]
+    assert wrong_event["ts"] == alert_ts + 1000
 
     assert strategy_history.backfill_monitor_events(
         tmp_path,
@@ -100,5 +111,6 @@ def test_existing_strategy_alerts_are_backfilled_and_deduplicated(tmp_path: Path
         symbol="300516.SZ",
         event_type="buy_signal",
     )[0]
+    assert event["ts"] == alert_ts
     assert event["reason_code"] == "buy_signal"
     assert event["strategy_name"] == "策略监控 · 双刃合-Focus"

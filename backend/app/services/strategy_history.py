@@ -111,38 +111,7 @@ def record_selection_snapshot(
 
 def record_monitor_events(data_dir: Path, events: list[dict]) -> int:
     """把策略监控的买卖节点同步到长期历史。"""
-    rows = []
-    for event in events:
-        if event.get("source") != "strategy":
-            continue
-        event_type = str(event.get("type") or "")
-        if event_type not in {"buy_signal", "sell_signal", "pool_entry", "pool_exit"}:
-            continue
-        strategy_id = str(event.get("strategy_id") or "").strip()
-        symbol = str(event.get("symbol") or "").strip().upper()
-        if not strategy_id or not symbol or symbol == "_BATCH":
-            continue
-        signal_date = _date_from_ts(event.get("ts"))
-        rows.append({
-            "event_key": f"monitor:{strategy_id}:{symbol}:{event_type}:{signal_date}",
-            "event_type": event_type,
-            "status": "signal",
-            "strategy_id": strategy_id,
-            "strategy_name": event.get("rule_name") or strategy_id,
-            "symbol": symbol,
-            "name": event.get("name"),
-            "signal_date": signal_date,
-            "trade_date": signal_date,
-            "phase": "intraday",
-            "price": event.get("price"),
-            "change_pct": event.get("change_pct"),
-            "score": None,
-            "signals": event.get("signals") or [],
-            "reason_code": event_type,
-            "reason": event.get("message") or event_type,
-            "metadata": {"rule_id": event.get("rule_id")},
-        })
-    return append_many(data_dir, rows)
+    return append_many(data_dir, _monitor_event_rows(events))
 
 
 def backfill_monitor_events(
@@ -165,7 +134,89 @@ def backfill_monitor_events(
             event for event in events
             if event.get("strategy_id") == strategy_id
         ]
-    return record_monitor_events(data_dir, events)
+    rows = _monitor_event_rows(events)
+    return _upsert_monitor_events(data_dir, rows)
+
+
+def _monitor_event_rows(events: list[dict]) -> list[dict]:
+    rows = []
+    for event in events:
+        if event.get("source") != "strategy":
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type not in {"buy_signal", "sell_signal", "pool_entry", "pool_exit"}:
+            continue
+        strategy_id = str(event.get("strategy_id") or "").strip()
+        symbol = str(event.get("symbol") or "").strip().upper()
+        if not strategy_id or not symbol or symbol == "_BATCH":
+            continue
+        signal_date = _date_from_ts(event.get("ts"))
+        rows.append({
+            "event_key": f"monitor:{strategy_id}:{symbol}:{event_type}:{signal_date}",
+            "ts": event.get("ts"),
+            "event_type": event_type,
+            "status": "signal",
+            "strategy_id": strategy_id,
+            "strategy_name": event.get("rule_name") or strategy_id,
+            "symbol": symbol,
+            "name": event.get("name"),
+            "signal_date": signal_date,
+            "trade_date": signal_date,
+            "phase": "intraday",
+            "price": event.get("price"),
+            "change_pct": event.get("change_pct"),
+            "score": None,
+            "signals": event.get("signals") or [],
+            "reason_code": event_type,
+            "reason": event.get("message") or event_type,
+            "metadata": {"rule_id": event.get("rule_id")},
+        })
+    return rows
+
+
+def _upsert_monitor_events(data_dir: Path, events: list[dict]) -> int:
+    if not events:
+        return 0
+    target = path(data_dir)
+    desired: dict[str, dict] = {}
+    for event in events:
+        row = _normalize(event)
+        desired[row["event_key"]] = row
+    changed = 0
+    with _lock:
+        known = _load_known_keys_locked(target, str(target))
+        existing_keys: set[str] = set()
+        kept: list[dict] = []
+        if target.exists():
+            try:
+                with target.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            current = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        key = str(current.get("event_key") or "")
+                        replacement = desired.get(key)
+                        if replacement is not None:
+                            existing_keys.add(key)
+                            kept.append(replacement)
+                            changed += int(current != replacement)
+                        else:
+                            kept.append(current)
+            except OSError as exc:
+                logger.warning("读取策略历史以回填监控节点失败: %s", exc)
+                return 0
+        for key, row in desired.items():
+            if key not in existing_keys:
+                kept.append(row)
+                known.add(key)
+                changed += 1
+        if not changed:
+            return 0
+        _write_rows_locked(target, kept)
+        known.clear()
+        known.update(str(row.get("event_key")) for row in kept if row.get("event_key"))
+    return changed
 
 
 def record_auction_outcomes(data_dir: Path, outcomes: list[dict[str, Any]]) -> int:
@@ -301,14 +352,18 @@ def _prune_locked(target: Path, known: set[str]) -> None:
         kept.sort(key=lambda row: int(row.get("ts") or 0))
         kept = kept[-MAX_RECORDS:]
     try:
-        tmp = target.with_name(target.name + ".tmp")
-        text = "\n".join(json.dumps(row, ensure_ascii=False) for row in kept)
-        tmp.write_text(text + ("\n" if kept else ""), encoding="utf-8")
-        tmp.replace(target)
+        _write_rows_locked(target, kept)
         known.clear()
         known.update(str(row.get("event_key")) for row in kept if row.get("event_key"))
     except OSError as exc:
         logger.warning("清理策略历史失败: %s", exc)
+
+
+def _write_rows_locked(target: Path, rows: list[dict]) -> None:
+    tmp = target.with_name(target.name + ".tmp")
+    text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    tmp.write_text(text + ("\n" if rows else ""), encoding="utf-8")
+    tmp.replace(target)
 
 
 def _date_from_ts(value: Any) -> str:
