@@ -5,6 +5,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
+import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
@@ -878,16 +879,74 @@ export function Watchlist() {
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
+  // 视口感知: 虚拟器渲染中的 symbol 集合 (可见 + overscan 缓冲), 由下方虚拟器
+  // 区域的 effect 写入; null = 未就绪/非虚拟化视图, 沿用全列表。首轮全量播种
+  // 缓存 (queryFn 在挂载时先于 ref 填充执行), 之后各轮只拉视口集合。
+  const minuteRequestSymbolsRef = useRef<string[] | null>(null)
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(minuteSymbolsKey),
-    // prefer_local: 全量分钟服务健康时股票缺口不再批量补拉 (本地分区由服务持续写入),
-    // 大自选(数百上千只)不再持续打批量分钟接口
-    queryFn: () => api.klineMinuteBatch(minuteSymbols, undefined, true),
+    // 增量轮询 (prefer_local): 读缓存以最后一根为 since 只拉新增, 本地合并为
+    // 完整序列; 全量分钟健康时服务端零补拉, 不健康时也只增量。
+    // 请求集合 = 视口内 symbol (缓存按 symbol upsert, 视口外保留旧序列)
+    queryFn: () => {
+      const reqSymbols = minuteRequestSymbolsRef.current ?? minuteSymbols
+      return fetchMinuteBatchIncremental(qc, QK.minuteBatch(minuteSymbolsKey), reqSymbols, true)
+    },
     enabled: intradayVisible && minuteSymbols.length > 0 && !groupCardsOpen,
     staleTime: 10_000,
-    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
+    // SSE tick 新鲜 (enriched 10s 内被行情推送刷新过) → 分时图已由下方续画本地
+    // 跳动, 轮询降为 30s 兜底校准; tick 断流时回到用户设定间隔
+    refetchInterval: () => {
+      if (!(intradayRefreshEnabled && realtimeRunning)) return false
+      const tickFresh = Date.now() - enriched.dataUpdatedAt < 10_000
+      return tickFresh ? 30_000 : intradayRefreshInterval * 1000
+    },
   })
-  const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
+
+  // 分时图 SSE 续画: enriched 行情列每 tick 刷新 (SSE 触发), 前端本地续写分钟序列
+  // 的最后一根 / 分钟滚动追加新K — 轮询间隔内分时图也随实时价跳动, 零额外请求。
+  // 纯视图叠加不写回缓存: 轮询拉回的服务端定版K始终是权威值, 覆盖续画值。
+  const minuteData = useMemo(() => {
+    const base: Record<string, MinuteKlineRow[]> = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
+    const liveRows = enriched.data?.rows
+    if (!intradayVisible || !liveRows?.length) return base
+    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
+    // 仅连续竞价时段续画 (9:31-11:30, 13:01-15:00); 收盘后 rt_price 即收盘价无需续写
+    const now = new Date()
+    const hh = now.getHours(), mm = now.getMinutes()
+    const inSession =
+      (hh === 9 && mm >= 31) || hh === 10 ||
+      (hh === 11 && mm <= 30) || (hh === 13 && mm >= 1) || hh === 14
+    if (!inSession) return base
+    // 与服务端同构的 naive 北京时间戳 (手工拼本地时间, 不能用 toISOString — 那是 UTC)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const barTs = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(hh)}:${pad(mm)}:00`
+    const patched: Record<string, MinuteKlineRow[]> = {}
+    for (const sym of Object.keys(base)) {
+      const arr = base[sym]
+      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
+      const live = liveBySymbol.get(sym)
+      const price = live?.rt_price ?? live?.close
+      if (typeof price !== 'number' || !Number.isFinite(price)) { patched[sym] = arr; continue }
+      const last = arr[arr.length - 1]
+      if (last.datetime === barTs) {
+        patched[sym] = [...arr.slice(0, -1), {
+          ...last,
+          close: price,
+          high: Math.max(last.high, price),
+          low: Math.min(last.low, price),
+        }]
+      } else if (barTs > last.datetime) {
+        patched[sym] = [...arr, {
+          datetime: barTs, open: price, high: price, low: price, close: price,
+          volume: 0, amount: 0,   // 量/额由下一轮轮询定版覆盖
+        }]
+      } else {
+        patched[sym] = arr   // 轮询数据已新于本地时钟 (钟差兜底), 不动
+      }
+    }
+    return patched
+  }, [intradayVisible, minuteBatch.data, enriched.data])
 
   const addMutation = useMutation({
     mutationFn: ({ symbol, groupId }: { symbol: string; groupId: string | null }) =>
@@ -1213,6 +1272,40 @@ export function Watchlist() {
     overscan: 3,
     scrollMargin: cardScrollMargin,
   })
+
+  // 视口感知 (数据层): 从虚拟器派生"正在渲染的 symbol" (可见 + overscan 缓冲,
+  // 滚动前已就绪)。非虚拟化视图 (小列表/表格/分组) 为 null → 沿用全列表。
+  // 每次渲染直读 getVirtualItems (滚动不换 deps, 不能 useMemo), 副作用集中在 effect。
+  const visibleCardSymbols = (() => {
+    if (!virtualizeCards) return null
+    // 与 minuteSymbols 同口径: 剔除指数 (minute-batch 契约只收股票/ETF)
+    const scope = new Set(minuteSymbols as string[])
+    const items = cardRowVirtualizer.getVirtualItems()
+    const out: string[] = []
+    for (const item of items) {
+      for (let i = item.index * cardColumns; i < (item.index + 1) * cardColumns && i < sortedRows.length; i++) {
+        const s = (sortedRows[i] as any)?.symbol
+        if (typeof s === 'string' && scope.has(s)) out.push(s)
+      }
+    }
+    return out.length ? out : null
+  })()
+  const minuteVisibleKey = visibleCardSymbols?.join(',') ?? ''
+  const lastVisibleKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    minuteRequestSymbolsRef.current = visibleCardSymbols
+    if (!minuteVisibleKey) return
+    if (lastVisibleKeyRef.current === minuteVisibleKey) return
+    const prevKey = lastVisibleKeyRef.current
+    lastVisibleKeyRef.current = minuteVisibleKey
+    if (prevKey === null) return   // 首次: 挂载播种轮已按全列表发出, 不额外触发
+    // 视口集合变化 (滚动到新区段) → 防抖 300ms 补拉一次, 新滚入的 symbol 即时就绪
+    const t = setTimeout(() => {
+      qc.invalidateQueries({ queryKey: QK.minuteBatch(minuteSymbolsKey) })
+    }, 300)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minuteVisibleKey, minuteSymbolsKey])
 
   // 可见的 ext 列（卡片视图使用）
   const visibleExtCols = useMemo(

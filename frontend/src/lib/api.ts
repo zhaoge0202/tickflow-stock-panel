@@ -2052,10 +2052,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
-  klineMinuteBatch: (symbols: string[], date?: string, preferLocal?: boolean) =>
-    request<{ data: Record<string, MinuteKlineRow[]>; full_minute_local?: boolean }>('/api/kline/minute-batch', {
+  klineMinuteBatch: (symbols: string[], date?: string, preferLocal?: boolean, since?: string) =>
+    request<{ data: Record<string, MinuteKlineRow[]>; full_minute_local?: boolean; incremental?: boolean }>('/api/kline/minute-batch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, date, ...(preferLocal ? { prefer_local: true } : {}) }),
+      body: JSON.stringify({ symbols, date, ...(preferLocal ? { prefer_local: true } : {}), ...(since ? { since } : {}) }),
     }),
   instrumentSearch: (q: string, limit = 20, assetTypes?: string) =>
     request<{ results: { symbol: string; name: string; code: string; asset_type?: string }[] }>(

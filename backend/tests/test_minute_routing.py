@@ -413,6 +413,34 @@ def test_minute_batch_fresh_local_skips_pull(monkeypatch):
     assert len(result["data"]["600519.SH"]) == 240
 
 
+def test_minute_batch_since_returns_only_new_bars(monkeypatch):
+    """since 增量响应: 只回 >= since 的K (含 since 本身 — 形成中的动态K需覆盖),
+    无新增的 symbol 不出现在 data; incremental 标志为 True。"""
+    from app.api import kline as kline_api
+
+    dts = ([datetime(2026, 1, 15, 9, 31) + timedelta(minutes=i) for i in range(120)]
+           + [datetime(2026, 1, 15, 13, 1) + timedelta(minutes=i) for i in range(120)])
+    local = _bars("600519.SH", dts)   # fresh: 不触发补拉, 直读本地后做 since 过滤
+    _, _, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    result = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15",
+        "since": "2026-01-15T15:00:00",
+    })
+    rows = result["data"]["600519.SH"]
+    assert [r["datetime"] for r in rows] == [datetime(2026, 1, 15, 15, 0)]   # 含 since 当根
+    assert result["incremental"] is True
+
+    # since 早于全部K → 全量返回; 无 since → incremental False
+    full = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15", "since": "2026-01-15T09:00:00",
+    })
+    assert len(full["data"]["600519.SH"]) == 240
+    plain = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+    assert plain["incremental"] is False
+    assert len(plain["data"]["600519.SH"]) == 240
+
+
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------
 
 def test_sync_minute_batch_custom_calls_on_segment(monkeypatch):

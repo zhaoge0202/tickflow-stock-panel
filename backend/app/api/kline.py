@@ -583,6 +583,15 @@ def get_minute_batch(request: Request, body: dict):
 
     symbols: list[str] = body.get("symbols", [])
     trade_date_str: str | None = body.get("date")
+    # 增量响应: since (ISO datetime) 之前的K不回传, 客户端本地缓存合并。
+    # since 应传客户端已持有的最后一根时间 — 形成中的动态K >= since, 每轮覆盖。
+    since_str = body.get("since")
+    since_dt: datetime | None = None
+    if since_str:
+        try:
+            since_dt = datetime.fromisoformat(str(since_str))
+        except ValueError:
+            since_dt = None
     # 自选分时本地优先标志: 全量分钟服务健康时, 股票缺口不再批量补拉
     # (本地分区由服务按间隔持续写入, 下一轮自然补全; 停牌/临停票补拉也是空, 无损)。
     # ETF 不在全量分钟 universe 内, 恒走补拉。服务不健康时回落现状补拉兜底。
@@ -757,8 +766,20 @@ def get_minute_batch(request: Request, body: dict):
         if sym not in result:
             result[sym] = live.to_dicts()
 
+    # since 增量过滤: 只回 >= since 的K (含动态最后一根), 无新增的 symbol 不回
+    if since_dt is not None:
+        result = {
+            sym: [r for r in rows if r["datetime"] >= since_dt]
+            for sym, rows in result.items()
+        }
+        result = {sym: rows for sym, rows in result.items() if rows}
+
     # full_minute_local: 本轮 prefer_local 生效 (本地分区由全量分钟服务供给, 股票未做补拉)
-    return {"data": result, "full_minute_local": full_minute_healthy}
+    return {
+        "data": result,
+        "full_minute_local": full_minute_healthy,
+        "incremental": since_dt is not None,
+    }
 
 
 @router.get("/minute-range")
