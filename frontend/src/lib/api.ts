@@ -3950,6 +3950,12 @@ export const api = {
     return request<StrategyHistoryResponse>(`/api/strategy-history${suffix ? `?${suffix}` : ''}`)
   },
 
+  strategyHistoryBackfill: (strategyIds?: string[], maxCycles = 5) =>
+    request<{ cycles: number; written: number }>('/api/strategy-history/backfill', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_ids: strategyIds ?? null, max_cycles: maxCycles, asset_type: 'stock' }),
+    }),
+
   marketBreadthLatest: () =>
     request<MarketBreadthSnapshot>('/api/market-breadth/latest'),
 

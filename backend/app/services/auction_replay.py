@@ -7,6 +7,7 @@ stale 秒数; 不会把没有原始事件的秒伪装成真实新 tick。
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import asdict
@@ -37,6 +38,9 @@ _dynamic_history_lock = threading.Lock()
 _dynamic_history_cache: dict[tuple, object] = {}
 _quote_window_lock = threading.Lock()
 _quote_window_cache: dict[tuple[str, str], dict] = {}
+_backfill_lock = threading.Lock()
+_backfill_cache: dict[tuple[str, tuple[str, ...]], float] = {}
+_BACKFILL_TTL_SECONDS = 30.0
 
 
 def replay_cached_strategy_results(
@@ -363,6 +367,205 @@ def replay_dynamic_strategy_results(
     return payload
 
 
+def backfill_recent_strategy_history(
+    repo,
+    engine,
+    *,
+    strategy_ids: list[str],
+    max_cycles: int = 5,
+) -> dict[str, int]:
+    """补齐最近已结束且有竞价快照的策略生命周期。
+
+    页面进入下一个交易日后，策略缓存只保留最新日，无法再依赖当天的动态
+    回放请求生成上一周期的淘汰结果。这里按最近交易日相邻窗口重算缺失的
+    基础候选和动态结果，只处理尚未落盘的周期，避免重复计算和重复写入。
+    """
+    from app.services import strategy_history
+    from app.services.screener import ScreenerService
+    from app.strategy import config as strategy_config
+
+    data_dir = Path(repo.store.data_dir)
+    requested_ids = [sid for sid in _normalize_strategy_ids(strategy_ids) or [] if engine.has(sid)]
+    if not requested_ids:
+        return {"cycles": 0, "written": 0}
+    cache_key = (str(data_dir.resolve()), tuple(sorted(requested_ids)))
+    now = time.monotonic()
+    with _backfill_lock:
+        previous = _backfill_cache.get(cache_key)
+        if previous is not None and now - previous < _BACKFILL_TTL_SECONDS:
+            return {"cycles": 0, "written": 0}
+        _backfill_cache[cache_key] = now
+    dates = _enriched_partition_dates(data_dir)
+    if len(dates) < 2:
+        return {"cycles": 0, "written": 0}
+
+    overrides_map_all = strategy_config.list_overrides(data_dir)
+    svc = ScreenerService(repo, asset_type="stock")
+    cycles = 0
+    written = 0
+    cycle_pairs = list(zip(dates, dates[1:]))
+    for signal_date, trade_day in reversed(cycle_pairs[-max(1, int(max_cycles)):]):
+        quote_rows = _read_quote_window_rows(
+            data_dir,
+            trade_day,
+            start_ts=_window_start_ms(trade_day, AUCTION_START),
+            end_ts=_window_start_ms(trade_day, TRADE_END),
+        )
+        if not quote_rows:
+            continue
+        classified = _classify_rows(quote_rows, trade_day)
+        if not classified["auction_rows"] and not classified["trade_rows"]:
+            continue
+        for sid in requested_ids:
+            existing = strategy_history.list_events(
+                data_dir,
+                strategy_id=sid,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+                event_type="auction_rejected",
+                limit=1,
+            )
+            if existing:
+                continue
+            existing = strategy_history.list_events(
+                data_dir,
+                strategy_id=sid,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+                event_type="auction_confirmed",
+                limit=1,
+            )
+            if existing:
+                continue
+            result = _historical_strategy_result(
+                svc,
+                engine,
+                sid,
+                signal_date,
+                overrides_map_all.get(sid) or {},
+            )
+            if result is None:
+                continue
+            params = result["params"]
+            history = _load_dynamic_history(
+                svc,
+                engine,
+                signal_date,
+                [sid],
+                params_map={sid: params},
+                overrides_map={sid: overrides_map_all.get(sid) or {}},
+            )
+            if history is None or history.is_empty():
+                continue
+            final_ts = _window_start_ms(trade_day, TRADE_END) - 1
+            final_frame = _build_dynamic_frame(
+                final_ts,
+                repo,
+                engine,
+                history,
+                signal_date=signal_date,
+                trade_day=trade_day,
+                strategy_ids=[sid],
+                params_map={sid: params},
+                overrides_map={sid: overrides_map_all.get(sid) or {}},
+                classified=classified,
+                include_candidates=True,
+                asset_type="stock",
+                timeframe="1d",
+            )
+            before = len(strategy_history.list_events(
+                data_dir,
+                strategy_id=sid,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+            ))
+            _record_dynamic_history(
+                data_dir,
+                engine=engine,
+                signal_date=signal_date,
+                trade_day=trade_day,
+                final_frame=final_frame,
+                classified=classified,
+                final_ts=final_ts,
+                requested_ids=[sid],
+                params_map={sid: params},
+                cache_results={sid: result["cache_result"]},
+            )
+            after = len(strategy_history.list_events(
+                data_dir,
+                strategy_id=sid,
+                signal_date=signal_date.isoformat(),
+                trade_date=trade_day.isoformat(),
+            ))
+            written += max(after - before, 0)
+            cycles += 1
+    return {"cycles": cycles, "written": written}
+
+
+def _historical_strategy_result(
+    svc,
+    engine,
+    strategy_id: str,
+    signal_date: date,
+    overrides: dict,
+) -> dict | None:
+    from dataclasses import asdict
+
+    params = dict(overrides.get("params") or {})
+    try:
+        context = svc.build_strategy_context(
+            engine,
+            signal_date,
+            [strategy_id],
+            timeframe="1d",
+            params_map={strategy_id: params},
+            overrides_map={strategy_id: overrides},
+        )
+        strategy = engine.get(strategy_id)
+        engine.validate_context(strategy, context)
+        result = engine.run(
+            strategy_id,
+            context,
+            params=params,
+            overrides=overrides or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("历史策略候选回填失败(%s, %s): %s", strategy_id, signal_date, exc)
+        return None
+    rows = []
+    for row in asdict(result).get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        rows.append({
+            key: None if isinstance(value, float) and not math.isfinite(value) else value
+            for key, value in row.items()
+        })
+    strategy = engine.get(strategy_id)
+    strategy_name = (strategy.meta.get("name") if strategy else None) or strategy_id
+    return {
+        "params": params,
+        "cache_result": {
+            "as_of": signal_date.isoformat(),
+            "rows": rows,
+            "strategy_name": strategy_name,
+        },
+    }
+
+
+def _enriched_partition_dates(data_dir: Path) -> list[date]:
+    base = data_dir / "kline_daily_enriched"
+    dates: list[date] = []
+    try:
+        for path in base.glob("date=*"):
+            try:
+                dates.append(date.fromisoformat(path.name.removeprefix("date=")))
+            except ValueError:
+                continue
+    except OSError:
+        return []
+    return sorted(set(dates))
+
+
 def _record_dynamic_history(
     data_dir: Path,
     *,
@@ -374,6 +577,7 @@ def _record_dynamic_history(
     final_ts: int,
     requested_ids: list[str],
     params_map: dict[str, dict],
+    cache_results: dict | None = None,
 ) -> None:
     """把盘后候选与收盘前动态结果对齐，记录确认或淘汰原因。
 
@@ -387,10 +591,11 @@ def _record_dynamic_history(
         return
     if final_ts < trade_end_ts - 1:
         return
-    cached = strategy_cache.read_cache(data_dir)
-    if not isinstance(cached, dict) or str(cached.get("as_of") or "") != signal_date.isoformat():
-        return
-    cache_results = cached.get("results") or {}
+    if cache_results is None:
+        cached = strategy_cache.read_cache(data_dir)
+        if not isinstance(cached, dict) or str(cached.get("as_of") or "") != signal_date.isoformat():
+            return
+        cache_results = cached.get("results") or {}
     if not isinstance(cache_results, dict):
         return
 
