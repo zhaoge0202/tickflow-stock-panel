@@ -30,6 +30,8 @@ _REQUIRED = {
     "adj_factor": {"symbol", "trade_date", "ex_factor"},
     "realtime": {"symbol", "last_price", "prev_close", "open", "high", "low", "volume"},
     "minute": {"symbol", "datetime", "open", "high", "low", "close", "volume", "amount"},
+    # full_minute (全量分钟) 与 minute 同形: 当日窗口批量拉取, 字段映射一致
+    "full_minute": {"symbol", "datetime", "open", "high", "low", "close", "volume", "amount"},
     # financial 字段由数据源决定, 只要求能映射出 symbol
     "financial": {"symbol"},
 }
@@ -116,7 +118,7 @@ class GenericHTTPProvider:
                     errors.append(f"{dataset}: pct_unit 必须是 percent 或 decimal")
             if dataset != "realtime":
                 request_params = [cfg.symbols_param, cfg.start_param, cfg.end_param]
-                if dataset == "minute":
+                if dataset in {"minute", "full_minute"}:
                     request_params.extend(
                         name for name in (cfg.asset_type_param, cfg.freq_param) if name
                     )
@@ -205,7 +207,38 @@ class GenericHTTPProvider:
         配置的参数名注入请求 (GET → params, POST → body), 用于上游需区分
         stock/ETF/index 或固定频率的场景。
         """
-        cfg = self._dataset("minute")
+        return self._fetch_minute_dataset(
+            "minute", symbols, start_time, end_time, asset_type, freq, on_chunk_done,
+        )
+
+    def get_intraday_batch(
+        self,
+        symbols: list[str],
+        count: int = 300,  # noqa: ARG002 — 与插件契约对齐, YAML 源按时间窗口取全天
+        asset_type: AssetType = "stock",
+    ) -> pl.DataFrame:
+        """全量分钟修复轮: 按当日窗口批量拉取 full_minute 数据集 (chunked + rpm 限速)。
+
+        与 get_minute 同形 (字段映射/归一一致), 区别仅在数据集名与窗口由调用方
+        传当日值。稳态增量 (get_intraday_latest) YAML 声明式源不提供 — 服务自动
+        降级为仅修复轮模式并放慢节奏。
+        """
+        start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return self._fetch_minute_dataset(
+            "full_minute", symbols, start, datetime.now(), asset_type, "1m", None,
+        )
+
+    def _fetch_minute_dataset(
+        self,
+        ds_name: str,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
+        on_chunk_done: Callable[[int, int], None] | None = None,
+    ) -> pl.DataFrame:
+        cfg = self._dataset(ds_name)
         override: dict[str, Any] = {}
         if cfg.asset_type_param:
             override[cfg.asset_type_param] = asset_type
@@ -280,7 +313,7 @@ class GenericHTTPProvider:
         start_time = end_time - timedelta(days=7)
         if dataset == "realtime":
             rows = self._request_rows(cfg)
-        elif dataset == "minute":
+        elif dataset in {"minute", "full_minute"}:
             override: dict[str, Any] = {}
             if cfg.asset_type_param:
                 override[cfg.asset_type_param] = "stock"

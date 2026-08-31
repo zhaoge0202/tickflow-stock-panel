@@ -1485,6 +1485,7 @@ export type ProviderField =
   | 'daily_data_provider'
   | 'adj_factor_provider'
   | 'minute_data_provider'
+  | 'full_minute_data_provider'
   | 'depth5_data_provider'
   | 'realtime_data_provider'
   | 'financial_data_provider'
@@ -1604,6 +1605,8 @@ export interface Preferences {
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
+  /** 全量分钟 (盘中全市场分钟落盘) 生效源; 默认 tickflow (需 Expert 档) */
+  full_minute_data_provider?: string
   /** 分钟源 1 分钟历史深度(交易日); null/缺省 = 深历史 (如 tickflow)。分时档位据此收窄 */
   minute_history_days?: number | null
   depth5_data_provider?: string
@@ -1797,15 +1800,17 @@ export const api = {
       }),
     }),
 
-  /** 全量分钟 (盘中全市场分钟落盘) 服务状态 (TickFlow Expert 专有) */
+  /** 全量分钟 (盘中全市场分钟落盘) 服务状态 (按能力路由: TickFlow Expert 或声明 full_minute 的插件/自定义源) */
   minuteRefreshStatus: () =>
     request<{
       available: boolean
       enabled?: boolean
       running?: boolean
+      provider?: string
+      provider_effective?: string
+      repair_only?: boolean
       interval_seconds?: number
       capability_ok?: boolean
-      custom_provider_active?: boolean
       in_trading_hours?: boolean
       gate_reason?: string | null
       rounds?: number

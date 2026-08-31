@@ -262,6 +262,11 @@ def get_minute_data_provider() -> str:
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 
+def get_full_minute_data_provider() -> str:
+    provider = str(load().get("full_minute_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
+
+
 def get_depth5_data_provider() -> str:
     provider = str(load().get("depth5_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"

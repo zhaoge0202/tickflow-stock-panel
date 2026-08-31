@@ -205,7 +205,6 @@ def _minute_service(monkeypatch):
         "app.services.minute_refresh.preferences.get_minute_refresh_enabled",
         lambda: True,
     )
-    monkeypatch.setattr(svc, "custom_provider_active", lambda: False)
     monkeypatch.setattr(svc, "capability_ok", lambda: True)
     return svc
 
