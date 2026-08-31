@@ -12,6 +12,7 @@ import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/l
 import { SealedBadge } from '@/components/SealedBadge'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { SettingsModal } from '@/components/data/SettingsModal'
+import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
@@ -628,6 +629,8 @@ export function Dashboard() {
   const fetchSucceeded = fetchStatus.data?.status === 'succeeded'
 
   // 首次使用且无数据 → 自动弹一次引导弹窗(同会话只弹一次)
+  // 「开始获取」前若无除权因子能力, 先弹前置确认 (adjGate.guard)
+  const adjGate = useAdjFactorSyncGate()
   useEffect(() => {
     if (!hasNoData) return
     if (settings.data?.onboarding_completed === false) return  // 还在引导流程中,不重复弹
@@ -722,12 +725,16 @@ export function Dashboard() {
             providerLabel={providerLabel}
             onClose={() => setShowWelcomeModal(false)}
             onStart={() => {
-              startFetch.mutate()
-              setShowWelcomeModal(false)
+              adjGate.guard(() => {
+                startFetch.mutate()
+                setShowWelcomeModal(false)
+              })
             }}
           />
         )}
       </AnimatePresence>
+      {/* 无除权因子能力时的同步前置确认 */}
+      {adjGate.dialog}
       <div className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 shadow-[0_1px_3px_hsl(var(--border)/0.4)] backdrop-blur-sm">
         <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" aria-hidden />
         <div className="flex items-center gap-2">
