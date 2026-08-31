@@ -366,49 +366,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
 
       {/* ========== 右列 ========== */}
       <div className="space-y-6">
-        {/* 连板梯队降级修正 (右列顶部) */}
-        <Card
-          icon={Flame}
-          title="连板梯队降级修正"
-          anchor="depth-fix"
-          badge={!hasDepth ? '五档盘口不可用' : undefined}
-          right={hasDepth ? (
-            <button
-              onClick={() => runFix.mutate()}
-              disabled={runFix.isPending}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px]
-                         bg-accent/15 text-accent hover:bg-accent/25 transition-colors
-                         disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Zap className="h-3 w-3" />
-              {runFix.isPending ? '修正中…' : '立即修正'}
-            </button>
-          ) : undefined}
-        >
-          {hasDepth ? (
-            <>
-              <p className="text-xs text-secondary mb-4">
-                通过五档盘口实时修正真假涨停/跌停。真封板显示封单量,假涨停(收盘价=涨停价但卖一有量)归入炸板。
-                盘中按设定间隔轮询,收盘后自动定版。
-              </p>
-              <ToggleRow
-                label="启用真假板修正"
-                desc="开启后盘中自动拉取五档盘口修正真假板"
-                checked={limitLadderMonitor}
-                onChange={toggleLimitLadderMonitor}
-              />
-              <div className="mt-4 pt-3 border-t border-border">
-                <div className="text-[10px] uppercase tracking-widest text-muted mb-3">
-                  五档盘口配置
-                </div>
-                <DepthConfigContent disabled={!limitLadderMonitor} />
-              </div>
-            </>
-          ) : (
-            <DepthConfigContent disabled />
-          )}
-        </Card>
-
         {/* 全量分钟 (TickFlow Expert 专有): 盘中全市场分钟落盘, intraday.universe 单请求增量 */}
         <Card icon={Zap} title="全量分钟" anchor="minute-refresh">
           <ToggleRow
@@ -458,6 +415,49 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               </div>
             )}
           </div>
+        </Card>
+
+        {/* 连板梯队降级修正 */}
+        <Card
+          icon={Flame}
+          title="连板梯队降级修正"
+          anchor="depth-fix"
+          badge={!hasDepth ? '五档盘口不可用' : undefined}
+          right={hasDepth ? (
+            <button
+              onClick={() => runFix.mutate()}
+              disabled={runFix.isPending}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px]
+                         bg-accent/15 text-accent hover:bg-accent/25 transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Zap className="h-3 w-3" />
+              {runFix.isPending ? '修正中…' : '立即修正'}
+            </button>
+          ) : undefined}
+        >
+          {hasDepth ? (
+            <>
+              <p className="text-xs text-secondary mb-4">
+                通过五档盘口实时修正真假涨停/跌停。真封板显示封单量,假涨停(收盘价=涨停价但卖一有量)归入炸板。
+                盘中按设定间隔轮询,收盘后自动定版。
+              </p>
+              <ToggleRow
+                label="启用真假板修正"
+                desc="开启后盘中自动拉取五档盘口修正真假板"
+                checked={limitLadderMonitor}
+                onChange={toggleLimitLadderMonitor}
+              />
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] uppercase tracking-widest text-muted mb-3">
+                  五档盘口配置
+                </div>
+                <DepthConfigContent disabled={!limitLadderMonitor} />
+              </div>
+            </>
+          ) : (
+            <DepthConfigContent disabled />
+          )}
         </Card>
 
         {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。
