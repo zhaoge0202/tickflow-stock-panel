@@ -886,11 +886,14 @@ export function Screener() {
   // 策略候选生命周期: 即使今日动态结果归零,仍展示此前候选的竞价确认/淘汰节点。
   const strategyHistoryQuery = useQuery({
     queryKey: QK.strategyHistory(activeStrategy ?? '', 180),
-    queryFn: () => api.strategyHistory({
-      strategyId: activeStrategy ?? undefined,
-      days: 180,
-      limit: 200,
-    }),
+    queryFn: async () => {
+      await api.strategyHistoryBackfill(activeStrategy ? [activeStrategy] : undefined)
+      return api.strategyHistory({
+        strategyId: activeStrategy ?? undefined,
+        days: 180,
+        limit: 200,
+      })
+    },
     enabled: assetType === 'stock' && !!activeStrategy,
     staleTime: 10_000,
   })

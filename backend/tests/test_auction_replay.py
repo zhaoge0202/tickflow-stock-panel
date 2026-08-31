@@ -523,3 +523,86 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
     assert events[0]["reason_code"] == "auction_gap_failed"
     assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 2.0%"
     assert events[1]["strategy_name"] == "双刃合-Focus"
+
+
+def test_backfill_recent_history_rebuilds_previous_cycle(monkeypatch, tmp_path):
+    auction_replay._backfill_cache.clear()
+    for target_date in (SIGNAL_DATE, TRADE_DATE):
+        (tmp_path / "kline_daily_enriched" / f"date={target_date.isoformat()}").mkdir(
+            parents=True,
+        )
+
+    class _HistoryEngine:
+        def has(self, strategy_id):
+            return strategy_id == "custom_dual_edge_focus"
+
+        def get(self, strategy_id):
+            assert strategy_id == "custom_dual_edge_focus"
+            return type("Strategy", (), {"meta": {"name": "双刃合-Focus"}})()
+
+    monkeypatch.setattr(
+        auction_replay,
+        "_read_quote_window_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "symbol": "002758.SZ",
+                "event_ts": _ms(9, 24, 50),
+                "last_price": 8.95,
+                "price_type": "auction_reference",
+            },
+            {
+                "symbol": "002758.SZ",
+                "event_ts": _ms(9, 25, 3),
+                "last_price": 8.95,
+                "open": 8.95,
+                "price_type": "trade",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        auction_replay,
+        "_historical_strategy_result",
+        lambda *_args, **_kwargs: {
+            "params": {},
+            "cache_result": {
+                "as_of": SIGNAL_DATE.isoformat(),
+                "rows": [{
+                    "symbol": "002758.SZ",
+                    "name": "浙农股份",
+                    "close": 9.11,
+                    "score": 88.0,
+                }],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        auction_replay,
+        "_load_dynamic_history",
+        lambda *_args, **_kwargs: pl.DataFrame({
+            "symbol": ["002758.SZ"],
+            "date": [SIGNAL_DATE],
+        }),
+    )
+    monkeypatch.setattr(
+        auction_replay,
+        "_build_dynamic_frame",
+        lambda *_args, **_kwargs: {
+            "results": {"custom_dual_edge_focus": {"rows": [], "dual_rows": []}},
+        },
+    )
+
+    result = auction_replay.backfill_recent_strategy_history(
+        SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+        _HistoryEngine(),
+        strategy_ids=["custom_dual_edge_focus"],
+        max_cycles=1,
+    )
+
+    events = strategy_history.list_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+        symbol="002758.SZ",
+    )
+    assert result["written"] == 2
+    assert [event["event_type"] for event in events] == ["auction_rejected", "selected"]
+    assert events[0]["reason_code"] == "auction_gap_failed"
