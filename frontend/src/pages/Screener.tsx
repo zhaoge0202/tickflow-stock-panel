@@ -598,6 +598,10 @@ export function Screener() {
     if (!preselectResults) return 0
     return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
   }, [preselectResults])
+  const activePreselectRows = useMemo(() => {
+    if (showAll || !activeStrategy || !preselectResults) return []
+    return preselectResults[activeStrategy]?.rows ?? []
+  }, [showAll, activeStrategy, preselectResults])
   const preselectActive = (
     assetType === 'stock'
     && strictPoolTotal === 0
@@ -1548,6 +1552,40 @@ export function Screener() {
                     sort={sort}
                     onSortToggle={toggle}
                   />
+                  {activePreselectRows.length > 0 && displayMode !== 'preselect' && (
+                    <section className="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/15 px-4 py-2.5">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="font-medium text-amber-200">盘后预选</span>
+                          <span className="num text-amber-300">{activePreselectRows.length} 只</span>
+                          <span className="text-[10px] text-amber-200/60">非正式命中 · 等待 {auctionTradeDate} 09:25 竞价确认</span>
+                        </div>
+                        <span className="text-[10px] text-amber-200/60">仅作次日观察</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                        {activePreselectRows.map((row: any) => (
+                          <button
+                            key={row.symbol}
+                            type="button"
+                            onClick={() => { setPreviewSymbol(row.symbol); setPreviewName(row.name ?? '') }}
+                            className="rounded-lg border border-border/50 bg-surface/50 px-3 py-2 text-left transition hover:border-amber-400/40 hover:bg-amber-500/10"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate text-xs font-medium text-foreground">{row.name || row.symbol}</span>
+                              <span className="shrink-0 text-[10px] text-amber-200">观察</span>
+                            </div>
+                            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
+                              <span className="font-mono">{row.symbol}</span>
+                              <span className="num">价 {row.close != null ? Number(row.close).toFixed(2) : '—'}</span>
+                              <span className={`num ${Number(row.change_pct) >= 0 ? 'text-success' : 'text-danger'}`}>
+                                {row.change_pct != null ? `${(Number(row.change_pct) * 100).toFixed(2)}%` : '—'}
+                              </span>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </>
               )}
             </motion.div>
