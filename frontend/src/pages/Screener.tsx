@@ -77,6 +77,15 @@ export function Screener() {
       return next
     })
   }, [])
+  // 策略列标签全表展开/收起（命中多策略时行会很高；默认收起, 每行可单独展开；持久化）
+  const [strategyTagsExpanded, setStrategyTagsExpanded] = useState<boolean>(() => storage.screenerStrategyTags.get(false))
+  const toggleStrategyTags = useCallback(() => {
+    setStrategyTagsExpanded(v => {
+      const next = !v
+      storage.screenerStrategyTags.set(next)
+      return next
+    })
+  }, [])
   // 截断提示可关闭 (仅本次会话, 不持久化)
   const [intradayCapDismissed, setIntradayCapDismissed] = useState(false)
   const [showAll, setShowAll] = useState(false)
@@ -979,6 +988,8 @@ export function Screener() {
                     intradayAutoRefresh={intradayRefreshEnabled && realtimeRunning}
                     onRefreshIntraday={() => minuteBatch.refetch()}
                     intradayRefreshing={minuteBatch.isFetching}
+                    strategyTagsExpanded={strategyTagsExpanded}
+                    onToggleStrategyTags={toggleStrategyTags}
                     sort={sort}
                     onSortToggle={toggle}
                   />
