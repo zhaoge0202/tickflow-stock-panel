@@ -145,6 +145,29 @@ def record_monitor_events(data_dir: Path, events: list[dict]) -> int:
     return append_many(data_dir, rows)
 
 
+def backfill_monitor_events(
+    data_dir: Path,
+    *,
+    strategy_id: str | None = None,
+    days: int = MAX_DAYS,
+) -> int:
+    """把已有告警记录迁移到策略生命周期历史，按 event_key 自动去重。"""
+    from app.services import alert_store
+
+    events = alert_store.list_recent(
+        data_dir,
+        days=max(1, min(int(days or MAX_DAYS), MAX_DAYS)),
+        limit=MAX_RECORDS,
+        source="strategy",
+    )
+    if strategy_id:
+        events = [
+            event for event in events
+            if event.get("strategy_id") == strategy_id
+        ]
+    return record_monitor_events(data_dir, events)
+
+
 def record_auction_outcomes(data_dir: Path, outcomes: list[dict[str, Any]]) -> int:
     """记录竞价确认、未确认节点。调用方负责提供 reason。"""
     return append_many(data_dir, outcomes)

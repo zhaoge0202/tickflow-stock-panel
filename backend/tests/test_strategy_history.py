@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from app.services import strategy_history
+from app.services import alert_store, strategy_history
 
 
 def test_selection_and_auction_outcome_are_persisted_and_deduplicated(tmp_path: Path):
@@ -67,3 +68,37 @@ def test_preselect_is_marked_watch_only(tmp_path: Path):
     event = strategy_history.list_events(tmp_path, event_type="preselect")[0]
     assert event["status"] == "watch_only"
     assert "仅供观察" in event["reason"]
+
+
+def test_existing_strategy_alerts_are_backfilled_and_deduplicated(tmp_path: Path):
+    alert_store.append_many(tmp_path, [{
+        "ts": int(time.time() * 1000),
+        "rule_id": "mr_strategy_custom_dual_edge_focus",
+        "rule_name": "策略监控 · 双刃合-Focus",
+        "strategy_id": "custom_dual_edge_focus",
+        "source": "strategy",
+        "type": "buy_signal",
+        "symbol": "300516.SZ",
+        "name": "久之洋",
+        "message": "策略「双刃合-Focus」买入信号 久之洋 +5.0%",
+        "price": 34.55,
+        "change_pct": 0.05,
+        "signals": ["signal_fenqi"],
+    }])
+
+    assert strategy_history.backfill_monitor_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+    ) == 1
+    assert strategy_history.backfill_monitor_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+    ) == 0
+    event = strategy_history.list_events(
+        tmp_path,
+        strategy_id="custom_dual_edge_focus",
+        symbol="300516.SZ",
+        event_type="buy_signal",
+    )[0]
+    assert event["reason_code"] == "buy_signal"
+    assert event["strategy_name"] == "策略监控 · 双刃合-Focus"
