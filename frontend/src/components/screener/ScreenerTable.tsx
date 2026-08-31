@@ -6,8 +6,8 @@
  * score、signals、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
-import { Check, Plus, Eye, EyeOff, RefreshCw } from 'lucide-react'
-import type { KlineRow, MinuteKlineRow } from '@/lib/api'
+import { Check, CheckCircle2, Plus, Eye, EyeOff, RefreshCw } from 'lucide-react'
+import type { KlineRow, MinuteKlineRow, StrategyPurchaseMark } from '@/lib/api'
 import { fmtPrice, formatExtNumber } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/screener-columns'
 import { getSignals, signalCls } from '@/lib/stock-table'
@@ -32,6 +32,19 @@ interface ScreenerTableProps {
   symbolStrategyMap: Map<string, string[]>
   activeStrategy: string | null
   watchlistSet: Set<string>
+  /** 当前策略/信号日的用户买入标记, key = strategyId::symbol::signalDate */
+  purchaseMarks?: Map<string, StrategyPurchaseMark>
+  purchaseSignalDate?: string
+  onTogglePurchaseMark?: (
+    strategyId: string,
+    symbol: string,
+    signalDate: string,
+    signalPrice: number | null,
+    signalScore: number | null,
+    signalChangePct: number | null,
+    marked: boolean,
+  ) => void
+  purchaseMarkPending?: boolean
   onPreview: (symbol: string, name: string) => void
   onAddToWatchlist: (symbol: string, groupId: string | null) => void
   onRemoveFromWatchlist: (symbol: string) => void
@@ -151,7 +164,9 @@ function renderExtValue(
 
 export function ScreenerTable({
   rows, columns, strategyIdToName, strategyLabelSuffix, symbolStrategyMap, activeStrategy,
-  watchlistSet, onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
+  watchlistSet, purchaseMarks, purchaseSignalDate, onTogglePurchaseMark,
+  purchaseMarkPending,
+  onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
@@ -220,6 +235,11 @@ export function ScreenerTable({
       case 'symbol': {
         const board = boardTag(r.symbol)
         const inWatchlist = watchlistSet.has(r.symbol)
+        const signalDate = purchaseSignalDate || String(r.date || '').slice(0, 10)
+        const purchaseKey = activeStrategy && signalDate
+          ? `${activeStrategy}::${r.symbol}::${signalDate}`
+          : null
+        const purchaseMark = purchaseKey ? purchaseMarks?.get(purchaseKey) : undefined
         return (
           <td key={col.id} className="px-4 py-2">
             <div className="flex items-center gap-2">
@@ -270,6 +290,31 @@ export function ScreenerTable({
                     <Plus className="h-3 w-3" />
                   </WatchlistAddMenu>
                 )
+              )}
+              {activeStrategy && onTogglePurchaseMark && signalDate && (
+                <button
+                  type="button"
+                  disabled={purchaseMarkPending}
+                  onClick={() => onTogglePurchaseMark(
+                    activeStrategy,
+                    r.symbol,
+                    signalDate,
+                    Number.isFinite(Number(r.close)) ? Number(r.close) : null,
+                    Number.isFinite(Number(r.score)) ? Number(r.score) : null,
+                    Number.isFinite(Number(r.change_pct)) ? Number(r.change_pct) : null,
+                    !!purchaseMark,
+                  )}
+                  className={`shrink-0 inline-flex h-5 items-center gap-1 rounded-full border px-1.5 text-[9px] font-medium transition-colors ${
+                    purchaseMark
+                      ? 'border-bull/40 bg-bull/10 text-bull'
+                      : 'border-border text-muted hover:border-bull/40 hover:text-bull'
+                  }`}
+                  title={purchaseMark ? '取消已买入标记' : '标记为已买入'}
+                  aria-label={purchaseMark ? `取消 ${r.symbol} 已买入标记` : `标记 ${r.symbol} 已买入`}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  {purchaseMark ? '已买' : '我已买'}
+                </button>
               )}
             </div>
           </td>

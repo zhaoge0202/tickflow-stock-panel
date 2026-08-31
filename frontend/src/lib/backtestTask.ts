@@ -1,5 +1,10 @@
 import { useSyncExternalStore } from 'react'
 import type { StrategyBacktestResult } from './api'
+import {
+  notifyBacktestCompleted,
+  notifyTaskError,
+  requestTaskNotificationPermission,
+} from './taskNotifications'
 
 /**
  * 全局回测任务管理 (SSE 模式 + 任务缓存 + 重连支持)。
@@ -68,6 +73,7 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 /** 连接 SSE (新建或重连都用这个) */
 function connectSSE(url: string): void {
   const id = current?.id ?? ++taskSeq
+  let completionNotified = false
 
   // 关闭旧连接
   if (eventSource) {
@@ -110,9 +116,17 @@ function connectSSE(url: string): void {
       const result = JSON.parse(e.data) as StrategyBacktestResult
       current = { ...current, isPending: false, result, error: null, reconnecting: false }
       emit()
+      if (!completionNotified) {
+        completionNotified = true
+        notifyBacktestCompleted(result)
+      }
     } catch {
       current = { ...current, isPending: false, error: '结果解析失败', reconnecting: false }
       emit()
+      if (!completionNotified) {
+        completionNotified = true
+        notifyTaskError('回测失败', '结果解析失败')
+      }
     }
     es.close()
     eventSource = null
@@ -127,9 +141,17 @@ function connectSSE(url: string): void {
         const msg = JSON.parse(e.data)?.message ?? '回测出错'
         current = { ...current, isPending: false, error: msg, reconnecting: false }
         emit()
+        if (!completionNotified) {
+          completionNotified = true
+          notifyTaskError('回测失败', msg)
+        }
       } catch {
         current = { ...current, isPending: false, error: '回测出错', reconnecting: false }
         emit()
+        if (!completionNotified) {
+          completionNotified = true
+          notifyTaskError('回测失败', '回测出错')
+        }
       }
       es.close()
       eventSource = null
@@ -150,6 +172,10 @@ function connectSSE(url: string): void {
         error: '连接中断，请重试',
       }
       emit()
+      if (!completionNotified) {
+        completionNotified = true
+        notifyTaskError('回测失败', '连接中断，请重试')
+      }
       return
     }
     // 仍在重试窗口内: 标记 reconnecting, 让 UI 显示"连接中断，重试中"
@@ -183,6 +209,7 @@ export function startBacktest(params: {
   minute_fill?: boolean
   regime_filter?: { states?: string[]; min_score?: number } | null
 }): void {
+  requestTaskNotificationPermission()
   // 取消之前的任务状态
   if (eventSource) {
     eventSource.close()

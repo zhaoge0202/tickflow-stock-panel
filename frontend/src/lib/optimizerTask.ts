@@ -1,4 +1,9 @@
 import { useSyncExternalStore } from 'react'
+import {
+  notifyOptimizerCompleted,
+  notifyTaskError,
+  requestTaskNotificationPermission,
+} from './taskNotifications'
 
 /**
  * 参数优化任务管理 (SSE 模式 + 重连)。镜像 backtestTask, 结果为排名 dict。
@@ -106,6 +111,7 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 
 function connectSSE(url: string): void {
   const id = current?.id ?? ++taskSeq
+  let completionNotified = false
 
   if (eventSource) {
     eventSource.close()
@@ -152,9 +158,17 @@ function connectSSE(url: string): void {
       const result = JSON.parse(e.data) as OptimizeResult
       current = { ...current, isPending: false, result, error: null }
       emit()
+      if (!completionNotified) {
+        completionNotified = true
+        notifyOptimizerCompleted(result)
+      }
     } catch {
       current = { ...current, isPending: false, error: '结果解析失败' }
       emit()
+      if (!completionNotified) {
+        completionNotified = true
+        notifyTaskError('参数优化失败', '结果解析失败')
+      }
     }
     es.close()
     eventSource = null
@@ -170,9 +184,17 @@ function connectSSE(url: string): void {
         const msg = JSON.parse(e.data)?.message ?? '优化出错'
         current = { ...current, isPending: false, error: msg }
         emit()
+        if (!completionNotified) {
+          completionNotified = true
+          notifyTaskError('参数优化失败', msg)
+        }
       } catch {
         current = { ...current, isPending: false, error: '优化出错' }
         emit()
+        if (!completionNotified) {
+          completionNotified = true
+          notifyTaskError('参数优化失败', '优化出错')
+        }
       }
       es.close()
       eventSource = null
@@ -192,6 +214,10 @@ function connectSSE(url: string): void {
         localStorage.removeItem(JOB_KEY_KEY)
         current = { ...current, isPending: false, error: '连接中断, 重连多次失败' }
         emit()
+        if (!completionNotified) {
+          completionNotified = true
+          notifyTaskError('参数优化失败', '连接中断, 重连多次失败')
+        }
       }
     }
   })
@@ -207,6 +233,7 @@ function postCancel(jobKey: string): void {
 }
 
 export function startOptimize(params: StartOptimizeParams): void {
+  requestTaskNotificationPermission()
   if (eventSource) {
     eventSource.close()
     eventSource = null
