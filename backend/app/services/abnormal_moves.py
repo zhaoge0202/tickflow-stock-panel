@@ -223,3 +223,60 @@ def build_overview(
         "counts": counts,
         "rows": out_rows[:limit],
     }
+
+
+# ================================================================
+# 盘中异动 (量价信号聚合, 异动监控「盘中」tab)
+#
+# 数据源: enriched 最新快照的当日消息号列 (零新增采集):
+# 涨停/跌停/跌停翘板/炸板/放量(量比≥2)/创60日新高/新低。
+# 行序 = 信号优先级 (涨停 > 炸板 > 翘板 > 跌停 > 新高 > 新低 > 放量),
+# 同级按 |今日涨跌| 降序; counts 供前端筛选 chips 展示各类型数量。
+# ================================================================
+
+_INTRADAY_SIGNALS: tuple[tuple[str, str], ...] = (
+    ("signal_limit_up", "limit_up"),
+    ("signal_broken_limit_up", "broken"),
+    ("signal_limit_down_recovery", "recovery"),
+    ("signal_limit_down", "limit_down"),
+    ("signal_n_day_high", "new_high"),
+    ("signal_n_day_low", "new_low"),
+    ("signal_volume_surge", "volume_surge"),
+)
+_INTRADAY_PRIORITY = {key: i for i, (_, key) in enumerate(_INTRADAY_SIGNALS)}
+_INTRADAY_COLS = ("symbol", "name", "close", "change_pct", "amplitude",
+                  "vol_ratio_5d", "turnover_rate", "consecutive_limit_ups")
+
+
+def build_intraday(repo: Any, limit: int = 500) -> dict[str, Any]:
+    """enriched 最新快照 → 当日异动信号命中行 (含各类型计数)。"""
+    df, cache_date = repo.get_enriched_latest()
+    empty = {"cache_date": cache_date.isoformat() if cache_date else None,
+             "counts": {}, "rows": []}
+    if df.is_empty() or "symbol" not in df.columns:
+        return empty
+    present = [(c, k) for c, k in _INTRADAY_SIGNALS if c in df.columns]
+    if not present:
+        return empty
+
+    hits = df.filter(pl.any_horizontal([pl.col(c).fill_null(False) for c, _ in present]))
+    if hits.is_empty():
+        return empty
+    counts = {k: int(hits[c].fill_null(False).sum()) for c, k in present}
+
+    sig_cols = {k: hits[c].fill_null(False).to_list() for c, k in present}
+    base_cols = [c for c in _INTRADAY_COLS if c in hits.columns]
+    base = hits.select(base_cols).to_dicts()
+    rows: list[dict[str, Any]] = []
+    for i, r in enumerate(base):
+        signals = [k for k, flags in sig_cols.items() if flags[i]]
+        rows.append({
+            **{c: r.get(c) for c in base_cols},
+            "signals": signals,
+            "_prio": min((_INTRADAY_PRIORITY[s] for s in signals), default=99),
+        })
+    rows.sort(key=lambda r: (r["_prio"], -abs(r.get("change_pct") or 0.0)))
+    for r in rows:
+        r.pop("_prio", None)
+    return {"cache_date": cache_date.isoformat() if cache_date else None,
+            "counts": counts, "rows": rows[:limit]}

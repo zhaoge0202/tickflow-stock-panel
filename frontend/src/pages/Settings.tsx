@@ -125,7 +125,7 @@ export function Settings() {
           >
             {activeTab.key === 'monitoring'
             ? <SettingsMonitoringPanel highlight={highlight} />
-            : <activeTab.panel />}
+            : <activeTab.panel highlight={highlight} />}
           </motion.div>
         </div>
       </div>

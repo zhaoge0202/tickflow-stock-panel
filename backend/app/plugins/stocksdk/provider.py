@@ -12,7 +12,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as dtime
 
 import polars as pl
 
@@ -51,6 +52,9 @@ class StockSDKProvider:
 
     name = "stocksdk"
     builtin = True
+    # 分钟历史深度能力(可选声明, 未声明视为深历史): stock-sdk 免费分时接口
+    # 只保留最近 5 个交易日的 1 分钟数据, 分时档位/默认值据此收窄。
+    minute_history_days = 5
 
     def __init__(self) -> None:
         self.config = _StockSDKConfig()
@@ -145,28 +149,95 @@ class StockSDKProvider:
             return pl.DataFrame()
         period = "".join(ch for ch in str(freq) if ch.isdigit()) or "1"
         logger.info("stock-sdk minute 拉取开始(%d symbols, period=%s)", len(symbols), period)
+
+        # 上游区间查询的分钟 open 为日级常量(伪值), 单日查询才给最新交易日真实
+        # 分钟 open → 末尾 3 个自然日逐日单拉(跳过周末, 覆盖周五收盘后场景),
+        # 其余历史段仍走单个区间任务控制桥接成本。伪 open 由 _null_degenerate_opens
+        # 在 _minute_df 内置 null。
+        windows: list[tuple[datetime | None, datetime | None]] = []
+        if (
+            start_time is not None
+            and end_time is not None
+            and end_time.date() > start_time.date()
+        ):
+            tail_start = end_time.date() - timedelta(days=3)
+            if tail_start > start_time.date():
+                head_end = datetime.combine(tail_start - timedelta(days=1), dtime.max)
+                windows.append((start_time, head_end))
+            else:
+                tail_start = start_time.date()
+            day = tail_start
+            while day <= end_time.date():
+                if day.weekday() < 5:
+                    windows.append((
+                        datetime.combine(day, dtime.min),
+                        datetime.combine(day, dtime.max),
+                    ))
+                day += timedelta(days=1)
+        else:
+            windows.append((start_time, end_time))
+
         frames: list[pl.DataFrame] = []
         chunks = chunked(symbols, _BATCH)
-        for i, chunk in enumerate(chunks):
-            job = {
-                "op": "minute",
-                "symbols": chunk,
-                "period": period,
-                "start": _yyyymmdd(start_time),
-                "end": _yyyymmdd(end_time),
-            }
-            try:
-                result = bridge.run_job(job, timeout=180)
-            except bridge.StockSDKBridgeError as e:
-                logger.warning("stock-sdk minute 拉取失败(%d symbols): %s", len(chunk), e)
-                result = {"rows": {}}
-            for sym, rows in (result.get("rows") or {}).items():
-                df = self._minute_df(rows, sym)
-                if not df.is_empty():
-                    frames.append(df)
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(chunks))
+        total = len(chunks) * len(windows)
+        step = 0
+        for win_start, win_end in windows:
+            for chunk in chunks:
+                step += 1
+                job = {
+                    "op": "minute",
+                    "symbols": chunk,
+                    "period": period,
+                    "start": _yyyymmdd(win_start),
+                    "end": _yyyymmdd(win_end),
+                }
+                try:
+                    result = bridge.run_job(job, timeout=180)
+                except bridge.StockSDKBridgeError as e:
+                    logger.warning("stock-sdk minute 拉取失败(%d symbols): %s", len(chunk), e)
+                    result = {"rows": {}}
+                for sym, rows in (result.get("rows") or {}).items():
+                    df = self._minute_df(rows, sym)
+                    if not df.is_empty():
+                        frames.append(df)
+                if on_chunk_done:
+                    on_chunk_done(step, total)
+        # 末窗口(最新一日)的真实 open 与首窗口可能重叠同日(时区/边界), keep="last"
+        # 由上层 _write_minute_partition 的 unique 处理; 这里仅拼接。
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+    @staticmethod
+    def _null_degenerate_opens(df: pl.DataFrame) -> pl.DataFrame:
+        """把"日级常量"的伪分钟 open 置 null。
+
+        stock-sdk 上游对历史日的分钟 open 只给全天常量(如涨跌停价/日开),
+        并非真实分钟开盘价; 只有最新交易日在单日查询下给真实值。伪 open 入库
+        会让分钟K的 close-vs-open 口径全偏(如分时量恒红), 故按日检测:
+        同日 rows>10 且 open 唯一值<=3 而 close 唯一值>10 → open 判定非分钟级,
+        置 null(fail-closed, 不伪造 prev_close 替代)。
+        """
+        if df.is_empty() or "open" not in df.columns or "datetime" not in df.columns:
+            return df
+        stats = df.group_by(pl.col("datetime").dt.date()).agg(
+            pl.len().alias("n"),
+            pl.col("open").n_unique().alias("uo"),
+            pl.col("close").n_unique().alias("uc"),
+        )
+        fake_dates = stats.filter(
+            (pl.col("n") > 10) & (pl.col("uo") <= 3) & (pl.col("uc") > 10)
+        )["datetime"]
+        if fake_dates.is_empty():
+            return df
+        logger.warning(
+            "stock-sdk minute open 为日级常量, 置 null: %s %s",
+            df["symbol"][0] if "symbol" in df.columns else "?", fake_dates.to_list(),
+        )
+        return df.with_columns(
+            pl.when(pl.col("datetime").dt.date().is_in(fake_dates))
+            .then(None)
+            .otherwise(pl.col("open"))
+            .alias("open")
+        )
 
     @staticmethod
     def _minute_df(rows: list[dict], symbol: str) -> pl.DataFrame:
@@ -192,6 +263,7 @@ class StockSDKProvider:
         for col in ("open", "high", "low", "close", "volume", "amount"):
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+        df = StockSDKProvider._null_degenerate_opens(df)
         keep = [c for c in _MINUTE_CANONICAL if c in df.columns]
         return df.select(keep) if "datetime" in keep else pl.DataFrame()
 

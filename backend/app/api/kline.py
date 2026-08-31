@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
-from app.market_time import cn_now, cn_today
+from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
@@ -676,6 +676,10 @@ def get_minute_batch(request: Request, body: dict):
 
     symbols: list[str] = body.get("symbols", [])
     trade_date_str: str | None = body.get("date")
+    # 自选分时本地优先标志: 全量分钟服务健康时, 股票缺口不再批量补拉
+    # (本地分区由服务按间隔持续写入, 下一轮自然补全; 停牌/临停票补拉也是空, 无损)。
+    # ETF 不在全量分钟 universe 内, 恒走补拉。服务不健康时回落现状补拉兜底。
+    prefer_local = bool(body.get("prefer_local", False))
     if not symbols:
         return {"data": {}}
 
@@ -754,6 +758,20 @@ def get_minute_batch(request: Request, body: dict):
         elif not sub.is_empty():
             result[sym] = sub.to_dicts()
 
+    # prefer_local 生效判定: 仅当全量分钟服务健康 (freshness 契约, 见 minute_refresh.is_healthy)
+    full_minute_healthy = False
+    if prefer_local:
+        svc = getattr(request.app.state, "minute_refresh", None)
+        full_minute_healthy = bool(svc is not None and svc.is_healthy())
+    if full_minute_healthy:
+        # 股票 incomplete 不补拉, 本地有多少给多少 (服务下一轮写入补全);
+        # ETF 维持 incomplete 走下方补拉
+        for sym in incomplete:
+            sub = local_parts.get(sym)
+            if sym not in etf_set and sub is not None and not sub.is_empty():
+                result[sym] = sub.to_dicts()
+        incomplete = [s for s in incomplete if s in etf_set]
+
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
         start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
@@ -800,7 +818,8 @@ def get_minute_batch(request: Request, body: dict):
                 if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
-    return {"data": result}
+    # full_minute_local: 本轮 prefer_local 生效 (本地分区由全量分钟服务供给, 股票未做补拉)
+    return {"data": result, "full_minute_local": full_minute_healthy}
 
 
 @router.get("/minute-range")
@@ -876,12 +895,16 @@ def get_minute(
     request: Request,
     symbol: str = Query(..., description="标的代码"),
     trade_date: date | None = Query(None, alias="date", description="交易日期, 默认最新"),
+    live: bool = Query(False, description="当日盘中跳过本地优先, 直接实时拉取(个股详情分时轮询用)"),
 ):
     """读取某只股票某天的分钟 K 线。
 
     - 今天 → 优先从分钟数据源实时拉取, 避免本地旧分区阻断盘中刷新
     - 历史日期本地有完整数据(240条) → 直接返回
     - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
+    - live=true 且当日连续竞价时段 → 跳过本地优先直接实时拉取:
+      盘中分钟增量落盘的本地分区按 ≥60s 轮次更新, 90% 完整度启发式会让
+      详情分时图停在上一增量轮, 与行情列表的节奏脱节
     """
     repo = request.app.state.repo
     symbol = normalize_symbol(symbol, repo)
@@ -932,31 +955,38 @@ def get_minute(
     price_limit = _get_price_limit_info(
         repo, symbol, trade_date, asset_type, stock_name,
     )
-    df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
-    # 今天优先实时拉，避免本地旧分区阻断盘中刷新；历史日再按完整度判断。
-    today = cn_today()
-    if trade_date == today:
-        live_df = _fetch_minute_or_502(symbol, trade_date, asset_type=asset_type)
+    if live and trade_date == cn_today() and in_continuous_session():
+        # 详情分时轮询: 当日盘中实时拉取最新一根K, 不落盘; 拉空(源侧延迟/
+        # 时段边界)则落回下方本地优先路径。
+        live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
         if not live_df.is_empty():
             return {
                 "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-                "date": str(trade_date), "rows": live_df.to_dicts(), "source": "live",
-                "asset_type": asset_type,
-                "price_limit": price_limit,
-                "prev_close": prev_close,
+                "date": str(trade_date), "rows": live_df.to_dicts(),
+                "source": "live", "asset_type": asset_type,
+                "price_limit": price_limit, "prev_close": prev_close,
             }
-        return {
-            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(),
-            "source": "local" if not df.is_empty() else "none",
-            "asset_type": asset_type,
-            "price_limit": price_limit,
-            "prev_close": prev_close,
-        }
 
-    # 历史完整交易日应有 240 条分钟K。
+    df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
+
+    # 本地完整度足够时优先返回本地；只有不完整或无数据才实时补拉。
+    # 完整交易日应有 240 条分钟K；盘中按已交易分钟数估算。
     expected = 240
+    today = cn_today()
+    if trade_date == today:
+        now = cn_now()
+        h, m = now.hour, now.minute
+        if h < 9 or (h == 9 and m < 30):
+            expected = 0
+        elif h < 12:
+            expected = (h - 9) * 60 + m - 30
+        elif h < 13:
+            expected = 120
+        elif h < 15:
+            expected = 120 + (h - 13) * 60 + m
+        else:
+            expected = 240
 
     is_complete = not df.is_empty() and len(df) >= expected * 0.9  # 允许 10% 容差
 
@@ -1192,9 +1222,11 @@ async def clear_minute(request: Request):
     removed = 0
     if minute_dir.exists():
         try:
-            result = repo.db.execute("SELECT COUNT(*) AS cnt FROM kline_minute").fetchone()
+            # execute_one (cursor+close): 直连 db.execute 的未消费结果集会在 Windows 上
+            # 钉住分区句柄, 导致下方 rmtree 静默删不掉被钉文件
+            result = repo.execute_one("SELECT COUNT(*) AS cnt FROM kline_minute")
             removed = result[0] if result else 0
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         # 仅删 kline_minute 目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)

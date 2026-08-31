@@ -155,6 +155,9 @@ class StrategyDataContext:
     as_of: date
     current: pl.DataFrame | None = None
     history: pl.DataFrame | None = None
+    # 仅 1m 分支: 策略声明 META["daily_history_bars"] 时注入的日线 enriched 窗口,
+    # 供分钟策略叠加日线维度条件 (如 N 日内涨停过); 未声明时为 None。
+    daily_history: pl.DataFrame | None = None
     market: Any | None = None
     cache_key: str | None = None
 
@@ -199,6 +202,11 @@ class StrategyDef:
     execution_backend: str = "polars_expr"
     matrix_strategy: Any | None = None
     composite: CompositeSpec | None = None  # 仅 backend=="composite" 时非空
+    # 仅 backend=="minute_filter" 时非空: 输入为当日分钟K窗口, 输出为命中标的行
+    filter_minute_history_fn: Callable[[pl.DataFrame, dict], pl.DataFrame] | None = None
+    # 仅 minute_filter: META["daily_history_bars"] 声明需要的日线历史窗口 (0=不需要;
+    # >0 时 filter_minute_history 必须接受 daily 关键字, 引擎注入 context.daily_history)
+    minute_daily_bars: int = 0
 
 
 @dataclass
@@ -471,6 +479,7 @@ class StrategyEngine:
 
         filter_fn = getattr(mod, "filter", None)
         filter_history_fn = getattr(mod, "filter_history", None)
+        filter_minute_history_fn = getattr(mod, "filter_minute_history", None)
         execution_backend = str(
             getattr(
                 mod,
@@ -481,7 +490,7 @@ class StrategyEngine:
                 ),
             )
         )
-        valid_backends = {"polars_expr", "matrix_native", "python_history_legacy", "composite"}
+        valid_backends = {"polars_expr", "matrix_native", "python_history_legacy", "composite", "minute_filter"}
         if execution_backend not in valid_backends:
             raise ValueError(
                 f"unsupported execution backend {execution_backend!r}; "
@@ -490,6 +499,7 @@ class StrategyEngine:
 
         matrix_strategy = getattr(mod, "MATRIX_STRATEGY", None)
         composite_spec: CompositeSpec | None = None
+        minute_daily_bars = 0
         if execution_backend == "matrix_native":
             from app.backtest.matrix import MatrixStrategy
 
@@ -515,6 +525,39 @@ class StrategyEngine:
                     "composite strategy must not declare filter, filter_history or MATRIX_STRATEGY"
                 )
             composite_spec = _parse_composite_children(meta.get("children"))
+        elif execution_backend == "minute_filter":
+            # 分钟形态策略: 只声明 filter_minute_history; 数据源是本地当日分钟K分区
+            # (由 ScreenerService.build_strategy_context 的 1m 分支注入), 因此 timeframes
+            # 必须且只能是 ["1m"] — 混入 1d 会让日线 context 走错数据路径。
+            if (
+                filter_minute_history_fn is None
+                or filter_fn is not None
+                or filter_history_fn is not None
+                or matrix_strategy is not None
+            ):
+                raise ValueError(
+                    "minute_filter strategy must declare only filter_minute_history"
+                )
+            if meta.get("timeframes") != ["1m"]:
+                raise ValueError(
+                    "minute_filter strategy must declare timeframes == ['1m']"
+                )
+            # 可选日线历史窗口: 声明 daily_history_bars 时 fn 必须接受 daily 关键字,
+            # 引擎会把 context.daily_history (enriched 日线窗口) 注入进来。
+            minute_daily_bars = int(meta.get("daily_history_bars") or 0)
+            if minute_daily_bars < 0 or minute_daily_bars > 250:
+                raise ValueError(
+                    "minute_filter daily_history_bars must be within [0, 250]"
+                )
+            if minute_daily_bars > 0:
+                import inspect
+
+                sig = inspect.signature(filter_minute_history_fn)
+                if "daily" not in sig.parameters:
+                    raise ValueError(
+                        "minute_filter daily_history_bars requires "
+                        "filter_minute_history to accept a 'daily' keyword"
+                    )
         elif filter_history_fn is None or filter_fn is not None:
             raise ValueError("python_history_legacy strategy must declare only filter_history")
 
@@ -538,6 +581,8 @@ class StrategyEngine:
             execution_backend=execution_backend,
             matrix_strategy=matrix_strategy,
             composite=composite_spec,
+            filter_minute_history_fn=filter_minute_history_fn,
+            minute_daily_bars=minute_daily_bars,
         )
 
     def reload(self) -> None:
@@ -651,6 +696,16 @@ class StrategyEngine:
         if value in (None, 0):
             return None
         return max(0, int(value))
+
+    def minute_daily_history_bars(self, strategy_ids: list[str]) -> int:
+        """1m 分支需要的日线 enriched 窗口大小: 各 minute_filter 策略声明的
+        META["daily_history_bars"] 取 max, 未声明 (纯分钟策略) 为 0。"""
+        required = 0
+        for strategy_id in strategy_ids:
+            strategy = self.get(strategy_id)
+            if strategy.execution_backend == "minute_filter":
+                required = max(required, strategy.minute_daily_bars)
+        return required
 
     def required_history_bars(
         self,
@@ -885,7 +940,26 @@ class StrategyEngine:
         exit_signal_hits = self._collect_signal_hits(signal_df, exit_signals)
 
         # 普通策略只读目标日期；历史策略读取调用方注入的历史窗口。
-        if s.filter_history_fn:
+        if s.execution_backend == "minute_filter":
+            # 分钟策略: 读取调用方注入的当日分钟K窗口。无 date 列, 不按 as_of 过滤,
+            # 每个命中行自带最后K线时间戳 (last_datetime)。
+            if history is None:
+                raise ValueError(f"strategy {strategy_id} requires minute history data")
+            if history.is_empty():
+                return StrategyResult(
+                    as_of=as_of,
+                    strategy_id=strategy_id,
+                    exit_signal_hits=exit_signal_hits,
+                )
+            if s.minute_daily_bars > 0:
+                df = s.filter_minute_history_fn(history, params, daily=context.daily_history)
+            else:
+                df = s.filter_minute_history_fn(history, params)
+            # 基础过滤/展示列 (name/total_shares/change_pct 等) 来自 enriched 快照,
+            # 在命中结果上事后联表, 避免把 enriched 列铺到全市场分钟行上。
+            if current is not None and not current.is_empty():
+                df = self._join_basic_columns(df, current)
+        elif s.filter_history_fn:
             if history is None:
                 raise ValueError(f"strategy {strategy_id} requires history data")
             df = history
@@ -945,7 +1019,9 @@ class StrategyEngine:
         # Stage 3: 评分
         df = self._apply_scoring(df, scoring, scoring_directions)
         entry_signal_hits = self._collect_signal_hits(df, entry_signals)
-        if not entry_signals and (s.filter_history_fn or s.filter_fn):
+        if not entry_signals and (
+            s.filter_history_fn or s.filter_fn or s.execution_backend == "minute_filter"
+        ):
             entry_signal_hits = [
                 {"symbol": str(symbol), "signals": []}
                 for symbol in df["symbol"].cast(pl.Utf8).unique().to_list()
@@ -1036,7 +1112,8 @@ class StrategyEngine:
         history_strats = [
             (sid, strategy)
             for sid, strategy in selected
-            if strategy.filter_history_fn or strategy.execution_backend == "matrix_native"
+            if strategy.filter_history_fn
+            or strategy.execution_backend in ("matrix_native", "minute_filter")
         ]
         shared_history = context.history
         if history_strats and shared_history is None:
@@ -1465,6 +1542,25 @@ class StrategyEngine:
         if expr is not None:
             return df.filter(expr)
         return df
+
+    # 分钟策略命中行需要从事后联表补齐的 enriched 列: 基础过滤引用 + 前端展示。
+    # close 不在列 — 分钟策略输出的 close 是最后一根分钟K收盘价, 优先于日线快照。
+    MINUTE_JOIN_COLUMNS: tuple[str, ...] = (
+        "name", "total_shares", "float_shares", "amount",
+        "turnover_rate", "change_pct", "pre_close",
+    )
+
+    @staticmethod
+    def _join_basic_columns(df: pl.DataFrame, current: pl.DataFrame) -> pl.DataFrame:
+        """把 enriched 快照列按 symbol 联到分钟策略输出上, 只补 df 缺失的列。"""
+        cols = [
+            c for c in StrategyEngine.MINUTE_JOIN_COLUMNS
+            if c in current.columns and c not in df.columns
+        ]
+        if not cols:
+            return df
+        extra = current.select(["symbol", *cols]).unique(subset=["symbol"], keep="last")
+        return df.join(extra, on="symbol", how="left")
 
     # ================================================================
     # 内部: 评分

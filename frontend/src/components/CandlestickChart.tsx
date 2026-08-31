@@ -66,6 +66,8 @@ export function CandlestickChart({ data, height = 480 }: Props) {
       width: el.clientWidth,
       height,
       layout: {
+        // 关闭 TV 角标 (licence 归属改由 README 技术栈外链承担)
+        attributionLogo: false,
         background: { color: THEME.background },
         textColor: ctRef.current.text,
         fontFamily: 'JetBrains Mono, monospace',

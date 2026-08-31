@@ -167,15 +167,18 @@ def test_intraday_batch_provider_is_normalized_without_network(monkeypatch):
         def intraday_batch(self, symbols, count, as_dataframe, show_progress, batch_size):
             assert symbols == ["600000.SH"]
             assert count == 300
-            assert as_dataframe is True
+            assert as_dataframe is False
             assert show_progress is False
             assert batch_size == 20
-            return pl.DataFrame({
-                "symbol": symbols,
-                "datetime": [datetime(2026, 7, 17, 9, 30)],
-                "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],
-                "volume": [1.0], "amount": [1000.0],
-            })
+            # as_dataframe=False: dict[symbol → CompactKlineData (字段→列数组)]
+            ts = int(datetime(2026, 7, 17, 9, 30, tzinfo=CN_TZ).timestamp() * 1000)
+            return {
+                "600000.SH": {
+                    "timestamp": [ts],
+                    "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],
+                    "volume": [1.0], "amount": [1000.0],
+                },
+            }
 
     class FakeClient:
         klines = FakeKlines()

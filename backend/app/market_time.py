@@ -28,6 +28,15 @@ def cn_today() -> date:
     return datetime.now(CN_TZ).date()
 
 
+def in_continuous_session(now: datetime | None = None) -> bool:
+    """A股连续竞价时段 (北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。"""
+    now = now or cn_now()
+    return now.weekday() < 5 and (
+        _MORNING_START <= now.time() <= _MORNING_END
+        or _AFTERNOON_START <= now.time() <= _AFTERNOON_END
+    )
+
+
 def trading_minutes_elapsed_from_dt(dt: datetime) -> float:
     """根据北京时间 datetime 计算当日已交易分钟数。
 

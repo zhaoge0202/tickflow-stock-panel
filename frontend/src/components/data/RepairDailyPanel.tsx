@@ -18,14 +18,15 @@ function daysAgo(n: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-export function RepairDailyPanel({ caps, isRunning, latestDate, onStart }: {
-  caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined
+// hasCap: 日K批量能力当前是否可用 (路由矩阵判定, 生效源含插件/自定义源)
+export function RepairDailyPanel({ hasCap, isRunning, latestDate, onStart }: {
+  hasCap: boolean
   isRunning: boolean
   latestDate: string | null
   onStart: () => void
 }) {
   const qc = useQueryClient()
-  const hasBatchCap = !!caps?.capabilities?.['kline.daily.batch']
+  const hasBatchCap = hasCap
 
   // 默认起始日期: 最新数据往前推 30 天 (兼顾补缺口 + 复核近期数据, 成本不高)
   const [startDate, setStartDate] = useState(daysAgo(30))

@@ -1,11 +1,25 @@
-"""异动边缘监控 API — 按交易所异动规则口径统计接近触发的个股。"""
+"""异动监控 API — 竞价/盘中/偏移三类异动。
+
+- /intraday: 盘中量价信号聚合 (enriched 当日信号列, 零新增采集)
+- /overview: 偏移异动边缘总览 (交易所异动规则口径的接近度)
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 
-from app.services.abnormal_moves import build_overview
+from app.services.abnormal_moves import build_intraday, build_overview
 
 router = APIRouter(prefix="/api/abnormal", tags=["abnormal"])
+
+
+@router.get("/intraday")
+def abnormal_intraday(
+    request: Request,
+    limit: int = Query(500, ge=1, le=2000),
+):
+    """盘中异动: 涨停/炸板/跌停翘板/跌停/新高/新低/放量 信号命中行。"""
+    repo = request.app.state.repo
+    return build_intraday(repo, limit=limit)
 
 
 @router.get("/overview")

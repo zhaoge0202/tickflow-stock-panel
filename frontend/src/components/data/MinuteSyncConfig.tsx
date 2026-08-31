@@ -5,7 +5,8 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { MissingCapChip } from '@/lib/capability-labels'
 
-export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined; onJobStart?: (jobId: string) => void }) {
+// hasCap: 分钟K能力当前是否可用 (路由矩阵判定, 生效源含插件/自定义源)
+export function MinuteSyncConfig({ hasCap, onJobStart }: { hasCap: boolean; onJobStart?: (jobId: string) => void }) {
   const qc = useQueryClient()
   const prefs = useQuery({
     queryKey: QK.preferences,
@@ -17,12 +18,15 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
-  const hasMinuteCap = !!caps?.capabilities?.['kline.minute.batch']
+  const hasMinuteCap = hasCap
   const enabled = prefs.data?.minute_sync_enabled ?? false
   const days = prefs.data?.minute_sync_days ?? 5
   const segmentDays = prefs.data?.minute_sync_segment_days ?? 20
   const [localDays, setLocalDays] = useState(days)
   const [localSegment, setLocalSegment] = useState(segmentDays)
+
+  useEffect(() => { setLocalDays(days) }, [days])
+  useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])
 
   useEffect(() => { setLocalDays(days) }, [days])
   useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])

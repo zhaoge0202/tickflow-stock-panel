@@ -226,3 +226,82 @@ def test_builtin_not_editable():
             raise AssertionError("expected ValueError for builtin")
         except ValueError:
             pass
+
+
+# ---------- 分钟 open 数据卫生 (stock-sdk 上游区间模式给日级常量伪 open) ----------
+
+def _sdk_rows(day: str, opens, closes):
+    """构造 bridge 返回形状的分钟行 (timestamp 为北京墙钟对应 UTC 毫秒)。"""
+    from datetime import UTC, datetime, timedelta
+    rows = []
+    for i, (o, c) in enumerate(zip(opens, closes, strict=True)):
+        dt = datetime.fromisoformat(f"{day} 09:30:00") + timedelta(minutes=i)
+        ts = int(dt.replace(tzinfo=UTC).timestamp() * 1000) - 8 * 3600_000
+        rows.append({"timestamp": ts, "open": o, "high": max(o, c), "low": min(o, c),
+                     "close": c, "volume": 100 + i, "amount": 1000.0 + i})
+    return rows
+
+
+def test_minute_degenerate_open_nulled():
+    """历史日 open 为全天常量(uniq=1)而 close 多值 → open 置 null。"""
+    n = 30
+    rows = _sdk_rows("2026-08-27", [8.0] * n, [10 + i * 0.01 for i in range(n)])
+    df = StockSDKProvider._minute_df(rows, "600664.SH")
+    assert df.height == n
+    assert df["open"].null_count() == n          # 伪 open 全部置 null
+    assert df["close"].null_count() == 0         # close/high/low 保留
+
+
+def test_minute_real_open_kept():
+    """真实分钟 open (多唯一值) 原样保留。"""
+    n = 30
+    rows = _sdk_rows("2026-08-28", [10 + i * 0.01 for i in range(n)], [10.05 + i * 0.01 for i in range(n)])
+    df = StockSDKProvider._minute_df(rows, "600664.SH")
+    assert df["open"].null_count() == 0
+    assert df["open"].n_unique() == n
+
+
+def test_minute_short_day_open_kept():
+    """短交易日 (rows<=10, 如半日/首日少量bar) 不误杀。"""
+    rows = _sdk_rows("2026-08-26", [8.0] * 6, [8.0 + i * 0.1 for i in range(6)])
+    df = StockSDKProvider._minute_df(rows, "600664.SH")
+    assert df["open"].null_count() == 0
+
+
+def test_get_minute_splits_tail_into_single_day_jobs(monkeypatch):
+    """多日区间 → 末尾 3 自然日(跳过周末)逐日单拉 (保住最新交易日真实 open)。"""
+    from datetime import datetime
+
+    jobs = []
+
+    def fake_run_job(job, timeout=None):
+        jobs.append(job)
+        return {"ok": True, "op": "minute", "rows": {}}
+
+    monkeypatch.setattr(sp.bridge, "run_job", fake_run_job)
+    p = StockSDKProvider()
+    p.get_minute(["600519.SH"], datetime(2026, 8, 20), datetime(2026, 8, 29, 23, 0))
+
+    # 末尾 4 个自然日 (08-26..08-29) 逐日单拉, 周六 08-29 跳过;
+    # 前段 = [08-20, 08-25] 一个区间任务
+    spans = [(j["start"], j["end"]) for j in jobs]
+    for day in ("20260826", "20260827", "20260828"):
+        assert (day, day) in spans
+    assert ("20260829", "20260829") not in spans          # 周六不单拉
+    assert ("20260820", "20260825") in spans
+
+
+def test_get_minute_single_day_no_split(monkeypatch):
+    """单日区间不拆分, 保持一个任务。"""
+    from datetime import datetime
+
+    jobs = []
+
+    def fake_run_job(job, timeout=None):
+        jobs.append(job)
+        return {"ok": True, "op": "minute", "rows": {}}
+
+    monkeypatch.setattr(sp.bridge, "run_job", fake_run_job)
+    StockSDKProvider().get_minute(["600519.SH"], datetime(2026, 8, 28), datetime(2026, 8, 28, 15, 0))
+    assert len(jobs) == 1
+    assert jobs[0]["start"] == "20260828"

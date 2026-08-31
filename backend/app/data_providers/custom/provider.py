@@ -34,29 +34,56 @@ _REQUIRED = {
     "financial": {"symbol"},
 }
 
-# 小数制下 change_pct/amplitude/turnover_rate 的物理上限: A股最大涨跌停 30% (+容差)。
+# 小数制下 change_pct 的物理上限: A股最大涨跌停 30% (+容差)。
 # 中位数口径下小数制批次不可能超过该值, 百分制批次(典型中位数 0.5~3)必然超过。
+# 仅对 change_pct 有效——amplitude/turnover_rate 的两种单位在数值区间上重叠
+# (百分制 0.05 = 0.05% 与小数制 0.05 = 5%), 无物理依据可判。
 _PCT_FRACTION_MAX = 0.31
 
+_PCT_COLUMNS = ("change_pct", "amplitude", "turnover_rate")
 
-def _normalize_pct_units(df: pl.DataFrame) -> pl.DataFrame:
-    """百分制源自适应归一为小数制 (契约: change_pct/amplitude/turnover_rate 为小数,
-    0.0366 = 3.66%)。不少第三方接口(如 a-stock-data)直接返回 3.66 表示 3.66%,
-    若不归一, 下游(行业/概念统计、前端 x100 展示)会整体放大 100 倍。
 
-    截面判定: 样本 >= 5 用 |值| 中位数(对个别无涨跌幅限制新股免疫),
-    小样本退用最大值。整批同除 100, 避免逐值阈值在 0.3~1 区间的歧义。
+def _normalize_pct_units(
+    df: pl.DataFrame,
+    pct_unit: str | None = None,
+    transformed_cols: frozenset[str] = frozenset(),
+) -> pl.DataFrame:
+    """比例字段单位归一为契约小数制 (change_pct/amplitude/turnover_rate,
+    0.0366 = 3.66%, CONTRIBUTING §3.1)。单位只认显式声明, 不靠数值猜:
+
+      - pct_unit="percent"  → 三列无条件 /100 (声明即契约, 即使数值看着像小数制);
+      - pct_unit="decimal"  → 原样透传 (即使数值看着像百分制也不动);
+      - 未声明 → change_pct 保留截面中位数判定(涨跌停 30% 上限使其物理可判:
+        样本 >= 5 用 |值| 中位数, 小样本退用最大值, 整批同除 100);
+        amplitude/turnover_rate 置 None 交下游重算(enriched 管道按
+        high/low/prev_close 与股本口径重算), 除非该列已被 transforms 显式
+        处理过(视为用户已接管单位, 原样透传)。
     """
-    for col in ("change_pct", "amplitude", "turnover_rate"):
+    dropped_undeclared = False
+    for col in _PCT_COLUMNS:
         if col not in df.columns:
             continue
         df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False).alias(col))
-        vals = df[col].drop_nulls().abs()
-        if vals.is_empty():
-            continue
-        stat = vals.median() if vals.len() >= 5 else vals.max()
-        if stat > _PCT_FRACTION_MAX:
+        if pct_unit == "percent":
             df = df.with_columns((pl.col(col) / 100).alias(col))
+        elif pct_unit == "decimal" or col in transformed_cols:
+            continue
+        elif col == "change_pct":
+            vals = df[col].drop_nulls().abs()
+            if vals.is_empty():
+                continue
+            stat = vals.median() if vals.len() >= 5 else vals.max()
+            if stat > _PCT_FRACTION_MAX:
+                df = df.with_columns((pl.col(col) / 100).alias(col))
+        else:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(col))
+            dropped_undeclared = True
+    if dropped_undeclared:
+        logger.warning(
+            "自定义源 realtime 未声明 pct_unit: amplitude/turnover_rate 的单位"
+            "无法从数值判定, 已置 None 交由下游按股本/价格口径重算;"
+            "请在 realtime 数据集配置中显式声明 pct_unit: percent 或 decimal"
+        )
     return df
 
 
@@ -82,6 +109,11 @@ class GenericHTTPProvider:
                 missing = sorted(required - mapped)
                 if missing:
                     errors.append(f"{dataset}: missing mapped fields: {', '.join(missing)}")
+            if cfg.pct_unit is not None:
+                if dataset != "realtime":
+                    errors.append(f"{dataset}: pct_unit 仅用于 realtime 数据集")
+                elif cfg.pct_unit not in ("percent", "decimal"):
+                    errors.append(f"{dataset}: pct_unit 必须是 percent 或 decimal")
             if dataset != "realtime":
                 request_params = [cfg.symbols_param, cfg.start_param, cfg.end_param]
                 if dataset == "minute":
@@ -146,8 +178,13 @@ class GenericHTTPProvider:
         cfg = self._dataset("realtime")
         rows = self._request_rows(cfg)
         df = self._mapped_frame(cfg, rows)
-        # 百分制源(返回 3.66 表示 3.66%)截面归一为契约小数制
-        df = _normalize_pct_units(df)
+        # 单位归一: 显式 pct_unit 声明优先; 未声明时 amplitude/turnover_rate
+        # fail-closed 置 None(交下游重算), change_pct 保留截面判定
+        df = _normalize_pct_units(
+            df,
+            pct_unit=cfg.pct_unit,
+            transformed_cols=frozenset(cfg.transforms) & set(_PCT_COLUMNS),
+        )
         if df.is_empty():
             return []
         return df.to_dicts()

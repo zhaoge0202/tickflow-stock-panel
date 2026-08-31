@@ -12,7 +12,7 @@ from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 from app.tickflow.policy import _augment_custom_sources
 
 
-def _set_providers(monkeypatch, *, daily="tickflow", adj="same_as_daily",
+def _set_providers(monkeypatch, *, daily="tickflow", adj="tickflow",
                    minute="tickflow", financial="tickflow") -> None:
     """mock preferences 各数据集 provider getter。"""
     from app.services import preferences
@@ -42,9 +42,9 @@ def test_daily_custom_source_grants_daily_batch(monkeypatch):
     assert not capset.has(Cap.FINANCIAL)
 
 
-def test_adj_same_as_daily_resolves_to_daily_provider(monkeypatch):
-    """adj_factor_provider=same_as_daily → 跟随 daily provider 判定。"""
-    _set_providers(monkeypatch, daily="mock_src", adj="same_as_daily")
+def test_adj_custom_source_grants_adj_factor(monkeypatch):
+    """adj 显式路由到声明除权的自定义源 → 补授能力 (跟随日K已下线, 独立判定)。"""
+    _set_providers(monkeypatch, adj="mock_src")
     _set_datasets(monkeypatch, {"adj_factor"})
     capset = CapabilitySet()
     _augment_custom_sources(capset)

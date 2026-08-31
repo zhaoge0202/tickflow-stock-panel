@@ -71,8 +71,15 @@ def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:  # no
     df = df.rename({k: v for k, v in rename_map.items() if k in df.columns})
     if "trade_date" in df.columns:
         if df.schema["trade_date"] in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
+            # 毫秒时间戳 → 北京墙钟日期 (直接 from_epoch().dt.date() 是 UTC 日期,
+            # 除权事件时间戳为北京零点 = UTC 前一日 16:00, 会整体早一天)。
             df = df.with_columns(
-                pl.from_epoch(pl.col("trade_date").cast(pl.Int64), time_unit="ms").dt.date().alias("trade_date")
+                pl.from_epoch(pl.col("trade_date").cast(pl.Int64), time_unit="ms")
+                .dt.replace_time_zone("UTC")
+                .dt.convert_time_zone("Asia/Shanghai")
+                .dt.replace_time_zone(None)
+                .dt.date()
+                .alias("trade_date")
             )
         else:
             df = df.with_columns(pl.col("trade_date").cast(pl.Date, strict=False))

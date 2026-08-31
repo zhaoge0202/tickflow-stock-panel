@@ -1,5 +1,6 @@
 import type { MinuteKlineRow } from '@/lib/api'
 
+/** 从 datetime 串取 HH:MM。契约: 分钟K datetime 已在后端入口统一为北京墙钟, 前端不做时区换算。 */
 export function formatMinuteTime(datetime: string): string {
   if (/[Zz]|[+-]\d{2}:\d{2}$/.test(datetime)) {
     const parsed = new Date(datetime)

@@ -257,9 +257,10 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         if store is not None:
             with suppress(Exception):
                 store.db.close()
-        # 终态消息已入队: 显式冲刷队列后立即退出。大数据量任务跳过解释器
-        # teardown (GC、DuckDB 线程 join、DLL 卸载), 否则收尾可达数十秒,
-        # 会撞上父进程 10s 退出预算。close+join_thread 保证消息完整落管。
+        # 终态消息已入队: 显式冲刷队列后立即退出。put 只是入队, 实际写管道的
+        # 是后台 feeder 线程, close+join_thread 保证消息完整落管 (否则父进程误判
+        # "exited without result"); 大数据量任务再跳过解释器 teardown (GC、DuckDB
+        # 线程 join、DLL 卸载), 否则收尾可达数十秒, 撞上父进程 10s 退出预算。
         with suppress(Exception):
             event_queue.close()
             event_queue.join_thread()
@@ -319,6 +320,21 @@ def run_worker_task(
                 result = message["payload"]
             elif message_type == "error":
                 failure = message
+
+        # 子进程退出后, 队列读线程可能尚未把管道尾部的 result/error 搬进本地缓冲
+        # (0.1s 轮询在系统高负载下会先看到 Empty+进程已死)。join 后做一次兜底排空,
+        # 只要消息完整刷入过管道就一定能取到。
+        if result is None and failure is None:
+            for _ in range(2):
+                try:
+                    message = events.get(timeout=1.0)
+                except queue.Empty:
+                    break
+                message_type = message.get("type")
+                if message_type == "result":
+                    result = message["payload"]
+                elif message_type == "error":
+                    failure = message
 
         process.join(timeout=10.0)
         worker_exit_forcibly = False
