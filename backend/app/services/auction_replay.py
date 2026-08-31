@@ -388,6 +388,10 @@ def backfill_recent_strategy_history(
     requested_ids = [sid for sid in _normalize_strategy_ids(strategy_ids) or [] if engine.has(sid)]
     if not requested_ids:
         return {"cycles": 0, "written": 0}
+    monitor_written = strategy_history.backfill_monitor_events(
+        data_dir,
+        strategy_id=requested_ids[0] if len(requested_ids) == 1 else None,
+    )
     cache_key = (str(data_dir.resolve()), tuple(sorted(requested_ids)))
     now = time.monotonic()
     with _backfill_lock:
@@ -397,7 +401,7 @@ def backfill_recent_strategy_history(
         _backfill_cache[cache_key] = now
     dates = _enriched_partition_dates(data_dir)
     if len(dates) < 2:
-        return {"cycles": 0, "written": 0}
+        return {"cycles": 0, "written": monitor_written}
 
     overrides_map_all = strategy_config.list_overrides(data_dir)
     svc = ScreenerService(repo, asset_type="stock")
@@ -499,7 +503,7 @@ def backfill_recent_strategy_history(
             ))
             written += max(after - before, 0)
             cycles += 1
-    return {"cycles": cycles, "written": written}
+    return {"cycles": cycles, "written": written + monitor_written}
 
 
 def _historical_strategy_result(
