@@ -58,6 +58,17 @@ function getCnTodayIso(now = new Date()): string {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: CN_TZ }).format(now)
 }
 
+function formatHistoryTime(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '—'
+  return new Date(ts).toLocaleTimeString('zh-CN', {
+    timeZone: CN_TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
 function nextBusinessDateIso(dateIso: string): string {
   const [year, month, day] = dateIso.split('-').map(Number)
   const date = new Date(Date.UTC(year, month - 1, day + 1))
@@ -939,10 +950,17 @@ export function Screener() {
       recommendationTypes.has(event.event_type)
       || (monitorTypes.has(event.event_type)
         && (recommendationMarks.get(event.symbol.toUpperCase()) ?? []).some(
-          mark => mark.signalDate < event.signal_date || mark.ts <= event.ts,
+          mark => mark.signalDate < event.signal_date
+            || (mark.signalDate === event.signal_date && mark.ts <= event.ts),
         )),
     )
   }, [strategyHistoryEvents])
+  const intradayBuyCount = useMemo(
+    () => recommendationHistoryEvents.filter(event =>
+      event.event_type === 'buy_signal' && event.signal_date === asOf,
+    ).length,
+    [recommendationHistoryEvents, asOf],
+  )
   const historyPageCount = Math.max(1, Math.ceil(recommendationHistoryEvents.length / HISTORY_PAGE_SIZE))
   const historyPageEvents = recommendationHistoryEvents.slice(
     historyPage * HISTORY_PAGE_SIZE,
@@ -1088,7 +1106,7 @@ export function Screener() {
       ? '竞价确认'
       : displayMode === 'dynamic'
         ? '动态竞价'
-        : '命中'
+        : '正式命中'
   const auctionWaitingHint = `已生成盘后预选，等待 ${auctionTradeDate} 09:25 竞价确认`
 
   return (
@@ -1316,6 +1334,11 @@ export function Screener() {
                       <> · 共 {displayPool.reduce((sum, id) => sum + (displayHitCounts[id] ?? hitCounts[id] ?? 0), 0)} 只</>
                     )}
                   </span>
+                  {!showAll && intradayBuyCount > 0 && (
+                    <span className="text-[11px] text-secondary font-normal">
+                      · 盘中买点 {intradayBuyCount}
+                    </span>
+                  )}
                   {displayMode === 'dynamic' ? (
                     <span className="text-[11px] text-secondary">
                       · 动态竞价 {auctionDynamicTotals.final} / 双刃合 {auctionDynamicTotals.candidates}
@@ -1668,7 +1691,7 @@ export function Screener() {
                   {strategyIdToName[activeStrategy] ?? activeStrategy} · 推荐历史
                 </div>
                 <div className="mt-0.5 text-[10px] text-muted">
-                  仅展示当前策略推荐事件及其关联操作 · 最近 {recommendationHistoryEvents.length} 条
+                  仅展示当前策略推荐事件及其关联操作 · 盘中买卖信号不等同正式命中 · 最近 {recommendationHistoryEvents.length} 条
                 </div>
               </div>
             </div>
@@ -1694,6 +1717,10 @@ export function Screener() {
                   const isConfirmed = event.event_type === 'auction_confirmed'
                   const isBuy = event.event_type === 'buy_signal'
                   const isSell = event.event_type === 'sell_signal'
+                  const hasEventTime = isBuy || isSell
+                    || isConfirmed || isRejected
+                    || event.event_type === 'pool_entry'
+                    || event.event_type === 'pool_exit'
                   const tone = isRejected || isSell
                     ? 'text-danger bg-danger/10 border-danger/20'
                     : isConfirmed || isBuy
@@ -1710,6 +1737,11 @@ export function Screener() {
                         <span className="text-[10px] text-muted">
                           {event.signal_date}{event.trade_date && event.trade_date !== event.signal_date ? ` → ${event.trade_date}` : ''}
                         </span>
+                        {hasEventTime && (
+                          <span className="font-mono text-[10px] text-secondary">
+                            时间 {formatHistoryTime(event.ts)}
+                          </span>
+                        )}
                         {event.price != null && <span className="num text-secondary">价 {event.price.toFixed(2)}</span>}
                         {event.change_pct != null && (
                           <span className={`num ${event.change_pct >= 0 ? 'text-success' : 'text-danger'}`}>
