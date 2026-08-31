@@ -3,7 +3,6 @@ import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   Wifi,
-  BarChart3,
   Flame,
   Zap,
   Webhook,
@@ -32,13 +31,6 @@ const PAGE_LABELS: Record<string, string> = {
   watchlist: '自选页',
   'limit-ladder': '连板梯队',
 }
-
-const SIDEBAR_INDEX_OPTIONS = [
-  { symbol: '000001.SH', name: '上证指数' },
-  { symbol: '399001.SZ', name: '深证成指' },
-  { symbol: '399006.SZ', name: '创业板指' },
-  { symbol: '000680.SH', name: '科创综指' },
-]
 
 // ===== 导出为 Panel 组件 (由 Settings.tsx 嵌入) =====
 
@@ -74,8 +66,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const rs = refreshStatus.data
   // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
   const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
-  const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? SIDEBAR_INDEX_OPTIONS.map(i => i.symbol)
-  const indicesPinned = prefs?.indices_nav_pinned ?? true
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
@@ -133,20 +123,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     qc.invalidateQueries({ queryKey: QK.preferences })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }, [toggleQuote, qc])
-
-  const toggleSidebarIndex = useCallback((symbol: string, visible: boolean) => {
-    const selected = new Set(sidebarIndexSymbols)
-    if (visible) selected.add(symbol)
-    else selected.delete(symbol)
-    const next = SIDEBAR_INDEX_OPTIONS
-      .map(item => item.symbol)
-      .filter(s => selected.has(s))
-    save({ sidebar_index_symbols: next })
-  }, [save, sidebarIndexSymbols])
-
-  const toggleIndicesPin = useCallback((pinned: boolean) => {
-    api.updateIndicesNavPinned(pinned).then(() => qc.invalidateQueries({ queryKey: QK.preferences }))
-  }, [qc])
 
   const toggleLimitLadderMonitor = useCallback(async (enabled: boolean) => {
     await api.updateLimitLadderMonitor(enabled)
@@ -386,30 +362,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           </div>
         </Card>
 
-        <Card icon={BarChart3} title="左侧菜单指数">
-          <p className="text-xs text-secondary mb-4">
-            选择实时行情开启时，左侧菜单底部显示哪些指数点位和涨跌幅。
-          </p>
-          <div className="space-y-2">
-            {SIDEBAR_INDEX_OPTIONS.map(item => (
-              <ToggleRow
-                key={item.symbol}
-                label={item.name}
-                desc={item.symbol}
-                checked={sidebarIndexSymbols.includes(item.symbol)}
-                onChange={(v) => toggleSidebarIndex(item.symbol, v)}
-              />
-            ))}
-          </div>
-          <div className="mt-3 pt-3 border-t border-border">
-            <ToggleRow
-              label="固定显示"
-              desc={indicesPinned ? '指数卡片常驻显示（即使实时行情关闭）' : '跟随实时行情开关（仅实时开时显示）'}
-              checked={indicesPinned}
-              onChange={toggleIndicesPin}
-            />
-          </div>
-        </Card>
       </div>
 
       {/* ========== 右列 ========== */}

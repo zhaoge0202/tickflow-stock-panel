@@ -141,7 +141,7 @@ function MonitorBadge({ active }: { active: boolean }) {
   )
 }
 
-function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; items: CoreIndex[] }) {
+function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; items: readonly CoreIndex[] }) {
   if (items.length === 0) return null
   const quoteBySymbol = new Map((rows ?? []).map(q => [q.symbol, q]))
   return (
@@ -445,15 +445,12 @@ export function Layout() {
       return next
     })
   }
-  const indicesPinned = prefs?.indices_nav_pinned ?? true
-  const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? CORE_INDEXES.map(p => p.symbol)
-  const sidebarIndexes = CORE_INDEXES.filter(item => sidebarIndexSymbols.includes(item.symbol))
-  // 卡片数据：固定显示时也拉取（即使实时行情关闭）
-  const showSidebarQuotes = indicesPinned || realtimeEnabled
+  // 指数条: 固定核心四只 (产品契约, 不再可配置), 常驻显示
+  const sidebarIndexes = CORE_INDEXES
   const { data: sidebarIndexQuotes } = useQuery({
-    queryKey: [...QK.indexQuotes, 'sidebar', sidebarIndexSymbols.join(',')] as const,
+    queryKey: [...QK.indexQuotes, 'sidebar', 'core'] as const,
     queryFn: () => api.indexQuotes(sidebarIndexes.map(p => p.symbol)),
-    enabled: showSidebarQuotes && sidebarIndexes.length > 0,
+    enabled: sidebarIndexes.length > 0,
     placeholderData: (prev) => prev,
   })
 
@@ -877,7 +874,7 @@ export function Layout() {
                 )}
               </div>
             )}
-          {showSidebarQuotes && !isWatchlistMode && (!realtimeUnavailable || !!realtimeProviderName) && (
+          {!isWatchlistMode && (!realtimeUnavailable || !!realtimeProviderName) && (
             <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
           )}
         </div>

@@ -162,7 +162,6 @@ export function Data() {
     mutationFn: () => api.syncIndexDaily(indexSyncDays),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
-      qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
       qc.invalidateQueries({ queryKey: ['index-daily'] })
     },

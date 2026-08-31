@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Loader2, Lock, RefreshCw, Search } from 'lucide-react'
+import { Activity, Loader2, Lock, RefreshCw } from 'lucide-react'
 import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -61,14 +61,9 @@ const PINNED_INDEXES = [
   { symbol: '000680.SH', name: '科创综指' },
 ]
 
-function pinnedRank(item: IndexInstrument) {
-  return PINNED_INDEXES.findIndex(p => item.symbol === p.symbol || item.name === p.name)
-}
-
 export function Indices() {
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [keyword, setKeyword] = useState('')
   const symbolParam = searchParams.get('symbol') ?? ''
   const [selected, setSelected] = useState<string>(symbolParam)
   const [range, setRange] = useState(defaultRange)
@@ -79,29 +74,12 @@ export function Indices() {
   const caps = useCapabilities()
   const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
 
-  const list = useQuery({
-    queryKey: QK.indexList,
-    queryFn: api.indexList,
-  })
+  // 指数标的固定核心四只 (产品契约, 不再提供全指数搜索/浏览)
+  const topRows: IndexInstrument[] = PINNED_INDEXES.map(p => ({
+    symbol: p.symbol, name: p.name, asset_type: 'index' as const,
+  }))
 
-  const search = useQuery({
-    queryKey: ['index-search', keyword],
-    queryFn: () => api.indexSearch(keyword, 50),
-    enabled: keyword.trim().length > 0,
-  })
-
-  const rows: IndexInstrument[] = keyword.trim()
-    ? (search.data?.results ?? [])
-    : (list.data?.results ?? [])
-  const topRows = useMemo(() => {
-    const all = list.data?.results ?? []
-    return PINNED_INDEXES.map(p => (
-      all.find(item => item.symbol === p.symbol || item.name === p.name) ?? { symbol: p.symbol, name: p.name, asset_type: 'index' as const }
-    ))
-  }, [list.data?.results])
-  const listRows = useMemo(() => rows.filter(item => pinnedRank(item) < 0), [rows])
-
-  const selectedSymbol = selected || topRows[0]?.symbol || listRows[0]?.symbol || ''
+  const selectedSymbol = selected || topRows[0]?.symbol || ''
 
   useEffect(() => {
     if (symbolParam && symbolParam !== selected) setSelected(symbolParam)
@@ -132,18 +110,9 @@ export function Indices() {
     placeholderData: (prev) => prev,
   })
 
-  const syncInstruments = useMutation({
-    mutationFn: api.syncIndexInstruments,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.indexList })
-      qc.invalidateQueries({ queryKey: QK.indexQuotes })
-    },
-  })
-
   const syncDaily = useMutation({
     mutationFn: () => api.syncIndexDaily(365),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
       qc.invalidateQueries({ queryKey: ['index-daily'] })
     },
@@ -159,7 +128,7 @@ export function Indices() {
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
-  const selectedInfo = [...topRows, ...listRows].find(r => r.symbol === selectedSymbol) || daily.data?.index_info
+  const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
   const minuteRows: MinuteKlineRow[] = minute.data?.rows ?? []
   const selectedIdx = selectedDate ? chartRows.findIndex(r => r.date === selectedDate) : -1
   const prevClose = selectedIdx > 0
@@ -212,14 +181,6 @@ export function Indices() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => syncInstruments.mutate()}
-            disabled={syncInstruments.isPending}
-            className="inline-flex items-center gap-1.5 rounded-btn bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
-          >
-            {syncInstruments.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            同步指数列表
-          </button>
-          <button
             onClick={() => syncDaily.mutate()}
             disabled={syncDaily.isPending}
             className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-base hover:bg-accent/90 disabled:opacity-50"
@@ -232,26 +193,9 @@ export function Indices() {
 
       <div className="grid grid-cols-[15rem_1fr] gap-4">
         <aside className="rounded-card border border-border bg-surface p-3">
-          <div className="relative mb-3">
-            <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted" />
-            <input
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
-              placeholder="搜索指数代码/名称"
-              className="w-full rounded-btn border border-border bg-base py-1.5 pl-7 pr-2 text-xs text-foreground outline-none focus:border-accent"
-            />
-          </div>
-          <div className="mb-3 space-y-1 border-b border-border/60 pb-3">
+          <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-muted">核心指数</div>
+          <div className="space-y-1">
             {topRows.map(renderIndexItem)}
-          </div>
-          <div className="max-h-[calc(100vh-24rem)] space-y-1 overflow-auto pr-1">
-            {(list.isLoading || search.isLoading) && <div className="py-4 text-center text-xs text-muted">加载中…</div>}
-            {!list.isLoading && listRows.length === 0 && (
-              <div className="rounded-btn bg-elevated p-3 text-xs text-muted">
-                {keyword.trim() ? '无匹配指数。' : '暂无更多指数，先点击“同步指数列表”。'}
-              </div>
-            )}
-            {listRows.map(renderIndexItem)}
           </div>
         </aside>
 

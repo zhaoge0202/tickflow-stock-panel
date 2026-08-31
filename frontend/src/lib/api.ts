@@ -1595,7 +1595,6 @@ export interface WecomBotStatus {
 
 export interface Preferences {
   realtime_quotes_enabled: boolean
-  indices_nav_pinned: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
@@ -1614,9 +1613,6 @@ export interface Preferences {
   data_source_long_job_timeout_s: number
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
-  realtime_pull_index?: boolean
-  realtime_index_mode?: 'core' | 'all'
-  realtime_index_symbols?: string[]
   pipeline_pull_a_share: boolean
   pipeline_pull_etf: boolean
   pipeline_pull_index: boolean
@@ -1645,7 +1641,6 @@ export interface Preferences {
   wecom_bot_enabled?: boolean
   webhook_enabled_default?: boolean
   webhook_default_channels?: string[]
-  sidebar_index_symbols: string[]
   nav_order: string[]
   nav_hidden: string[]
   screener_auto_run: boolean
@@ -1851,15 +1846,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ realtime_quotes_enabled: enabled }),
     }),
-  updateRealtimeQuoteScope: (cfg: Partial<Pick<Preferences, 'realtime_pull_stock' | 'realtime_pull_etf' | 'realtime_pull_index' | 'realtime_index_mode' | 'realtime_index_symbols'>>) =>
+  updateRealtimeQuoteScope: (cfg: Partial<Pick<Preferences, 'realtime_pull_stock' | 'realtime_pull_etf'>>) =>
     request<Partial<Preferences>>('/api/settings/preferences/realtime-quote-scope', {
       method: 'PUT',
       body: JSON.stringify(cfg),
-    }),
-  updateIndicesNavPinned: (pinned: boolean) =>
-    request<{ indices_nav_pinned: boolean }>('/api/settings/preferences/indices-nav-pinned', {
-      method: 'PUT',
-      body: JSON.stringify({ indices_nav_pinned: pinned }),
     }),
   updateWatchlistGroupsInNav: (enabled: boolean) =>
     request<{ watchlist_groups_in_nav: boolean }>('/api/settings/preferences/watchlist-groups-in-nav', {
@@ -1904,7 +1894,6 @@ export const api = {
     sse_refresh_pages?: Record<string, boolean>
     strategy_monitor_enabled?: boolean
     strategy_monitor_ids?: string[]
-    sidebar_index_symbols?: string[]
     screener_auto_run?: boolean
     minute_intraday_refresh?: boolean
     minute_intraday_refresh_interval?: number
@@ -1914,7 +1903,6 @@ export const api = {
       sse_refresh_pages: Record<string, boolean>
       strategy_monitor_enabled: boolean
       strategy_monitor_ids: string[]
-      sidebar_index_symbols: string[]
       screener_auto_run: boolean
       minute_intraday_refresh: boolean
       minute_intraday_refresh_interval: number
@@ -2105,11 +2093,6 @@ export const api = {
     }>(
       `/api/kline/minute-range?symbol=${encodeURIComponent(symbol)}&days=${days}`,
     ),
-  indexList: () => request<{ results: IndexInstrument[]; count: number }>('/api/index/list'),
-  indexSearch: (q: string, limit = 20) =>
-    request<{ results: IndexInstrument[] }>(
-      `/api/index/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    ),
   indexDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }) =>
     request<{
       symbol: string
@@ -2126,7 +2109,6 @@ export const api = {
     request<{
       symbol: string
       name?: string
-      index_info?: IndexInstrument
       date: string | null
       rows: MinuteKlineRow[]
       source?: string
