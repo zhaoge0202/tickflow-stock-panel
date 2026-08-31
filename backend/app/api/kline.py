@@ -582,6 +582,10 @@ def get_minute_batch(request: Request, body: dict):
 
     symbols: list[str] = body.get("symbols", [])
     trade_date_str: str | None = body.get("date")
+    # 自选分时本地优先标志: 全量分钟服务健康时, 股票缺口不再批量补拉
+    # (本地分区由服务按间隔持续写入, 下一轮自然补全; 停牌/临停票补拉也是空, 无损)。
+    # ETF 不在全量分钟 universe 内, 恒走补拉。服务不健康时回落现状补拉兜底。
+    prefer_local = bool(body.get("prefer_local", False))
     if not symbols:
         return {"data": {}}
 
@@ -659,6 +663,20 @@ def get_minute_batch(request: Request, body: dict):
         elif not sub.is_empty():
             result[sym] = sub.to_dicts()
 
+    # prefer_local 生效判定: 仅当全量分钟服务健康 (freshness 契约, 见 minute_refresh.is_healthy)
+    full_minute_healthy = False
+    if prefer_local:
+        svc = getattr(request.app.state, "minute_refresh", None)
+        full_minute_healthy = bool(svc is not None and svc.is_healthy())
+    if full_minute_healthy:
+        # 股票 incomplete 不补拉, 本地有多少给多少 (服务下一轮写入补全);
+        # ETF 维持 incomplete 走下方补拉
+        for sym in incomplete:
+            sub = local_parts.get(sym)
+            if sym not in etf_set and sub is not None and not sub.is_empty():
+                result[sym] = sub.to_dicts()
+        incomplete = [s for s in incomplete if s in etf_set]
+
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
         start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
@@ -705,7 +723,8 @@ def get_minute_batch(request: Request, body: dict):
                 if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
-    return {"data": result}
+    # full_minute_local: 本轮 prefer_local 生效 (本地分区由全量分钟服务供给, 股票未做补拉)
+    return {"data": result, "full_minute_local": full_minute_healthy}
 
 
 @router.get("/minute-range")

@@ -11,7 +11,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from threading import Lock
 from unittest.mock import MagicMock
 
@@ -735,3 +735,146 @@ def test_sync_minute_single_rejects_index_symbol():
         asyncio.run(kline_api.sync_minute_single(mock_request, {"symbol": "000001.SH"}))
     assert exc_info.value.status_code == 400
     assert "指数" in str(exc_info.value.detail)
+
+
+# ---------- 测试: prefer_local (自选分时 × 全量分钟健康) ----------
+
+
+def _mock_minute_rows(symbol: str, n: int) -> pl.DataFrame:
+    """n 根分钟K (同日递增分钟), 用于构造'部分完整'的本地分区数据。"""
+    return pl.DataFrame({
+        "symbol": [symbol] * n,
+        "datetime": [datetime(2026, 1, 15, 9, 31, 0) + timedelta(minutes=i) for i in range(n)],
+        "open": [100.0] * n, "high": [101.0] * n, "low": [99.5] * n, "close": [100.5] * n,
+        "volume": [1000.0] * n, "amount": [100500.0] * n,
+    })
+
+
+def _healthy_svc(monkeypatch, healthy: bool):
+    """mock app.state.minute_refresh (is_healthy 可控)。"""
+    svc = MagicMock()
+    svc.is_healthy.return_value = healthy
+    return svc
+
+
+def test_get_minute_batch_prefer_local_healthy_skips_stock_refetch(monkeypatch):
+    """全量分钟服务健康 + prefer_local: 股票 incomplete 不再批量补拉,
+    本地现有数据(哪怕 <90%)直接返回; ETF 不在服务 universe, 维持补拉。"""
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_df(symbol="510300.SH"))
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = {"510300.SH"}
+    # 股票本地 100 根 (expected=240 → <90% 判 incomplete), ETF 本地空
+    mock_repo.get_minute_batch.side_effect = (
+        lambda syms, d, asset_type="stock":
+        _mock_minute_rows("600519.SH", 100) if asset_type == "stock" else pl.DataFrame()
+    )
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, True)
+
+    body = {"symbols": ["600519.SH", "510300.SH"], "date": "2026-01-15", "prefer_local": True}
+    result = kline_api.get_minute_batch(mock_request, body)
+
+    # 股票未被补拉: sync_minute_batch 只为 ETF 调了一次
+    assert sync_spy.call_count == 1
+    assert sync_spy.call_args.kwargs.get("asset_type") == "etf"
+    assert sync_spy.call_args.args[0] == ["510300.SH"]
+    # 股票返回的是本地 100 根 (部分数据, 不因 incomplete 而缺失)
+    assert len(result["data"]["600519.SH"]) == 100
+    assert result["full_minute_local"] is True
+
+
+def test_get_minute_batch_prefer_local_unhealthy_falls_back(monkeypatch):
+    """服务不健康 (挂了/停了) + prefer_local: 回落现状补拉兜底, 行为与不带标志一致。"""
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_df())
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = _mock_minute_rows("600519.SH", 100)
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, False)
+
+    body = {"symbols": ["600519.SH"], "date": "2026-01-15", "prefer_local": True}
+    result = kline_api.get_minute_batch(mock_request, body)
+
+    assert sync_spy.call_count == 1  # 股票照常补拉
+    assert sync_spy.call_args.kwargs.get("asset_type") == "stock"
+    assert result["full_minute_local"] is False
+
+
+def test_get_minute_batch_no_flag_unaffected_even_if_healthy(monkeypatch):
+    """不带 prefer_local (策略页等) 即使服务健康也维持现状补拉 — 本轮只辐射自选场景。"""
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_df())
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = _mock_minute_rows("600519.SH", 100)
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, True)
+
+    body = {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    result = kline_api.get_minute_batch(mock_request, body)
+
+    assert sync_spy.call_count == 1
+    assert result["full_minute_local"] is False
+
+
+def test_minute_refresh_is_healthy_requires_recent_round(monkeypatch):
+    """is_healthy 三条件: 偏好开 + 线程活 + 最近一轮距现在 ≤ max(2×间隔, 30s)。"""
+    import time as time_mod
+    from app.services import minute_refresh as mr
+
+    svc = mr.MinuteRefreshService(MagicMock())  # is_healthy 不触达 repo
+
+    monkeypatch.setattr(mr.preferences, "get_minute_refresh_enabled", lambda: True)
+    monkeypatch.setattr(mr.preferences, "get_minute_refresh_interval", lambda: 6)
+    # 线程未启动 → False
+    assert svc.is_healthy() is False
+
+    svc._thread = MagicMock()
+    svc._thread.is_alive.return_value = True
+    # 无轮次记录 → False
+    assert svc.is_healthy() is False
+
+    # 最近一轮在 10s 前 (≤ max(12, 30)) → True
+    svc._state.last_round_at = time_mod.time() - 10
+    assert svc.is_healthy() is True
+
+    # 最近一轮在 120s 前 (> 30) → False (连续失败不更新 last_round_at, 自动超时)
+    svc._state.last_round_at = time_mod.time() - 120
+    assert svc.is_healthy() is False
+
+    # 偏好关闭 → False
+    monkeypatch.setattr(mr.preferences, "get_minute_refresh_enabled", lambda: False)
+    svc._state.last_round_at = time_mod.time() - 10
+    assert svc.is_healthy() is False

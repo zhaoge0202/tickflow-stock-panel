@@ -295,6 +295,26 @@ class MinuteRefreshService:
     # 状态
     # ------------------------------------------------------------------
 
+    def is_healthy(self) -> bool:
+        """读侧 freshness 判定: 本地 kline_minute 分区是否正被服务持续写入。
+
+        条件: 偏好开启 + 轮询线程存活 + 最近一轮距现在 ≤ max(2×间隔, 30s)。
+        健康时消费方 (自选分时等) 可信任本地分区、跳过批量补拉;
+        连续失败轮不更新 last_round_at → 自动超时判不健康, 无需单独盯 last_error。
+        """
+        try:
+            if not preferences.get_minute_refresh_enabled():
+                return False
+        except Exception:  # noqa: BLE001 — 偏好文件异常按不健康处理
+            return False
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        last = self._state.last_round_at
+        if last is None:
+            return False
+        interval = preferences.get_minute_refresh_interval()
+        return (time.time() - float(last)) <= max(2.0 * interval, 30.0)
+
     def status(self) -> dict[str, Any]:
         import contextlib
 
