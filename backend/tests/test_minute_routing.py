@@ -363,7 +363,7 @@ def _endpoint_mocks(monkeypatch, local_df: pl.DataFrame, sync_ret: pl.DataFrame 
 
 
 def test_minute_batch_tail_stale_pulls_incremental_and_persists(monkeypatch):
-    """尾部落后 (本地连续但根数不足) → 从最后一根+1min 增量拉;
+    """尾部落后 (本地连续但根数不足) → 从最后一根本身增量拉 (动态K重拉覆盖);
     拉取结果落盘, 响应为本地+增量合并去重。"""
     from app.api import kline as kline_api
 
@@ -376,7 +376,7 @@ def test_minute_batch_tail_stale_pulls_incremental_and_persists(monkeypatch):
     result = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
 
     assert len(captured) == 1
-    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 34)   # 最后一根 + 1min
+    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 33)   # 从最后一根本身重拉 (动态K覆盖)
     assert captured[0]["asset"] == "stock"
     assert writes and writes[0].height == 2                        # 取到即落盘
     rows = result["data"]["600519.SH"]

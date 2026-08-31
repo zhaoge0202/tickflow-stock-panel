@@ -736,8 +736,9 @@ def get_minute_batch(request: Request, body: dict):
     _pull("stock", [s for s in full_pull if s not in etf_set], day_start)
     _pull("etf", [s for s in full_pull if s in etf_set], day_start)
     if stale_last:
-        # 增量公共起点 = 最旧尾部 + 1min; 起点更早的重叠由落盘/合并去重吸收
-        inc_start = min(stale_last.values()) + timedelta(minutes=1)
+        # 增量公共起点 = 最旧的最后一根本身: 最后一根是形成中的动态K (分钟内
+        # 收盘/量/额持续变化), 必须重拉并以定版值覆盖; 重叠由 upsert/合并去重吸收
+        inc_start = min(stale_last.values())
         if inc_start < session_end:
             _pull("stock", [s for s in stale_last if s not in etf_set], inc_start)
             _pull("etf", [s for s in stale_last if s in etf_set], inc_start)
