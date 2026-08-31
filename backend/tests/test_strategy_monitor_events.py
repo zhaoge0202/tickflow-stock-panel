@@ -224,6 +224,20 @@ def test_strategy_sell_and_pool_exit_are_independent_events():
     }
 
 
+def test_strategy_sell_signal_ignores_untracked_market_exit():
+    day = date(2026, 7, 24)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(day, pool=("A",)),
+        _result(day, pool=("A",), sells=("B",)),
+    ]))
+    engine.set_rules([_rule("sell_signal")])
+
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
+        assert engine.evaluate(_quotes()) == []
+        assert engine.evaluate(_quotes()) == []
+
+
 def test_strategy_rule_reload_preserves_state_and_semantic_edit_resets_it():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()

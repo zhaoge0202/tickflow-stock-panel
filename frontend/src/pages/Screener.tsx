@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyPurchaseMark } from '@/lib/api'
+import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -883,6 +883,28 @@ export function Screener() {
     return map
   }, [purchaseMarksQuery.data])
 
+  // 策略候选生命周期: 即使今日动态结果归零,仍展示此前候选的竞价确认/淘汰节点。
+  const strategyHistoryQuery = useQuery({
+    queryKey: QK.strategyHistory(activeStrategy ?? '', 180),
+    queryFn: () => api.strategyHistory({
+      strategyId: activeStrategy ?? undefined,
+      days: 180,
+      limit: 200,
+    }),
+    enabled: assetType === 'stock' && !!activeStrategy,
+    staleTime: 10_000,
+  })
+  const auctionHistoryEvents = useMemo(() => {
+    const events = strategyHistoryQuery.data?.events ?? []
+    return events.filter((event: StrategyHistoryEvent) =>
+      event.event_type === 'auction_rejected' || event.event_type === 'auction_confirmed',
+    )
+  }, [strategyHistoryQuery.data])
+  const auctionRejectedEvents = useMemo(
+    () => auctionHistoryEvents.filter(event => event.event_type === 'auction_rejected'),
+    [auctionHistoryEvents],
+  )
+
   const togglePurchaseMark = useMutation({
     mutationFn: ({
       strategyId,
@@ -1223,6 +1245,20 @@ export function Screener() {
                     <div className="mt-0.5 text-[11px] text-amber-200/70">
                       这些结果仅供次交易日 09:25 前观察，正式结果会在竞价确认后单独切换。
                     </div>
+                  </div>
+                </div>
+              )}
+              {auctionRejectedEvents.length > 0 && (
+                <div className="rounded-btn border border-danger/25 bg-danger/5 px-3 py-2 text-xs">
+                  <div className="font-medium text-danger">竞价复盘：曾选出但未确认</div>
+                  <div className="mt-1 space-y-1 text-[11px] text-secondary">
+                    {auctionRejectedEvents.slice(0, 5).map(event => (
+                      <div key={event.event_key} className="flex flex-wrap gap-x-2 gap-y-0.5">
+                        <span className="text-foreground">{event.name || event.symbol}</span>
+                        <span>{event.signal_date} → {event.trade_date}</span>
+                        <span className="text-danger">{event.reason || '竞价确认未通过'}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
