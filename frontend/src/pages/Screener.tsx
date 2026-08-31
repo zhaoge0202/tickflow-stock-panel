@@ -913,8 +913,38 @@ export function Screener() {
     staleTime: 10_000,
   })
   const strategyHistoryEvents = strategyHistoryQuery.data?.events ?? []
-  const historyPageCount = Math.max(1, Math.ceil(strategyHistoryEvents.length / HISTORY_PAGE_SIZE))
-  const historyPageEvents = strategyHistoryEvents.slice(
+  const recommendationHistoryEvents = useMemo(() => {
+    const recommendationTypes = new Set<StrategyHistoryEvent['event_type']>([
+      'selected',
+      'preselect',
+      'auction_confirmed',
+      'auction_rejected',
+      'buy_signal',
+    ])
+    const monitorTypes = new Set<StrategyHistoryEvent['event_type']>([
+      'sell_signal',
+      'pool_entry',
+      'pool_exit',
+    ])
+    const recommendationMarks = new Map<string, { signalDate: string; ts: number }[]>()
+    for (const event of strategyHistoryEvents) {
+      if (!recommendationTypes.has(event.event_type)) continue
+      const symbol = event.symbol.toUpperCase()
+      recommendationMarks.set(symbol, [
+        ...(recommendationMarks.get(symbol) ?? []),
+        { signalDate: event.signal_date, ts: event.ts },
+      ])
+    }
+    return strategyHistoryEvents.filter(event =>
+      recommendationTypes.has(event.event_type)
+      || (monitorTypes.has(event.event_type)
+        && (recommendationMarks.get(event.symbol.toUpperCase()) ?? []).some(
+          mark => mark.signalDate < event.signal_date || mark.ts <= event.ts,
+        )),
+    )
+  }, [strategyHistoryEvents])
+  const historyPageCount = Math.max(1, Math.ceil(recommendationHistoryEvents.length / HISTORY_PAGE_SIZE))
+  const historyPageEvents = recommendationHistoryEvents.slice(
     historyPage * HISTORY_PAGE_SIZE,
     (historyPage + 1) * HISTORY_PAGE_SIZE,
   )
@@ -1638,7 +1668,7 @@ export function Screener() {
                   {strategyIdToName[activeStrategy] ?? activeStrategy} · 推荐历史
                 </div>
                 <div className="mt-0.5 text-[10px] text-muted">
-                  仅展示当前策略 · 最近 {strategyHistoryEvents.length} 条
+                  仅展示当前策略推荐事件及其关联操作 · 最近 {recommendationHistoryEvents.length} 条
                 </div>
               </div>
             </div>
