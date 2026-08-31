@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
@@ -23,6 +23,7 @@ import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
 import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
+import { Modal } from '@/components/Modal'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -82,6 +83,18 @@ function resolveAuctionTradeDate(asOf: string, now = new Date()): string {
 // 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
 const SHOW_STRATEGY_STORE = false
 
+const HISTORY_PAGE_SIZE = 10
+const HISTORY_EVENT_LABELS: Record<StrategyHistoryEvent['event_type'], string> = {
+  selected: '策略选出',
+  preselect: '盘后预选',
+  auction_confirmed: '竞价确认',
+  auction_rejected: '竞价淘汰',
+  buy_signal: '买入信号',
+  sell_signal: '卖出信号',
+  pool_entry: '进入策略池',
+  pool_exit: '移出策略池',
+}
+
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   // 周期显示筛选: 全部 / 日线 / 分钟 — 只过滤卡片显示, 不影响池和执行;
@@ -100,6 +113,8 @@ export function Screener() {
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
   const [showComposite, setShowComposite] = useState(false)
+  const [showHistoryDialog, setShowHistoryDialog] = useState(false)
+  const [historyPage, setHistoryPage] = useState(0)
   const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
@@ -891,22 +906,26 @@ export function Screener() {
       return api.strategyHistory({
         strategyId: activeStrategy ?? undefined,
         days: 180,
-        limit: 200,
+        limit: 1000,
       })
     },
     enabled: assetType === 'stock' && !!activeStrategy,
     staleTime: 10_000,
   })
-  const auctionHistoryEvents = useMemo(() => {
-    const events = strategyHistoryQuery.data?.events ?? []
-    return events.filter((event: StrategyHistoryEvent) =>
-      event.event_type === 'auction_rejected' || event.event_type === 'auction_confirmed',
-    )
-  }, [strategyHistoryQuery.data])
-  const auctionRejectedEvents = useMemo(
-    () => auctionHistoryEvents.filter(event => event.event_type === 'auction_rejected'),
-    [auctionHistoryEvents],
+  const strategyHistoryEvents = strategyHistoryQuery.data?.events ?? []
+  const historyPageCount = Math.max(1, Math.ceil(strategyHistoryEvents.length / HISTORY_PAGE_SIZE))
+  const historyPageEvents = strategyHistoryEvents.slice(
+    historyPage * HISTORY_PAGE_SIZE,
+    (historyPage + 1) * HISTORY_PAGE_SIZE,
   )
+
+  useEffect(() => {
+    setHistoryPage(0)
+  }, [activeStrategy, strategyHistoryQuery.data])
+
+  useEffect(() => {
+    if (historyPage >= historyPageCount) setHistoryPage(Math.max(historyPageCount - 1, 0))
+  }, [historyPage, historyPageCount])
 
   const togglePurchaseMark = useMutation({
     mutationFn: ({
@@ -1251,20 +1270,6 @@ export function Screener() {
                   </div>
                 </div>
               )}
-              {auctionRejectedEvents.length > 0 && (
-                <div className="rounded-btn border border-danger/25 bg-danger/5 px-3 py-2 text-xs">
-                  <div className="font-medium text-danger">竞价复盘：曾选出但未确认</div>
-                  <div className="mt-1 space-y-1 text-[11px] text-secondary">
-                    {auctionRejectedEvents.slice(0, 5).map(event => (
-                      <div key={event.event_key} className="flex flex-wrap gap-x-2 gap-y-0.5">
-                        <span className="text-foreground">{event.name || event.symbol}</span>
-                        <span>{event.signal_date} → {event.trade_date}</span>
-                        <span className="text-danger">{event.reason || '竞价确认未通过'}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium text-foreground flex items-center gap-2">
                   {!showAll && activeStrategy && (
@@ -1603,6 +1608,120 @@ export function Screener() {
         open={showStore}
         onClose={() => setShowStore(false)}
       />
+
+      {activeStrategy && (
+        <button
+          type="button"
+          onClick={() => setShowHistoryDialog(true)}
+          title={`查看${strategyIdToName[activeStrategy] ?? activeStrategy}推荐历史`}
+          className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-surface/95 px-4 py-2.5 text-xs font-medium text-foreground shadow-xl shadow-black/20 backdrop-blur-md transition hover:border-accent/60 hover:bg-accent/10"
+        >
+          <History className="h-3.5 w-3.5 text-accent" />
+          <span>推荐历史</span>
+          <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent num">
+            {strategyHistoryQuery.data?.total ?? 0}
+          </span>
+        </button>
+      )}
+
+      {showHistoryDialog && activeStrategy && (
+        <Modal
+          onClose={() => setShowHistoryDialog(false)}
+          labelledBy="strategy-history-title"
+          panelClassName="w-[min(920px,94vw)] max-h-[82vh] bg-surface/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        >
+          <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <History className="h-4 w-4 shrink-0 text-accent" />
+              <div className="min-w-0">
+                <div id="strategy-history-title" className="truncate text-sm font-semibold text-foreground">
+                  {strategyIdToName[activeStrategy] ?? activeStrategy} · 推荐历史
+                </div>
+                <div className="mt-0.5 text-[10px] text-muted">
+                  仅展示当前策略 · 最近 {strategyHistoryEvents.length} 条
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭"
+              onClick={() => setShowHistoryDialog(false)}
+              className="rounded-lg p-1.5 transition hover:bg-elevated"
+            >
+              <X className="h-4 w-4 text-muted" />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            {strategyHistoryQuery.isLoading ? (
+              <div className="flex items-center justify-center py-16 text-xs text-muted">历史加载中…</div>
+            ) : historyPageEvents.length === 0 ? (
+              <div className="flex items-center justify-center py-16 text-xs text-muted">当前策略暂无历史记录</div>
+            ) : (
+              <div className="space-y-2">
+                {historyPageEvents.map(event => {
+                  const isRejected = event.event_type === 'auction_rejected'
+                  const isConfirmed = event.event_type === 'auction_confirmed'
+                  const isBuy = event.event_type === 'buy_signal'
+                  const isSell = event.event_type === 'sell_signal'
+                  const tone = isRejected || isSell
+                    ? 'text-danger bg-danger/10 border-danger/20'
+                    : isConfirmed || isBuy
+                      ? 'text-success bg-success/10 border-success/20'
+                      : 'text-accent bg-accent/10 border-accent/20'
+                  return (
+                    <div key={event.event_key} className="rounded-xl border border-border/40 bg-elevated/30 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${tone}`}>
+                          {HISTORY_EVENT_LABELS[event.event_type] ?? event.event_type}
+                        </span>
+                        <span className="font-medium text-foreground">{event.name || event.symbol}</span>
+                        <span className="font-mono text-[10px] text-muted">{event.symbol}</span>
+                        <span className="text-[10px] text-muted">
+                          {event.signal_date}{event.trade_date && event.trade_date !== event.signal_date ? ` → ${event.trade_date}` : ''}
+                        </span>
+                        {event.price != null && <span className="num text-secondary">价 {event.price.toFixed(2)}</span>}
+                        {event.change_pct != null && (
+                          <span className={`num ${event.change_pct >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {(event.change_pct * 100).toFixed(2)}%
+                          </span>
+                        )}
+                      </div>
+                      {(event.reason || event.signals?.length) && (
+                        <div className="mt-1 text-[11px] leading-5 text-secondary">
+                          {event.reason || event.signals?.join('、')}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between border-t border-border/50 px-5 py-3 text-[11px] text-muted">
+            <span>第 {Math.min(historyPage + 1, historyPageCount)} / {historyPageCount} 页</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setHistoryPage(page => Math.max(page - 1, 0))}
+                disabled={historyPage <= 0}
+                className="inline-flex items-center gap-1 rounded-btn border border-border px-2.5 py-1.5 transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />上一页
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryPage(page => Math.min(page + 1, historyPageCount - 1))}
+                disabled={historyPage >= historyPageCount - 1}
+                className="inline-flex items-center gap-1 rounded-btn border border-border px-2.5 py-1.5 transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                下一页<ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </>
   )
 }
