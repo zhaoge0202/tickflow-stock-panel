@@ -880,7 +880,9 @@ export function Watchlist() {
   const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(minuteSymbolsKey),
-    queryFn: () => api.klineMinuteBatch(minuteSymbols),
+    // prefer_local: 全量分钟服务健康时股票缺口不再批量补拉 (本地分区由服务持续写入),
+    // 大自选(数百上千只)不再持续打批量分钟接口
+    queryFn: () => api.klineMinuteBatch(minuteSymbols, undefined, true),
     enabled: intradayVisible && minuteSymbols.length > 0 && !groupCardsOpen,
     staleTime: 10_000,
     refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
