@@ -440,6 +440,14 @@ def test_minute_batch_since_returns_only_new_bars(monkeypatch):
     assert plain["incremental"] is False
     assert len(plain["data"]["600519.SH"]) == 240
 
+    # 防御: 带 Z 的 UTC aware 输入 (toISOString 客户端) → 归一为北京 naive 再比,
+    # 不抛 TypeError 且语义正确 (15:00 北京 = 07:00 UTC)
+    utc = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15",
+        "since": "2026-01-15T07:00:00Z",
+    })
+    assert [r["datetime"] for r in utc["data"]["600519.SH"]] == [datetime(2026, 1, 15, 15, 0)]
+
 
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------
 

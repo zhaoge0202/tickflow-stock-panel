@@ -5,6 +5,7 @@ import logging
 import math
 from datetime import date, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from functools import lru_cache
 from typing import Optional
 
@@ -590,6 +591,10 @@ def get_minute_batch(request: Request, body: dict):
     if since_str:
         try:
             since_dt = datetime.fromisoformat(str(since_str))
+            # 防御: 带 Z/偏移的 aware 输入 (如 toISOString) → 转北京墙钟再去 tz,
+            # 否则与行里的 naive 北京时间比较会 TypeError 且差 8 小时
+            if since_dt.tzinfo is not None:
+                since_dt = since_dt.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
         except ValueError:
             since_dt = None
     # 自选分时本地优先标志: 全量分钟服务健康时, 股票缺口不再批量补拉

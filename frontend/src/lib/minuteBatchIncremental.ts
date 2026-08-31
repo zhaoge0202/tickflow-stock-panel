@@ -10,17 +10,17 @@ import { api, type MinuteKlineRow } from '@/lib/api'
 
 type MinuteBatchData = Record<string, MinuteKlineRow[]>
 
-function lastBarTs(data: MinuteBatchData, symbols?: string[]): number | null {
-  // since 只按本轮请求的 symbol 取最旧最后一根: 视口感知下不可见 symbol 可能
-  // 落后很多分钟, 把它们计入会把整个批量窗口拉大重拉
+function lastBarTs(data: MinuteBatchData, symbols?: string[]): string | null {
+  // 直接取"最旧最后一根"的原始 datetime 字符串 (与服务端行同格式, 同为北京墙钟):
+  // 不做任何 Date/ISO 转换 — toISOString 会变成带 Z 的 UTC, 服务端 naive 比较
+  // 会 TypeError, 且换算差 8 小时。固定格式字符串的字典序即时间序。
   const scope = symbols ? new Set(symbols) : null
-  let min: number | null = null
+  let min: string | null = null
   for (const [sym, rows] of Object.entries(data)) {
     if (scope && !scope.has(sym)) continue
     const last = rows[rows.length - 1]
     if (!last) continue
-    const t = new Date(last.datetime).getTime()
-    if (Number.isFinite(t) && (min === null || t < min)) min = t
+    if (min === null || last.datetime < min) min = last.datetime
   }
   return min
 }
@@ -45,8 +45,7 @@ export async function fetchMinuteBatchIncremental(
   preferLocal?: boolean,
 ): Promise<{ data: MinuteBatchData }> {
   const prev = qc.getQueryData<{ data: MinuteBatchData }>(cacheKey)?.data
-  const minTs = prev ? lastBarTs(prev, symbols) : null
-  const since = minTs !== null ? new Date(minTs).toISOString() : undefined
+  const since = prev ? lastBarTs(prev, symbols) ?? undefined : undefined
   const resp = await api.klineMinuteBatch(symbols, undefined, preferLocal, since)
   if (!since || !resp.incremental) return { data: resp.data ?? {} }
   return { data: mergeInto(prev ?? {}, resp.data ?? {}) }
