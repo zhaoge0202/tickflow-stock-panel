@@ -932,6 +932,16 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
             qs.disable()
         _sync_depth_polling(False)
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
+    if req.realtime_quotes_enabled:
+        # 首用门禁: 本地完全无数据 (日K/enriched 均空, 与看板首用弹窗同口径) 时
+        # 禁止开启 — 实时行情的展示 (enriched 底座 + 快照覆盖)、监控、连板梯队
+        # 全部依赖本地数据, 空数据下轮询只是空转耗配额, 且无 instruments 维表。
+        repo = getattr(request.app.state, "repo", None)
+        if repo is not None and repo.latest_daily_date() is None and repo.latest_enriched_date() is None:
+            raise HTTPException(
+                status_code=409,
+                detail="本地暂无行情数据，请先在「数据」页同步后再开启实时行情",
+            )
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
         raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
