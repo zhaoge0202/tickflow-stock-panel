@@ -397,7 +397,7 @@ def backfill_recent_strategy_history(
     with _backfill_lock:
         previous = _backfill_cache.get(cache_key)
         if previous is not None and now - previous < _BACKFILL_TTL_SECONDS:
-            return {"cycles": 0, "written": 0}
+            return {"cycles": 0, "written": monitor_written}
         _backfill_cache[cache_key] = now
     dates = _enriched_partition_dates(data_dir)
     if len(dates) < 2:
