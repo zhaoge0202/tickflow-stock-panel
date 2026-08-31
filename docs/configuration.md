@@ -24,12 +24,25 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 | Free     | 自选页前 5 个标的实时监控(最低 6 秒刷新) |
 | Starter+ | 全市场实时行情                           |
 | Pro      | 分钟 K + 盘口                            |
-| Expert   | WebSocket + 财务数据                     |
+| Expert   | WebSocket + 财务数据 + 全量分钟          |
 
 > 完整能力矩阵见 [tickflow.org/pricing](https://tickflow.org/pricing/),高等档位含较低档全部权益。
 > 在面板 **设置 → 凭据与能力** 点「重新检测」可查看当前档位标签。
 >
 > **档位仅适用于 TickFlow 数据源**。功能门槛的统一标准是"能力"(`kline.minute.batch`、`depth5.batch`、`financial` 等能力键):其他第三方/自定义数据源以声明的数据集能力为准,系统会按当前数据源配置自动合并判定,UI 提示一律以能力名表达,不再依赖 TickFlow 档位名。
+
+### 全量分钟 (full_minute)
+
+「全量分钟」是一项**独立能力**(能力键 `full_minute`,探测名 `intraday.universe`),不是某个档位的封闭功能:盘中把全市场当日 1 分钟 K 持续增量落盘到本地 `data/kline_minute/` 当日分区,分钟策略(`minute_filter`)与分时视图即可读到新鲜数据。**当前接入方式为 TickFlow Expert** — 配置 Expert 档 Key 即可使用。
+
+接入步骤:
+
+1. **设置 → 凭据与能力** 配置 TickFlow API Key(Expert 档),点「重新检测」,能力列表出现「全量分钟」
+2. **开启实时行情**后落盘服务自动启动;仅连续竞价时段(9:30–11:30 / 13:00–15:00)运行,午休/收盘自动暂停与恢复
+3. 冷启动(如 10 点才开服务)自动触发**全天修复轮**,一次并发脉冲补齐 9:30 起的全部缺口;稳态走**增量轮**(默认 6 秒一轮,可配 3–120 秒),全市场每只取最新 3 根幂等合并滚出全天
+4. 与盘后分钟同步写同一分区(`unique(symbol, datetime)` 幂等合并),互不冲突
+
+说明:标的池为 A 股股票(CN_Equity_A),ETF 不在内(分时走批量补拉路径);覆盖滞后超阈值或连续空轮会自动再跑修复轮自愈。该数据集暂未纳入插件 loader 白名单;但配置了自定义分钟源(`minute_data_provider ≠ tickflow`)时,内置服务自动让位不启动,盘中分时由你的数据源按需供给(见 [plugin-development.md](./plugin-development.md))。
 
 ---
 

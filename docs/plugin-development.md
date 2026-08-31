@@ -184,6 +184,11 @@ class MyProvider:
 深历史（TickFlow 基准）。浅源（如 stock-sdk 免费分时仅保留最近 5 个交易日）声明后，
 个股分时档位自动收窄为可行选项并默认 5 日，深源默认 20 日。
 
+> **全量分钟与插件源的关系**:「全量分钟」(`intraday.universe`,盘中全市场分钟增量
+> 落盘)是独立能力,当前经 TickFlow Expert 接入、由内置服务(`minute_refresh`)执行,
+> 该数据集暂未纳入插件 loader 白名单。但配置了自定义分钟源(`minute_data_provider
+> != tickflow`)时,内置服务自动让位不启动,盘中分时由你的源经 `get_minute` 按需供给。
+
 ### 异常语义
 
 | 方法 | 失败行为 |
