@@ -3,7 +3,8 @@
 集中管理全市场行情拉取 + enriched 缓存，供盘中选股、自选股等所有模块复用。
 
 架构:
-  - 后台线程轮询 TickFlow get_by_universes(["CN_Equity_A", "CN_Index"])
+  - 后台线程轮询 TickFlow get_by_universes(["CN_Equity_A", "CN_ETF"]) + 核心指数按码拉取
+    (自定义源走 provider.get_realtime() + 可选 get_realtime_indices() 指数补充)
   - 拉取行情 → 写 kline_daily (不复权) + 增量计算 enriched → 写盘 + 更新缓存
   - _enriched_cache 是唯一的盘中数据源 (OHLCV + 全套技术指标)
   - _live_agg_cache 是递推状态 (只加载一次, 盘中不变)
@@ -34,6 +35,7 @@ import polars as pl
 
 from app.market_time import cn_now, cn_today
 from app.parquet import scan_daily_parquet
+from app.services.index_const import CORE_INDEX_SYMBOLS
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 
 logger = logging.getLogger(__name__)
@@ -164,8 +166,6 @@ def _monitor_name_map(repo) -> dict[str, str]:
 
 class QuoteService:
     """全局实时行情服务 — 单例。"""
-
-    CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
 
     # 档位 → 最小轮询间隔 (秒) — TickFlow 档位限速保护, 仅实时源为 tickflow 时适用
     TIER_MIN_INTERVAL = {
@@ -599,7 +599,18 @@ class QuoteService:
                 try:
                     t0 = time.perf_counter()
                     now_ts = time.perf_counter()
-                    records = custom_sources.get_provider(provider_name).get_realtime()
+                    provider = custom_sources.get_provider(provider_name)
+                    records = provider.get_realtime()
+                    # 指数补充: A 股快照通常不含指数。插件可选实现
+                    # get_realtime_indices(symbols) 用独立端点补拉 (如 fuyao 指数快照);
+                    # 未实现的源指数缓存为空, 由日K兜底接管。
+                    fetch_indices = getattr(provider, "get_realtime_indices", None)
+                    if callable(fetch_indices):
+                        wanted = sorted(set(CORE_INDEX_SYMBOLS) | self._collect_monitor_index_symbols())
+                        try:
+                            records = records + (fetch_indices(wanted) or [])
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("自定义源指数行情拉取失败: %s", e)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
@@ -619,15 +630,10 @@ class QuoteService:
         try:
             from app.services import preferences
             all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-            core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+            core_index_symbols = set(CORE_INDEX_SYMBOLS)
             all_index_symbols.update(core_index_symbols)
-            # 指数监控规则标的并入轮询 (mode=core 时 quotes.get 显式拉取覆盖; mode=all 被 CN_Index 全覆盖)
-            monitor_index_symbols: set[str] = set()
-            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-            if engine:
-                for _r in list(engine.rules.values()):
-                    if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
-                        monitor_index_symbols.update(s for s in _r.get("symbols", []) if s)
+            # 指数监控规则标的并入显式拉取 (quotes.get 按码覆盖)
+            monitor_index_symbols = self._collect_monitor_index_symbols()
             all_index_symbols.update(monitor_index_symbols)
             all_etf_symbols = set()
             if self._repo:
@@ -640,8 +646,6 @@ class QuoteService:
                 universes.append("CN_Equity_A")
             if preferences.get_realtime_pull_etf() and all_etf_symbols:
                 universes.append("CN_ETF")
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "all":
-                universes.append("CN_Index")
 
             resp = []
             if universes:
@@ -649,9 +653,10 @@ class QuoteService:
                 logger.info("拉取全市场行情 (universes=%s, SDK超时=30s×重试3)", universes)
                 resp.extend(tf.quotes.get_by_universes(universes=universes) or [])
                 logger.info("全市场行情拉取完成: %d 条 (%.2fs)", len(resp), time.perf_counter() - _u0)
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "core":
+            # 指数: 固定核心四只 + 监控规则标的, 按码显式拉取
+            _core_syms = sorted(core_index_symbols | monitor_index_symbols)
+            if _core_syms:
                 _i0 = time.perf_counter()
-                _core_syms = sorted(core_index_symbols | monitor_index_symbols)
                 resp.extend(tf.quotes.get(symbols=_core_syms) or [])
                 logger.info("核心指数行情拉取完成: %d 只 (%.2fs)", len(_core_syms), time.perf_counter() - _i0)
         except Exception as e:  # noqa: BLE001
@@ -700,7 +705,7 @@ class QuoteService:
         """把全市场 records 写盘并增量计算 enriched。"""
         from app.services import preferences
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-        core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+        core_index_symbols = set(CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
         all_etf_symbols = set()
         if self._repo:
@@ -763,20 +768,16 @@ class QuoteService:
         if not etf_daily_df.is_empty() and self._repo:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
         # ---- 指数: 仅有指数监控规则时才写盘 (无规则零成本) ----
-        # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
+        # 指数为按码显式拉取 (部分标的) → merge 不截断分区
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine and engine.has_asset_rules("index") and self._repo:
             index_daily_df = self._build_daily(index_records)
             if not index_daily_df.is_empty():
-                use_flush = preferences.get_realtime_index_mode() == "all"
                 try:
-                    if use_flush:
-                        self._repo.flush_live_daily_asset("index", index_daily_df)
-                    else:
-                        self._repo.merge_live_daily_asset("index", index_daily_df)
+                    self._repo.merge_live_daily_asset("index", index_daily_df)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("指数日K写盘失败: %s", e)
-                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=not use_flush)
+                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -787,6 +788,17 @@ class QuoteService:
     # ================================================================
     # 工具
     # ================================================================
+
+    def _collect_monitor_index_symbols(self) -> set[str]:
+        """启用中的指数监控规则标的 (asset_type=index & scope=symbols)。"""
+        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+        if not engine:
+            return set()
+        out: set[str] = set()
+        for _r in list(engine.rules.values()):
+            if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
+                out.update(s for s in _r.get("symbols", []) if s)
+        return out
 
     @staticmethod
     @staticmethod

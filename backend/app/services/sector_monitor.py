@@ -13,13 +13,7 @@ import polars as pl
 
 from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
-
-CORE_INDICES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
+from app.services.index_const import CORE_INDEX_NAMES as CORE_INDICES
 SECTOR_KINDS = {"index", "concept", "industry"}
 _VALUE_SEP = re.compile(r"[\u3001,\uff0c;\uff1b|]+")
 _NULL_VALUES = {"nan", "none", "null", "<na>", "n/a", "-"}
@@ -147,16 +141,14 @@ class SectorMonitorService:
         except Exception:
             pass
 
-        realtime_index_enabled = preferences.get_realtime_pull_index()
-        realtime_indices = set(preferences.get_realtime_index_symbols() or CORE_INDICES)
-        all_indices_enabled = preferences.get_realtime_index_mode() == "all"
+        # 指数标的恒可实时监控: quote_service 对核心四只 + 启用规则标的显式拉取
         for symbol, name in sorted(index_names.items()):
             target = {
                 "key": f"index:{symbol}",
                 "kind": "index",
                 "name": name,
                 "symbol": symbol,
-                "available": realtime_index_enabled and (all_indices_enabled or symbol in realtime_indices),
+                "available": True,
                 "member_count": 1,
             }
             catalog["index"].append(target)
@@ -223,10 +215,6 @@ class SectorMonitorService:
             for path in sorted(paths)
             if path.is_file()
         ]
-        index_mode = preferences.get_realtime_index_mode()
-        index_enabled = preferences.get_realtime_pull_index()
-        index_symbols = sorted(preferences.get_realtime_index_symbols() or CORE_INDICES)
-        signature.append((f"realtime_indices:{index_enabled}:{index_mode}:{','.join(index_symbols)}", 0, 0))
         return tuple(signature)
 
     def _read_ext_dataframe(self, config: ExtConfig) -> pl.DataFrame:

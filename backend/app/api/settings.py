@@ -489,7 +489,6 @@ def get_preferences() -> dict:
     return {
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
-        "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
@@ -531,7 +530,6 @@ def get_preferences() -> dict:
         "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
-        "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
         "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": preferences.get_minute_intraday_refresh_interval(),
         "monitor_ext_fields": preferences.get_monitor_ext_fields(),
@@ -901,9 +899,6 @@ class RealtimeQuotesPrefs(BaseModel):
 class RealtimeQuoteScopePrefs(BaseModel):
     realtime_pull_stock: bool | None = None
     realtime_pull_etf: bool | None = None
-    realtime_pull_index: bool | None = None
-    realtime_index_mode: str | None = None
-    realtime_index_symbols: list[str] | None = None
 
 
 @router.put("/preferences/realtime-quotes")
@@ -985,19 +980,6 @@ def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
     return preferences.set_realtime_quote_scope(cfg)
 
 
-class IndicesNavPinnedPrefs(BaseModel):
-    indices_nav_pinned: bool
-
-
-@router.put("/preferences/indices-nav-pinned")
-def update_indices_nav_pinned(req: IndicesNavPinnedPrefs) -> dict:
-    """保存侧栏指数报价卡片固定显示开关。
-    ON=常驻显示；OFF=跟随实时行情开关（仅实时开时显示）。"""
-    from app.services import preferences
-    preferences.save({"indices_nav_pinned": req.indices_nav_pinned})
-    return {"indices_nav_pinned": req.indices_nav_pinned}
-
-
 class WatchlistGroupsInNavPrefs(BaseModel):
     watchlist_groups_in_nav: bool
 
@@ -1014,7 +996,6 @@ class RealtimeMonitorConfigIn(BaseModel):
     sse_refresh_pages: dict[str, bool] | None = None
     strategy_monitor_enabled: bool | None = None
     strategy_monitor_ids: list[str] | None = None
-    sidebar_index_symbols: list[str] | None = None
     screener_auto_run: bool | None = None
     minute_intraday_refresh: bool | None = None
     minute_intraday_refresh_interval: int | None = None

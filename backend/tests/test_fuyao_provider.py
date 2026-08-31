@@ -266,6 +266,66 @@ def test_realtime_error_returns_empty_list(monkeypatch):
     assert provider.get_realtime() == []
 
 
+# ---- 指数快照 (可选插件协议 get_realtime_indices) ----
+
+
+class _FakeIndexClient:
+    def __init__(self, rows=None, server_ts=0, error=None):
+        self.rows = rows or []
+        self.server_ts = server_ts
+        self.error = error
+        self.calls: list[list[str]] = []
+
+    def index_snapshot(self, thscodes):
+        self.calls.append(list(thscodes))
+        if self.error:
+            raise self.error
+        return list(self.rows), self.server_ts
+
+    def close(self):
+        pass
+
+
+def _index_provider_with(monkeypatch, **kwargs):
+    fake = _FakeIndexClient(**kwargs)
+    monkeypatch.setattr(fp, "fuyao_client", type("M", (), {"FuyaoClient": lambda **kw: fake}))
+    monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
+    return FuyaoProvider(), fake
+
+
+def test_realtime_indices_maps_and_keeps_volume_unit(monkeypatch):
+    """指数快照 → realtime record; volume 无股→手口径, 直接透传。"""
+    provider, fake = _index_provider_with(
+        monkeypatch,
+        rows=[_row("000001.SH", volume=576656606, price_change_ratio_pct=0.86)],
+        server_ts=1787542612000,
+    )
+    records = provider.get_realtime_indices(["000001.SH", "399001.SZ"])
+    assert fake.calls == [["000001.SH", "399001.SZ"]]
+    assert len(records) == 1
+    r = records[0]
+    assert r["symbol"] == "000001.SH"
+    assert r["change_pct"] == pytest.approx(0.0086)
+    assert r["timestamp"] == 1787542612000
+    assert r["volume"] == 576656606  # 不做 /100
+
+
+def test_realtime_indices_skips_bj_symbols(monkeypatch):
+    """北交所指数扶摇不支持, 未知代码会整批 1002 连坐 → .BJ 直接跳过不进请求。"""
+    provider, fake = _index_provider_with(monkeypatch, rows=[])
+    assert provider.get_realtime_indices(["899050.BJ", "000001.SH"]) == []
+    assert fake.calls == [["000001.SH"]]
+    assert provider.get_realtime_indices(["899050.BJ"]) == []
+    assert fake.calls == [["000001.SH"]]  # 全 .BJ 时根本不发请求
+
+
+def test_realtime_indices_error_returns_empty(monkeypatch):
+    provider, _ = _index_provider_with(
+        monkeypatch, error=fc.FuyaoError("扶摇接口错误 code=1002: Unknown thscode")
+    )
+    assert provider.get_realtime_indices(["000001.SH"]) == []
+
+
 def test_client_requires_api_key():
     with pytest.raises(fc.FuyaoError):
         fc.FuyaoClient(api_key="")

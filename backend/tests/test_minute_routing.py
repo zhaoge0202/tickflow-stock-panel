@@ -275,7 +275,7 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     asset_type='stock'/'etf' 调用 sync_minute_batch, 结果 concat 返回。
 
     覆盖 kline.py get_minute_batch 的双调用拼接逻辑 (本次提交改动量最大的部分)。
-    契约: 本端点只接受 stock/ETF (指数走 /api/index/minute), 故两分支覆盖全部 incomplete。
+    契约: 本端点只接受 stock/ETF, 故两分支覆盖全部 incomplete。
     """
     from app.api import kline as kline_api
 

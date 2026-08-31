@@ -115,6 +115,28 @@ class FuyaoClient:
             raise FuyaoError("全市场快照为空")
         return out, server_ts
 
+    # ---- 指数快照 ----
+    def index_snapshot(self, thscodes: list[str]) -> tuple[list[dict], int]:
+        """拉取指数行情快照 (/api/a-share-index/prices/snapshot)。返回 (rows, 服务端时间戳ms)。
+
+        与 A 股快照不同: 必须显式传 thscodes (逗号分隔), 无全量枚举;
+        单次批量上限实测 627 个代码 (~6.3KB 参数, 超出 HTTP 400);
+        混入未知代码整批失败 (code=1002 连坐), 调用方需自行过滤。
+        覆盖范围: 沪深交易所指数 + 同花顺板块指数, 无北交所 (官方文档明确)。
+        """
+        if not thscodes:
+            return [], 0
+        joined = ",".join(thscodes[:627])
+        data = self._get("/api/a-share-index/prices/snapshot", {"thscodes": joined})
+        try:
+            server_ts = int(data.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            server_ts = 0
+        rows = data.get("item")
+        if not isinstance(rows, list):
+            rows = []
+        return rows, server_ts
+
     # ---- 历史日K ----
     def historical_kline(
         self, thscode: str, start_ms: int, end_ms: int, adjust: str = "none"

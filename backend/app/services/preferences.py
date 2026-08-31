@@ -69,12 +69,6 @@ def get_realtime_quotes_enabled() -> bool:
     return load().get("realtime_quotes_enabled", False)
 
 
-def get_indices_nav_pinned() -> bool:
-    """侧栏指数报价卡片是否固定显示。默认 True（常驻）。
-    关闭后，卡片跟随实时行情开关（仅实时开时显示）。"""
-    return load().get("indices_nav_pinned", True)
-
-
 def get_watchlist_groups_in_nav() -> bool:
     """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
     return load().get("watchlist_groups_in_nav", False)
@@ -672,10 +666,9 @@ SSE_REFRESH_PAGES_DEFAULT = {
     "limit-ladder": False,
 }
 
-SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["000001.SH", "399001.SZ", "399006.SZ", "000680.SH"]
-
 
 # ===== 盘中实时行情范围 (独立于盘后管道范围) =====
+# 指数不在其中: 展示层固定核心四只 (app.services.index_const), 不开放配置。
 
 
 def get_realtime_pull_stock() -> bool:
@@ -687,32 +680,11 @@ def get_realtime_pull_etf() -> bool:
     return load().get("realtime_pull_etf", False)
 
 
-def get_realtime_pull_index() -> bool:
-    return load().get("realtime_pull_index", True)
-
-
-def get_realtime_index_mode() -> str:
-    mode = str(load().get("realtime_index_mode", "core") or "core").lower()
-    return mode if mode in {"core", "all"} else "core"
-
-
-def get_realtime_index_symbols() -> list[str]:
-    stored = load().get("realtime_index_symbols", SIDEBAR_INDEX_SYMBOLS_DEFAULT)
-    if isinstance(stored, str):
-        import re
-        stored = [s.strip() for s in re.split(r"[,\s]+", stored) if s.strip()]
-    return [str(s) for s in stored if str(s).strip()]
-
-
 def set_realtime_quote_scope(cfg: dict) -> dict:
     updates = {}
-    for key in ("realtime_pull_stock", "realtime_pull_etf", "realtime_pull_index"):
+    for key in ("realtime_pull_stock", "realtime_pull_etf"):
         if key in cfg and cfg[key] is not None:
             updates[key] = bool(cfg[key])
-    if "realtime_index_mode" in cfg and cfg["realtime_index_mode"] in {"core", "all"}:
-        updates["realtime_index_mode"] = cfg["realtime_index_mode"]
-    if "realtime_index_symbols" in cfg and cfg["realtime_index_symbols"] is not None:
-        updates["realtime_index_symbols"] = cfg["realtime_index_symbols"]
     if updates:
         save(updates)
     return get_realtime_quote_scope()
@@ -722,9 +694,6 @@ def get_realtime_quote_scope() -> dict:
     return {
         "realtime_pull_stock": get_realtime_pull_stock(),
         "realtime_pull_etf": get_realtime_pull_etf(),
-        "realtime_pull_index": get_realtime_pull_index(),
-        "realtime_index_mode": get_realtime_index_mode(),
-        "realtime_index_symbols": get_realtime_index_symbols(),
     }
 
 
@@ -741,13 +710,6 @@ def set_sse_refresh_pages(pages: dict[str, bool]) -> dict[str, bool]:
     """保存页面 SSE 刷新配置。"""
     save({"sse_refresh_pages": pages})
     return get_sse_refresh_pages()
-
-
-def get_sidebar_index_symbols() -> list[str]:
-    """返回左侧菜单显示的指数代码。"""
-    stored = load().get("sidebar_index_symbols", SIDEBAR_INDEX_SYMBOLS_DEFAULT)
-    allowed = set(SIDEBAR_INDEX_SYMBOLS_DEFAULT)
-    return [s for s in stored if s in allowed]
 
 
 def get_strategy_monitor_enabled() -> bool:
@@ -911,9 +873,6 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["strategy_monitor_enabled"] = cfg["strategy_monitor_enabled"]
     if "strategy_monitor_ids" in cfg:
         updates["strategy_monitor_ids"] = cfg["strategy_monitor_ids"]
-    if "sidebar_index_symbols" in cfg:
-        allowed = set(SIDEBAR_INDEX_SYMBOLS_DEFAULT)
-        updates["sidebar_index_symbols"] = [s for s in cfg["sidebar_index_symbols"] if s in allowed]
     if "screener_auto_run" in cfg:
         updates["screener_auto_run"] = bool(cfg["screener_auto_run"])
     if "minute_intraday_refresh" in cfg:
@@ -947,7 +906,6 @@ def get_realtime_monitor_config() -> dict:
         "sse_refresh_pages": get_sse_refresh_pages(),
         "strategy_monitor_enabled": get_strategy_monitor_enabled(),
         "strategy_monitor_ids": get_strategy_monitor_ids(),
-        "sidebar_index_symbols": get_sidebar_index_symbols(),
         "screener_auto_run": get_screener_auto_run(),
         "minute_intraday_refresh": get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": get_minute_intraday_refresh_interval(),

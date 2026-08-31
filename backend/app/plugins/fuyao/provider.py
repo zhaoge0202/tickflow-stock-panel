@@ -250,11 +250,12 @@ def _dump_date_range(path: Path) -> tuple[date | None, date | None]:
     return row["dmin"][0], row["dmax"][0]
 
 
-def _map_snapshot_row(row: dict, fetched_ms: int) -> dict | None:
+def _map_snapshot_row(row: dict, fetched_ms: int, *, volume_to_hand: bool = True) -> dict | None:
     """扶摇快照行 → 内部 realtime record。字段缺失时按依赖推导, 不伪造数据。
 
     实测字段(2026-08): high_price / low_price / prev_price;
     官方文档示例: highest_price / lowest_price / prev_close_price。两者都取。
+    volume_to_hand: A 股快照 volume 为股 → 手; 指数快照无此口径, 直接透传。
     """
     symbol = row.get("thscode")
     if not symbol:
@@ -283,7 +284,7 @@ def _map_snapshot_row(row: dict, fetched_ms: int) -> dict | None:
         "open": _to_float(row.get("open_price")),
         "high": _to_float(_first(row, "high_price", "highest_price")),
         "low": _to_float(_first(row, "low_price", "lowest_price")),
-        "volume": math.floor(volume / 100.0) if volume is not None else None,  # 股 → 手
+        "volume": math.floor(volume / 100.0) if (volume is not None and volume_to_hand) else volume,
         "amount": _to_float(row.get("turnover")),
         "change_pct": change_pct,
         "change_amount": change_amount,
@@ -398,6 +399,30 @@ class FuyaoProvider:
             logger.warning("扶摇快照 %d 行全部缺少 thscode 字段, 疑似接口结构变化", dropped)
             return []
         logger.info("扶摇实时行情拉取完成: %d 条(丢弃 %d 行)", len(records), dropped)
+        return records
+
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict]:
+        """指数实时快照 → 内部 realtime record (可选插件协议, quote_service 鸭子类型调用)。
+
+        A 股快照不含指数, 指数在扶摇是独立端点; 覆盖沪深交易所指数 + 同花顺板块,
+        无北交所 (未知代码会整批 1002 连坐, .BJ 直接跳过)。失败软返回空列表。
+        """
+        wanted = [s for s in symbols if s and not s.upper().endswith(".BJ")]
+        if not wanted:
+            return []
+        try:
+            rows, server_ts = self._get_client().index_snapshot(wanted)
+        except FuyaoError as e:
+            logger.warning("扶摇指数行情拉取失败: %s", e)
+            return []
+
+        fetched_ms = server_ts or int(time.time() * 1000)
+        records = []
+        for row in rows:
+            rec = _map_snapshot_row(row, fetched_ms, volume_to_hand=False)
+            if rec is not None:
+                records.append(rec)
+        logger.info("扶摇指数行情拉取完成: %d 条(请求 %d 只)", len(records), len(wanted))
         return records
 
     # ---- daily ----

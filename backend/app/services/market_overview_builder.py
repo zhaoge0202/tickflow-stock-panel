@@ -19,19 +19,12 @@ from typing import Any
 import polars as pl
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
+from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
 
 # ================================================================
-# 常量(与 overview.py 保持同步;复盘复盘仅 A 股核心指数)
+# 常量(核心指数清单单一权威: app.services.index_const)
 # ================================================================
-
-CORE_INDEX_NAMES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
-CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 

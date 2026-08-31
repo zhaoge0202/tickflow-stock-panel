@@ -12,6 +12,7 @@ import polars as pl
 from fastapi import APIRouter, Request
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
+from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
@@ -36,14 +37,6 @@ def invalidate_overview_cache() -> None:
         _cache_key = None
         _cache_ts = 0.0
 
-
-CORE_INDEX_NAMES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
-}
-CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 
