@@ -486,6 +486,7 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
     auction_replay._record_dynamic_history(
         tmp_path,
         engine=_HistoryEngine(),
+        now=datetime(2026, 7, 8, 10, 0, tzinfo=CN),
         signal_date=SIGNAL_DATE,
         trade_day=TRADE_DATE,
         final_frame={
@@ -523,6 +524,43 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
     assert events[0]["reason_code"] == "auction_gap_failed"
     assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 2.0%"
     assert events[1]["strategy_name"] == "双刃合-Focus"
+
+
+def test_dynamic_history_skips_future_trade_day(tmp_path):
+    strategy_cache.write_cache(
+        tmp_path,
+        SIGNAL_DATE.isoformat(),
+        {
+            "custom_dual_edge_focus": {
+                "as_of": SIGNAL_DATE.isoformat(),
+                "rows": [{
+                    "symbol": "601169.SH",
+                    "name": "北京银行",
+                    "close": 5.35,
+                }],
+            },
+        },
+    )
+
+    class _HistoryEngine:
+        def get(self, strategy_id):
+            assert strategy_id == "custom_dual_edge_focus"
+            return type("Strategy", (), {"meta": {"name": "双刃合-Focus"}})()
+
+    auction_replay._record_dynamic_history(
+        tmp_path,
+        engine=_HistoryEngine(),
+        now=datetime(2026, 7, 7, 23, 41, tzinfo=CN),
+        signal_date=SIGNAL_DATE,
+        trade_day=date(2026, 7, 8),
+        final_frame={"results": {"custom_dual_edge_focus": {"rows": [], "dual_rows": []}}},
+        classified={"auction_rows": [], "trade_rows": []},
+        final_ts=_ms(9, 29, 59, 999),
+        requested_ids=["custom_dual_edge_focus"],
+        params_map={"custom_dual_edge_focus": {}},
+    )
+
+    assert strategy_history.list_events(tmp_path) == []
 
 
 def test_backfill_recent_history_rebuilds_previous_cycle(monkeypatch, tmp_path):

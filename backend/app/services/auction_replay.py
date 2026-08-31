@@ -288,6 +288,7 @@ def replay_dynamic_strategy_results(
         _record_dynamic_history(
             data_dir,
             engine=engine,
+            now=now,
             signal_date=signal_date,
             trade_day=trade_day,
             final_frame=frame,
@@ -356,6 +357,7 @@ def replay_dynamic_strategy_results(
     _record_dynamic_history(
         data_dir,
         engine=engine,
+        now=now,
         signal_date=signal_date,
         trade_day=trade_day,
         final_frame=final_frame,
@@ -486,6 +488,7 @@ def backfill_recent_strategy_history(
             _record_dynamic_history(
                 data_dir,
                 engine=engine,
+                now=datetime.now(tz=CN_TZ),
                 signal_date=signal_date,
                 trade_day=trade_day,
                 final_frame=final_frame,
@@ -574,6 +577,7 @@ def _record_dynamic_history(
     data_dir: Path,
     *,
     engine,
+    now: datetime,
     signal_date: date,
     trade_day: date,
     final_frame: dict,
@@ -589,9 +593,16 @@ def _record_dynamic_history(
     固化。动态请求在确认窗口结束后，才把最终状态写入历史。
     """
     trade_end_ts = _window_start_ms(trade_day, TRADE_END)
+    now_cn = now.astimezone(CN_TZ)
     # 当前日的动态重算使用的是盘中实时 bar，不对应“前一交易日候选→次日确认”
     # 生命周期；只有 signal_date < trade_day 的跨日确认才落盘。
     if signal_date >= trade_day:
+        return
+    # 没到目标交易日，或当天还没走完 09:25~09:30 确认窗口时，不能把
+    # “无快照”写成淘汰。无 tick 时的 final_ts 是窗口结束哨兵值，不是真实时间。
+    if trade_day > now_cn.date():
+        return
+    if trade_day == now_cn.date() and now_cn.time() < TRADE_END:
         return
     if final_ts < trade_end_ts - 1:
         return
