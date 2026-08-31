@@ -1005,7 +1005,14 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
             try:
                 if preferences.get_strategy_monitor_enabled():
                     ids = preferences.get_strategy_monitor_ids()
-                    names = {s.id: s.name for s in strategy_engine.list_strategies()}
+                    # StrategyEngine.list_strategies() 返回公开元数据字典,
+                    # 不能按 StrategyDef 对象访问属性; 否则异常会被下方兼容保护吞掉,
+                    # 造成偏好开关已开启但策略监控规则为 0。
+                    names = {
+                        str(item["id"]): str(item.get("name") or item["id"])
+                        for item in strategy_engine.list_strategies()
+                        if isinstance(item, dict) and item.get("id")
+                    }
                     mr_store.migrate_strategy_monitors(data_dir, ids, names)
                 else:
                     # 关闭策略监控: 停用所有策略规则

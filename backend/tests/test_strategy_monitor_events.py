@@ -110,6 +110,20 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
     monitor_rules.validate(_rule("buy_signal", "pool_exit"))
 
 
+def test_strategy_monitor_migration_creates_buy_and_sell_events(tmp_path):
+    touched = monitor_rules.migrate_strategy_monitors(
+        tmp_path,
+        ["custom_oscillation_reversal"],
+        {"custom_oscillation_reversal": "震荡超跌反转"},
+    )
+
+    assert len(touched) == 1
+    rule = monitor_rules.load_one(tmp_path, "mr_strategy_custom_oscillation_reversal")
+    assert rule is not None
+    assert rule["enabled"] is True
+    assert rule["notify_events"] == ["buy_signal", "sell_signal"]
+
+
 def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()

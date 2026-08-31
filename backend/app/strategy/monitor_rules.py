@@ -278,7 +278,7 @@ def normalize(rule: dict) -> dict:
         r.setdefault("score_min", None)
         r.setdefault("score_max", None)
         if r.get("notify_events") is None:
-            # 兼容统一监控上线后的旧规则: 当时实际行为是同时通知进入和移出。
+            # 兼容旧规则: 未显式配置时保留历史的选股池通知语义。
             r["notify_events"] = ["pool_entry", "pool_exit"]
         else:
             r["notify_events"] = list(dict.fromkeys(r["notify_events"]))
@@ -358,8 +358,8 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
                 "type": "strategy",
                 "scope": "all",
                 "strategy_id": sid,
-                "direction": "entry",
-                "notify_events": ["pool_entry", "pool_exit"],
+                "direction": "both",
+                "notify_events": ["buy_signal", "sell_signal"],
                 "conditions": [],
                 "cooldown_seconds": 3600,
                 "enabled": True,
@@ -370,7 +370,12 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
             rule["strategy_id"] = sid
             rule["name"] = f"策略监控 · {name}"
             rule.setdefault("scope", "all")
-            rule.setdefault("direction", "entry")
+            rule["notify_events"] = list(dict.fromkeys([
+                "buy_signal",
+                "sell_signal",
+                *(rule.get("notify_events") or []),
+            ]))
+            rule["direction"] = "both"
         save_one(data_dir, rule)
         touched.append(rule)
 

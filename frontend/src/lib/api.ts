@@ -396,6 +396,19 @@ export interface ScreenerResult {
   elapsed_ms: number
 }
 
+/** 策略结果页的用户买入标记，不等同于券商真实成交或手动持仓。 */
+export interface StrategyPurchaseMark {
+  strategy_id: string
+  strategy_name?: string
+  symbol: string
+  signal_date: string
+  signal_price?: number | null
+  signal_score?: number | null
+  signal_change_pct?: number | null
+  marked_at: number
+  note?: string
+}
+
 export interface ScreenerAuctionConfirmationResult {
   strategy: string
   as_of: string
@@ -3671,6 +3684,24 @@ export const api = {
 
   manualPositions: () =>
     request<{ positions: ManualPosition[] }>('/api/manual-positions'),
+
+  strategyPurchaseMarks: () =>
+    request<{ marks: StrategyPurchaseMark[] }>('/api/strategy-purchase-marks'),
+
+  strategyPurchaseMarkSave: (mark: Omit<StrategyPurchaseMark, 'marked_at'>) =>
+    request<{ ok: boolean; mark: StrategyPurchaseMark }>('/api/strategy-purchase-marks', {
+      method: 'PUT',
+      body: JSON.stringify(mark),
+    }),
+
+  strategyPurchaseMarkDelete: (strategyId: string, symbol: string, signalDate: string) => {
+    const qs = new URLSearchParams({
+      strategy_id: strategyId,
+      symbol,
+      signal_date: signalDate,
+    })
+    return request<{ ok: boolean }>(`/api/strategy-purchase-marks?${qs.toString()}`, { method: 'DELETE' })
+  },
 
   marketBreadthLatest: () =>
     request<MarketBreadthSnapshot>('/api/market-breadth/latest'),

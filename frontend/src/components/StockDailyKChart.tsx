@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type KlineRow } from '@/lib/api'
+import { api, type KlineRow, type PriceLevel } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -45,6 +45,8 @@ interface Props {
   showLimitMarkers?: boolean
   showIndicatorControls?: boolean
   showMarkerToggle?: boolean
+  /** 是否显示普通日K主图的压力/支撑线开关。 */
+  showKeyLevelToggle?: boolean
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
@@ -117,6 +119,48 @@ function rangeDays(range: { start: string; end: string }): number {
   return Math.min(Math.ceil((end.getTime() - start.getTime()) / 86400000) + 30, MAX_DAYS)
 }
 
+const STRUCTURAL_LEVEL_TYPES = new Set<PriceLevel['type']>([
+  'sr', 'pivot', 'extreme', 'gap',
+])
+
+function buildKeyPriceLines(
+  levels: Record<string, PriceLevel[]> | undefined,
+  close: number | null | undefined,
+): ChartPriceLine[] {
+  if (!levels || close == null || !Number.isFinite(close) || close <= 0) return []
+
+  const points = Object.values(levels)
+    .flat()
+    .filter(point => STRUCTURAL_LEVEL_TYPES.has(point.type))
+    .filter(point => Number.isFinite(point.value) && point.value > 0)
+
+  const mergeByPrice = (side: 'resistance' | 'support') => {
+    const grouped = new Map<string, { value: number; labels: string[] }>()
+    for (const point of points) {
+      if (point.side !== side) continue
+      if (side === 'resistance' && point.value <= close * 1.001) continue
+      if (side === 'support' && point.value >= close * 0.999) continue
+      const key = point.value.toFixed(2)
+      const current = grouped.get(key)
+      if (current) {
+        if (!current.labels.includes(point.label)) current.labels.push(point.label)
+      } else {
+        grouped.set(key, { value: point.value, labels: [point.label] })
+      }
+    }
+    return [...grouped.values()]
+      .sort((a, b) => side === 'resistance' ? a.value - b.value : b.value - a.value)
+      .slice(0, 3)
+      .map(point => ({
+        value: point.value,
+        label: `${point.labels.join(' / ')} ${point.value.toFixed(2)}`,
+        color: side === 'resistance' ? '#EF4444' : '#22C55E',
+      }))
+  }
+
+  return [...mergeByPrice('resistance'), ...mergeByPrice('support')]
+}
+
 export function StockDailyKChart({
   symbol,
   height = 520,
@@ -128,6 +172,7 @@ export function StockDailyKChart({
   showLimitMarkers = true,
   showIndicatorControls = true,
   showMarkerToggle = true,
+  showKeyLevelToggle = true,
   showMA = true,
   showInfoBar = true,
   visibleBars = 60,
@@ -139,6 +184,7 @@ export function StockDailyKChart({
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
+  const [showKeyLevels, setShowKeyLevels] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
     normalizeVolumeCompare(storage.stockVolumeCompare.get(DEFAULT_VOLUME_COMPARE)),
   )
@@ -153,8 +199,28 @@ export function StockDailyKChart({
     placeholderData: (prev) => prev,
   })
 
+  // 复用个股分析页的关键价位 API，普通日K只显示当前价附近的压力/支撑。
+  const levelsQ = useQuery({
+    queryKey: QK.stockLevels(symbol, 250),
+    queryFn: () => api.stockAnalysisLevels(symbol, 250),
+    enabled: !!symbol,
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  })
+
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
   const stockInfo = kline.data?.stock_info
+  const keyPriceLines = useMemo(
+    () => buildKeyPriceLines(
+      levelsQ.data?.levels,
+      levelsQ.data?.close ?? rows[rows.length - 1]?.close,
+    ),
+    [levelsQ.data?.close, levelsQ.data?.levels, rows],
+  )
+  const mergedPriceLines = useMemo(
+    () => [...(showKeyLevels ? keyPriceLines : []), ...(priceLines ?? [])],
+    [keyPriceLines, priceLines, showKeyLevels],
+  )
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
@@ -260,6 +326,23 @@ export function StockDailyKChart({
               异动
             </button>
           )}
+          {showKeyLevelToggle && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showKeyLevels}
+              aria-label={showKeyLevels ? '隐藏压力支撑位' : '显示压力支撑位'}
+              title={showKeyLevels ? '隐藏压力支撑位' : '显示压力支撑位'}
+              onClick={() => setShowKeyLevels(v => !v)}
+              className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                showKeyLevels
+                  ? 'text-[#F97316] bg-[#F97316]/10'
+                  : 'bg-elevated text-muted hover:text-secondary'
+              }`}
+            >
+              压支
+            </button>
+          )}
         </div>
       )}
       {kline.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
@@ -272,7 +355,7 @@ export function StockDailyKChart({
           data={rows}
           markers={allMarkers}
           ranges={ranges}
-          priceLines={priceLines}
+          priceLines={mergedPriceLines}
           height={chartHeight - 22}
           showMA={showMA}
           showInfoBar={showInfoBar}

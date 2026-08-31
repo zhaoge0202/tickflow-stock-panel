@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
+import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyPurchaseMark } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -838,6 +838,55 @@ export function Screener() {
     return new Set(symbols.map((s: any) => s.symbol))
   }, [watchlist.data])
 
+  // 策略结果页的用户买入标记: 以 strategy + signal_date 隔离, 避免同一股票
+  // 在不同策略或不同交易日的标记互相覆盖。
+  const purchaseMarksQuery = useQuery({
+    queryKey: QK.strategyPurchaseMarks,
+    queryFn: api.strategyPurchaseMarks,
+  })
+  const purchaseMarks = useMemo(() => {
+    const map = new Map<string, StrategyPurchaseMark>()
+    for (const mark of purchaseMarksQuery.data?.marks ?? []) {
+      map.set(`${mark.strategy_id}::${mark.symbol.toUpperCase()}::${mark.signal_date}`, mark)
+    }
+    return map
+  }, [purchaseMarksQuery.data])
+
+  const togglePurchaseMark = useMutation({
+    mutationFn: ({
+      strategyId,
+      symbol,
+      signalDate,
+      signalPrice,
+      signalScore,
+      signalChangePct,
+      marked,
+    }: {
+      strategyId: string
+      symbol: string
+      signalDate: string
+      signalPrice: number | null
+      signalScore: number | null
+      signalChangePct: number | null
+      marked: boolean
+    }) => marked
+      ? api.strategyPurchaseMarkDelete(strategyId, symbol, signalDate)
+      : api.strategyPurchaseMarkSave({
+          strategy_id: strategyId,
+          strategy_name: strategyIdToName[strategyId] ?? strategyId,
+          symbol,
+          signal_date: signalDate,
+          signal_price: signalPrice,
+          signal_score: signalScore,
+          signal_change_pct: signalChangePct,
+          note: '策略页用户手动标记已买入',
+        }),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: QK.strategyPurchaseMarks })
+      toast(variables.marked ? '已取消买入标记' : '已记录用户买入标记', 'success')
+    },
+  })
+
   // 单只股票加入/移出自选
   const toggleWatchlist = useMutation({
     mutationFn: ({
@@ -1319,6 +1368,19 @@ export function Screener() {
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
                     watchlistSet={watchlistSet}
+                    purchaseMarks={purchaseMarks}
+                    purchaseSignalDate={!showAll && activeStrategy ? (result?.as_of || asOf) : undefined}
+                    purchaseMarkPending={togglePurchaseMark.isPending}
+                    onTogglePurchaseMark={(strategyId, symbol, signalDate, signalPrice, signalScore, signalChangePct, marked) =>
+                      togglePurchaseMark.mutate({
+                        strategyId,
+                        symbol,
+                        signalDate,
+                        signalPrice,
+                        signalScore,
+                        signalChangePct,
+                        marked,
+                      })}
                     onPreview={(symbol, name) => { setPreviewSymbol(symbol); setPreviewName(name) }}
                     onAddToWatchlist={(symbol, groupId) => toggleWatchlist.mutate({ symbol, action: 'add', groupId })}
                     onRemoveFromWatchlist={symbol => toggleWatchlist.mutate({ symbol, action: 'remove' })}

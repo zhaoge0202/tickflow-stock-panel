@@ -172,7 +172,13 @@ export const MONITOR_INTRADAY_SIGNAL_OPTIONS = Object.keys(MONITOR_INTRADAY_SIGN
 export const SIGNAL_LABELS: Record<string, string> = BUILTIN_SIGNAL_DEFINITIONS.reduce<Record<string, string>>((acc, sig) => {
   acc[sig.id] = sig.name
   return acc
-}, { ...MONITOR_INTRADAY_SIGNAL_LABELS })
+}, {
+  ...MONITOR_INTRADAY_SIGNAL_LABELS,
+  signal_auction: '竞价强势',
+  signal_fenqi: '分歧转一致',
+  signal_volume_contraction_reversal: '缩量止跌反转',
+  signal_oscillation_reversal: '震荡超跌反转',
+})
 
 /** 内置信号 ID 列表 */
 export const SIGNAL_OPTIONS = BUILTIN_SIGNAL_DEFINITIONS.map(sig => sig.id)

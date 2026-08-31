@@ -42,6 +42,9 @@ _SIGNAL_CN: dict[str, str] = {
     "signal_boll_breakdown_lower": "跌破布林下轨", "signal_volume_surge": "放量",
     "signal_limit_up": "涨停", "signal_limit_down": "跌停",
     "signal_limit_down_recovery": "跌停翘板", "signal_broken_limit_up": "炸板",
+    "signal_auction": "竞价强势", "signal_fenqi": "分歧转一致",
+    "signal_volume_contraction_reversal": "缩量止跌反转",
+    "signal_oscillation_reversal": "震荡超跌反转",
     **INTRADAY_SIGNAL_LABELS,
     # 行情字段
     "close": "收盘价", "open": "开盘价", "high": "最高价", "low": "最低价",
