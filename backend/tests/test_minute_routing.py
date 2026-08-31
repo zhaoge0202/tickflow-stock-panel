@@ -12,6 +12,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from threading import Lock
 from unittest.mock import MagicMock
 
@@ -314,6 +315,102 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     # 两个 symbol 都在结果里 (concat 后按 symbol filter 命中)
     assert "600519.SH" in result["data"]
     assert "510300.SH" in result["data"]
+
+
+# ---------- 测试 9b: 取到即落盘 + 增量拉取 (尾部落后 / 中间洞 / fresh) ----------
+
+def _bars(symbol: str, dts: list) -> pl.DataFrame:
+    """构造 canonical 8 列分钟K帧 (dts 为 datetime 列表)。"""
+    n = len(dts)
+    return pl.DataFrame({
+        "symbol": [symbol] * n,
+        "datetime": dts,
+        "open": [10.0] * n, "high": [10.1] * n, "low": [9.9] * n, "close": [10.0] * n,
+        "volume": [100.0] * n, "amount": [1000.0] * n,
+    })
+
+
+def _endpoint_mocks(monkeypatch, local_df: pl.DataFrame, sync_ret: pl.DataFrame | None):
+    """get_minute_batch 的最小 mock: repo/capset + sync/落盘 spy。返回 (捕获, 落盘, request)。"""
+    from app.api import kline as kline_api
+
+    captured: list[dict] = []
+
+    def fake_sync(symbols, *, start_time, end_time, batch_size, rpm, asset_type):
+        captured.append({"symbols": list(symbols), "start": start_time, "asset": asset_type})
+        return sync_ret if sync_ret is not None else pl.DataFrame()
+
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", fake_sync)
+    writes: list[pl.DataFrame] = []
+    monkeypatch.setattr(kline_api.kline_sync, "_write_minute_partition",
+                        lambda df, d: writes.append(df))
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = local_df
+    mock_repo._write_lock = Lock()
+    # 真实 Path 才会触发落盘分支 (kline.py 的 isinstance 守卫)
+    mock_repo.store.data_dir = Path("data")
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    return captured, writes, mock_request
+
+
+def test_minute_batch_tail_stale_pulls_incremental_and_persists(monkeypatch):
+    """尾部落后 (本地连续但根数不足) → 从最后一根+1min 增量拉;
+    拉取结果落盘, 响应为本地+增量合并去重。"""
+    from app.api import kline as kline_api
+
+    local = _bars("600519.SH", [
+        datetime(2026, 1, 15, 9, 31), datetime(2026, 1, 15, 9, 32), datetime(2026, 1, 15, 9, 33),
+    ])
+    inc = _bars("600519.SH", [datetime(2026, 1, 15, 9, 34), datetime(2026, 1, 15, 9, 35)])
+    captured, writes, req = _endpoint_mocks(monkeypatch, local, sync_ret=inc)
+
+    result = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert len(captured) == 1
+    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 34)   # 最后一根 + 1min
+    assert captured[0]["asset"] == "stock"
+    assert writes and writes[0].height == 2                        # 取到即落盘
+    rows = result["data"]["600519.SH"]
+    assert len(rows) == 5                                          # 3 本地 + 2 增量
+    assert rows[-1]["datetime"] == datetime(2026, 1, 15, 9, 35)
+
+
+def test_minute_batch_middle_hole_falls_back_to_full_day(monkeypatch):
+    """中间缺K (间距 2min) → 增量窗口永远回看不到洞, 必须退回全天重拉。"""
+    from app.api import kline as kline_api
+
+    local = _bars("600519.SH", [datetime(2026, 1, 15, 9, 31), datetime(2026, 1, 15, 9, 33)])
+    captured, _, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert len(captured) == 1
+    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 25)    # 全天窗口
+
+
+def test_minute_batch_fresh_local_skips_pull(monkeypatch):
+    """本地完整 (240 根, 含午休 91min 间距) → 不发任何拉取请求, 直读本地。"""
+    from app.api import kline as kline_api
+
+    dts = ([datetime(2026, 1, 15, 9, 31) + timedelta(minutes=i) for i in range(120)]
+           + [datetime(2026, 1, 15, 13, 1) + timedelta(minutes=i) for i in range(120)])
+    local = _bars("600519.SH", dts)
+    captured, writes, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    result = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert captured == []                                          # 零请求
+    assert writes == []
+    assert len(result["data"]["600519.SH"]) == 240
 
 
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------

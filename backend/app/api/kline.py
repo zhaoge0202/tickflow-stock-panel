@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, timedelta
+from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 
@@ -599,11 +600,9 @@ def get_minute_batch(request: Request, body: dict):
     trade_date = date.fromisoformat(trade_date_str) if trade_date_str else cn_today()
 
     # 非交易日(周末/节假日)才回退到最近有数据的交易日; 否则盘中会显示昨天而非今天。
-    # 注意: 不能用 latest_minute_date_global() 判断盘中是否为交易日 —— 批量实时补拉
-    # 不落库 (见下方 sync_minute_batch 无 on_segment), 盘中它恒返回上次全量同步日,
-    # 用它做判据会导致 trade_date 永久回退到昨天, 再因 expected=240 判定昨日"完整"
-    # 而不再补拉今天, 形成永远显示昨日的死循环。
-    # 判据改为: 周末必回退; 工作日收盘后(>=15:30)仍无今日日K → 节假日, 回退。
+    # 判据: 周末必回退; 工作日收盘后(>=15:30)仍无今日日K → 节假日, 回退。
+    # (下方补拉已改为取到即落盘, 但只有真实交易时段才会写入当日分区,
+    #  节假日当日分区恒为空, 不影响该回退判据。)
     if not trade_date_str:
         today = cn_today()
         need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
@@ -649,19 +648,36 @@ def get_minute_batch(request: Request, body: dict):
     else:
         expected = 240
 
-    # 按 symbol 分组, 判定哪些不完整需要补拉 (partition_by 一次切分, 同 daily-batch)
+    # 本地状态分类 (补拉已改为取到即落盘, 完整性判定随之收紧):
+    # - fresh:  根数 >= 期望-2 (时间边界容差), 直接用本地。原 0.9 比例阈值会让
+    #           持久化数据在 90% 处冻结尾巴, 必须按根数差判。
+    # - holes:  中间缺K (相邻间距非 1 分钟 / 非午休 91 分钟) → 全天重拉回填,
+    #           否则"最后一根+1min"的增量窗口永远不会回看中间的洞。
+    # - stale:  仅尾部落后 → 增量拉, 请求量从"每轮全天"降为"每轮一根"量级。
+    _LUNCH_GAP_MIN = 91  # 11:30 → 13:01
+
+    def _has_holes(sub: pl.DataFrame) -> bool:
+        gaps = sub["datetime"].diff().dt.total_minutes().drop_nulls()
+        return gaps.filter((gaps != 1) & (gaps != _LUNCH_GAP_MIN)).len() > 0
+
     result: dict[str, list[dict]] = {}
-    incomplete: list[str] = []
+    full_pull: list[str] = []          # 无数据或中间有洞 → 全天拉
+    stale_last: dict[str, datetime] = {}  # 尾部落后 → symbol → 最后一根时间
     local_parts: dict[str, pl.DataFrame] = {}
     if not df_local.is_empty():
         for part in df_local.partition_by("symbol", maintain_order=True):
             local_parts[part["symbol"][0]] = part.sort("datetime")
+    fresh_floor = max(0, expected - 2)
     for sym in symbols:
         sub = local_parts.get(sym, pl.DataFrame())
-        if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
-            incomplete.append(sym)
-        elif not sub.is_empty():
-            result[sym] = sub.to_dicts()
+        if expected == 0 or sub.height >= fresh_floor:
+            if not sub.is_empty():
+                result[sym] = sub.to_dicts()
+            continue
+        if sub.is_empty() or _has_holes(sub):
+            full_pull.append(sym)
+        else:
+            stale_last[sym] = sub["datetime"][-1]
 
     # prefer_local 生效判定: 仅当全量分钟服务健康 (freshness 契约, 见 minute_refresh.is_healthy)
     full_minute_healthy = False
@@ -669,59 +685,76 @@ def get_minute_batch(request: Request, body: dict):
         svc = getattr(request.app.state, "minute_refresh", None)
         full_minute_healthy = bool(svc is not None and svc.is_healthy())
     if full_minute_healthy:
-        # 股票 incomplete 不补拉, 本地有多少给多少 (服务下一轮写入补全);
-        # ETF 维持 incomplete 走下方补拉
-        for sym in incomplete:
-            sub = local_parts.get(sym)
-            if sym not in etf_set and sub is not None and not sub.is_empty():
-                result[sym] = sub.to_dicts()
-        incomplete = [s for s in incomplete if s in etf_set]
-
-    # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
-    if incomplete:
-        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
-        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
-        lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
-        # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
-        # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
-        # 契约: 本端点只接受 stock/ETF (指数分钟K走 /api/index/minute 独立路径),
-        # 故两分支已覆盖全部 incomplete。若未来放开指数支持, 需额外加 index 分支
-        # 以避免被误路由为 stock。
-        stock_incomplete = [s for s in incomplete if s not in etf_set]
-        etf_incomplete = [s for s in incomplete if s in etf_set]
-        live_parts: list[pl.DataFrame] = []
-        if stock_incomplete:
-            df_s = kline_sync.sync_minute_batch(
-                stock_incomplete,
-                start_time=start_time,
-                end_time=end_time,
-                batch_size=lim.batch if lim else None,
-                rpm=lim.rpm if lim else None,
-                asset_type="stock",
-            )
-            if not df_s.is_empty():
-                live_parts.append(df_s)
-        if etf_incomplete:
-            df_e = kline_sync.sync_minute_batch(
-                etf_incomplete,
-                start_time=start_time,
-                end_time=end_time,
-                batch_size=lim.batch if lim else None,
-                rpm=lim.rpm if lim else None,
-                asset_type="etf",
-            )
-            if not df_e.is_empty():
-                live_parts.append(df_e)
-        if live_parts:
-            live_df = pl.concat(live_parts, how="diagonal_relaxed")
-            live_map: dict[str, pl.DataFrame] = {
-                part["symbol"][0]: part.sort("datetime")
-                for part in live_df.partition_by("symbol", maintain_order=True)
-            }
-            for sym in incomplete:
-                sub = live_map.get(sym)
+        # 股票缺口不补拉, 本地有多少给多少 (服务下一轮写入补全);
+        # ETF 不在 universe 内, 维持补拉
+        for sym in [*full_pull, *stale_last]:
+            if sym not in etf_set:
+                sub = local_parts.get(sym)
                 if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
+        full_pull = [s for s in full_pull if s in etf_set]
+        stale_last = {s: t for s, t in stale_last.items() if s in etf_set}
+
+    # Step 2: 补拉并落盘 (取到即写, upsert 语义; 下一轮命中本地, 请求量骤降)。
+    # 落盘失败只降级 (log 后继续返回本轮数据), 不影响响应 —— 持久化是优化而非正确性前提。
+    # 契约: 本端点只接受 stock/ETF (指数分钟K走 /api/index/minute 独立路径),
+    # 按 asset_type 拆分调用 (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)。
+    day_start = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
+    session_end = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+    lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
+    minute_dirs = {
+        "stock": repo.store.data_dir / "kline_minute",
+        "etf": repo.store.data_dir / "kline_etf_minute",
+    }
+    live_map: dict[str, pl.DataFrame] = {}
+
+    def _pull(asset: str, sym_list: list[str], start: datetime) -> None:
+        if not sym_list:
+            return
+        df_live = kline_sync.sync_minute_batch(
+            sym_list,
+            start_time=start,
+            end_time=session_end,
+            batch_size=lim.batch if lim else None,
+            rpm=lim.rpm if lim else None,
+            asset_type=asset,
+        )
+        if df_live.is_empty():
+            return
+        try:
+            # 读-改-写必须持仓库写锁 (与全量分钟服务/盘后同步同一纪律, Windows 临时文件占用)。
+            # 仅在拿到真实目录时落盘: data_dir 异常 (非 Path) 时跳过, 只返回本轮数据。
+            minute_dir = minute_dirs[asset]
+            if isinstance(minute_dir, Path):
+                with repo._write_lock:
+                    kline_sync._write_minute_partition(df_live, minute_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("minute-batch 补拉落盘失败 (降级为仅返回): %s", e)
+        for part in df_live.partition_by("symbol", maintain_order=True):
+            live_map[part["symbol"][0]] = part.sort("datetime")
+
+    _pull("stock", [s for s in full_pull if s not in etf_set], day_start)
+    _pull("etf", [s for s in full_pull if s in etf_set], day_start)
+    if stale_last:
+        # 增量公共起点 = 最旧尾部 + 1min; 起点更早的重叠由落盘/合并去重吸收
+        inc_start = min(stale_last.values()) + timedelta(minutes=1)
+        if inc_start < session_end:
+            _pull("stock", [s for s in stale_last if s not in etf_set], inc_start)
+            _pull("etf", [s for s in stale_last if s in etf_set], inc_start)
+
+    # 合并: 有增量/回填的 symbol = 本地 + 拉取 upsert; 仅拉到的 (missing) 直接进结果
+    for sym, sub in local_parts.items():
+        live = live_map.get(sym)
+        if live is not None:
+            merged = (
+                pl.concat([sub, live])
+                .unique(subset=["symbol", "datetime"], keep="last")
+                .sort("datetime")
+            )
+            result[sym] = merged.to_dicts()
+    for sym, live in live_map.items():
+        if sym not in result:
+            result[sym] = live.to_dicts()
 
     # full_minute_local: 本轮 prefer_local 生效 (本地分区由全量分钟服务供给, 股票未做补拉)
     return {"data": result, "full_minute_local": full_minute_healthy}
