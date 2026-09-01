@@ -158,7 +158,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     svc = FactorBacktestService(engine)
 
     end = req.end or date.today()
-    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
+    start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
     symbols = req.symbols if req.symbols else None
     if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
@@ -212,7 +212,7 @@ def factor_batch(req: FactorBatchRequest, request: Request):
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
 
     end = req.end or date.today()
-    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
+    start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
     symbols = req.symbols if req.symbols else None
     if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
