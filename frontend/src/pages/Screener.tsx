@@ -69,6 +69,15 @@ function formatHistoryTime(ts: number): string {
   })
 }
 
+function historyEventTimestamp(event: StrategyHistoryEvent): number {
+  if (event.event_type === 'auction_confirmed' || event.event_type === 'auction_rejected') {
+    const metadata = event.metadata ?? {}
+    const observedTs = metadata.open_confirm_event_ts ?? metadata.auction_event_ts
+    if (typeof observedTs === 'number') return observedTs
+  }
+  return event.ts
+}
+
 function nextBusinessDateIso(dateIso: string): string {
   const [year, month, day] = dateIso.split('-').map(Number)
   const date = new Date(Date.UTC(year, month - 1, day + 1))
@@ -1777,7 +1786,7 @@ export function Screener() {
                         </span>
                         {hasEventTime && (
                           <span className="font-mono text-[10px] text-secondary">
-                            时间 {formatHistoryTime(event.ts)}
+                            时间 {formatHistoryTime(historyEventTimestamp(event))}
                           </span>
                         )}
                         {event.price != null && <span className="num text-secondary">价 {event.price.toFixed(2)}</span>}

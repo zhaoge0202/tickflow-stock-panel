@@ -523,6 +523,7 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
     assert [event["event_type"] for event in events] == ["auction_rejected", "selected"]
     assert events[0]["reason_code"] == "auction_gap_failed"
     assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 2.0%"
+    assert events[0]["metadata"]["open_confirm_event_ts"] == trade_ts
     assert events[1]["strategy_name"] == "双刃合-Focus"
 
 
