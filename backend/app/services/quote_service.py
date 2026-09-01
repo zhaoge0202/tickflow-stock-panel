@@ -827,6 +827,11 @@ class QuoteService:
         result = df.select(select_exprs).with_columns(
             pl.lit(cn_today()).cast(pl.Date).alias("date"),
         )
+        # 停牌/尚无集合竞价的记录 open/high 均为 0。必须在下方用 close 填充前
+        # 过滤, 否则零成交行会被伪装成有效日K, 并在 batch 同步后作为实时残留
+        # 反复触发历史完整性修复。
+        from app.indicators.pipeline import filter_halt_days
+        result = filter_halt_days(result)
         # 修复: API 在非交易时段可能返回 open/high/low=0 或 null,
         # 导致蜡烛从 0 开始。用 close 填充这些异常值。
         for col in ("open", "high", "low"):
