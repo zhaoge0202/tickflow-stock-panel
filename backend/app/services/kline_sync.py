@@ -1064,6 +1064,100 @@ def fetch_intraday_universe_increment(
     return (_normalize_minute(seg), 1)
 
 
+def _resolve_full_minute_provider(
+    provider_name: str,
+) -> tuple[object | None, bool, str | None]:
+    """解析全量分钟生效的自定义源。返回 (provider, should_use_tickflow, error_msg):
+
+    - provider_name == "tickflow" / 未配 full_minute dataset → (None, True, None)
+    - resolver 异常 (registry 损坏 / 插件失效 / 源不存在) → (None, True, str(e))
+    - 成功 → (provider, False, None)
+
+    与 _resolve_minute_provider 同构, 仅数据集名不同。
+    """
+    if provider_name == "tickflow":
+        return (None, True, None)
+    from app.data_providers import custom as custom_sources
+    try:
+        if not custom_sources.provider_has_dataset(provider_name, "full_minute"):
+            return (None, True, None)
+        provider = custom_sources.get_provider(provider_name)
+        return (provider, False, None)
+    except Exception as e:  # noqa: BLE001
+        return (None, True, str(e))
+
+
+def fetch_intraday_custom_batch(
+    provider: object,
+    provider_name: str,
+    symbols: list[str],
+) -> tuple[pl.DataFrame, int]:
+    """自定义源全量分钟修复轮: 当日窗口全市场批量拉取 (不落盘)。
+
+    provider 契约 (见 docs/plugin-development.md):
+    - get_intraday_batch(symbols, count, asset_type) 优先 — 源自管批量端点;
+    - 未实现则回退 get_minute(symbols, 当日窗口) — 复用逐标的分钟K机制,
+      请求数按 chunk 回调统计。
+    帧统一过北京墙钟守卫 (与 _try_custom_minute 同纪律)。
+    返回 (当日分钟K, 请求数); 失败返回空 df 由调用方按空轮处理。
+    """
+    try:
+        method = getattr(provider, "get_intraday_batch", None)
+        if callable(method):
+            df = method(symbols)
+            requests = 1
+        else:
+            counted = {"requests": 0}
+
+            def _count_requests(cur: int, total: int) -> None:
+                counted["requests"] = max(counted["requests"], int(total))
+
+            end = cn_now()
+            start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+            df = provider.get_minute(
+                symbols, start_time=start, end_time=end,
+                asset_type="stock", freq="1m", on_chunk_done=_count_requests,
+            )
+            requests = counted["requests"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom full_minute batch via %s failed: %s", provider_name, e)
+        return (pl.DataFrame(), 0)
+    try:
+        df = _enforce_minute_beijing_wallclock(df, source=provider_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom full_minute datetime 契约校验失败 (%s): %s", provider_name, e)
+        return (pl.DataFrame(), 0)
+    return (df, max(requests, 1))
+
+
+def fetch_intraday_custom_latest(
+    provider: object,
+    provider_name: str,
+    *,
+    count: int = 3,
+) -> tuple[pl.DataFrame, int] | None:
+    """自定义源全量分钟稳态增量轮 (不落盘)。
+
+    provider 可选实现 get_intraday_latest(symbols=None, count) → 每只标的最新
+    count 根分钟K, 尽量单请求/低请求量 (TickFlow 的 intraday.universe 同义)。
+    未实现返回 None — 调用方降级为仅修复轮模式。失败返回 (空 df, 0) 按空轮处理。
+    """
+    method = getattr(provider, "get_intraday_latest", None)
+    if not callable(method):
+        return None
+    try:
+        df = method(count=count)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom full_minute latest via %s failed: %s", provider_name, e)
+        return (pl.DataFrame(), 0)
+    try:
+        df = _enforce_minute_beijing_wallclock(df, source=provider_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom full_minute datetime 契约校验失败 (%s): %s", provider_name, e)
+        return (pl.DataFrame(), 0)
+    return (df, 1)
+
+
 def fetch_minute_single(
     symbol: str,
     trade_date: date,

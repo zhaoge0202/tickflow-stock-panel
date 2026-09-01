@@ -17,6 +17,7 @@ DEFAULT_CURRENT = {
     "daily_data_provider": "tickflow",
     "adj_factor_provider": "tickflow",
     "minute_data_provider": "tickflow",
+    "full_minute_data_provider": "tickflow",
     "depth5_data_provider": "tickflow",
     "realtime_data_provider": "tickflow",
     "financial_data_provider": "tickflow",
@@ -42,7 +43,7 @@ def test_registry_covers_all_routing_fields():
         "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
     }
     full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
-    assert full_minute["field"] is None
+    assert full_minute["field"] == "full_minute_data_provider"
     assert full_minute["tf_tier"] == "expert"
     for cap in CAPABILITY_REGISTRY:
         assert cap["default"] == "tickflow"
@@ -237,20 +238,33 @@ def test_unknown_current_display_falls_back_to_name(monkeypatch):
     assert caps["realtime"]["effective_display"] == "ghost"
 
 
-def test_full_minute_row_is_non_routable_expert_only(monkeypatch):
-    """全量分钟行: field=None 不可路由, 生效源恒为 TickFlow, 按 expert 档判定可用。"""
-    _fake_sources(monkeypatch, [])
-    # 即使有插件声明别的数据集也不会成为全量分钟候选 (契约不开放该数据集)
+def test_full_minute_routable_like_other_capabilities(monkeypatch):
+    """全量分钟行: 与其他能力同样可路由 — 声明 full_minute 数据集的源进候选,
+    路由到它则 usable=True (TickFlow 档位不足也不拦); 未路由且档位不足才不可用。"""
+    _fake_sources(
+        monkeypatch,
+        [],
+        [{"name": "myfm", "display_name": "MyFM", "datasets": ["full_minute"]}],
+    )
     caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert"))
     fm = caps["full_minute"]
-    assert fm["field"] is None
-    assert [c["name"] for c in fm["candidates"]] == ["tickflow"]
+    assert fm["field"] == "full_minute_data_provider"
+    assert [c["name"] for c in fm["candidates"]] == ["tickflow", "myfm"]
     assert fm["usable"] is True
     assert fm["tf_available"] is True
     assert fm["effective"] == "tickflow"
 
-    caps_pro = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="pro"))
+    # TickFlow 档位不足 (pro) 但路由到声明该数据集的自定义源 → 同样可用
+    routed = dict(DEFAULT_CURRENT, full_minute_data_provider="myfm")
+    caps_pro = _by_id(build_capability_matrix(routed, tickflow_tier="pro"))
     fm_pro = caps_pro["full_minute"]
-    assert fm_pro["candidates"] == []
-    assert fm_pro["usable"] is False
+    assert [c["name"] for c in fm_pro["candidates"]] == ["myfm"]
+    assert fm_pro["usable"] is True
     assert fm_pro["tf_available"] is False
+    assert fm_pro["effective"] == "myfm"
+
+    # 档位不足且未路由 → 不可用
+    caps_pro_default = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="pro"))
+    fm_default = caps_pro_default["full_minute"]
+    assert [c["name"] for c in fm_default["candidates"]] == ["myfm"]
+    assert fm_default["usable"] is False

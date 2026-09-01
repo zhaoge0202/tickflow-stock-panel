@@ -4,7 +4,7 @@
 
 ## 支持范围
 
-当前自定义源支持五类数据:
+当前自定义源支持六类数据:
 
 | 数据集 | 配置名 | 说明 |
 | --- | --- | --- |
@@ -12,9 +12,14 @@
 | 除权因子 | `adj_factor` | 批量返回一组股票的复权因子 |
 | 实时行情 | `realtime` | 返回全市场快照,用于盘中 enriched 增量计算 |
 | 分钟K | `minute` | 返回 1m 分钟K(需映射出 symbol / datetime / OHLC / 量额) |
+| 全量分钟 | `full_minute` | 与 `minute` 同形;声明后可被路由为「全量分钟」生效源,内置服务盘中按当日窗口全市场批量落盘(仅修复轮语义,节奏下限 60s) |
 | 财务数据 | `financial` | 一个配置覆盖全部财务表,请求时把表名作为参数传给上游;字段由数据源决定,仅需映射出 symbol |
 
 深度盘口(depth5)暂无数据集契约,仍由 TickFlow 提供。
+
+`full_minute` 声明式源只提供修复轮(当日窗口批量);廉价增量端点
+(`get_intraday_latest`)是 Python 插件契约,见
+[plugin-development.md](./plugin-development.md)。
 
 ## 配置位置
 
@@ -294,7 +299,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   # 上游若返回百分数值 (3.66 表示 3.66%), 在 realtime 数据集声明 pct_unit: percent,
   # 不要依赖数值自动识别; 逐列转换也可用 transforms: turnover_rate: "value / 100"
 
-分钟K (minute):
+分钟K (minute) 与 全量分钟 (full_minute, 字段同 minute):
   symbol = 股票代码
   # datetime 必须是北京时间墙钟 (如 2026-08-28 09:35:00), 不要返回 UTC;
   # 入口守卫会自动纠偏 UTC 特征帧, 但契约仍要求源头写对

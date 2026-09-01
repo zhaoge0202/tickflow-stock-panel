@@ -149,6 +149,14 @@ class MyProvider:
                    on_chunk_done=None, freq="1m") -> pl.DataFrame:
         """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount]"""
 
+    def get_intraday_batch(self, symbols, count=300, asset_type="stock") -> pl.DataFrame:
+        """(声明 full_minute 数据集时实现) 全量分钟修复轮: 给定标的当日 1 分钟K,
+        canonical 8 列同 get_minute; 内部自行分块/限速。"""
+
+    def get_intraday_latest(self, symbols=None, count=3) -> pl.DataFrame:
+        """(可选, full_minute 稳态增量轮) 尽量单请求返回全市场每只最新 count 根;
+        未实现则服务降级为仅修复轮 (节奏下限 60s)。"""
+
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
 
@@ -184,10 +192,25 @@ class MyProvider:
 深历史（TickFlow 基准）。浅源（如 stock-sdk 免费分时仅保留最近 5 个交易日）声明后，
 个股分时档位自动收窄为可行选项并默认 5 日，深源默认 20 日。
 
-> **全量分钟与插件源的关系**:「全量分钟」(`intraday.universe`,盘中全市场分钟增量
-> 落盘)是独立能力,当前经 TickFlow Expert 接入、由内置服务(`minute_refresh`)执行,
-> 该数据集暂未纳入插件 loader 白名单。但配置了自定义分钟源(`minute_data_provider
-> != tickflow`)时,内置服务自动让位不启动,盘中分时由你的源经 `get_minute` 按需供给。
+> **全量分钟 (full_minute) 数据集契约**:声明 `full_minute` 数据集并把
+> `full_minute_data_provider` 路由到你的源,即接入「全量分钟」能力(盘中全市场
+> 当日分钟K增量落盘,由内置服务 `minute_refresh` 调度,与 TickFlow Expert 同一
+> 能力键 `intraday.universe`)。需实现:
+>
+> - `get_intraday_batch(symbols, count=300, asset_type="stock") -> pl.DataFrame`
+>   — **必须**(或已有 `get_minute` 自动回退,但强烈建议实现批量端点)。
+>   返回给定标的当日 1 分钟K,canonical 8 列
+>   `[symbol, datetime(北京墙钟 naive), open, high, low, close, volume, amount]`,
+>   内部自行分块/限速。服务在冷启动、覆盖断档、连续空轮时调用(修复轮)。
+> - `get_intraday_latest(symbols=None, count=3) -> pl.DataFrame` — **可选**,
+>   稳态增量轮专用:尽量单请求返回全市场每只标的最新 `count` 根。未实现时
+>   服务自动降级为仅修复轮,节奏下限抬到 60s(全天批量打不住 6s 节奏)。
+>
+> 两个方法的返回帧都过 `_enforce_minute_beijing_wallclock` 时区守卫(与
+> `get_minute` 同纪律);失败抛异常或返回空 df 均按空轮处理,连续空轮触发
+> 修复轮自愈。声明方式:插件在 `plugin.yaml` 的 `datasets:` 列表加入
+> `full_minute`。YAML 声明式源同样支持(数据集配置与 `minute` 同形,仅提供
+> 修复轮语义,见 [custom-data-source.md](./custom-data-source.md))。
 
 ### 异常语义
 

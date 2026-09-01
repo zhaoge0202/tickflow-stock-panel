@@ -1,34 +1,41 @@
-"""盘中分钟K增量落盘服务 (Expert 专有)。
+"""盘中分钟K增量落盘服务 (全量分钟能力, 按能力路由)。
 
 两段式拉取 (见 feat/minute-strategy 方案):
-- 全天修复轮: intraday.batch (日内分时批量) 并发脉冲一次拉全市场当日全部
-  分钟K — 冷启动 (如 10 点才开服务, 补 9:30 起缺口) / 覆盖滞后超阈值 /
-  连续空轮自愈时触发。
-- 稳态增量轮: intraday.universe 传 CN_Equity_A 标的池, 单请求返回全市场
-  每只最新 3 根 (服务端上限), 靠 _write_minute_partition 的
-  unique(symbol,datetime) 幂等合并滚出全天。
+- 全天修复轮: 全市场日内分时批量并发脉冲一次拉当日全部分钟K — 冷启动
+  (如 10 点才开服务, 补 9:30 起缺口) / 覆盖滞后超阈值 / 连续空轮自愈时触发。
+- 稳态增量轮: 传标的池/universe 单请求返回全市场每只最新 3 根, 靠
+  _write_minute_partition 的 unique(symbol,datetime) 幂等合并滚出全天。
 
 单轮合并写入当日 kline_minute 分区, 供分钟策略 (minute_filter) 读到新鲜数据。
 
+数据源路由 (像其他能力一样可接入):
+- 生效源由偏好 full_minute_data_provider 决定 (设置 → 数据源 → 全量分钟):
+  TickFlow (Expert 档, intraday.batch + intraday.universe) 或声明 full_minute
+  数据集的插件/自定义源。
+- 自定义源契约 (docs/plugin-development.md): get_intraday_batch(symbols) 修复轮
+  (未实现自动回退 get_minute 当日窗口); get_intraday_latest(count) 稳态增量
+  (可选, 未实现自动降级为仅修复轮并放慢节奏至 >=60s)。
+- 能力门控 Cap.INTRADAY_UNIVERSE: TickFlow 按档位探测, 自定义源声明数据集且
+  被路由时由 policy._augment_custom_sources 补授 — 门控口径对两类源统一。
+
 设计约束:
-- Expert 专有: 能力门控 Cap.INTRADAY_UNIVERSE (全量分钟) — 仅 TickFlow
-  Expert 档具备, 天然排他 (自定义分钟源无此能力, 且服务本就让位插件)。
-- 修复轮并发脉冲: 全市场按 batch_size 分块 (5546/200 = 28 块) 一次打出。
-  任何 60s 滑动窗口至多一个脉冲 (28 < 48 安全 rpm); 单块失败不拖垮整轮,
-  失败块单独重试一次 (见 fetch_intraday_full_market_burst)。
+- 修复轮并发脉冲: TickFlow 路径全市场按 batch_size 分块 (5546/200 = 28 块)
+  一次打出。任何 60s 滑动窗口至多一个脉冲 (28 < 48 安全 rpm); 单块失败不拖垮
+  整轮, 失败块单独重试一次 (见 fetch_intraday_full_market_burst)。自定义源
+  由 provider 自管批量与限速 (rpm 配置/内部并发), 服务不代限。
 - 稳态轮单请求: 无脉冲并发, 间隔可低至 3s; 实际节奏 = max(间隔, 单轮完成),
   服务端响应 ~5s 时自动退化为响应节奏, 不会重叠请求。
-- 固定节奏: 默认 6s 一轮 (clamp [3, 300]), 不补跑 (missed 轮次直接跳过)。
+- 固定节奏: 默认 6s 一轮 (clamp [3, 300]), 不补跑 (missed 轮次直接跳过);
+  仅修复轮的自定义源下限抬到 60s (全天批量打不住 6s 节奏)。
 - 仅连续竞价时段运行 (9:30-11:30 / 13:00-15:00), 午休/收盘自动暂停与恢复;
   午休后恢复因覆盖滞后会多跑一次修复轮, 幂等无害。
 - 不与其他分钟能力冲突: 与 盘后分钟同步 (kline.minute.batch) / 分时监控路径
   分属不同限流池; 落盘走 _write_minute_partition 的 unique(symbol,datetime)
   合并, 与盘后同步写同一分区安全幂等。
-- 数据源插件化让位: 配置了自定义分钟源 (minute_data_provider != tickflow) 时
-  服务不启动 — 盘中增量交由插件自管, 本服务不抢占。
 
-分层: 本模块只做调度/落盘/状态; TickFlow SDK 调用全部在 kline_sync 边界层
-(fetch_intraday_full_market_burst / fetch_intraday_universe_increment),
+分层: 本模块只做调度/落盘/状态; 取数全部经 kline_sync 边界层
+(TickFlow: fetch_intraday_full_market_burst / fetch_intraday_universe_increment;
+自定义: fetch_intraday_custom_batch / fetch_intraday_custom_latest),
 保持插件化边界不泄漏。
 """
 from __future__ import annotations
@@ -58,6 +65,9 @@ _LOOP_STEP_S = 2.0
 _REPAIR_LAG_MINUTES = 3.0
 # 连续空轮达到该次数 → 强制全天修复轮 (自愈 universe 端点持续异常)。
 _EMPTY_ROUNDS_TO_REPAIR = 2
+# 仅修复轮的自定义源 (无 get_intraday_latest 廉价增量): 全天批量节奏下限,
+# 6s 一轮全市场拉取会把绝大多数源打爆。
+_REPAIR_ONLY_MIN_INTERVAL_S = 60
 
 
 def _in_continuous_session(now=None) -> bool:
@@ -124,8 +134,10 @@ class MinuteRefreshService:
     def capability_ok(self) -> bool:
         """Cap.INTRADAY_UNIVERSE (全量分钟) 存在。能力探测结果缓存在 app.state。
 
-        门控挂在稳态增量的主能力上; 全天修复轮用的 intraday.batch 与其
-        同属 Expert 档 (tiers.yaml), 目前两者必然同时持有。
+        门控挂在稳态增量的主能力上; TickFlow 路径全天修复轮用的 intraday.batch
+        与其同属 Expert 档 (tiers.yaml), 两者必然同时持有。自定义源声明
+        full_minute 数据集且被路由时, 由 policy._augment_custom_sources 补授
+        同一能力键 — 门控口径对两类源统一。
         """
         capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
         if capset is None:
@@ -137,19 +149,54 @@ class MinuteRefreshService:
         except Exception:
             return False
 
-    def custom_provider_active(self) -> bool:
-        """配置了自定义分钟源 → 让位插件, 本服务不启动。"""
+    def active_provider(self) -> str:
+        """全量分钟生效源名 ("tickflow" 或自定义源名, 偏好 full_minute_data_provider)。"""
         try:
-            return preferences.get_minute_data_provider() != "tickflow"
-        except Exception:
-            return False
+            return preferences.get_full_minute_data_provider()
+        except Exception:  # noqa: BLE001 — 偏好文件异常按 TickFlow 处理
+            return "tickflow"
+
+    def _resolve_custom(self) -> tuple[object | None, str]:
+        """解析自定义源。返回 (provider_or_None, effective_name):
+
+        - 偏好 tickflow / 源未声明 full_minute 数据集 / 解析异常 → (None, "tickflow")
+          (与 minute 数据集同纪律: 静默降级 TickFlow, 能力门控决定能否真正运行)
+        - 成功 → (provider, name)
+        """
+        from app.services import kline_sync
+
+        name = self.active_provider()
+        if name == "tickflow":
+            return (None, "tickflow")
+        provider, use_tickflow, err = kline_sync._resolve_full_minute_provider(name)
+        if use_tickflow:
+            if err is not None:
+                logger.warning(
+                    "full_minute provider %s 解析失败, 本轮降级 TickFlow: %s", name, err,
+                )
+            return (None, "tickflow")
+        return (provider, name)
+
+    def _custom_supports_increment(self, provider: object) -> bool:
+        """自定义源是否实现 get_intraday_latest (稳态增量); 否则仅修复轮。"""
+        return callable(getattr(provider, "get_intraday_latest", None))
+
+    def repair_only(self) -> bool:
+        """当前生效源只能全天修复轮 (无廉价增量端点) — 节奏下限抬到 60s。"""
+        provider, name = self._resolve_custom()
+        return provider is not None and not self._custom_supports_increment(provider)
+
+    def _effective_interval(self) -> int:
+        """本轮间隔: 偏好值; 仅修复轮的自定义源下限 60s (全天批量打不住 6s 节奏)。"""
+        interval = preferences.get_minute_refresh_interval()
+        if self.repair_only():
+            return max(interval, _REPAIR_ONLY_MIN_INTERVAL_S)
+        return interval
 
     def _gate_reason(self) -> str | None:
         """返回本轮不执行的原因 (None = 放行)。"""
         if not preferences.get_minute_refresh_enabled():
             return "disabled"
-        if self.custom_provider_active():
-            return "custom_minute_provider"
         if not self.capability_ok():
             return "capability"
         if not _in_continuous_session():
@@ -171,7 +218,7 @@ class MinuteRefreshService:
             try:
                 reason = self._gate_reason()
                 if reason is None:
-                    interval = preferences.get_minute_refresh_interval()
+                    interval = self._effective_interval()
                     started = time.time()
                     self._run_round()
                     # 固定节奏: 下一轮 = max(本轮起点+间隔, 本轮完成), 不补跑
@@ -234,13 +281,21 @@ class MinuteRefreshService:
         from app.services import kline_sync
 
         t0 = time.perf_counter()
+        custom, provider_name = self._resolve_custom()
         mode = self._select_mode()
+        if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
+            # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
+            mode = "full"
         mode_label = "增量" if mode == "increment" else "全天修复"
         with self._round_lock:
             if mode == "increment":
                 # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
                 fetch_started = time.perf_counter()
-                df, requests = kline_sync.fetch_intraday_universe_increment()
+                if custom is not None:
+                    latest = kline_sync.fetch_intraday_custom_latest(custom, provider_name)
+                    df, requests = latest if latest is not None else (pl.DataFrame(), 0)
+                else:
+                    df, requests = kline_sync.fetch_intraday_universe_increment()
                 self._state.last_symbols = (
                     df["symbol"].n_unique() if not df.is_empty() else 0
                 )
@@ -251,9 +306,14 @@ class MinuteRefreshService:
                     self._state.last_error = "empty universe (instruments 未加载)"
                     logger.warning("全量分钟[%s] 本轮中止: 标的池为空 (instruments 未加载)", mode_label)
                     return
-                capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
                 fetch_started = time.perf_counter()
-                df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
+                if custom is not None:
+                    df, requests = kline_sync.fetch_intraday_custom_batch(
+                        custom, provider_name, symbols,
+                    )
+                else:
+                    capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+                    df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
             fetch_ms = (time.perf_counter() - fetch_started) * 1000
             self._state.last_requests = requests
             if df.is_empty():
@@ -326,9 +386,11 @@ class MinuteRefreshService:
             "enabled": enabled,
             "running": running,
             "healthy": self.is_healthy(),
+            "provider": self.active_provider(),
+            "provider_effective": self._resolve_custom()[1],
+            "repair_only": self.repair_only(),
             "interval_seconds": preferences.get_minute_refresh_interval(),
             "capability_ok": self.capability_ok(),
-            "custom_provider_active": self.custom_provider_active(),
             "in_trading_hours": _in_continuous_session(),
             "gate_reason": gate if (enabled and running) else (gate or "disabled"),
             "rounds": self._state.rounds,
@@ -343,8 +405,8 @@ class MinuteRefreshService:
         }
 
     def trigger_manual_round(self) -> dict[str, Any]:
-        """手动触发一轮 (无视时段门控, 但仍受能力/插件门控); 供状态页「立即刷新」。"""
-        if self.custom_provider_active() or not self.capability_ok():
+        """手动触发一轮 (无视时段门控, 但仍受能力门控); 供状态页「立即刷新」。"""
+        if not self.capability_ok():
             return {"ok": False, "reason": self._gate_reason() or "capability"}
         threading.Thread(target=self._run_round, daemon=True, name="minute-refresh-manual").start()
         return {"ok": True}

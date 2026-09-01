@@ -366,19 +366,19 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
 
       {/* ========== 右列 ========== */}
       <div className="space-y-6">
-        {/* 全量分钟 (TickFlow Expert 专有): 盘中全市场分钟落盘, intraday.universe 单请求增量 */}
+        {/* 全量分钟: 盘中全市场分钟落盘, 按能力路由 (TickFlow Expert 或声明 full_minute 的插件/自定义源) */}
         <Card icon={Zap} title="全量分钟" anchor="minute-refresh">
           <ToggleRow
             label="全量分钟落盘"
             desc={
-              !hasFullMinuteCap ? '需要全量分钟能力 (TickFlow Expert)'
-              : rs?.custom_provider_active ? '已配置自定义分钟源, 盘中增量由插件自管'
+              !hasFullMinuteCap ? '需要全量分钟能力 (TickFlow Expert 或声明该能力的自定义源)'
+              : rs?.repair_only ? `服务运行中 · ${rs?.provider ?? '自定义源'} 无廉价增量端点, 按 ≥60s 全天批量节奏`
               : rs?.running ? (rs?.in_trading_hours ? '服务运行中' : '运行中 · 非连续竞价时段暂停')
               : '已关闭'
             }
             checked={prefs?.minute_refresh_enabled ?? false}
             onChange={(v) => save({ minute_refresh_enabled: v })}
-            disabled={!hasFullMinuteCap || !!rs?.custom_provider_active}
+            disabled={!hasFullMinuteCap}
           />
           <div className="mt-3 pt-3 border-t border-border">
             <div className="flex items-center justify-between gap-4 py-1">

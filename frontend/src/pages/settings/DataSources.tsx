@@ -150,6 +150,7 @@ const DEFAULT_ROUTING: Record<ProviderField, string> = {
   daily_data_provider: 'tickflow',
   adj_factor_provider: 'tickflow',
   minute_data_provider: 'tickflow',
+  full_minute_data_provider: 'tickflow',
   depth5_data_provider: 'tickflow',
   realtime_data_provider: 'tickflow',
   financial_data_provider: 'tickflow',
@@ -612,19 +613,13 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     daily: dailyPref,
     adj_factor: adjPref === 'same_as_daily' ? dailyPref : adjPref,
     minute: prefs.data?.minute_data_provider || 'tickflow',
+    full_minute: prefs.data?.full_minute_data_provider || 'tickflow',
     realtime: prefs.data?.realtime_data_provider || 'tickflow',
     depth5: prefs.data?.depth5_data_provider || 'tickflow',
     financial: prefs.data?.financial_data_provider || 'tickflow',
   }
-  const servingDatasets = (name: string) => {
-    const ids = Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
-    if (name === 'tickflow') {
-      // 不可路由能力 (field=null, 如全量分钟): 仅 TickFlow 提供, usable 即服务中
-      ids.push(...(matrix.data?.capabilities ?? [])
-        .filter(c => c.field == null && c.usable).map(c => c.id))
-    }
-    return ids
-  }
+  const servingDatasets = (name: string) =>
+    Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
   const servingSetOf = (name: string) => new Set(servingDatasets(name))
 
   const matrixCaps = matrix.data?.capabilities ?? []

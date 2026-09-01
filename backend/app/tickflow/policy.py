@@ -311,6 +311,7 @@ _DATASET_CAP_MAP: tuple[tuple[str, Cap], ...] = (
     ("adj_factor", Cap.ADJ_FACTOR),
     ("minute", Cap.KLINE_MINUTE_BATCH),
     ("financial", Cap.FINANCIAL),
+    ("full_minute", Cap.INTRADAY_UNIVERSE),
 )
 
 
@@ -327,6 +328,7 @@ def _augment_custom_sources(capset: CapabilitySet) -> None:
             "adj_factor": adj_provider,
             "minute": preferences.get_minute_data_provider(),
             "financial": preferences.get_financial_provider(),
+            "full_minute": preferences.get_full_minute_data_provider(),
         }
         for dataset, cap in _DATASET_CAP_MAP:
             provider = active_providers[dataset]
