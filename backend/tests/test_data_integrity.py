@@ -227,14 +227,19 @@ def test_describe_and_issue_dataclass():
 # ── 开实时行情门禁 (钩子2) ──────────────────────────────────────────
 
 
-def _gate_state(tmp_path, quote_service, repo):
+def _gate_state(tmp_path, quote_service, repo, *, has_data=True):
     from types import SimpleNamespace
 
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(
             quote_service=quote_service,
             depth_service=None,
-            repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            repo=SimpleNamespace(
+                store=SimpleNamespace(data_dir=tmp_path),
+                # 首用门禁判据: 日K/enriched 最近日期 (None = 本地无数据)
+                latest_daily_date=lambda: date(2026, 8, 28) if has_data else None,
+                latest_enriched_date=lambda: None,
+            ),
             capabilities=None,
         ))
     )
@@ -296,6 +301,30 @@ def test_realtime_gate_blocks_on_snapshot_and_launches_repair(tmp_path, monkeypa
     # 修复任务以最早坏日为起点, 且实时行情未被开启
     assert launched == [(FRIDAY, "realtime_gate")]
     assert saved == {}
+
+
+def test_realtime_gate_blocks_when_no_local_data(tmp_path, monkeypatch):
+    """首用门禁: 日K/enriched 均无数据时禁止开启实时行情 (409 + 同步指引),
+    且不落偏好 (开关不生效)。"""
+    from fastapi import HTTPException
+
+    from app.api import settings as settings_api
+
+    saved = {}
+    monkeypatch.setattr(
+        "app.services.preferences.save", lambda payload: saved.update(payload),
+    )
+
+    qs = _QuoteServiceStub()
+    request = _gate_state(tmp_path, qs, repo=None, has_data=False)
+    req = settings_api.RealtimeQuotesPrefs(realtime_quotes_enabled=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        settings_api.update_realtime_quotes(req, request)
+
+    assert exc_info.value.status_code == 409
+    assert "同步" in exc_info.value.detail
+    assert saved == {}                       # 未开启
 
 
 def test_realtime_gate_allows_clean_data(tmp_path, monkeypatch):

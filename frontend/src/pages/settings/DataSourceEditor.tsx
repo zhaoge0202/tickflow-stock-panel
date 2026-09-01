@@ -9,7 +9,7 @@ import { toast } from '@/components/Toast'
 const INPUT_CLS =
   'w-full h-9 px-2.5 rounded-lg bg-base border-0 ring-1 ring-border/40 text-xs text-foreground placeholder:text-muted/30 focus:outline-none focus:ring-2 focus:ring-accent/40 transition-shadow'
 
-const DATASETS = ['daily', 'adj_factor', 'realtime', 'minute'] as const
+const DATASETS = ['daily', 'adj_factor', 'realtime', 'minute', 'full_minute'] as const
 type DatasetKey = typeof DATASETS[number]
 
 const DATASET_LABEL: Record<DatasetKey, string> = {
@@ -17,6 +17,7 @@ const DATASET_LABEL: Record<DatasetKey, string> = {
   adj_factor: '除权因子',
   realtime: '实时行情',
   minute: '分钟K',
+  full_minute: '全量分钟',
 }
 
 const TARGET_FIELDS: Record<DatasetKey, string[]> = {
@@ -24,6 +25,7 @@ const TARGET_FIELDS: Record<DatasetKey, string[]> = {
   adj_factor: ['symbol', 'trade_date', 'ex_factor'],
   realtime: ['symbol', 'name', 'last_price', 'prev_close', 'open', 'high', 'low', 'volume', 'amount', 'change_pct', 'change_amount', 'amplitude', 'turnover_rate', 'timestamp', 'session'],
   minute: ['symbol', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'amount'],
+  full_minute: ['symbol', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'amount'],
 }
 
 // 内部字段的中文说明 (下拉选项展示用)
@@ -486,7 +488,7 @@ function DatasetDetail({
                           </Field>
                         </>
                       )}
-                      {datasetKey === 'minute' && (
+                      {(datasetKey === 'minute' || datasetKey === 'full_minute') && (
                         <>
                           <Field label="资产类型参数">
                             <input

@@ -423,7 +423,7 @@ def _sanitize_for_yaml(config: dict) -> dict:
 
     datasets_out: dict = {}
     for ds_name, ds_cfg in (config.get("datasets") or {}).items():
-        if ds_name not in {"daily", "adj_factor", "realtime", "minute", "financial"}:
+        if ds_name not in {"daily", "adj_factor", "realtime", "minute", "full_minute", "financial"}:
             continue
         if not isinstance(ds_cfg, dict):
             continue

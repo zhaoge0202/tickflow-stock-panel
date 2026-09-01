@@ -367,7 +367,58 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
 
       {/* ========== 右列 ========== */}
       <div className="space-y-6">
-        {/* 连板梯队降级修正 (右列顶部) */}
+        {/* 全量分钟: 盘中全市场分钟落盘, 按能力路由 (TickFlow Expert 或声明 full_minute 的插件/自定义源) */}
+        <Card icon={Zap} title="全量分钟" anchor="minute-refresh">
+          <ToggleRow
+            label="全量分钟落盘"
+            desc={
+              !hasFullMinuteCap ? '需要全量分钟能力 (TickFlow Expert 或声明该能力的自定义源)'
+              : rs?.repair_only ? `服务运行中 · ${rs?.provider ?? '自定义源'} 无廉价增量端点, 按 ≥60s 全天批量节奏`
+              : rs?.running ? (rs?.in_trading_hours ? '服务运行中' : '运行中 · 非连续竞价时段暂停')
+              : '已关闭'
+            }
+            checked={prefs?.minute_refresh_enabled ?? false}
+            onChange={(v) => save({ minute_refresh_enabled: v })}
+            disabled={!hasFullMinuteCap}
+          />
+          <div className="mt-3 pt-3 border-t border-border">
+            <div className="flex items-center justify-between gap-4 py-1">
+              <div className="min-w-0">
+                <div className="text-sm text-foreground">刷新间隔</div>
+                <div className="text-[11px] text-muted">
+                  交易时段内全市场分钟K增量落盘的间隔; 稳态单请求增量, 冷启动/断档自动全天回补
+                </div>
+              </div>
+              <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
+                {minuteRefreshIntervalDraft >= 60 && minuteRefreshIntervalDraft % 60 === 0 ? `${minuteRefreshIntervalDraft / 60}m` : `${minuteRefreshIntervalDraft}s`}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 mt-2">
+              <input
+                type="range"
+                min={3}
+                max={120}
+                step={3}
+                value={minuteRefreshIntervalDraft}
+                disabled={!hasFullMinuteCap}
+                onChange={(e) => setMinuteRefreshIntervalDraft(parseInt(e.target.value, 10))}
+                className="flex-1 h-1 accent-accent cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              />
+              <span className="text-[10px] text-muted shrink-0">
+                {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '3s — 120s'}
+              </span>
+            </div>
+            {rs?.available && rs.rounds != null && rs.rounds > 0 && (
+              <div className="mt-2 text-[10px] text-muted">
+                已 {rs.rounds} 轮 · 最近 {rs.last_symbols} 标的 / {rs.last_rows} 行 / {rs.last_requests} 请求
+                {rs.last_round_ms != null ? ` · ${(rs.last_round_ms / 1000).toFixed(1)}s` : ''}
+                {rs.last_error ? ` · ${rs.last_error}` : ''}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        {/* 连板梯队降级修正 */}
         <Card
           icon={Flame}
           title="连板梯队降级修正"
@@ -410,59 +461,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           )}
         </Card>
 
-        {/* 全量分钟 (TickFlow Expert 专有): 盘中全市场分钟落盘, intraday.universe 单请求增量 */}
-        <Card icon={Zap} title="全量分钟" anchor="minute-refresh">
-          <ToggleRow
-            label="全量分钟落盘"
-            desc={
-              !hasFullMinuteCap ? '需要全量分钟能力 (TickFlow Expert)'
-              : rs?.custom_provider_active ? '已配置自定义分钟源, 盘中增量由插件自管'
-              : rs?.running ? (rs?.in_trading_hours ? '服务运行中' : '运行中 · 非连续竞价时段暂停')
-              : '已关闭'
-            }
-            checked={prefs?.minute_refresh_enabled ?? false}
-            onChange={(v) => save({ minute_refresh_enabled: v })}
-            disabled={!hasFullMinuteCap || !!rs?.custom_provider_active}
-          />
-          <div className="mt-3 pt-3 border-t border-border">
-            <div className="flex items-center justify-between gap-4 py-1">
-              <div className="min-w-0">
-                <div className="text-sm text-foreground">刷新间隔</div>
-                <div className="text-[11px] text-muted">
-                  交易时段内全市场分钟K增量落盘的间隔; 稳态单请求增量, 冷启动/断档自动全天回补
-                </div>
-              </div>
-              <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
-                {minuteRefreshIntervalDraft >= 60 && minuteRefreshIntervalDraft % 60 === 0 ? `${minuteRefreshIntervalDraft / 60}m` : `${minuteRefreshIntervalDraft}s`}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 mt-2">
-              <input
-                type="range"
-                min={3}
-                max={120}
-                step={3}
-                value={minuteRefreshIntervalDraft}
-                disabled={!hasFullMinuteCap}
-                onChange={(e) => setMinuteRefreshIntervalDraft(parseInt(e.target.value, 10))}
-                className="flex-1 h-1 accent-accent cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              />
-              <span className="text-[10px] text-muted shrink-0">
-                {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '3s — 120s'}
-              </span>
-            </div>
-            {rs?.available && rs.rounds != null && rs.rounds > 0 && (
-              <div className="mt-2 text-[10px] text-muted">
-                已 {rs.rounds} 轮 · 最近 {rs.last_symbols} 标的 / {rs.last_rows} 行 / {rs.last_requests} 请求
-                {rs.last_round_ms != null ? ` · ${(rs.last_round_ms / 1000).toFixed(1)}s` : ''}
-                {rs.last_error ? ` · ${rs.last_error}` : ''}
-              </div>
-            )}
-          </div>
-        </Card>
-
-        {/* 推送通知 — 监控告警的外部通知渠道 (全局配置)。
-            飞书 / 企业微信已实现, 不接券商委托。
+        {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。
+            飞书 / 企业微信。
             每个渠道合并成一行: 勾选=新建规则默认推送, 点行展开地址配置。 */}
         <Card icon={Webhook} title="推送通知" anchor="webhooks">
           <p className="text-xs text-secondary mb-3">

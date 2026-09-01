@@ -62,6 +62,9 @@ export const storage = {
   /** 策略结果列表分时图显示状态 */
   screenerIntraday:     kv<boolean>('screener_showIntraday'),
 
+  /** 策略结果列表"策略"列标签展开状态 (false=默认收起: 每行首个+计数, 行内可单独展开) */
+  screenerStrategyTags: kv<boolean>('screener_strategyTagsExpanded'),
+
   /** 自选列表板块筛选 */
   watchlistBoardFilter: kv<string[]>('watchlist_boardFilter'),
 

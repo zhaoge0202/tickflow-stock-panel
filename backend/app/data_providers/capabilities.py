@@ -81,11 +81,11 @@ CAPABILITY_REGISTRY: list[dict] = [
         "id": "full_minute",
         "label": "全量分钟",
         "desc": "盘中全市场当日分钟落盘 (冷启动全天 + 标的池增量)",
-        "field": None,
+        "field": "full_minute_data_provider",
         "default": "tickflow",
         "tf_tier": "expert",
-        # intraday.universe 能力 (TickFlow Expert 专有): 插件契约不开放此数据集,
-        # 生效源恒为 TickFlow — 不可路由, 无对应 provider 偏好字段
+        # TickFlow 侧需 Expert 档; 插件/自定义源声明 full_minute 数据集即可提供
+        # (插件实现 get_intraday_batch / 可选 get_intraday_latest, YAML 仅修复轮)
     },
 ]
 
