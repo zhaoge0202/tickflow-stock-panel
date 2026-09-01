@@ -1,6 +1,8 @@
 """K 线 / 同步 API。"""
 from __future__ import annotations
 
+import gzip
+import json
 import logging
 import math
 from datetime import date, timedelta
@@ -9,7 +11,7 @@ from zoneinfo import ZoneInfo
 from functools import lru_cache
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today, in_continuous_session
@@ -20,6 +22,41 @@ from app.services import kline_sync
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
+
+
+def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | Response:
+    """大 JSON 响应的传输压缩: 偏好开启 + 客户端接受 gzip + 响应超阈值才压。
+
+    分时/日K批量各自独立偏好键 (网络设置里大开关批量、子开关单独控制)。
+    level 6 实测 13MB ≈ 290ms CPU 压掉 87%; level 9 要 2.5s 不可用。
+    datetime → isoformat, 与 FastAPI jsonable_encoder 输出一致
+    (前端 since 增量按字符串字典序比较, 格式必须与非压缩路径相同)。
+    """
+    from app.services import preferences as _prefs
+    _getters = {
+        "minute_batch_compress": _prefs.get_minute_batch_compress,
+        "daily_batch_compress": _prefs.get_daily_batch_compress,
+    }
+    getter = _getters.get(pref_key)
+    compress_on = False
+    if getter is not None:
+        try:
+            compress_on = bool(getter())
+        except Exception:  # 偏好读取异常按不压缩返回原样
+            compress_on = False
+    headers = getattr(request, "headers", None) or {}
+    if compress_on and "gzip" in (headers.get("accept-encoding") or ""):
+        raw = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=True,
+            default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o),
+        ).encode()
+        if len(raw) > 1024:
+            return Response(
+                content=gzip.compress(raw, 6),
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            )
+    return payload
 
 
 def _minute_allowed(capset) -> bool:
@@ -567,7 +604,8 @@ def get_daily_batch(request: Request, body: dict):
         if not sub.is_empty():
             result[sub["symbol"][0]] = sub.to_dicts()
 
-    return {"data": result}
+    # 日K批量同为大响应端点 (千只自选 MB 级), 与分时各自独立压缩开关
+    return _gzip_payload(request, {"data": result}, pref_key="daily_batch_compress")
 
 
 @router.post("/minute-batch")
@@ -779,12 +817,15 @@ def get_minute_batch(request: Request, body: dict):
         }
         result = {sym: rows for sym, rows in result.items() if rows}
 
-    # full_minute_local: 本轮 prefer_local 生效 (本地分区由全量分钟服务供给, 股票未做补拉)
-    return {
-        "data": result,
-        "full_minute_local": full_minute_healthy,
-        "incremental": since_dt is not None,
-    }
+    return _gzip_payload(
+        request,
+        {
+            "data": result,
+            "full_minute_local": full_minute_healthy,
+            "incremental": since_dt is not None,
+        },
+        pref_key="minute_batch_compress",
+    )
 
 
 @router.get("/minute-range")

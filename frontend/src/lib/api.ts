@@ -1611,6 +1611,8 @@ export interface Preferences {
   financial_data_provider?: string
   data_source_job_timeout_s: number
   data_source_long_job_timeout_s: number
+  minute_batch_compress: boolean
+  daily_batch_compress: boolean
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
   pipeline_pull_a_share: boolean
@@ -1785,8 +1787,23 @@ export const api = {
           data_source_job_timeout_s: dataSourceJobTimeoutS,
           data_source_long_job_timeout_s: dataSourceLongJobTimeoutS,
         }),
+
       },
     ),
+
+  /** 分时批量响应 gzip 压缩开关 (网络设置) — 逐请求即时生效 */
+  updateMinuteBatchCompress: (enabled: boolean) =>
+    request<Pick<Preferences, 'minute_batch_compress'>>('/api/settings/preferences/minute-batch-compress', {
+      method: 'PUT',
+      body: JSON.stringify({ minute_batch_compress: enabled }),
+    }),
+
+  /** 日K批量响应 gzip 压缩开关 (与分时独立) — 逐请求即时生效 */
+  updateDailyBatchCompress: (enabled: boolean) =>
+    request<Pick<Preferences, 'daily_batch_compress'>>('/api/settings/preferences/daily-batch-compress', {
+      method: 'PUT',
+      body: JSON.stringify({ daily_batch_compress: enabled }),
+    }),
   updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',

@@ -1011,3 +1011,173 @@ def test_minute_refresh_is_healthy_requires_recent_round(monkeypatch):
     monkeypatch.setattr(mr.preferences, "get_minute_refresh_enabled", lambda: False)
     svc._state.last_round_at = time_mod.time() - 10
     assert svc.is_healthy() is False
+
+
+# ---------- 测试: 分时批量传输压缩 (网络设置开关) ----------
+
+
+def test_minute_batch_compress_preference_default_and_toggle(monkeypatch):
+    """偏好默认开启; 关闭后 getter 立即反映 (逐请求读取, 无缓存)。"""
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "load", lambda: {})
+    assert prefs.get_minute_batch_compress() is True
+    monkeypatch.setattr(prefs, "load", lambda: {"minute_batch_compress": False})
+    assert prefs.get_minute_batch_compress() is False
+
+
+def _compress_mock_env(monkeypatch, *, compress_on, accept="gzip, deflate"):
+    """构造 get_minute_batch 压缩路径的最小 mock 环境, 返回 (mock_request, sync_spy)。"""
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "get_minute_batch_compress", lambda: compress_on)
+
+    sync_spy = MagicMock(return_value=_mock_minute_df())
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = _mock_minute_rows("600519.SH", 100)
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.headers = {"accept-encoding": accept} if accept else {}
+    return mock_request, sync_spy
+
+
+def test_get_minute_batch_gzip_response_when_enabled(monkeypatch):
+    """开关开 + 客户端接受 gzip + 响应超阈值 → 返回 gzip Response, 解压后 JSON 完整。"""
+    import gzip as gzip_mod
+    from app.api import kline as kline_api
+    from fastapi import Response
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, Response)
+    assert result.headers["content-encoding"] == "gzip"
+    import json as json_mod
+    payload = json_mod.loads(gzip_mod.decompress(result.body))
+    assert payload["full_minute_local"] is False
+    assert len(payload["data"]["600519.SH"]) > 0
+
+
+def test_get_minute_batch_plain_when_disabled(monkeypatch):
+    """开关关 → 恒返回普通 dict, 不做压缩。"""
+    from app.api import kline as kline_api
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=False)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, dict) and "600519.SH" in result["data"]
+
+
+def test_get_minute_batch_plain_without_accept_encoding(monkeypatch):
+    """开关开但客户端未声明 gzip (如裸 curl) → 尊重协商, 原样返回。"""
+    from app.api import kline as kline_api
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=True, accept=None)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, dict)
+
+
+# ---------- 测试: 日K批量传输压缩 (与分时独立开关) ----------
+
+
+def _daily_mock_env(monkeypatch, *, compress_on, accept="gzip, deflate"):
+    """构造 get_daily_batch 压缩路径的最小 mock。"""
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "get_daily_batch_compress", lambda: compress_on)
+
+    # 20 根日K (date 列), 足以过 1KB 阈值
+    n = 20
+    daily_df = pl.DataFrame({
+        "symbol": ["600519.SH"] * n,
+        "date": [date(2026, 1, 1) + timedelta(days=i) for i in range(n)],
+        "open": [100.0] * n, "high": [101.0] * n,
+        "low": [99.0] * n, "close": [100.5] * n, "volume": [1000.0] * n,
+    })
+    mock_repo = MagicMock()
+    mock_repo.resolve_asset_type.return_value = "stock"
+    mock_repo.get_daily_batch.return_value = daily_df
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.headers = {"accept-encoding": accept} if accept else {}
+    return mock_request
+
+
+def test_daily_batch_gzip_when_enabled(monkeypatch):
+    """日K压缩开 + 接受 gzip → 压缩 Response, 解压 JSON 完整。"""
+    import gzip as gzip_mod
+    import json as json_mod
+    from app.api import kline as kline_api
+    from fastapi import Response
+
+    req = _daily_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, Response)
+    assert result.headers["content-encoding"] == "gzip"
+    payload = json_mod.loads(gzip_mod.decompress(result.body))
+    assert len(payload["data"]["600519.SH"]) == 20
+
+
+def test_daily_batch_plain_when_disabled(monkeypatch):
+    from app.api import kline as kline_api
+
+    req = _daily_mock_env(monkeypatch, compress_on=False)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, dict) and "600519.SH" in result["data"]
+
+
+def test_daily_batch_independent_from_minute_switch(monkeypatch):
+    """日K与分时独立: 分时关、日K开 → 日K仍压缩 (helper 按 pref_key 走各自 getter)。"""
+    import gzip as gzip_mod
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+    from fastapi import Response
+
+    monkeypatch.setattr(prefs, "get_minute_batch_compress", lambda: False)
+    req = _daily_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, Response) and gzip_mod.decompress(result.body)
+
+
+def test_preferences_parallel_saves_do_not_lose_each_other(tmp_path, monkeypatch):
+    """回归: 并行 save 不同键不得互相覆盖 (压缩总开关并行 PUT 两键的竞态)。
+
+    save 是 read-modify-write, 无锁时两线程同时基于旧快照写盘,
+    后写者会把先写者的更新覆盖掉。
+    """
+    import threading
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "_path", lambda: tmp_path / "preferences.json")
+    prefs._invalidate_cache()
+    prefs.save({"minute_batch_compress": True})
+
+    barrier = threading.Barrier(2)
+
+    def write_key(key: str) -> None:
+        barrier.wait()  # 尽量同时进入 save
+        prefs.save({key: False})
+
+    t1 = threading.Thread(target=write_key, args=("minute_batch_compress",))
+    t2 = threading.Thread(target=write_key, args=("daily_batch_compress",))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    final = prefs.load()
+    assert final["minute_batch_compress"] is False
+    assert final["daily_batch_compress"] is False
