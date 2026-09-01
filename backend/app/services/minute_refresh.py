@@ -298,7 +298,7 @@ class MinuteRefreshService:
     def is_healthy(self) -> bool:
         """读侧 freshness 判定: 本地 kline_minute 分区是否正被服务持续写入。
 
-        条件: 偏好开启 + 轮询线程存活 + 最近一轮距现在 ≤ max(2×间隔, 30s)。
+        条件: 偏好开启 + 轮询线程存活 + 最近一轮距现在 ≤ max(2*间隔, 30s)。
         健康时消费方 (自选分时等) 可信任本地分区、跳过批量补拉;
         连续失败轮不更新 last_round_at → 自动超时判不健康, 无需单独盯 last_error。
         """
@@ -325,6 +325,7 @@ class MinuteRefreshService:
         return {
             "enabled": enabled,
             "running": running,
+            "healthy": self.is_healthy(),
             "interval_seconds": preferences.get_minute_refresh_interval(),
             "capability_ok": self.capability_ok(),
             "custom_provider_active": self.custom_provider_active(),

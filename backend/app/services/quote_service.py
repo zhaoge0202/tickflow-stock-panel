@@ -1241,11 +1241,24 @@ class QuoteService:
         )
 
         capset = getattr(self._app_state, "capabilities", None)
-        support = intraday_monitor_support(capset)
-        if not support["available"] or len(symbols) > int(support["max_symbols"]):
-            return self._intraday_signal_evaluator.inject(enriched, [])
 
-        minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
+        # 全量分钟健康时股票读本地分区 (服务按间隔持续落盘, 与 API 同一列契约),
+        # 免去每分钟 bucket 一次的全量 API 拉取; ETF 不在服务 universe 内,
+        # 本地读空/异常回落原 API 路径 (含能力与上限检查)
+        minute_df = pl.DataFrame()
+        if asset_type == "stock":
+            svc = getattr(self._app_state, "minute_refresh", None) if self._app_state else None
+            if svc is not None and svc.is_healthy() and self._repo is not None:
+                try:
+                    minute_df = self._repo.get_minute_batch(sorted(symbols), cn_today())
+                except Exception as e:  # 本地读异常回落 API
+                    logger.warning("分时信号本地读失败, 回退 API 路径: %s", e)
+                    minute_df = pl.DataFrame()
+        if minute_df.is_empty():
+            support = intraday_monitor_support(capset)
+            if not support["available"] or len(symbols) > int(support["max_symbols"]):
+                return self._intraday_signal_evaluator.inject(enriched, [])
+            minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
         prev_close: dict[str, float] = {}
         available_cols = set(enriched.columns)
         for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):

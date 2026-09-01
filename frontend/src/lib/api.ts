@@ -1803,6 +1803,8 @@ export const api = {
       available: boolean
       enabled?: boolean
       running?: boolean
+      /** 读侧 freshness: 本地分区正被服务持续写入 (前端据此切本地读/解除截断) */
+      healthy?: boolean
       interval_seconds?: number
       capability_ok?: boolean
       custom_provider_active?: boolean
