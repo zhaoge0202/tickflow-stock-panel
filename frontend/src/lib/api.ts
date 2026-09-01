@@ -2525,6 +2525,9 @@ export const api = {
     '/api/pipeline/run', { method: 'POST' },
   ),
   pipelineJob: (id: string) => request<PipelineJob>(`/api/pipeline/jobs/${id}`),
+  /** 手动停止一个 running/pending 的同步任务 (协作式: 当前分块完成后线程自行退出) */
+  pipelineJobCancel: (id: string) =>
+    request<{ cancelled: string }>(`/api/pipeline/jobs/${id}/cancel`, { method: 'POST' }),
   pipelineJobs: (limit = 20) =>
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(
       `/api/pipeline/jobs?limit=${limit}`,
