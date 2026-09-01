@@ -33,6 +33,7 @@ import { useToggleRealtimeQuotes, useUpdateQuoteInterval } from '@/lib/useShared
 import { MissingCapChip, routeCapUsable, routeProviderDisplay, type RouteCapId } from '@/lib/capability-labels'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
+import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
 
 // 拆分出的子组件
@@ -104,6 +105,9 @@ export function Data() {
       startTime.current = Date.now()
     },
   })
+
+  // 无除权因子能力时同步前置确认 (静默降级告知)
+  const adjGate = useAdjFactorSyncGate()
 
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const clearData = useMutation({
@@ -581,7 +585,7 @@ export function Data() {
               <span className="text-xs text-accent animate-pulse">首次使用请点击右侧按钮同步数据</span>
             )}
             <button
-              onClick={() => startSync.mutate()}
+              onClick={() => adjGate.guard(() => startSync.mutate())}
               disabled={isStarting}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-accent/25 to-accent/10 border border-accent/30 text-accent text-xs font-medium hover:from-accent/35 hover:to-accent/20 disabled:opacity-40 transition-all duration-150"
             >
@@ -1153,6 +1157,7 @@ export function Data() {
 
       {/* 清除数据二次确认弹窗 */}
       <AnimatePresence>
+        {adjGate.dialog}
         {showClearConfirm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <motion.div

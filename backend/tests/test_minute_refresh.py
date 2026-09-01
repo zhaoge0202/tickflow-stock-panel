@@ -2,13 +2,15 @@
 
 覆盖:
 - 连续竞价时段判定 (含边界)
-- 门控链: 开关关闭 / 自定义分钟源让位 / 能力缺失 / 时段外 / 放行
+- 门控链: 开关关闭 / 能力缺失 / 时段外 / 放行 (自定义源与 TickFlow 统一口径)
+- 数据源路由: full_minute 偏好 → 自定义源 (get_intraday_batch / get_intraday_latest /
+  get_minute 回退) 或降级 TickFlow; 仅修复轮源 60s 节奏下限
 - 单轮: mock 边界层脉冲 + 落盘, 校验状态字段与 universe 来源
-- 偏好读写: 默认关闭、间隔 clamp [60, 300]
+- 偏好读写: 默认关闭、间隔 clamp [3, 120]
 - API: /minute-refresh/status 无服务时 available=false
 
-不发起真实网络请求: fetch_intraday_full_market_burst 与 _write_minute_partition
-均 monkeypatch 替换。
+不发起真实网络请求: TickFlow 侧边界函数与 _write_minute_partition 均
+monkeypatch 替换; 自定义源侧用内存 fake provider 走真实边界包装。
 """
 from __future__ import annotations
 
@@ -70,12 +72,20 @@ def test_continuous_session_boundaries():
 # ── 门控链 ──────────────────────────────────────────────────────────
 
 
-def _svc(tmp_path, monkeypatch, *, enabled=True, custom_provider=False, capability=True, in_hours=True):
+def _svc(tmp_path, monkeypatch, *, enabled=True, capability=True, in_hours=True,
+         full_minute_provider="tickflow", custom=None):
+    """custom 非 None 时模拟「full_minute 路由到声明该数据集的自定义源」:
+    resolver 直接返回 fake provider (注册表在测试环境未加载)。"""
     _isolated_prefs(tmp_path, monkeypatch)
     preferences.save({"minute_refresh_enabled": enabled})
-    if custom_provider:
-        # 模拟已注册的自定义分钟源 (真实注册表在测试环境未加载)
-        monkeypatch.setattr(preferences, "get_minute_data_provider", lambda: "a-stock-data")
+    monkeypatch.setattr(
+        preferences, "get_full_minute_data_provider", lambda: full_minute_provider,
+    )
+    if custom is not None:
+        monkeypatch.setattr(
+            "app.services.kline_sync._resolve_full_minute_provider",
+            lambda name: (custom, False, None),
+        )
     svc = MinuteRefreshService(_FakeRepo(["600000.SH"]))
     svc.set_app_state(_FakeAppState(capability))
     monkeypatch.setattr(minute_refresh, "_in_continuous_session", lambda now=None: in_hours)
@@ -90,9 +100,15 @@ def test_gate_disabled(tmp_path, monkeypatch):
     assert _svc(tmp_path, monkeypatch, enabled=False)._gate_reason() == "disabled"
 
 
-def test_gate_custom_provider_yields(tmp_path, monkeypatch):
-    svc = _svc(tmp_path, monkeypatch, custom_provider=True)
-    assert svc._gate_reason() == "custom_minute_provider"
+def test_gate_full_minute_custom_provider_runs(tmp_path, monkeypatch):
+    """全量分钟路由到自定义源: 不再让位 — 能力口径统一 (capset 增广后放行)。"""
+    class _P:  # noqa: D401 — fake provider
+        def get_intraday_batch(self, symbols, count=300, asset_type="stock"):
+            return pl.DataFrame()
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=_P())
+    assert svc._gate_reason() is None
+    assert svc.active_provider() == "myfm"
+    assert svc.status()["provider"] == "myfm"
 
 
 def test_gate_capability_missing(tmp_path, monkeypatch):
@@ -108,7 +124,7 @@ def test_gate_outside_trading_hours(tmp_path, monkeypatch):
 def test_gate_pass(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch)
     assert svc._gate_reason() is None
-    assert svc.capability_ok() and not svc.custom_provider_active()
+    assert svc.capability_ok() and svc.active_provider() == "tickflow"
 
 
 # ── 单轮 ────────────────────────────────────────────────────────────
@@ -251,6 +267,131 @@ def test_consecutive_empty_rounds_escalate_to_full(tmp_path, monkeypatch):
     svc._run_round()
     assert calls["modes"] == ["increment", "increment", "full"]
     assert svc.status()["last_mode"] == "full"
+
+
+# ── 自定义源 (full_minute 路由) 轮次 ────────────────────────────────
+
+
+class _FakeCustomProvider:
+    """内存 fake: 按 flags 暴露 get_intraday_batch / get_intraday_latest / get_minute。"""
+
+    def __init__(self, *, batch=False, latest=False, minute=False):
+        self.calls: dict = {}
+        # 未启用的方法置 None (实例属性遮蔽类方法) — getattr 返回 None → 边界
+        # 包装按"未实现"处理, 与真实 provider 只暴露部分方法的形状一致
+        if not batch:
+            self.get_intraday_batch = None
+        if not latest:
+            self.get_intraday_latest = None
+        if not minute:
+            self.get_minute = None
+
+    def get_intraday_batch(self, symbols, count=300, asset_type="stock"):
+        self.calls["batch"] = list(symbols)
+        return _full_df()
+
+    def get_intraday_latest(self, symbols=None, count=3):
+        self.calls["latest"] = count
+        return _inc_df()
+
+    def get_minute(self, symbols, start_time=None, end_time=None,
+                   asset_type="stock", freq="1m", on_chunk_done=None):
+        self.calls["minute"] = {
+            "symbols": list(symbols),
+            "start": start_time, "end": end_time,
+        }
+        if on_chunk_done:
+            on_chunk_done(1, 4)
+        return _full_df()
+
+
+def _patch_write(monkeypatch) -> dict:
+    calls = {"rows": None}
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: calls.update(rows=df.height) or df.height,
+    )
+    return calls
+
+
+def test_custom_provider_full_round_via_intraday_batch(tmp_path, monkeypatch):
+    """修复轮走 provider.get_intraday_batch (真实边界包装含时区守卫)。"""
+    provider = _FakeCustomProvider(batch=True)
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        lambda self: None,  # 冷启动 → 全天修复
+    )
+    write_calls = _patch_write(monkeypatch)
+    svc._run_round()
+    assert provider.calls["batch"] == ["600000.SH"]
+    assert write_calls["rows"] == 2
+    st = svc.status()
+    assert st["last_mode"] == "full"
+    assert st["provider"] == "myfm"
+    assert st["provider_effective"] == "myfm"
+
+
+def test_custom_provider_increment_round_via_latest(tmp_path, monkeypatch):
+    """实现 get_intraday_latest 的源: 覆盖新鲜时走稳态增量, 不打全天批量。"""
+    provider = _FakeCustomProvider(batch=True, latest=True)
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        lambda self: 0.2,
+    )
+    _patch_write(monkeypatch)
+    svc._run_round()
+    assert provider.calls == {"latest": 3}
+    st = svc.status()
+    assert st["last_mode"] == "increment"
+    assert st["last_requests"] == 1
+    assert st["repair_only"] is False
+
+
+def test_custom_provider_latest_missing_forces_full_with_minute_fallback(tmp_path, monkeypatch):
+    """无 get_intraday_latest: 增量轮退化为修复轮, 批量未实现时回退 get_minute
+    (当日窗口), 节奏下限抬到 60s。"""
+    provider = _FakeCustomProvider(minute=True)
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        lambda self: 0.2,  # 覆盖新鲜 → 本应增量
+    )
+    _patch_write(monkeypatch)
+    svc._run_round()
+    # 增量退化为修复: 走 get_minute 回退 (chunk 回调统计请求数)
+    assert "minute" in provider.calls
+    assert provider.calls["minute"]["symbols"] == ["600000.SH"]
+    assert svc.status()["last_mode"] == "full"
+    assert svc.status()["last_requests"] == 4
+    assert svc.repair_only() is True
+    assert svc._effective_interval() == 60
+
+
+def test_custom_provider_unresolved_degrades_to_tickflow(tmp_path, monkeypatch):
+    """路由指向未声明 full_minute 数据集的源 (真实 resolver 判定) → 降级
+    TickFlow 路径, 门控口径不变。"""
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="not-registered")
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        lambda self: 0.2,
+    )
+    _patch_write(monkeypatch)
+    modes: list[str] = []
+    monkeypatch.setattr(
+        "app.services.kline_sync.fetch_intraday_universe_increment",
+        lambda *a, **k: (modes.append("tf-inc"), (_inc_df(), 1))[1],
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync.fetch_intraday_full_market_burst",
+        lambda symbols, capset, *, count=300: (modes.append("tf-full"), (_full_df(), 28))[1],
+    )
+    svc._run_round()
+    assert modes == ["tf-inc"]
+    st = svc.status()
+    assert st["provider_effective"] == "tickflow"
+    assert st["last_mode"] == "increment"
 
 
 def test_status_reports_gate_reason_when_stopped(tmp_path, monkeypatch):

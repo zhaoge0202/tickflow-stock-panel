@@ -12,6 +12,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from threading import Lock
 from unittest.mock import MagicMock
 
@@ -314,6 +315,138 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     # 两个 symbol 都在结果里 (concat 后按 symbol filter 命中)
     assert "600519.SH" in result["data"]
     assert "510300.SH" in result["data"]
+
+
+# ---------- 测试 9b: 取到即落盘 + 增量拉取 (尾部落后 / 中间洞 / fresh) ----------
+
+def _bars(symbol: str, dts: list) -> pl.DataFrame:
+    """构造 canonical 8 列分钟K帧 (dts 为 datetime 列表)。"""
+    n = len(dts)
+    return pl.DataFrame({
+        "symbol": [symbol] * n,
+        "datetime": dts,
+        "open": [10.0] * n, "high": [10.1] * n, "low": [9.9] * n, "close": [10.0] * n,
+        "volume": [100.0] * n, "amount": [1000.0] * n,
+    })
+
+
+def _endpoint_mocks(monkeypatch, local_df: pl.DataFrame, sync_ret: pl.DataFrame | None):
+    """get_minute_batch 的最小 mock: repo/capset + sync/落盘 spy。返回 (捕获, 落盘, request)。"""
+    from app.api import kline as kline_api
+
+    captured: list[dict] = []
+
+    def fake_sync(symbols, *, start_time, end_time, batch_size, rpm, asset_type):
+        captured.append({"symbols": list(symbols), "start": start_time, "asset": asset_type})
+        return sync_ret if sync_ret is not None else pl.DataFrame()
+
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", fake_sync)
+    writes: list[pl.DataFrame] = []
+    monkeypatch.setattr(kline_api.kline_sync, "_write_minute_partition",
+                        lambda df, d: writes.append(df))
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = local_df
+    mock_repo._write_lock = Lock()
+    # 真实 Path 才会触发落盘分支 (kline.py 的 isinstance 守卫)
+    mock_repo.store.data_dir = Path("data")
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    return captured, writes, mock_request
+
+
+def test_minute_batch_tail_stale_pulls_incremental_and_persists(monkeypatch):
+    """尾部落后 (本地连续但根数不足) → 从最后一根本身增量拉 (动态K重拉覆盖);
+    拉取结果落盘, 响应为本地+增量合并去重。"""
+    from app.api import kline as kline_api
+
+    local = _bars("600519.SH", [
+        datetime(2026, 1, 15, 9, 31), datetime(2026, 1, 15, 9, 32), datetime(2026, 1, 15, 9, 33),
+    ])
+    inc = _bars("600519.SH", [datetime(2026, 1, 15, 9, 34), datetime(2026, 1, 15, 9, 35)])
+    captured, writes, req = _endpoint_mocks(monkeypatch, local, sync_ret=inc)
+
+    result = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert len(captured) == 1
+    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 33)   # 从最后一根本身重拉 (动态K覆盖)
+    assert captured[0]["asset"] == "stock"
+    assert writes and writes[0].height == 2                        # 取到即落盘
+    rows = result["data"]["600519.SH"]
+    assert len(rows) == 5                                          # 3 本地 + 2 增量
+    assert rows[-1]["datetime"] == datetime(2026, 1, 15, 9, 35)
+
+
+def test_minute_batch_middle_hole_falls_back_to_full_day(monkeypatch):
+    """中间缺K (间距 2min) → 增量窗口永远回看不到洞, 必须退回全天重拉。"""
+    from app.api import kline as kline_api
+
+    local = _bars("600519.SH", [datetime(2026, 1, 15, 9, 31), datetime(2026, 1, 15, 9, 33)])
+    captured, _, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert len(captured) == 1
+    assert captured[0]["start"] == datetime(2026, 1, 15, 9, 25)    # 全天窗口
+
+
+def test_minute_batch_fresh_local_skips_pull(monkeypatch):
+    """本地完整 (240 根, 含午休 91min 间距) → 不发任何拉取请求, 直读本地。"""
+    from app.api import kline as kline_api
+
+    dts = ([datetime(2026, 1, 15, 9, 31) + timedelta(minutes=i) for i in range(120)]
+           + [datetime(2026, 1, 15, 13, 1) + timedelta(minutes=i) for i in range(120)])
+    local = _bars("600519.SH", dts)
+    captured, writes, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    result = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+
+    assert captured == []                                          # 零请求
+    assert writes == []
+    assert len(result["data"]["600519.SH"]) == 240
+
+
+def test_minute_batch_since_returns_only_new_bars(monkeypatch):
+    """since 增量响应: 只回 >= since 的K (含 since 本身 — 形成中的动态K需覆盖),
+    无新增的 symbol 不出现在 data; incremental 标志为 True。"""
+    from app.api import kline as kline_api
+
+    dts = ([datetime(2026, 1, 15, 9, 31) + timedelta(minutes=i) for i in range(120)]
+           + [datetime(2026, 1, 15, 13, 1) + timedelta(minutes=i) for i in range(120)])
+    local = _bars("600519.SH", dts)   # fresh: 不触发补拉, 直读本地后做 since 过滤
+    _, _, req = _endpoint_mocks(monkeypatch, local, sync_ret=pl.DataFrame())
+
+    result = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15",
+        "since": "2026-01-15T15:00:00",
+    })
+    rows = result["data"]["600519.SH"]
+    assert [r["datetime"] for r in rows] == [datetime(2026, 1, 15, 15, 0)]   # 含 since 当根
+    assert result["incremental"] is True
+
+    # since 早于全部K → 全量返回; 无 since → incremental False
+    full = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15", "since": "2026-01-15T09:00:00",
+    })
+    assert len(full["data"]["600519.SH"]) == 240
+    plain = kline_api.get_minute_batch(req, {"symbols": ["600519.SH"], "date": "2026-01-15"})
+    assert plain["incremental"] is False
+    assert len(plain["data"]["600519.SH"]) == 240
+
+    # 防御: 带 Z 的 UTC aware 输入 (toISOString 客户端) → 归一为北京 naive 再比,
+    # 不抛 TypeError 且语义正确 (15:00 北京 = 07:00 UTC)
+    utc = kline_api.get_minute_batch(req, {
+        "symbols": ["600519.SH"], "date": "2026-01-15",
+        "since": "2026-01-15T07:00:00Z",
+    })
+    assert [r["datetime"] for r in utc["data"]["600519.SH"]] == [datetime(2026, 1, 15, 15, 0)]
 
 
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------
@@ -878,3 +1011,173 @@ def test_minute_refresh_is_healthy_requires_recent_round(monkeypatch):
     monkeypatch.setattr(mr.preferences, "get_minute_refresh_enabled", lambda: False)
     svc._state.last_round_at = time_mod.time() - 10
     assert svc.is_healthy() is False
+
+
+# ---------- 测试: 分时批量传输压缩 (网络设置开关) ----------
+
+
+def test_minute_batch_compress_preference_default_and_toggle(monkeypatch):
+    """偏好默认开启; 关闭后 getter 立即反映 (逐请求读取, 无缓存)。"""
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "load", lambda: {})
+    assert prefs.get_minute_batch_compress() is True
+    monkeypatch.setattr(prefs, "load", lambda: {"minute_batch_compress": False})
+    assert prefs.get_minute_batch_compress() is False
+
+
+def _compress_mock_env(monkeypatch, *, compress_on, accept="gzip, deflate"):
+    """构造 get_minute_batch 压缩路径的最小 mock 环境, 返回 (mock_request, sync_spy)。"""
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "get_minute_batch_compress", lambda: compress_on)
+
+    sync_spy = MagicMock(return_value=_mock_minute_df())
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = _mock_minute_rows("600519.SH", 100)
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.headers = {"accept-encoding": accept} if accept else {}
+    return mock_request, sync_spy
+
+
+def test_get_minute_batch_gzip_response_when_enabled(monkeypatch):
+    """开关开 + 客户端接受 gzip + 响应超阈值 → 返回 gzip Response, 解压后 JSON 完整。"""
+    import gzip as gzip_mod
+    from app.api import kline as kline_api
+    from fastapi import Response
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, Response)
+    assert result.headers["content-encoding"] == "gzip"
+    import json as json_mod
+    payload = json_mod.loads(gzip_mod.decompress(result.body))
+    assert payload["full_minute_local"] is False
+    assert len(payload["data"]["600519.SH"]) > 0
+
+
+def test_get_minute_batch_plain_when_disabled(monkeypatch):
+    """开关关 → 恒返回普通 dict, 不做压缩。"""
+    from app.api import kline as kline_api
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=False)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, dict) and "600519.SH" in result["data"]
+
+
+def test_get_minute_batch_plain_without_accept_encoding(monkeypatch):
+    """开关开但客户端未声明 gzip (如裸 curl) → 尊重协商, 原样返回。"""
+    from app.api import kline as kline_api
+
+    mock_request, _ = _compress_mock_env(monkeypatch, compress_on=True, accept=None)
+    result = kline_api.get_minute_batch(
+        mock_request, {"symbols": ["600519.SH"], "date": "2026-01-15"}
+    )
+    assert isinstance(result, dict)
+
+
+# ---------- 测试: 日K批量传输压缩 (与分时独立开关) ----------
+
+
+def _daily_mock_env(monkeypatch, *, compress_on, accept="gzip, deflate"):
+    """构造 get_daily_batch 压缩路径的最小 mock。"""
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "get_daily_batch_compress", lambda: compress_on)
+
+    # 20 根日K (date 列), 足以过 1KB 阈值
+    n = 20
+    daily_df = pl.DataFrame({
+        "symbol": ["600519.SH"] * n,
+        "date": [date(2026, 1, 1) + timedelta(days=i) for i in range(n)],
+        "open": [100.0] * n, "high": [101.0] * n,
+        "low": [99.0] * n, "close": [100.5] * n, "volume": [1000.0] * n,
+    })
+    mock_repo = MagicMock()
+    mock_repo.resolve_asset_type.return_value = "stock"
+    mock_repo.get_daily_batch.return_value = daily_df
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.headers = {"accept-encoding": accept} if accept else {}
+    return mock_request
+
+
+def test_daily_batch_gzip_when_enabled(monkeypatch):
+    """日K压缩开 + 接受 gzip → 压缩 Response, 解压 JSON 完整。"""
+    import gzip as gzip_mod
+    import json as json_mod
+    from app.api import kline as kline_api
+    from fastapi import Response
+
+    req = _daily_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, Response)
+    assert result.headers["content-encoding"] == "gzip"
+    payload = json_mod.loads(gzip_mod.decompress(result.body))
+    assert len(payload["data"]["600519.SH"]) == 20
+
+
+def test_daily_batch_plain_when_disabled(monkeypatch):
+    from app.api import kline as kline_api
+
+    req = _daily_mock_env(monkeypatch, compress_on=False)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, dict) and "600519.SH" in result["data"]
+
+
+def test_daily_batch_independent_from_minute_switch(monkeypatch):
+    """日K与分时独立: 分时关、日K开 → 日K仍压缩 (helper 按 pref_key 走各自 getter)。"""
+    import gzip as gzip_mod
+    from app.api import kline as kline_api
+    from app.services import preferences as prefs
+    from fastapi import Response
+
+    monkeypatch.setattr(prefs, "get_minute_batch_compress", lambda: False)
+    req = _daily_mock_env(monkeypatch, compress_on=True)
+    result = kline_api.get_daily_batch(req, {"symbols": ["600519.SH"], "days": 20})
+    assert isinstance(result, Response) and gzip_mod.decompress(result.body)
+
+
+def test_preferences_parallel_saves_do_not_lose_each_other(tmp_path, monkeypatch):
+    """回归: 并行 save 不同键不得互相覆盖 (压缩总开关并行 PUT 两键的竞态)。
+
+    save 是 read-modify-write, 无锁时两线程同时基于旧快照写盘,
+    后写者会把先写者的更新覆盖掉。
+    """
+    import threading
+    from app.services import preferences as prefs
+
+    monkeypatch.setattr(prefs, "_path", lambda: tmp_path / "preferences.json")
+    prefs._invalidate_cache()
+    prefs.save({"minute_batch_compress": True})
+
+    barrier = threading.Barrier(2)
+
+    def write_key(key: str) -> None:
+        barrier.wait()  # 尽量同时进入 save
+        prefs.save({key: False})
+
+    t1 = threading.Thread(target=write_key, args=("minute_batch_compress",))
+    t2 = threading.Thread(target=write_key, args=("daily_batch_compress",))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    final = prefs.load()
+    assert final["minute_batch_compress"] is False
+    assert final["daily_batch_compress"] is False

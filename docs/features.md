@@ -132,6 +132,12 @@
 
 详见 [custom-data-source.md](./custom-data-source.md) 与 [plugin-development.md](./plugin-development.md)。
 
+### 全量分钟(盘中增量落盘)
+
+「全量分钟」是独立能力(`full_minute`),**与其他能力同样可路由**:盘中将全市场当日 1 分钟 K 持续增量落盘 `data/kline_minute/`,分钟策略与分时视图即取即用。接入方式:TickFlow Expert,或声明 `full_minute` 数据集的插件/自定义源(设置 → 数据源 → 全量分钟 路由);配好能力后开启实时行情即自动运行(冷启动全天修复轮 + 稳态增量轮)。
+
+详见 [configuration.md → 全量分钟](./configuration.md#全量分钟-full_minute)。
+
 ### 🔌 第三方数据接入(重点)
 
 支持将自有量化项目的数据并入,与内置数据同台分析:

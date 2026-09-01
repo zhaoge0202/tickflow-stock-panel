@@ -64,7 +64,7 @@ def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
     live_df = _minute_df(dt.date(2026, 7, 8), 3, 7.40)
     calls: list[tuple[str, dt.date]] = []
 
-    def fake_fetch(symbol: str, trade_date: dt.date) -> pl.DataFrame:
+    def fake_fetch(symbol: str, trade_date: dt.date, asset_type: str = "stock") -> pl.DataFrame:
         calls.append((symbol, trade_date))
         return live_df
 
@@ -83,7 +83,7 @@ def test_get_minute_today_falls_back_to_local_when_live_empty(monkeypatch):
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
 
     local_df = _minute_df(dt.date(2026, 7, 8), 240, 7.30)
-    monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", lambda symbol, trade_date: pl.DataFrame())
+    monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", lambda symbol, trade_date, asset_type="stock": pl.DataFrame())
 
     resp = kline.get_minute(_request(_Repo(local_df)), "000725.SZ", dt.date(2026, 7, 8))
 
@@ -113,7 +113,7 @@ def test_get_minute_reports_transient_provider_failure(monkeypatch):
     monkeypatch.setattr(
         kline.kline_sync,
         "fetch_minute_single",
-        lambda symbol, trade_date: (_ for _ in ()).throw(
+        lambda symbol, trade_date, asset_type="stock": (_ for _ in ()).throw(
             kline.kline_sync.MinuteFetchError("TDX 分钟K请求失败，重试 3 次仍未恢复")
         ),
     )

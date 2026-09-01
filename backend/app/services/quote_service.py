@@ -38,6 +38,7 @@ import polars as pl
 from app.market_time import cn_now, cn_today, is_trading_weekday
 from app.parquet import scan_daily_parquet
 from app.services.index_const import CORE_INDEX_SYMBOLS as DEFAULT_CORE_INDEX_SYMBOLS
+from app.strategy.intraday_signals import IntradaySignalEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,8 @@ class QuoteService:
         self._index_symbol_count: int = 0
         self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
+        self._intraday_signal_evaluator = IntradaySignalEvaluator()
+        self._intraday_signal_bucket: dict[str, str] = {}
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
@@ -1656,67 +1659,66 @@ class QuoteService:
         except Exception as e:  # noqa: BLE001
             logger.debug("告警 ext 富化失败 (不影响推送): %s", e)
 
-    def _inject_intraday_signals(self, enriched_today: pl.DataFrame, engine, asset_type: str) -> pl.DataFrame:
-        """为使用分时穿越信号的监控规则注入当轮布尔信号列。"""
-        if enriched_today.is_empty() or engine is None:
-            return enriched_today
-        symbol_provider = getattr(engine, "intraday_signal_symbols", None)
-        if not callable(symbol_provider):
-            return enriched_today
-
-        try:
-            raw_symbols = symbol_provider(asset_type) or set()
-        except Exception as e:  # noqa: BLE001
-            logger.debug("分时信号标的解析失败 (监控规则安全降级): %s", e)
-            return enriched_today
-
-        symbols = {
-            str(symbol).strip().upper()
-            for symbol in raw_symbols
-            if str(symbol).strip()
-        }
+    def _inject_intraday_signals(self, enriched: pl.DataFrame, engine, asset_type: str) -> pl.DataFrame:
+        """每分钟为分时信号规则批量获取一次数据并注入临时布尔列。"""
+        get_symbols = getattr(engine, "intraday_signal_symbols", None)
+        if not callable(get_symbols):
+            return enriched
+        symbols = get_symbols(asset_type)
         if not symbols:
-            return enriched_today
+            return enriched
 
-        try:
-            from app.services.kline_sync import fetch_intraday_monitor_batch
-            from app.strategy.intraday_signals import IntradaySignalEvaluator
+        now = cn_now()
+        bucket = now.strftime("%Y%m%d%H%M")
+        if self._intraday_signal_bucket.get(asset_type) == bucket:
+            return self._intraday_signal_evaluator.inject(enriched, [])
+        self._intraday_signal_bucket[asset_type] = bucket
 
-            evaluator = getattr(self, "_intraday_signal_evaluator", None)
-            if evaluator is None:
-                evaluator = IntradaySignalEvaluator()
-                self._intraday_signal_evaluator = evaluator
+        from app.services.kline_sync import (
+            fetch_intraday_monitor_batch,
+            intraday_monitor_support,
+        )
 
-            prev_close: dict[str, float] = {}
-            if "symbol" in enriched_today.columns and "prev_close" in enriched_today.columns:
-                for row in enriched_today.select(["symbol", "prev_close"]).iter_rows(named=True):
-                    symbol = str(row.get("symbol") or "").strip().upper()
-                    if not symbol:
-                        continue
-                    try:
-                        prev_close[symbol] = float(row.get("prev_close"))
-                    except (TypeError, ValueError):
-                        continue
+        capset = getattr(self._app_state, "capabilities", None)
 
-            now = cn_now()
-            capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+        # 全量分钟健康时股票读本地分区 (服务按间隔持续落盘, 与 API 同一列契约),
+        # 免去每分钟 bucket 一次的全量 API 拉取; ETF 不在服务 universe 内,
+        # 本地读空/异常回落原 API 路径 (含能力与上限检查)
+        minute_df = pl.DataFrame()
+        if asset_type == "stock":
+            svc = getattr(self._app_state, "minute_refresh", None) if self._app_state else None
+            if svc is not None and svc.is_healthy() and self._repo is not None:
+                try:
+                    minute_df = self._repo.get_minute_batch(sorted(symbols), cn_today())
+                except Exception as e:  # 本地读异常回落 API
+                    logger.warning("分时信号本地读失败, 回退 API 路径: %s", e)
+                    minute_df = pl.DataFrame()
+        if minute_df.is_empty():
+            support = intraday_monitor_support(capset)
+            if not support["available"] or len(symbols) > int(support["max_symbols"]):
+                return self._intraday_signal_evaluator.inject(enriched, [])
             minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
-            signals = evaluator.evaluate(
-                minute_df,
-                symbols=symbols,
-                prev_close=prev_close,
-                asset_type=asset_type,
-                now=now,
-            )
-            return evaluator.inject(enriched_today, signals)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("分时信号注入失败 (监控规则安全降级): %s", e)
-            try:
-                from app.strategy.intraday_signals import IntradaySignalEvaluator
+        prev_close: dict[str, float] = {}
+        available_cols = set(enriched.columns)
+        for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):
+            symbol = str(row.get("symbol") or "")
+            reference = row.get("prev_close") if "prev_close" in available_cols else None
+            if reference is None and "close" in available_cols and "change_pct" in available_cols:
+                close = row.get("close")
+                change_pct = row.get("change_pct")
+                if close is not None and change_pct is not None and float(change_pct) > -1:
+                    reference = float(close) / (1.0 + float(change_pct))
+            if symbol and reference is not None:
+                prev_close[symbol] = float(reference)
 
-                return IntradaySignalEvaluator.inject(enriched_today, [])
-            except Exception:  # noqa: BLE001
-                return enriched_today
+        signals = self._intraday_signal_evaluator.evaluate(
+            minute_df,
+            symbols=symbols,
+            prev_close=prev_close,
+            asset_type=asset_type,
+            now=now,
+        )
+        return self._intraday_signal_evaluator.inject(enriched, signals)
 
     @staticmethod
     def _continuous_session_start_ms() -> float:
