@@ -134,7 +134,11 @@ def _hist_snapshot(repo: Any) -> dict[str, Any]:
 
 
 def _bench_rt_pct(quote_service: Any) -> float:
-    """基准指数今日实时涨跌 (各候选均值, 缺数据时 0)。"""
+    """基准指数今日实时涨跌 (各候选均值, 缺数据时 0)。
+
+    QuoteService 的指数行情 change_pct 是百分数值 (如 -1.02 表示 -1.02%),
+    这里转换成异动计算使用的小数制。
+    """
     try:
         df = quote_service.get_index_quotes()
     except Exception:
@@ -148,7 +152,7 @@ def _bench_rt_pct(quote_service: Any) -> float:
         if col in df.columns:
             vals = df[col].drop_nulls()
             if vals.len() > 0:
-                return float(vals.mean())
+                return float(vals.mean()) / 100.0
     if {"close", "prev_close"} <= set(df.columns):
         sub = df.select(["close", "prev_close"]).drop_nulls()
         if sub.height > 0:
