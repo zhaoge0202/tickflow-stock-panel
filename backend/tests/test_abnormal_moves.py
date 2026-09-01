@@ -14,6 +14,7 @@ from app.indicators.pipeline import (
 from app.services.abnormal_moves import (
     _hist_cache,
     _hist_cache_lock,
+    _bench_rt_pct,
     board_of,
     build_overview,
     is_st_name,
@@ -87,7 +88,7 @@ def _write_sh_bench(tmp_path) -> None:
 
 def test_benchmark_momentum_today_math(tmp_path) -> None:
     _write_sh_bench(tmp_path)
-    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [10.0]})
 
     out = benchmark_momentum_today(tmp_path, quotes)
     row = out.row(0, named=True)
@@ -116,7 +117,7 @@ def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
 
 def test_attach_deviation_columns_today(tmp_path) -> None:
     _write_sh_bench(tmp_path)
-    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [10.0]})
     # 单日帧: 增量路径产出的 momentum 列 (无 date 历史, 无法 shift 补算)
     today_df = pl.DataFrame(
         {
@@ -188,6 +189,14 @@ def test_board_and_st_rules() -> None:
     assert gem.thresholds[10] == (1.00, 0.50)
     bse = rule_for("920001.BJ", "正常股")
     assert bse.thresholds[3] == (0.40, 0.40)
+
+
+def test_bench_rt_pct_converts_index_percentage_to_fraction() -> None:
+    class _Quotes:
+        def get_index_quotes(self):
+            return pl.DataFrame({"symbol": ["399001.SZ"], "change_pct": [-1.02]})
+
+    assert _bench_rt_pct(_Quotes()) == -0.0102
 
 
 class _FakeRepo:

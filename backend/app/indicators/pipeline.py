@@ -1182,7 +1182,11 @@ def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
 
 
 def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -> float:
-    """从实时指数行情取某交易所首选基准的今日涨跌, 缺数据时 0。"""
+    """从实时指数行情取某交易所首选基准的今日涨跌, 缺数据时 0。
+
+    index_quotes 来自 QuoteService.get_index_quotes, 其中 change_pct 已统一为
+    百分数值 (如 -1.02 表示 -1.02%); 这里转换为内部小数制。
+    """
     if index_quotes is None or index_quotes.is_empty():
         return 0.0
     df = index_quotes.filter(pl.col("symbol").is_in(candidates))
@@ -1197,7 +1201,7 @@ def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -
         for col in ("change_pct", "pct", "pct_change"):
             v = row.get(col)
             if v is not None:
-                return float(v)
+                return float(v) / 100.0
         if row.get("close") is not None and row.get("prev_close") is not None and row["prev_close"]:
             return float(row["close"] / row["prev_close"] - 1)
     return 0.0
@@ -1212,6 +1216,8 @@ def benchmark_momentum_today(
     基准日K parquet 盘中不含今日, 今日基准收盘 = 昨收 × (1 + 实时涨跌)。
     N 日动量 = 今日基准收盘 / N 个交易日前的收盘 - 1; 交易所与
     load_benchmark_momentum 的选基逻辑一致 (同一 TTL 缓存帧)。
+    index_quotes.change_pct 使用 QuoteService 的百分数值口径
+    (10.0 表示 +10%), 本函数内部会显式转换为小数。
     返回小表: bench_exchange, bench_mom3d, bench_mom10d, bench_mom30d。
     无基准数据时 None。
     """
