@@ -192,6 +192,11 @@ def _target_frame(
     exprs: list[pl.Expr] = []
     if "close" in panel.columns:
         exprs.append(pl.col("close").shift(1).over("symbol").alias("_pre_prev_close"))
+        exprs.append(
+            (
+                pl.col("close") / pl.col("close").shift(9).over("symbol") - 1.0
+            ).alias("_pre_cum9")
+        )
     if "change_pct" in panel.columns:
         exprs.append(pl.col("change_pct").shift(1).over("symbol").alias("_pre_prev_change_pct"))
     if {"high", "close"}.issubset(panel.columns):
@@ -229,6 +234,14 @@ def _preselect_rows(
     df = StrategyEngine._apply_basic_filter(frame, basic_filter)
     if df.is_empty():
         return []
+
+    # 跟随策略的临近严重异动剔除: 策略开了 avoid_abnormal 时, 预选池同样
+    # 剔除信号日 9 日累计涨幅超限的票, 与正式信号/盘中提醒口径一致。
+    if bool(params.get("avoid_abnormal")) and "_pre_cum9" in df.columns:
+        cum9_max = float(params.get("abnormal_cum9_max", 60.0)) / 100.0
+        df = df.filter(pl.col("_pre_cum9").is_null() | (pl.col("_pre_cum9") < cum9_max))
+        if df.is_empty():
+            return []
 
     primary = _apply_relaxed_dual_filter(df, params, strict=True)
     stage = "dual_relaxed"
