@@ -11,6 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import ClassVar
 
+import polars as pl
+
 from app.services import quote_service as qs
 from app.services.index_const import CORE_INDEX_SYMBOLS
 
@@ -114,3 +116,76 @@ def test_custom_provider_index_fetch_error_is_soft(monkeypatch):
     service, captured = _service_with_provider(monkeypatch, _Boom())
     service._fetch_full_market_quotes()
     assert len(captured) == 1 and captured[0][0]["symbol"] == "600519.SH"
+
+
+# ---- 监控分时注入: 全量分钟健康时股票读本地分区 ----
+
+
+def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbols=None):
+    """构造 _inject_intraday_signals 最小环境, 捕获传入 evaluator 的 minute_df。"""
+    symbols = symbols or {"600519.SH"}
+    service = qs.QuoteService()
+    service._repo = SimpleNamespace(
+        get_minute_batch=lambda syms, d: local_df,
+    )
+    engine = SimpleNamespace(
+        intraday_signal_symbols=lambda at: set(symbols) if at == asset_type else set(),
+    )
+    minute_svc = SimpleNamespace(is_healthy=lambda: healthy)
+    service._app_state = SimpleNamespace(minute_refresh=minute_svc)
+
+    import app.services.quote_service as qsm
+    api_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        qsm, "_noop", qsm.__dict__.get("_noop", None), raising=False)  # 占位无操作
+    from app.services.kline_sync import intraday_monitor_support
+    monkeypatch.setattr(
+        "app.services.quote_service.logger", qsm.logger, raising=False)
+    # 打桩 API 拉取路径 (健康时不应被调)
+    import app.services.kline_sync as ks
+    monkeypatch.setattr(
+        ks, "fetch_intraday_monitor_batch",
+        lambda symbols, capset, *, now=None: (api_calls.append(list(symbols)), local_df)[1])
+    monkeypatch.setattr(
+        ks, "intraday_monitor_support",
+        lambda capset: {"available": True, "max_symbols": 200, "source": "minute_batch"})
+
+    evaluator = SimpleNamespace(
+        evaluate=lambda minute_df, **kw: (captured.append(minute_df), [])[1],
+        inject=lambda enriched, signals: enriched,
+    )
+    captured: list = []
+    service._intraday_signal_evaluator = evaluator
+    service._intraday_signal_bucket = {}
+    return service, engine, api_calls, captured
+
+
+def test_intraday_signals_read_local_when_healthy(monkeypatch):
+    """健康时股票读本地分区, 不触发 API 拉取。"""
+    local = pl.DataFrame({
+        "symbol": ["600519.SH"], "datetime": ["2026-01-15 09:31:00"],
+        "open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5],
+        "volume": [1000.0], "amount": [100500.0],
+    })
+    service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=True, local_df=local)
+    enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
+    service._inject_intraday_signals(enriched, engine, asset_type="stock")
+    assert api_calls == []          # 未走 API
+    assert captured and captured[0].height == 1  # evaluator 拿到本地数据
+
+
+def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
+    """不健康 (服务关/挂) 时回落原 API 拉取路径。"""
+    service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=False, local_df=pl.DataFrame())
+    enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
+    service._inject_intraday_signals(enriched, engine, asset_type="stock")
+    assert api_calls == [["600519.SH"]]  # 走了 API
+
+
+def test_intraday_signals_etf_never_reads_local(monkeypatch):
+    """ETF 不在全量分钟 universe: 即使健康也走 API 路径。"""
+    service, engine, api_calls, captured = _injection_env(
+        monkeypatch, healthy=True, local_df=pl.DataFrame(), asset_type="etf", symbols={"510300.SH"})
+    enriched = pl.DataFrame({"symbol": ["510300.SH"], "close": [4.0]})
+    service._inject_intraday_signals(enriched, engine, asset_type="etf")
+    assert api_calls == [["510300.SH"]]

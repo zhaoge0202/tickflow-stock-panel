@@ -438,6 +438,14 @@ export function Screener() {
   )
   // 分时图依赖分钟K批量数据 (kline.minute.batch), 无数据时开了列也不拉
   const caps = useCapabilities()
+  // 全量分钟服务健康 (freshness 契约): 健康时本地分区按配置间隔持续落盘,
+  // 分时读本地不受批量上限约束 → 不截断 + prefer_local; 与监控设置页共享缓存
+  const refreshStatus = useQuery({
+    queryKey: ['minute-refresh-status'],
+    queryFn: api.minuteRefreshStatus,
+    refetchInterval: 15000,
+  })
+  const fullMinuteHealthy = !!refreshStatus.data?.healthy
   const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
   const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
 
@@ -456,11 +464,11 @@ export function Screener() {
     () => displayRows.map((r: any) => r.symbol),
     [displayRows],
   )
-  const intradayTruncated = intradayVisible && allIntradaySymbols.length > minuteBatchCap
-  // 截断到 batch 上限, 一次请求 = 一次数据源调用
+  // 拉模型 (走批量接口) 才截断到 batch 上限; 全量分钟健康时读本地分区无上限
+  const intradayTruncated = intradayVisible && !fullMinuteHealthy && allIntradaySymbols.length > minuteBatchCap
   const intradaySymbols = useMemo(
     () => intradayTruncated ? allIntradaySymbols.slice(0, minuteBatchCap) : allIntradaySymbols,
-    [allIntradaySymbols, intradayTruncated, minuteBatchCap],
+    [allIntradaySymbols, intradayTruncated, minuteBatchCap, fullMinuteHealthy],
   )
   const intradayRequestSymbols = useMemo(
     () => [...new Set(intradaySymbols)].sort(),
@@ -471,7 +479,7 @@ export function Screener() {
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(intradaySymbolsKey),
     // 增量轮询: 读缓存以最后一根为 since 只拉新增, 本地合并为完整序列
-    queryFn: () => fetchMinuteBatchIncremental(qc, QK.minuteBatch(intradaySymbolsKey), intradayRequestSymbols),
+    queryFn: () => fetchMinuteBatchIncremental(qc, QK.minuteBatch(intradaySymbolsKey), intradayRequestSymbols, fullMinuteHealthy),
     enabled: intradayVisible && intradayRequestSymbols.length > 0,
     staleTime: 10_000,
     placeholderData: previousData => previousData,

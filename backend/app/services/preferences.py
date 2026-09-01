@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -54,14 +55,22 @@ def load() -> dict:
     return copy.deepcopy(_cache)
 
 
+_SAVE_LOCK = threading.Lock()
+
+
 def save(updates: dict) -> dict:
-    """合并写入。返回新内容。"""
-    current = load()
-    current.update(updates)
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    _invalidate_cache()
+    """合并写入。返回新内容。
+
+    锁内 read-modify-write: FastAPI 同步端点跑线程池, 并行 PUT 各自基于旧快照
+    写盘会互相覆盖 (实测: 压缩总开关并行写分时/日K两键, 后写者把先写者覆盖)。
+    """
+    with _SAVE_LOCK:
+        current = load()
+        current.update(updates)
+        _path().write_text(
+            json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+        _invalidate_cache()
     return current
 
 
@@ -236,6 +245,20 @@ def get_data_source_long_job_timeout_s() -> int:
     except (TypeError, ValueError):
         timeout_s = LONG_JOB_TIMEOUT_S
     return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
+
+
+def get_minute_batch_compress() -> bool:
+    """分时批量响应是否启用 gzip 传输压缩。默认开启 (公网部署传输是大头);
+    本机/内网可关闭省服务端 CPU。每次请求即时读取, 开关保存后立即生效。
+    """
+    raw = load().get("minute_batch_compress", True)
+    return bool(raw)
+
+
+def get_daily_batch_compress() -> bool:
+    """日K批量响应是否启用 gzip 传输压缩 (与分时各自独立配置)。默认开启。"""
+    raw = load().get("daily_batch_compress", True)
+    return bool(raw)
 
 
 def _allowed_data_providers() -> set[str]:

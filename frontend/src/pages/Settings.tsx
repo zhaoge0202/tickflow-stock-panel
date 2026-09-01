@@ -36,7 +36,7 @@ const TABS: readonly TabDef[] = [
   { key: 'monitoring', label: '实时监控',   icon: Radio,     panel: SettingsMonitoringPanel },
   { key: 'ext-pages',  label: '扩展页面',   icon: BarChart3, panel: SettingsExtPagesPanel },
   { key: 'signals',    label: '信号库',     icon: Zap,       panel: SettingsCustomSignalsPanel },
-  { key: 'timeout',    label: '超时设置',   icon: Clock3,    panel: SettingsTimeoutPanel },
+  { key: 'timeout',    label: '网络设置',   icon: Clock3,    panel: SettingsTimeoutPanel },
   { key: 'menus',      label: '菜单设置',   icon: SlidersHorizontal, panel: SettingsMenuSettingsPanel },
   { key: 'system',     label: '系统设置',   icon: Settings2, panel: SettingsSystemPanel },
 ]

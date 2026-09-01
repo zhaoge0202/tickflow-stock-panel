@@ -1,5 +1,6 @@
 /**
- * 数据任务超时配置卡片 — 从 DataSources 抽出, 放在系统设置页。
+ * 网络设置面板内容 — 任务停滞超时配置 + 分时批量传输压缩开关。
+ * 菜单/Tab 名为「网络设置」(Settings.tsx), 卡片内超时区块标题保持「超时设置」。
  */
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -53,6 +54,47 @@ export function JobTimeoutCard() {
     && regularTimeout >= 60 && longTimeout >= 60
   const timeoutValuesChanged = regularTimeout !== currentRegularTimeout
     || longTimeout !== currentLongTimeout
+
+  const minuteBatchCompress = prefs.data?.minute_batch_compress ?? true
+  const dailyBatchCompress = prefs.data?.daily_batch_compress ?? true
+  // 总开关显示: 任一子开即亮, 全关才灭; 点击 = 全开/全关 (批量写两个子项)
+  const compressAnyOn = minuteBatchCompress || dailyBatchCompress
+  const toggleCompress = useMutation({
+    mutationFn: (enabled: boolean) => api.updateMinuteBatchCompress(enabled),
+    onSuccess: (saved) => {
+      qc.setQueryData<Preferences>(QK.preferences, current => (
+        current ? { ...current, ...saved } : current
+      ))
+      toast(saved.minute_batch_compress ? '分时压缩已开启' : '分时压缩已关闭', 'success')
+    },
+    onError: (e: Error) => toast(`保存失败: ${e.message}`, 'error'),
+  })
+  const toggleDailyCompress = useMutation({
+    mutationFn: (enabled: boolean) => api.updateDailyBatchCompress(enabled),
+    onSuccess: (saved) => {
+      qc.setQueryData<Preferences>(QK.preferences, current => (
+        current ? { ...current, ...saved } : current
+      ))
+      toast(saved.daily_batch_compress ? '日K压缩已开启' : '日K压缩已关闭', 'success')
+    },
+    onError: (e: Error) => toast(`保存失败: ${e.message}`, 'error'),
+  })
+  const toggleAllCompress = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const [a, b] = await Promise.all([
+        api.updateMinuteBatchCompress(enabled),
+        api.updateDailyBatchCompress(enabled),
+      ])
+      return { ...a, ...b }
+    },
+    onSuccess: (saved) => {
+      qc.setQueryData<Preferences>(QK.preferences, current => (
+        current ? { ...current, ...saved } : current
+      ))
+      toast(saved.minute_batch_compress ? '传输压缩已全部开启' : '传输压缩已全部关闭', 'success')
+    },
+    onError: (e: Error) => toast(`保存失败: ${e.message}`, 'error'),
+  })
 
   const saveJobTimeouts = useMutation({
     mutationFn: () => api.updateDataSourceJobTimeouts(regularTimeout, longTimeout),
@@ -152,6 +194,74 @@ export function JobTimeoutCard() {
           <span className="block text-[10px] text-muted/60 mt-1.5">默认 30 分钟无进度，最小 1 分钟</span>
         </label>
       </div>
+
+      <div className="mt-3 pt-3 border-t border-border space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <span className="block text-xs font-medium text-foreground">数据传输压缩</span>
+            <span className="block text-[10px] text-muted mt-0.5 leading-relaxed">
+              大数据接口（分时、日K）启用 gzip 压缩，响应可缩至约 1/8，公网访问明显更快；本机或内网可关闭以节省服务端 CPU。任一子项开启时总开关为开，点击总开关一键全开/全关，子项可单独微调，立即生效。
+            </span>
+          </div>
+          <button
+            onClick={() => toggleAllCompress.mutate(!compressAnyOn)}
+            disabled={toggleAllCompress.isPending}
+            className={`shrink-0 relative h-5 w-9 rounded-full transition-colors disabled:opacity-40 ${
+              compressAnyOn ? 'bg-accent' : 'bg-elevated'
+            }`}
+            title={compressAnyOn ? '全部关闭' : '全部开启'}
+          >
+            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+              compressAnyOn ? 'left-[1.125rem]' : 'left-0.5'
+            }`} />
+          </button>
+        </div>
+        <div className="ml-1 space-y-2 border-l-2 border-border/60 pl-3">
+          <CompressToggleRow
+            label="分时数据压缩"
+            desc="分时批量接口（自选/策略分时图，千只标的 MB 级响应）"
+            enabled={minuteBatchCompress}
+            pending={toggleCompress.isPending}
+            onToggle={() => toggleCompress.mutate(!minuteBatchCompress)}
+          />
+          <CompressToggleRow
+            label="日K数据压缩"
+            desc="日K批量接口（自选/策略日K列，千只标的 MB 级响应）"
+            enabled={dailyBatchCompress}
+            pending={toggleDailyCompress.isPending}
+            onToggle={() => toggleDailyCompress.mutate(!dailyBatchCompress)}
+          />
+        </div>
+      </div>
     </section>
+  )
+}
+
+function CompressToggleRow({ label, desc, enabled, pending, onToggle }: {
+  label: string
+  desc: string
+  enabled: boolean
+  pending: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
+        <span className="block text-[11px] font-medium text-secondary">{label}</span>
+        <span className="block text-[10px] text-muted/80 mt-0.5 leading-relaxed">{desc}</span>
+      </div>
+      <button
+        onClick={onToggle}
+        disabled={pending}
+        className={`shrink-0 relative h-4 w-7 rounded-full transition-colors disabled:opacity-40 ${
+          enabled ? 'bg-accent' : 'bg-elevated'
+        }`}
+        title={enabled ? '点击关闭' : '点击开启'}
+      >
+        <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-all ${
+          enabled ? 'left-[0.875rem]' : 'left-0.5'
+        }`} />
+      </button>
+    </div>
   )
 }
