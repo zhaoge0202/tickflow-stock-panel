@@ -409,8 +409,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     ? '分时穿越信号需逐股订阅, 暂不支持自选分组作用域'
     : intradaySupport?.reason
   // 指数: 监控类型仅 signal/price (无涨跌停/策略/封单语义)
+  // date: 由「持仓提醒」页 (批次派生) 生成, 监控中心不手工创建
   const visibleTypes = (options.data?.types ?? []).filter(
-    t => assetType !== 'index' || t.key === 'signal' || t.key === 'price',
+    t => t.key !== 'date' && (assetType !== 'index' || t.key === 'signal' || t.key === 'price'),
   )
   // 指数: 作用范围仅 symbols (无全市场/板块语义); ETF: 不支持自选分组 (分组为个股)
   const visibleScopes = (options.data?.scopes ?? []).filter(

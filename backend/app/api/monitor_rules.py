@@ -97,6 +97,9 @@ class RuleModel(BaseModel):
     conditions: list[ConditionModel] = []
     logic: str = "and"        # and | or
     cooldown_seconds: int = 3600
+    # date 类型 (日期提醒): 纯日历窗口, 无 conditions
+    remind_date: str | None = None   # YYYY-MM-DD
+    lead_days: int = 0               # 提前 N 天进入提醒窗口
     severity: str = "info"    # info | warn | critical
     webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
@@ -166,6 +169,7 @@ def get_options(request: Request):
             {"key": "abnormal", "label": "异动监控"},
             {"key": "sector", "label": "板块监控"},
             {"key": "volume_delta", "label": "轮询放量"},
+            {"key": "date", "label": "日期提醒"},
         ],
         "scopes": [
             {"key": "symbols", "label": "指定标的"},
@@ -288,6 +292,9 @@ def save_rule(req: RuleModel, request: Request):
             raise HTTPException(status_code=400, detail=str(e)) from e
     # 编辑现有规则时, 保留原 created_at (避免按时间排序时位置跳动)
     existing = monitor_rules.load_one(_data_dir(request), rule["id"])
+    # 批次派生规则由「持仓提醒」页托管, 监控中心只读 (启停/改/删均回持仓页)
+    if existing and existing.get("lot_id"):
+        raise HTTPException(status_code=409, detail="该规则由「持仓提醒」页托管, 请在持仓提醒页修改")
     if existing and existing.get("created_at"):
         rule["created_at"] = existing["created_at"]
     try:
@@ -344,6 +351,10 @@ def save_rule(req: RuleModel, request: Request):
 def delete_rule(rule_id: str, request: Request):
     if not monitor_rules.ID_RE.match(rule_id):
         raise HTTPException(status_code=400, detail="规则 id 非法")
+    # 批次派生规则由「持仓提醒」页托管, 删除需在持仓页操作 (级联清理派生规则)
+    existing = monitor_rules.load_one(_data_dir(request), rule_id)
+    if existing and existing.get("lot_id"):
+        raise HTTPException(status_code=409, detail="该规则由「持仓提醒」页托管, 请在持仓提醒页删除批次")
     deleted = monitor_rules.delete_one(_data_dir(request), rule_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="规则不存在")
