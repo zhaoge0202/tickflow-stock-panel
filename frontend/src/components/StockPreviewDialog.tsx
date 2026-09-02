@@ -86,7 +86,6 @@ function loadIntradayDays(): number {
     ? saved
     : DEFAULT_INTRADAY_DAYS
 }
-}
 
 function boardTag(symbol: string): { label: string; color: string } | null {
   if (/^(300|301)/.test(symbol)) return { label: '创', color: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
@@ -614,7 +613,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
                   prefetchSymbols={prefetchSymbols}
-                  intradayDays={intradayDays}
+                  intradayDays={effectiveIntradayDays}
                   dailyKlineFlex="flex-[1.4]"
                 />
               ) : (
@@ -624,7 +623,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   dateRange={dateRange}
                   infoBarOnly
                   prefetchSymbols={prefetchSymbols}
-                  intradayDays={intradayDays}
+                  intradayDays={effectiveIntradayDays}
                 />
                 <StockMultiDayIntradayChart
                   symbol={symbol}

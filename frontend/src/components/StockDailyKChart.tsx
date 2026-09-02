@@ -131,7 +131,6 @@ export function StockDailyKChart({
   const dateRange = externalDateRange ?? getDefaultRange()
 
   // 查询配置统一来自 klineDailyQueryOptions, 与 StockPanel 信息条/邻近预取共享同一 cache key (只发一次请求)
-  // 上游新增的 refetchIntervalMs(个股对话框盘中实时刷新今日蜡烛) 补挂在工厂配置之上
   const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol, refetchInterval: refetchIntervalMs })
 
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])

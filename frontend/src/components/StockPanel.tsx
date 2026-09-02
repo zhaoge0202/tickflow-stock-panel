@@ -135,7 +135,8 @@ export function StockPanel({
       }
       // 分时 tab 的多日分时 + 最新分时: 切股后分时图也免 loading (与日K并行预取)
       qc.prefetchQuery({ ...klineMinuteRangeQueryOptions(s, intradayDays), staleTime: 30_000 })
-      qc.prefetchQuery({ ...klineMinuteQueryOptions(s), staleTime: 30_000 })
+      // latest 当日分时同样 live=true: 预取与渲染同读实时源 (历史日期后端忽略 live)
+      qc.prefetchQuery({ ...klineMinuteQueryOptions(s, undefined, true), staleTime: 30_000 })
       // 日K用 fetchQuery (返回数据) 以便级联预取分时; 邻股预取失败静默, 不影响切股。
       void qc.fetchQuery({ ...klineDailyQueryOptions(s, dateRange, extColumns), staleTime: 30_000 })
         .then((res) => {
@@ -144,7 +145,7 @@ export function StockPanel({
           const lastDate = res?.rows?.at(-1)?.date
           if (lastDate) {
             const d = String(lastDate).slice(0, 10)
-            // live=true: 若 d 为当日, 预取即命中实时源, 与实际渲染的 queryKey 同源 (历史日期后端忽略 live)
+            // 同上 live=true: 该日若为当日即命中实时源 (历史日期后端忽略 live)
             qc.prefetchQuery({ ...klineMinuteQueryOptions(s, d, true), staleTime: 30_000 })
           }
         })

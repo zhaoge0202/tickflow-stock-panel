@@ -32,8 +32,8 @@ export function klineDailyQueryOptions(
 /**
  * 单日分时查询配置 — 与 klineDailyQueryOptions 同风格的单源 options (date 为空 = 最新日内)。
  *
- * live 透传上游语义: 当日盘中传 true 后端直接实时拉取最新K (不被分钟增量落盘的本地分区拖慢);
- * 历史日期后端自行忽略 live, 所以预取/多日图恒传 true 也不会影响历史读取。
+ * live 仅当日盘中生效: 传 true 时后端实时拉取最新K, 不被分钟增量落盘(≥60s 一轮)拖慢;
+ * 历史日期后端自行忽略 live, 故多日图与预取恒传 true 亦不影响历史读取。
  */
 export function klineMinuteQueryOptions(symbol: string, date?: string, live?: boolean) {
   return {
