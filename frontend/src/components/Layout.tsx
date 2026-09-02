@@ -49,12 +49,15 @@ import {
   Moon,
   X,
   WifiOff,
+  Menu,
+  PanelLeft,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { useIsDesktop } from '@/lib/useMediaQuery'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { fmtPct } from '@/lib/format'
@@ -333,6 +336,10 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
   )
 }
 
+// 侧边栏桌面三态: expanded(14rem) / rail(3.5rem 图标条) / hidden(0 + 左缘悬浮按钮)。
+// 移动端 (<768px) 不参与三态 — aside 以抽屉呈现 (见 Layout 内 drawerOpen)。
+type NavState = 'expanded' | 'rail' | 'hidden'
+
 export function Layout() {
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: settingsState } = useSettings()
@@ -365,16 +372,41 @@ export function Layout() {
   // 自选二级菜单展开状态 — 默认当前在自选页时展开
   const [watchlistNavExpanded, setWatchlistNavExpanded] = useState(location.pathname === '/watchlist')
 
-  // 侧边栏收起状态 — 持久化到 localStorage
-  const [navCollapsed, setNavCollapsed] = useState(() => {
-    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) return true
-    try { return localStorage.getItem('tf-nav-collapsed') === '1' } catch { return false }
+  // 侧边栏三态 — expanded(14rem) / rail(3.5rem 图标条) / hidden(0, 左缘悬浮按钮唤出)。
+  // 仅桌面 (≥768px) 参与三态; 移动端 aside 以抽屉呈现, 由 drawerOpen 控制, 恒渲染完整形态。
+  // 持久化到 localStorage; 迁移旧两态键 tf-nav-collapsed (收起 → 图标条)。
+  const [navState, setNavState] = useState<NavState>(() => {
+    try {
+      const v = localStorage.getItem('tf-nav-state')
+      if (v === 'expanded' || v === 'rail' || v === 'hidden') return v
+      return localStorage.getItem('tf-nav-collapsed') === '1' ? 'rail' : 'expanded'
+    } catch { return 'expanded' }
   })
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const isDesktop = useIsDesktop()
+  // 桌面 hidden 态的左缘悬浮按钮: hover 1s 以 overlay 预览 (不挤压主区), 点击固定展开 (push)
+  const [overlayPreview, setOverlayPreview] = useState(false)
+  const overlayTimer = useRef<number | undefined>(undefined)
+  const setNavStatePersist = (s: NavState) => {
+    setNavState(s)
+    try { localStorage.setItem('tf-nav-state', s) } catch {}
+  }
+  // 图标条形态仅桌面 rail 态成立 (移动端抽屉与 overlay 预览恒为完整形态)
+  const railMode = isDesktop && navState === 'rail'
+  // 路由跳转/切回桌面时关抽屉; ESC 同样关闭
+  useEffect(() => { setDrawerOpen(false) }, [location.pathname, isDesktop])
+  useEffect(() => {
+    if (!drawerOpen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawerOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [drawerOpen])
 
   // 分组等权平均涨跌幅 — 复用 watchlist/enriched 查询缓存(与自选页同 key,
-  // 盘中随 SSE 刷新)。可见性门控: 子菜单实际可见(侧栏展开 + 二级菜单展开)
-  // 时才拉取, 收起状态下不为隐藏 UI 发请求。
-  const navGroupPctVisible = groupsInNav && !navCollapsed && watchlistNavExpanded
+  // 盘中随 SSE 刷新)。可见性门控: 子菜单实际可见(桌面展开 + 二级菜单展开, 或
+  // 移动端抽屉打开) 时才拉取, 收起/隐藏/抽屉关闭下不为隐藏 UI 发请求。
+  const sidebarFullyVisible = navState === 'expanded' && (isDesktop || drawerOpen)
+  const navGroupPctVisible = groupsInNav && sidebarFullyVisible && watchlistNavExpanded
   const { data: navWatchlist } = useQuery({
     queryKey: QK.watchlist,
     queryFn: api.watchlistList,
@@ -425,25 +457,9 @@ export function Layout() {
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
-  useEffect(() => {
-    const compact = window.matchMedia('(max-width: 767px)')
-    const syncSidebarWithViewport = (event: MediaQueryListEvent | MediaQueryList) => {
-      if (event.matches) {
-        setNavCollapsed(true)
-        return
-      }
-      try { setNavCollapsed(localStorage.getItem('tf-nav-collapsed') === '1') } catch {}
-    }
-    syncSidebarWithViewport(compact)
-    compact.addEventListener('change', syncSidebarWithViewport)
-    return () => compact.removeEventListener('change', syncSidebarWithViewport)
-  }, [])
+  // 三态循环切换 (仅桌面): 展开 → 图标条 → 隐藏 → 展开
   const toggleNavCollapsed = () => {
-    setNavCollapsed(prev => {
-      const next = !prev
-      try { localStorage.setItem('tf-nav-collapsed', next ? '1' : '0') } catch {}
-      return next
-    })
+    setNavStatePersist(navState === 'expanded' ? 'rail' : navState === 'rail' ? 'hidden' : 'expanded')
   }
   // 指数条: 固定核心四只 (产品契约, 不再可配置), 常驻显示
   const sidebarIndexes = CORE_INDEXES
@@ -583,18 +599,66 @@ export function Layout() {
   return (
     <div
       className="h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
-      style={{ gridTemplateColumns: navCollapsed ? '3.5rem 1fr' : '14rem 1fr' }}
+      style={{ gridTemplateColumns: isDesktop && !overlayPreview ? (navState === 'expanded' ? '14rem 1fr' : navState === 'rail' ? '3.5rem 1fr' : '0 1fr') : '1fr' }}
     >
-      <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
-        <div className={cn('border-b border-border shrink-0', navCollapsed ? 'px-2 pt-3 pb-2' : 'px-4 pt-4 pb-3')}>
+      {/* 移动端抽屉遮罩 */}
+      {!isDesktop && drawerOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50"
+          onClick={() => setDrawerOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      {/* 移动端汉堡按钮 / 桌面 hidden 态左缘悬浮按钮 (hover 1s overlay 预览, 点击固定展开) */}
+      {(!isDesktop || navState === 'hidden') && !overlayPreview && (
+        <button
+          onClick={() => {
+            window.clearTimeout(overlayTimer.current)
+            setOverlayPreview(false)
+            if (isDesktop) setNavStatePersist('expanded')
+            else setDrawerOpen(true)
+          }}
+          onMouseEnter={() => {
+            if (!isDesktop) return
+            window.clearTimeout(overlayTimer.current)
+            overlayTimer.current = window.setTimeout(() => setOverlayPreview(true), 1000)
+          }}
+          onMouseLeave={() => window.clearTimeout(overlayTimer.current)}
+          className={cn(
+            'fixed z-30 rounded-btn border border-border bg-surface/90 text-muted shadow-lg backdrop-blur-sm',
+            'hover:text-foreground hover:bg-elevated transition-colors duration-150 ease-smooth',
+            isDesktop ? 'left-1.5 top-1/2 -translate-y-1/2 p-2' : 'left-3 top-3 p-2',
+          )}
+          title={isDesktop ? '展开菜单' : '打开菜单'}
+        >
+          {isDesktop
+            ? <PanelLeftOpen className="h-4 w-4 shrink-0" />
+            : <Menu className="h-4 w-4 shrink-0" />}
+        </button>
+      )}
+      <aside
+        onMouseLeave={() => { if (overlayPreview) setOverlayPreview(false) }}
+        className={cn(
+          'bg-surface flex flex-col min-h-0 overflow-hidden',
+          isDesktop
+            ? cn('h-full', navState === 'hidden' && !overlayPreview ? 'border-r-0' : 'border-r border-border')
+            : cn(
+                'fixed inset-y-0 left-0 z-50 w-[80vw] max-w-[320px] border-r border-border shadow-2xl',
+                'transition-transform duration-200 ease-smooth',
+                drawerOpen ? 'translate-x-0' : '-translate-x-full',
+              ),
+          overlayPreview && 'fixed inset-y-0 left-0 z-50 w-56 shadow-2xl border-r border-border',
+        )}
+      >
+        <div className={cn('border-b border-border shrink-0', railMode ? 'px-2 pt-3 pb-2' : 'px-4 pt-4 pb-3')}>
           {/* Brand block — 收起时只显 logo 居中 */}
-          <div className={cn('flex', navCollapsed ? 'flex-col items-center gap-2' : 'items-center gap-2')}>
+          <div className={cn('flex', railMode ? 'flex-col items-center gap-2' : 'items-center gap-2')}>
             <Logo
-              size={navCollapsed ? 24 : 26}
+              size={railMode ? 24 : 26}
               className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.4)]"
               style={{ color: BRAND }}
             />
-            {!navCollapsed && (
+            {!railMode && (
               <div
                 className="font-bold text-[11px] uppercase tracking-[0.14em] text-foreground whitespace-nowrap"
                 style={{ textShadow: `0 0 10px ${BRAND}44` }}
@@ -602,24 +666,34 @@ export function Layout() {
                 Tick Stock Panel
               </div>
             )}
-            {/* 收起/展开 按钮 */}
-            <button
-              onClick={toggleNavCollapsed}
-              className={cn(
-                'flex items-center rounded-btn text-muted hover:text-foreground hover:bg-elevated/60 transition-colors duration-150 ease-smooth',
-                navCollapsed ? 'justify-center p-1.5' : 'ml-auto p-1.5',
-              )}
-              title={navCollapsed ? '展开菜单' : '收起菜单'}
-            >
-              {navCollapsed
-                ? <PanelLeftOpen className="h-3.5 w-3.5 shrink-0" />
-                : <PanelLeftClose className="h-3.5 w-3.5 shrink-0" />
-              }
-            </button>
+            {/* 收起/展开 按钮 (桌面三态循环) / 移动端抽屉关闭按钮 */}
+            {isDesktop ? (
+              <button
+                onClick={toggleNavCollapsed}
+                className={cn(
+                  'flex items-center rounded-btn text-muted hover:text-foreground hover:bg-elevated/60 transition-colors duration-150 ease-smooth',
+                  railMode ? 'justify-center p-1.5' : 'ml-auto p-1.5',
+                )}
+                title={railMode ? '隐藏菜单 (再点击左缘按钮可唤出)' : '收起菜单'}
+              >
+                {railMode
+                  ? <PanelLeft className="h-3.5 w-3.5 shrink-0" />
+                  : <PanelLeftClose className="h-3.5 w-3.5 shrink-0" />
+                }
+              </button>
+            ) : (
+              <button
+                onClick={() => setDrawerOpen(false)}
+                className="ml-auto flex items-center rounded-btn p-1.5 text-muted hover:text-foreground hover:bg-elevated/60 transition-colors duration-150 ease-smooth"
+                title="关闭菜单"
+              >
+                <X className="h-4 w-4 shrink-0" />
+              </button>
+            )}
           </div>
 
             {/* 状态卡 — 收起时隐藏 */}
-            {!navCollapsed && (
+            {!railMode && (
               <div className="mt-2.5 border-t border-border/60 pt-1">
                 <DataSourceHealthBadge matrix={matrix} />
               <div className="mx-2 border-t border-border/45" aria-hidden="true" />
@@ -634,7 +708,7 @@ export function Layout() {
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
           {visibleNavItems.map(({ to, label, icon: Icon, badge }) => {
             // 「自选」项 — 开启分组侧栏且未整体收起时, 渲染为可展开父项 + 二级分组
-            const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !navCollapsed && watchlistGroups.length > 0
+            const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !railMode && watchlistGroups.length > 0
             return (
               <div key={to}>
                 {isWatchlistExpandable ? (
@@ -665,11 +739,11 @@ export function Layout() {
                   /* 普通菜单项 */
                   <NavLink
                     to={to}
-                    title={navCollapsed ? label : undefined}
+                    title={railMode ? label : undefined}
                     className={({ isActive }) =>
                       cn(
                         'group relative flex items-center rounded-btn text-sm transition-all duration-150 ease-smooth',
-                        navCollapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2',
+                        railMode ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2',
                         isActive
                           ? 'bg-elevated text-foreground font-medium'
                           : 'text-foreground/75 hover:bg-elevated/70 hover:text-foreground',
@@ -686,21 +760,21 @@ export function Layout() {
                           )}
                         />
                         <Icon className={cn('h-4 w-4 shrink-0 transition-colors', isActive ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
-                        {!navCollapsed && <span className="flex-1">{label}</span>}
-                        {!navCollapsed && badge && (
+                        {!railMode && <span className="flex-1">{label}</span>}
+                        {!railMode && badge && (
                           <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                             {badge}
                           </span>
                         )}
                         {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                        {to === '/data' && isDataSyncing && !navCollapsed && (
+                        {to === '/data' && isDataSyncing && !railMode && (
                           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
                         )}
-                        {to === '/data' && !isDataSyncing && dataSyncJustDone && !navCollapsed && (
+                        {to === '/data' && !isDataSyncing && dataSyncJustDone && !railMode && (
                           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
                         )}
                         {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                        {to === '/monitor' && !navCollapsed && <MonitorBadge active={isActive} />}
+                        {to === '/monitor' && !railMode && <MonitorBadge active={isActive} />}
                       </>
                     )}
                   </NavLink>
@@ -762,13 +836,13 @@ export function Layout() {
           })}
           <ExtensionSlot
             name="layout.navigation.extra"
-            context={{ collapsed: navCollapsed, pathname: location.pathname }}
+            context={{ collapsed: railMode, pathname: location.pathname }}
             compact
           />
         </nav>
 
         {/* 全局行情开关 — 收起时只显示状态指示点 */}
-        {navCollapsed ? (
+        {railMode ? (
           <div className="border-t border-border px-2 py-2.5 shrink-0 flex justify-center">
             <button
               onClick={() => handleToggle(!realtimeEnabled)}
@@ -880,16 +954,16 @@ export function Layout() {
         </div>
         )}
 
-        <div className={cn('border-t border-border py-3 shrink-0', navCollapsed ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
-          <div className={navCollapsed ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
+        <div className={cn('border-t border-border py-3 shrink-0', railMode ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
+          <div className={railMode ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
             <ThemeToggle />
             <NavLink
               to="/settings"
-              title={navCollapsed ? '设置' : undefined}
+              title={railMode ? '设置' : undefined}
               className={({ isActive }) =>
                 cn(
                   'group relative flex items-center rounded-btn text-sm transition-all duration-150 ease-smooth',
-                  navCollapsed ? 'justify-center px-0 py-2' : 'flex-1 gap-3 px-3 py-2',
+                  railMode ? 'justify-center px-0 py-2' : 'flex-1 gap-3 px-3 py-2',
                   isActive
                     ? 'bg-elevated text-foreground font-medium'
                     : 'text-foreground/75 hover:bg-elevated/70 hover:text-foreground',
@@ -905,8 +979,8 @@ export function Layout() {
                     )}
                   />
                   <Settings className={cn('h-4 w-4 shrink-0 transition-colors', isActive ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
-                  {!navCollapsed && <span>设置</span>}
-                  {!navCollapsed && version && (
+                  {!railMode && <span>设置</span>}
+                  {!railMode && version && (
                     <span className="ml-auto font-mono text-[10px] text-muted/50 select-none shrink-0">
                       {version}
                     </span>
