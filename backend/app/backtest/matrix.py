@@ -1427,12 +1427,23 @@ def _populate_matrix_derived_arrays(
     if "turnover_rate" in wanted_fields and "turnover_rate" not in parquet_fields:
         float_shares = fields.get("float_shares")
         if float_shares is None:
-            raise ValueError("matrix turnover_rate requires float_shares")
-        _write_turnover_rate_matrix(
-            fields["turnover_rate"],
-            arrays["volume"],
-            float_shares,
-        )
+            # 非股票资产 (etf/index) 无股本数据: instruments 无 float_shares 列,
+            # 也无法从 parquet 读到 turnover_rate (数据源不提供, ETF 无换手率口径)。
+            # 此时矩阵中该字段保持全 NaN 列 (matrix_fields 已占位), 与运行期
+            # _optional_field 的降级语义一致, 供不需要换手率的策略正常回测。
+            # 若本应有股本 (vector_fields 含 float_shares) 却取不到值, 才是数据
+            # 异常, 由 _resolve_matrix_storage_fields 的 vector 装载路径显式失败。
+            if "float_shares" in vector_fields:
+                raise ValueError("matrix turnover_rate requires float_shares")
+            logger.info(
+                "turnover_rate unavailable (asset has no float_shares); keeping NaN column"
+            )
+        else:
+            _write_turnover_rate_matrix(
+                fields["turnover_rate"],
+                arrays["volume"],
+                float_shares,
+            )
     return names, latest_limits
 
 

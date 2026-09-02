@@ -487,20 +487,30 @@ _SHARE_CAP_FILTER_KEYS = (
     "float_cap_max",
 )
 
+# 换手率界同样依赖股本派生字段 (turnover_rate ← float_shares):
+# 非股票资产 (etf/index) 没有股本数据, 若保留非 None 的换手率界,
+# _basic_filter_dependencies 会解析出 turnover_rate 字段需求,
+# 矩阵缓存档构建时因无 float_shares 而失败 (matrix turnover_rate requires
+# float_shares)。与市值界同一族问题, 必须一并中和。
+_TURNOVER_FILTER_KEYS = (
+    "turnover_min",
+    "turnover_max",
+)
+
 
 def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
-    """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值与流通
-    市值界对它们既无意义也不可满足: 依赖解析前先置 None, 避免解析出
-    total_shares/float_shares 字段需求导致矩阵加载直接失败。
+    """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值、流通
+    市值与换手率界对它们既无意义也不可满足: 依赖解析前先置 None, 避免解析出
+    total_shares/float_shares/turnover_rate 字段需求导致矩阵加载直接失败。
 
     运行期过滤无需同步修改 —— polars 侧有列守卫 (engine._basic_filter_expr),
     矩阵侧 _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN
-    界, 二者对缺失股本列本就降级为 no-op。
+    界, 二者对缺失股本/换手率列本就降级为 no-op。
     """
     if asset_type == "stock" or not basic_filter:
         return basic_filter
     sanitized = dict(basic_filter)
-    for key in _SHARE_CAP_FILTER_KEYS:
+    for key in (*_SHARE_CAP_FILTER_KEYS, *_TURNOVER_FILTER_KEYS):
         sanitized[key] = None
     return sanitized
 
