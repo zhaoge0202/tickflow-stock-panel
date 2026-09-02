@@ -58,6 +58,7 @@ import { Logo } from './Logo'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useIsDesktop } from '@/lib/useMediaQuery'
+import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { fmtPct } from '@/lib/format'
@@ -457,6 +458,9 @@ export function Layout() {
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
+  // 开启实时行情时若存在排队中的挖掘任务 → 确认弹窗 (实时落盘会让排队任务开跑即失败)
+  const [miningQueuedWarning, setMiningQueuedWarning] = useState<number | null>(null)
+  const miningWarnBackdrop = useDialogBackdrop(() => setMiningQueuedWarning(null))
   // 三态循环切换 (仅桌面): 展开 → 图标条 → 隐藏 → 展开
   const toggleNavCollapsed = () => {
     setNavStatePersist(navState === 'expanded' ? 'rail' : navState === 'rail' ? 'hidden' : 'expanded')
@@ -577,23 +581,45 @@ export function Layout() {
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
   const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
 
-  const handleToggle = async (enabled: boolean) => {
-    // 开启时重新校验实时权限 (以 quote_status 的数据源无关判定为准)
-    if (enabled) {
-      const fresh = await qc.fetchQuery({
-        queryKey: QK.quoteStatus,
-        queryFn: api.quoteStatus,
-      })
-      if (!fresh.realtime_allowed) {
-        toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
-        return
-      }
-    }
-    await toggleQuote.mutateAsync(enabled)
+  const doEnableRealtime = async () => {
+    await toggleQuote.mutateAsync(true)
     // 仅在交易时段立即获取一次行情
-    if (enabled && isTrading) {
+    if (isTrading) {
       api.intradayRefresh().catch(() => {})
     }
+  }
+
+  const handleToggle = async (enabled: boolean) => {
+    // 开启时重新校验实时权限 (以 quote_status 的数据源无关判定为准)
+    if (!enabled) {
+      await toggleQuote.mutateAsync(false)
+      return
+    }
+    const fresh = await qc.fetchQuery({
+      queryKey: QK.quoteStatus,
+      queryFn: api.quoteStatus,
+    })
+    if (!fresh.realtime_allowed) {
+      toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
+      return
+    }
+    // 有排队中的挖掘任务时确认: 实时落盘会让排队任务开跑即失败
+    // (data generation changed); 运行中的任务会自动跟随新数据, 不受影响。
+    try {
+      const runs = await qc.fetchQuery({
+        queryKey: QK.miningRuns,
+        queryFn: api.miningRuns,
+        staleTime: 5_000,
+      })
+      const queued = (runs?.items ?? []).filter(r => r.status === 'queued').length
+      if (queued > 0) {
+        setMiningQueuedWarning(queued)
+        return
+      }
+    } catch {
+      // 挖掘运行历史查询失败不阻塞开关实时行情
+    }
+    await doEnableRealtime()
   }
 
   return (
@@ -1024,6 +1050,25 @@ export function Layout() {
       <AiReportBubble />
       <StockAnalysisHost />
       <StockAnalysisBubble />
+
+      {/* 开启实时行情 + 排队中的挖掘任务 → 冲突确认 */}
+      {miningQueuedWarning != null && (
+        <div {...miningWarnBackdrop} className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+          <div onClick={e => e.stopPropagation()} className="w-full max-w-sm rounded-2xl border border-border bg-surface p-5 shadow-2xl">
+            <div className="text-sm font-semibold text-foreground">
+              有挖掘任务正在排队
+            </div>
+            <p className="mt-2 text-xs leading-5 text-secondary">
+              当前有 {miningQueuedWarning} 个挖掘任务排队等待执行。开启实时行情后盘中数据会持续落盘，
+              排队中的任务启动时可能因数据更新校验而失败（需重新开始挖掘）；已开始运行的任务不受影响。
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setMiningQueuedWarning(null)} className="h-8 rounded-btn border border-border px-3 text-xs text-secondary hover:bg-elevated">取消</button>
+              <button type="button" onClick={() => { setMiningQueuedWarning(null); void doEnableRealtime() }} className="h-8 rounded-btn bg-accent px-3 text-xs font-semibold text-white hover:opacity-90">仍要开启</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
