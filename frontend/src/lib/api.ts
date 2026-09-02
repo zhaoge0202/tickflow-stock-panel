@@ -2192,10 +2192,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbol, note, group_id: groupId ?? null }),
     }),
-  watchlistBatchAdd: (symbols: string[], note = '', groupId?: string | null) =>
+  watchlistBatchAdd: (symbols: string[], note = '', groupId?: string | null, groupIds?: string[]) =>
     request<{ symbols: WatchlistEntry[]; added: number }>('/api/watchlist/batch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, note, group_id: groupId ?? null }),
+      body: JSON.stringify({
+        symbols,
+        note,
+        group_id: groupId ?? null,
+        group_ids: groupIds?.length ? groupIds : null,
+      }),
     }),
   watchlistGroups: () =>
     request<{ groups: WatchlistGroup[] }>('/api/watchlist/groups'),
@@ -2251,6 +2256,22 @@ export const api = {
       quiet,
     })
   },
+  watchlistImportCsv: (file: File, signal?: AbortSignal, quiet = false) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<WatchlistImportResult>('/api/watchlist/import-csv', {
+      method: 'POST',
+      body: fd,
+      signal,
+      quiet,
+    })
+  },
+  watchlistImportCodes: (text: string, signal?: AbortSignal) =>
+    request<WatchlistImportResult>('/api/watchlist/import-codes', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+      signal,
+    }),
   watchlistRemove: (symbol: string) =>
     request<{ symbols: WatchlistEntry[] }>(
       `/api/watchlist/${encodeURIComponent(symbol)}`,
