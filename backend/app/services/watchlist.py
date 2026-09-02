@@ -183,15 +183,23 @@ def add_batch(
     symbols: list[str],
     note: str = "",
     group_id: str | None = None,
+    group_ids: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     """批量添加并保持既有语义：每个新处理的标的移动到列表最前面。
 
-    group_id 为可选的初始分组(如从某分组页添加时); 重复添加的标的保留
-    既有全部分组, 仅在显式传入 group_id 且尚未属于该组时并入。
+    分组为可选的初始分组：``group_id`` 单组（如从某分组页添加）或 ``group_ids``
+    多组（如批量导入同时并入多个分组）。重复添加的标的保留既有全部分组，
+    仅把尚未属于的传入分组并入；二者可同时使用、内部去重。
     """
     with _LOCK:
         groups = _read_groups()
-        _validate_group_id(group_id, groups)
+        # 合并单/多组参数并去重；逐组校验存在性
+        apply_ids: list[str] = []
+        for gid in (group_ids or []) + ([group_id] if group_id is not None else []):
+            if gid in apply_ids:
+                continue
+            _validate_group_id(gid, groups)
+            apply_ids.append(gid)
         rows = _read_entries().to_dicts()
         added = 0
         for symbol in symbols:
@@ -200,8 +208,9 @@ def add_batch(
                 added += 1
             rows = [row for row in rows if row["symbol"] != symbol]
             gids = list((existing or {}).get("group_ids") or [])
-            if group_id is not None and group_id not in gids:
-                gids.append(group_id)
+            for gid in apply_ids:
+                if gid not in gids:
+                    gids.append(gid)
             rows.insert(0, {
                 "symbol": symbol,
                 "added_at": datetime.utcnow().isoformat(timespec="seconds"),
