@@ -10,7 +10,7 @@ import { fmtBigNum, fmtPct } from '@/lib/format'
 import { DimensionMembersDialog, dimensionKindForSourceField, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { useDataStatus, useCapabilities, useSettings, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
@@ -98,7 +98,10 @@ const _SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent/40', warn: 'bg-warning', critical: 'bg-danger',
 }
 
-function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => void }) {
+function MonitorWidget({ onStockClick, activeSymbol }: {
+  onStockClick: (event: AlertEvent, navList?: NavItem[]) => void
+  activeSymbol?: string
+}) {
   const navigate = useNavigate()
   const alerts = useQuery({
     queryKey: ['alerts', ''],
@@ -106,6 +109,8 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
     refetchInterval: 10000,
   })
   const events: AlertEvent[] = alerts.data?.alerts ?? []
+  // 切股导航列表: 有 symbol 的触发记录
+  const alertNav = toNavItems(events.filter((ev): ev is AlertEvent & { symbol: string } => !!ev.symbol))
 
   if (events.length === 0) {
     return (
@@ -129,13 +134,13 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
               initial={{ opacity: 0, y: -8, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ duration: 0.3, delay: Math.min(i * 0.03, 0.3) }}
-              className="relative overflow-hidden rounded-md border border-border/40 bg-surface/60 pl-2.5 pr-2 py-1.5 hover:border-border hover:bg-surface transition-colors"
+              className={`relative overflow-hidden rounded-md border pl-2.5 pr-2 py-1.5 transition-colors ${ev.symbol && ev.symbol === activeSymbol ? 'border-accent/40 bg-accent/5' : 'border-border/40 bg-surface/60 hover:border-border hover:bg-surface'}`}
             >
               <div className={cn('absolute left-0 top-0 h-full w-0.5', sev)} />
               {/* 第一行: 代码 + 名称 + 价格 + 涨跌幅 (点击代码/名称弹日K) */}
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={() => isSector ? navigate('/monitor') : ev.symbol && onStockClick(ev)}
+                  onClick={() => isSector ? navigate('/monitor') : ev.symbol && onStockClick(ev, alertNav)}
                   title={isSector ? '在监控中心查看板块告警' : ev.symbol ? `查看 ${ev.symbol} 日K` : undefined}
                   className={`inline-flex items-center gap-1 min-w-0 shrink-0 rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 ${isSector || ev.symbol ? 'cursor-pointer' : 'cursor-default'}`}
                 >
@@ -409,9 +414,10 @@ function MiniMetric({ label, value, cls = 'text-foreground' }: { label: string; 
   )
 }
 
-function StockList({ title, rows, mode, onStockClick }: {
+function StockList({ title, rows, mode, onStockClick, activeSymbol }: {
   title: string; rows: MarketSnapshotRow[]; mode: 'gain' | 'loss' | 'amount' | 'active';
   onStockClick?: (symbol: string, name?: string) => void;
+  activeSymbol?: string;
 }) {
   return (
     <div className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
@@ -423,7 +429,7 @@ function StockList({ title, rows, mode, onStockClick }: {
         {rows.slice(0, 8).map((r, idx) => (
           <div
             key={`${r.symbol}-${idx}`}
-            className="grid grid-cols-[18px_1fr_auto] items-center gap-1.5 rounded-md bg-elevated/40 px-1.5 py-1 cursor-pointer hover:bg-elevated hover:brightness-110 transition-colors border border-transparent hover:border-border/60"
+            className={`grid grid-cols-[18px_1fr_auto] items-center gap-1.5 rounded-md px-1.5 py-1 cursor-pointer transition-colors border ${r.symbol === activeSymbol ? 'bg-accent/10 border-accent/30' : 'bg-elevated/40 border-transparent hover:bg-elevated hover:brightness-110 hover:border-border/60'}`}
             onClick={() => onStockClick?.(r.symbol, r.name ?? undefined)}
           >
             <span className="text-center font-mono text-[10px] text-muted">{idx + 1}</span>
@@ -467,10 +473,11 @@ function StockList({ title, rows, mode, onStockClick }: {
   )
 }
 
-function RankColumn({ title, rows, tone, onStockClick, onDimensionClick }: {
+function RankColumn({ title, rows, tone, onStockClick, onDimensionClick, activeSymbol }: {
   title: string; rows: OverviewDimensionRankItem[]; tone: 'bull' | 'bear';
-  onStockClick?: (symbol: string, name?: string) => void
-  onDimensionClick?: (target: DimensionMembersTarget) => void
+  onStockClick?: (symbol: string, name?: string) => void;
+  onDimensionClick?: (target: DimensionMembersTarget) => void;
+  activeSymbol?: string;
 }) {
   return (
     <div className="min-w-0 space-y-1">
@@ -478,6 +485,7 @@ function RankColumn({ title, rows, tone, onStockClick, onDimensionClick }: {
       {rows.slice(0, 5).map((r, idx) => {
         const kind = r.source_field ? dimensionKindForSourceField(r.source_field) : null
         const clickable = !!(r.source_field && kind && onDimensionClick)
+        const isActive = r.leader?.symbol != null && r.leader.symbol === activeSymbol
         return (
         <div
           key={`${title}-${r.name}-${idx}`}
@@ -487,9 +495,9 @@ function RankColumn({ title, rows, tone, onStockClick, onDimensionClick }: {
             sourceField: r.source_field!,
           })}
           title={clickable ? `查看「${r.name}」成分股` : undefined}
-          className={`grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md bg-elevated/40 px-1.5 py-1 border border-transparent transition-colors ${
-            clickable ? 'cursor-pointer hover:border-accent/40 hover:bg-elevated/70' : 'hover:border-border/60'
-          }`}
+          className={`grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-1.5 py-1 border transition-colors ${
+            isActive ? 'border-accent/30 bg-accent/10' : 'border-transparent bg-elevated/40'
+          } ${clickable ? 'cursor-pointer hover:border-accent/40 hover:bg-elevated/70' : 'hover:border-border/60'}`}
         >
           <span className="text-center font-mono text-[9px] text-muted">{idx + 1}</span>
           <div className="min-w-0">
@@ -533,10 +541,11 @@ function RankColumn({ title, rows, tone, onStockClick, onDimensionClick }: {
   )
 }
 
-function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick }: {
+function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick, activeSymbol }: {
   title: string; rank?: OverviewMarket['concept_rank']; configUrl: string;
-  onStockClick?: (symbol: string, name?: string) => void
-  onDimensionClick?: (target: DimensionMembersTarget) => void
+  onStockClick?: (symbol: string, name?: string) => void;
+  onDimensionClick?: (target: DimensionMembersTarget) => void;
+  activeSymbol?: string;
 }) {
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   return (
@@ -544,8 +553,8 @@ function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick }:
       <SectionTitle icon={Flame} title={title} hint="领涨/领跌 · 点击板块看成分股" />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
-          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onDimensionClick={onDimensionClick} />
-          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} onDimensionClick={onDimensionClick} />
+          <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onDimensionClick={onDimensionClick} activeSymbol={activeSymbol} />
+          <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} onDimensionClick={onDimensionClick} activeSymbol={activeSymbol} />
         </div>
       ) : (
         <div className="py-4 text-center">
@@ -562,11 +571,30 @@ function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick }:
   )
 }
 
+// 切股导航列表构建 (与列表展示行一致: StockList 只显示前 8)
+function stockListNav(rows: MarketSnapshotRow[]): NavItem[] {
+  return toNavItems(rows.slice(0, 8))
+}
+function rankNav(rank?: OverviewMarket['concept_rank']): NavItem[] {
+  const leaders = [...(rank?.leading ?? []), ...(rank?.lagging ?? [])]
+    .map(r => r.leader)
+    .filter((l): l is NonNullable<typeof l> & { symbol: string } => !!l?.symbol)
+  return toNavItems(leaders)
+}
+
 export function Dashboard() {
   const qc = useQueryClient()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
-  const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
+  const [previewStock, setPreviewStock] = useState<{
+    symbol: string
+    name?: string
+    alert?: AlertEvent
+    /** 打开来源榜: 仅高亮来源榜的行 */
+    source?: 'gain' | 'loss' | 'amount' | 'active' | 'concept' | 'industry' | 'alert'
+    /** 切股导航列表 (来自来源榜) */
+    navList?: NavItem[]
+  } | null>(null)
   // 板块成分股弹窗 (概念/行业热度卡片行点击)
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
@@ -855,19 +883,19 @@ export function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis"
-              onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
+            <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" activeSymbol={previewStock?.source === 'concept' ? previewStock.symbol : undefined}
+              onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'concept', navList: rankNav(data.concept_rank) })}
               onDimensionClick={setDimensionTarget} />
-            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis"
-              onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
+            <HotRankCard title="行业热度" rank={data.industry_rank} configUrl="/industry-analysis" activeSymbol={previewStock?.source === 'industry' ? previewStock.symbol : undefined}
+              onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'industry', navList: rankNav(data.industry_rank) })}
               onDimensionClick={setDimensionTarget} />
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
-            <StockList title="涨幅榜" rows={data.top_gainers} mode="gain" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="跌幅榜" rows={data.top_losers} mode="loss" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="成交额榜" rows={data.turnover_leaders} mode="amount" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
-            <StockList title="活跃换手" rows={data.active_leaders} mode="active" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />
+            <StockList title="涨幅榜" rows={data.top_gainers} mode="gain" activeSymbol={previewStock?.source === 'gain' ? previewStock.symbol : undefined} onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'gain', navList: stockListNav(data.top_gainers) })} />
+            <StockList title="跌幅榜" rows={data.top_losers} mode="loss" activeSymbol={previewStock?.source === 'loss' ? previewStock.symbol : undefined} onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'loss', navList: stockListNav(data.top_losers) })} />
+            <StockList title="成交额榜" rows={data.turnover_leaders} mode="amount" activeSymbol={previewStock?.source === 'amount' ? previewStock.symbol : undefined} onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'amount', navList: stockListNav(data.turnover_leaders) })} />
+            <StockList title="活跃换手" rows={data.active_leaders} mode="active" activeSymbol={previewStock?.source === 'active' ? previewStock.symbol : undefined} onStockClick={(symbol, name) => setPreviewStock({ symbol, name, source: 'active', navList: stockListNav(data.active_leaders) })} />
           </div>
         </main>
 
@@ -887,9 +915,12 @@ export function Dashboard() {
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </Link>
             </div>
-            <MonitorWidget onStockClick={(event) => {
-              if (event.symbol) setPreviewStock({ symbol: event.symbol, name: event.name ?? undefined, alert: event })
-            }} />
+            <MonitorWidget
+              activeSymbol={previewStock?.source === 'alert' ? previewStock.symbol : undefined}
+              onStockClick={(event, navList) => {
+                if (event.symbol) setPreviewStock({ symbol: event.symbol, name: event.name ?? undefined, alert: event, source: 'alert', navList })
+              }}
+            />
           </section>
         </aside>
       </div>
@@ -904,6 +935,8 @@ export function Dashboard() {
           signals: previewStock.alert.signals,
           message: previewStock.alert.message,
         } : null}
+        navList={previewStock?.navList}
+        onNavigate={(sym, n) => setPreviewStock(prev => prev ? { ...prev, symbol: sym, name: n, alert: undefined } : prev)}
         onClose={() => setPreviewStock(null)}
       />
       <DimensionMembersDialog

@@ -9,10 +9,11 @@ import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
+import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import {
   DimensionMembersDialog,
   dimensionKindForSourceField,
@@ -468,6 +469,7 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand,
   onDimensionClick,
   isMonitored,
+  active,
   groups,
   onToggleMember,
   groupChangePending,
@@ -485,6 +487,8 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand: (key: string) => void
   onDimensionClick: (target: DimensionMembersTarget) => void
   isMonitored?: boolean
+  /** 正在 K 线弹窗预览中 → 高亮卡片 */
+  active?: boolean
   groups: WatchlistGroup[]
   onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   groupChangePending: boolean
@@ -510,7 +514,7 @@ const StockCard = React.memo(function StockCard({
 
   return (
     <div
-      className={`relative rounded-lg border border-border bg-surface hover:border-border/80 transition-all duration-200 group cursor-pointer overflow-hidden ${bgGlow}`}
+      className={`relative rounded-lg border border-border bg-surface hover:border-border/80 transition-all duration-200 group cursor-pointer overflow-hidden ${bgGlow} ${active ? 'ring-2 ring-accent/60' : ''}`}
       onClick={() => onPreview(r.symbol, name ?? '')}
     >
       {/* 左侧彩色指示条 */}
@@ -776,11 +780,14 @@ export function Watchlist() {
   }, [])
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
+  // 切股导航: 默认用 previewNavItems(自选列表); 从成分弹窗打开时用成分列表覆盖
+  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const closePreview = useCallback(() => {
     setPreviewSymbol(null)
     setPreviewName('')
+    setPreviewNavList([])
   }, [])
 
   const handleToggleExpand = useCallback((cellKey: string) => {
@@ -1255,6 +1262,13 @@ export function Watchlist() {
     [filteredRows, sortRows, columns],
   )
 
+  // 切股导航列表: 按列表当前展示顺序 (与 sortedRows 一致, 排序/筛选后行序随之变化)。
+  // 弹窗未打开时跳过构建 — sortedRows 随行情 tick 重建, 避免无谓分配。
+  const previewNavItems = useMemo(
+    () => previewSymbol ? toNavItems(sortedRows) : [],
+    [previewSymbol, sortedRows],
+  )
+
   const cardColumns = useCardColumnCount()
   const cardGridRef = useRef<HTMLDivElement>(null)
   const virtualizeCards = viewMode === 'card' && !groupCardsOpen && sortedRows.length > VIRTUAL_LIST_THRESHOLD
@@ -1341,6 +1355,7 @@ export function Watchlist() {
       onToggleExpand={handleToggleExpand}
       onDimensionClick={setDimensionTarget}
       isMonitored={monitoredSymbols.has(r.symbol)}
+      active={previewSymbol === r.symbol}
       groups={groups}
       onToggleMember={handleToggleMember}
       groupChangePending={addGroupMember.isPending || removeGroupMember.isPending}
@@ -1668,7 +1683,7 @@ export function Watchlist() {
               onSortToggle={handleSortToggle}
               extraSortableKeys={INTRADAY_SORTABLE_KEYS}
               rowKey={(r: any) => r.symbol}
-              rowClassName={() => 'border-t border-border hover:bg-elevated/50 transition-colors duration-150 ease-smooth'}
+              rowClassName={(r: any) => cn('border-t border-border transition-colors duration-150 ease-smooth hover:bg-elevated/50', r.symbol === previewSymbol && 'bg-accent/10 hover:bg-accent/15')}
               // 日k列表头：标签 + 显示/隐藏眼睛按钮
               renderHeaderContent={(col) => {
                 if (col.source.type === 'builtin' && col.source.key === 'candle') {
@@ -1990,15 +2005,19 @@ export function Watchlist() {
         symbol={previewSymbol}
         name={previewName}
         onClose={closePreview}
+        navList={previewNavList.length > 0 ? previewNavList : previewNavItems}
+        onNavigate={(sym, n) => { setPreviewSymbol(sym); setPreviewName(n ?? '') }}
       />
 
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={(symbol, name, navList) => {
           setDimensionTarget(null)
           setPreviewSymbol(symbol)
           setPreviewName(name ?? '')
+          // 成分列表作为切股导航 (成员可能不在自选列表, 不能退回 previewNavItems)
+          setPreviewNavList(navList ?? previewNavItems)
         }}
       />
 

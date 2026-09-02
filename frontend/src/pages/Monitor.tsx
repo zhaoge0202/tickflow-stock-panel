@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -17,7 +17,7 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 
@@ -339,6 +339,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
+  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
 
   const clearMut = useMutation({
@@ -366,6 +367,22 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   }
 
   const events = (alertsQuery.data as any)?.alerts ?? []
+
+  // 切股导航列表: 有 symbol 的触发记录 (按展示顺序)
+  const alertsNavItems = useMemo(
+    () => toNavItems(events.filter((ev: AlertEvent) => ev.symbol)),
+    [events],
+  )
+  const handlePreviewEvent = useCallback((ev: AlertEvent) => {
+    setPreviewEv(ev)
+    setPreviewNavList(alertsNavItems)
+  }, [alertsNavItems])
+  // 弹窗内切股: 来自成分弹窗则更新 memberPreview, 否则按 symbol 找到对应事件 (保住 triggerInfo)
+  const handleNavigate = useCallback((sym: string, name?: string) => {
+    if (memberPreview) { setMemberPreview({ symbol: sym, name }); return }
+    const ev = events.find((e: AlertEvent) => e.symbol === sym)
+    if (ev) setPreviewEv(ev)
+  }, [memberPreview, events])
 
   return (
     <div className="space-y-3">
@@ -418,7 +435,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             const board = boardTag(ev.symbol)
                             return (
                               <button
-                                onClick={() => setPreviewEv(ev)}
+                                onClick={() => handlePreviewEvent(ev)}
                                 className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                                 title="点击查看日K"
                               >
@@ -497,7 +514,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           const board = boardTag(ev.symbol)
                           return (
                             <button
-                              onClick={() => setPreviewEv(ev)}
+                              onClick={() => handlePreviewEvent(ev)}
                               className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                               title="点击查看日K"
                             >
@@ -627,15 +644,18 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
           signals: previewEv.signals,
           message: previewEv.message,
         } : null}
-        onClose={() => { setPreviewEv(null); setMemberPreview(null) }}
+        navList={previewNavList}
+        onNavigate={handleNavigate}
+        onClose={() => { setPreviewEv(null); setMemberPreview(null); setPreviewNavList([]) }}
       />
 
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={(symbol, name, navList) => {
           setDimensionTarget(null)
           setMemberPreview({ symbol, name })
+          setPreviewNavList(navList ?? alertsNavItems)
         }}
       />
     </div>
@@ -694,6 +714,14 @@ function RulesList({ rulesQuery, onEdit }: {
     staleTime: 300000,
   })
   const symbolNames = namesQuery.data?.names ?? {}
+
+  // 切股导航列表: 个股规则 (取第一个 symbol, 按展示顺序)
+  const rulesNavItems = useMemo(
+    () => rules
+      .filter(r => r.scope === 'symbols' && r.symbols.length > 0)
+      .map(r => ({ symbol: r.symbols[0], name: symbolNames[r.symbols[0]] ?? undefined })),
+    [rules, symbolNames],
+  )
 
   const del = useMutation({
     mutationFn: api.monitorRuleDelete,
@@ -930,6 +958,8 @@ function RulesList({ rulesQuery, onEdit }: {
       <StockPreviewDialog
         symbol={previewSymbol}
         name={previewSymbol ? symbolNames[previewSymbol] : undefined}
+        navList={rulesNavItems}
+        onNavigate={(sym) => setPreviewSymbol(sym)}
         onClose={() => setPreviewSymbol(null)}
       />
     </div>

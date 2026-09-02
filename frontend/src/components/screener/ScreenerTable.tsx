@@ -22,6 +22,8 @@ import {
   dimensionKindForSourceField,
   type DimensionMembersTarget,
 } from '@/components/DimensionMembersDialog'
+import { toNavItems, type NavItem } from '@/components/StockPreviewDialog'
+import { cn } from '@/lib/cn'
 
 interface ScreenerTableProps {
   rows: any[]
@@ -30,7 +32,7 @@ interface ScreenerTableProps {
   symbolStrategyMap: Map<string, string[]>
   activeStrategy: string | null
   watchlistSet: Set<string>
-  onPreview: (symbol: string, name: string) => void
+  onPreview: (symbol: string, name?: string, navList?: NavItem[]) => void
   onAddToWatchlist: (symbol: string, groupId: string | null) => void
   onRemoveFromWatchlist: (symbol: string) => void
   watchlistPending: boolean
@@ -57,6 +59,8 @@ interface ScreenerTableProps {
   /** 表头排序（受控，由 Screener.tsx 传入） */
   sort?: SortState | null
   onSortToggle?: (colId: string) => void
+  /** 正在 K 线弹窗预览中的 symbol → 高亮该行 */
+  activeSymbol?: string | null
 }
 
 /** 渲染标签数组（含 maxTags 折叠/展开、横竖排列）。策略列与 ext 列共用。
@@ -161,7 +165,7 @@ export function ScreenerTable({
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
   strategyTagsExpanded = false, onToggleStrategyTags,
-  sort, onSortToggle,
+  sort, onSortToggle, activeSymbol,
 }: ScreenerTableProps) {
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
@@ -244,7 +248,7 @@ export function ScreenerTable({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => onPreview(r.symbol, r.name ?? '')}
+                onClick={() => onPreview(r.symbol, r.name ?? '', toNavItems(rows))}
                 className={`flex items-center gap-2 text-left ${isExpired ? 'cursor-default' : ''}`}
               >
                 {board ? (
@@ -393,10 +397,12 @@ export function ScreenerTable({
         onSortToggle={onSortToggle}
         minWidth={Math.max(900, columns.filter(c => c.visible).length * 110)}
         rowKey={(r: any) => `${r.symbol}${r._expired ? '-expired' : ''}`}
-        rowClassName={(r: any) => r._expired
-          ? 'border-border/50 opacity-40'
-          : 'border-border hover:bg-elevated/50'
-        }
+        rowClassName={(r: any) => cn(
+          r._expired
+            ? 'border-border/50 opacity-40'
+            : 'border-border hover:bg-elevated/50',
+          r.symbol === activeSymbol && 'bg-accent/10',
+        )}
         // 日k / 分时列表头：标签 + 显示/隐藏的眼睛按钮（与自选页一致）
         renderHeaderContent={(col) => {
         if (col.source.type !== 'builtin') return undefined
@@ -487,9 +493,9 @@ export function ScreenerTable({
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={(symbol, name, navList) => {
           setDimensionTarget(null)
-          onPreview(symbol, name ?? '')
+          onPreview(symbol, name ?? '', navList)
         }}
       />
     </>
