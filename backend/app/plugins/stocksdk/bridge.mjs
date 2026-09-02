@@ -213,6 +213,7 @@ async function opRealtime(sdk, job) {
       volume: q.volume,
       amount: q.amount,
       change_pct: q.changePercent,
+      timestamp: q.timestamp,
     })
   }
   return rows
