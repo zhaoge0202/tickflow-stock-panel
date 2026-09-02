@@ -300,6 +300,7 @@ export function StockInfoBar({
         builtinSectionLabel="可选指标"
         extColumnAlign="left"
         showStandaloneToggle
+        disableBackdropBlur
       />
     </div>
   )
