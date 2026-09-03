@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 import numpy as np
@@ -19,6 +19,10 @@ from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+# 旧信号回测的指标 warmup 日历窗口 (#201): 与 backtest.factor.FACTOR_WARMUP_DAYS
+# 同源 (120 交易日 → 保守取日历日), 覆盖 MA60/MACD/BOLL 等最长回看
+_WARMUP_CALENDAR_DAYS = 120 * 1.6
 
 # vectorbt 是 optional extras(见 pyproject.toml).未装时只有 backtest 不可用,其他功能正常.
 _vbt = None
@@ -162,11 +166,17 @@ class BacktestService:
         try:
             from app.tickflow.repository import enriched_dirname
             enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
+            # 指标 warmup (#201): MA/MACD/RSI/BOLL 需要区间前的历史窗口,
+            # 直接按 [start,end] 过滤后 compute_all 会让区间头部的指标失真。
+            # 与挖掘侧同款公式 (mining_runtime: warmup = max(120, bars*1.6)),
+            # 此处指标最长回看约 120 交易日, 取保守日历日窗口; 数据不足时
+            # 自然退化 (有多少算多少)。计算完成后裁回 [start,end]。
+            warmup_start = start - timedelta(days=_WARMUP_CALENDAR_DAYS)
             df = (
                 scan_enriched_parquet(enriched_glob)
                 .filter(
                     (pl.col("symbol").is_in(symbols))
-                    & (pl.col("date") >= start)
+                    & (pl.col("date") >= warmup_start)
                     & (pl.col("date") <= end)
                 )
                 .sort(["date", "symbol"])
@@ -182,6 +192,7 @@ class BacktestService:
         # 即时计算指标 + 信号
         from app.indicators.pipeline import compute_all
         df = compute_all(df)
+        df = df.filter(pl.col("date") >= start)
 
         # 选择需要的列
         needed_cols = [

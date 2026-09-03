@@ -57,6 +57,10 @@ import {
 const BOARDS = ['沪主板', '深主板', '创业板', '科创板', '北交所'] as const
 type BoardType = typeof BOARDS[number]
 
+// 板块筛选选项 = 股票板块 + ETF（ETF 无 symbol 板块语义，按 asset_type 匹配）
+const ETF_BOARD = 'ETF'
+const BOARD_OPTIONS = [...BOARDS, ETF_BOARD]
+
 function getBoardType(symbol: string): BoardType | null {
   if (/^(300|301)/.test(symbol)) return '创业板'
   if (/^688/.test(symbol))       return '科创板'
@@ -1112,9 +1116,10 @@ export function Watchlist() {
   const [filters, setFilters] = useState<Record<string, { min?: string; max?: string; text?: string }>>({})
 
   // 板块筛选（持久化）
+  // 兼容: 旧存储不含 ETF 键 → 加载时补上，保持 ETF 行默认可见
   const [boardFilter, setBoardFilter] = useState<Set<string>>(() => {
     const saved = storage.watchlistBoardFilter.get([])
-    return saved.length > 0 ? new Set(saved) : new Set(BOARDS) // 默认全选
+    return saved.length > 0 ? new Set([...saved, ETF_BOARD]) : new Set(BOARD_OPTIONS) // 默认全选
   })
   const persistBoardFilter = useCallback((next: Set<string>) => {
     setBoardFilter(next)
@@ -1156,7 +1161,7 @@ export function Watchlist() {
 
   const resetAllFilters = useCallback(() => {
     setFilters({})
-    persistBoardFilter(new Set(BOARDS))
+    persistBoardFilter(new Set(BOARD_OPTIONS))
     setExcludeST(false)
     storage.watchlistExcludeST.set(false)
   }, [persistBoardFilter])
@@ -1184,9 +1189,10 @@ export function Watchlist() {
   const filteredRows = useMemo(() => {
     // 板块筛选（全选时跳过）
     let result = rowsInSelectedGroup
-    if (boardFilter.size > 0 && boardFilter.size < BOARDS.length) {
+    if (boardFilter.size > 0 && boardFilter.size < BOARD_OPTIONS.length) {
       result = result.filter(r => {
-        // 非股票 (指数/ETF) 无板块语义, 不受板块筛选影响 (顺带修复 ETF 行被误过滤)
+        if (r.asset_type === 'etf') return boardFilter.has(ETF_BOARD)
+        // 其他非股票 (指数等) 无板块语义, 不受板块筛选影响
         if (r.asset_type && r.asset_type !== 'stock') return true
         const board = getBoardType(r.symbol)
         return board != null && boardFilter.has(board)
@@ -1219,7 +1225,7 @@ export function Watchlist() {
   }, [rowsInSelectedGroup, filters, columns, boardFilter, excludeST])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
-  const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
+  const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARD_OPTIONS.length
   const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter || excludeST
 
   // 排序（复用共享三态排序 hook）。分时列按「最新分钟收盘 vs 昨收」排序（分时图最后一点同口径），
@@ -1527,7 +1533,7 @@ export function Watchlist() {
           <div className="mb-2">
             <div className="text-[10px] text-muted uppercase tracking-wider mb-0.5">板块</div>
             <div className="flex flex-wrap gap-1">
-              {BOARDS.map(board => {
+              {BOARD_OPTIONS.map(board => {
                 const active = boardFilter.has(board)
                 return (
                   <button
