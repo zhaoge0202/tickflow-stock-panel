@@ -59,6 +59,7 @@ def _freeze_today(monkeypatch, day: dt.date = dt.date(2026, 7, 8)) -> None:
 def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
     _freeze_today(monkeypatch)
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
+    monkeypatch.setattr(kline, "in_continuous_session", lambda: True)
 
     local_df = _minute_df(dt.date(2026, 7, 8), 240, 7.30)
     live_df = _minute_df(dt.date(2026, 7, 8), 3, 7.40)
@@ -70,7 +71,12 @@ def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
 
     monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", fake_fetch)
 
-    resp = kline.get_minute(_request(_Repo(local_df)), "000725.SZ", dt.date(2026, 7, 8))
+    resp = kline.get_minute(
+        _request(_Repo(local_df)),
+        "000725.SZ",
+        dt.date(2026, 7, 8),
+        live=True,
+    )
 
     assert resp["source"] == "live"
     assert len(resp["rows"]) == 3

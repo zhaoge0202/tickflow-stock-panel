@@ -725,6 +725,27 @@ def get_realtime_quote_scope() -> dict:
     }
 
 
+def get_realtime_watchlist_symbols() -> list[str]:
+    """返回自选实时轮询标的，保留旧调用方兼容入口。"""
+    try:
+        from app.services import watchlist
+
+        return [
+            str(row.get("symbol") or "").strip().upper()
+            for row in watchlist.list_symbols()
+            if row.get("symbol")
+        ]
+    except Exception:
+        return []
+
+
+def get_realtime_index_symbols() -> list[str]:
+    """返回核心指数实时轮询标的，保留旧调用方兼容入口。"""
+    from app.services.index_const import CORE_INDEX_SYMBOLS
+
+    return list(CORE_INDEX_SYMBOLS)
+
+
 def get_sse_refresh_pages() -> dict[str, bool]:
     """返回每个页面的 SSE 刷新开关。"""
     stored = load().get("sse_refresh_pages", {})

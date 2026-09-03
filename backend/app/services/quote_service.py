@@ -1767,7 +1767,7 @@ class QuoteService:
         - cur < prev (数据源重置/口径跳变) 的个股丢弃差值; 跨交易日清空
         """
         today = cn_today()
-        if self._prev_volume_date != today:
+        if getattr(self, "_prev_volume_date", None) != today:
             self._prev_stock_volume = None
             self._prev_volume_fetched_at = None
             self._prev_volume_date = today

@@ -27,7 +27,7 @@ def test_rps_rotation_computes_change_pct_from_narrow_close_scan(monkeypatch):
         "_sym_up": ["A.SZ", "B.SZ"],
         "concept": ["上涨概念", "波动概念"],
     })
-    monkeypatch.setattr(rps_rotation, "_load_concept_map_df", lambda repo: (map_df, 2))
+    monkeypatch.setattr(rps_rotation, "_load_concept_map_df", lambda repo, kind="concept": (map_df, 2))
 
     result = rps_rotation.build_rps_rotation(_Repo(), days=7)
 
