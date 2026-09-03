@@ -1338,6 +1338,7 @@ def sync_and_persist_minute(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
     force_full_days: bool = False,
+    target_date: date | None = None,
 ) -> int:
     """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
@@ -1368,7 +1369,17 @@ def sync_and_persist_minute(
 
     now = datetime.now()
 
-    if extend_backward:
+    if target_date is not None:
+        # 个股详情的“重新获取”必须只补选中的交易日，不能误补当前日期。
+        start_time = datetime(
+            target_date.year, target_date.month, target_date.day,
+            9, 25, tzinfo=CN_TZ,
+        )
+        end_time = datetime(
+            target_date.year, target_date.month, target_date.day,
+            15, 5, tzinfo=CN_TZ,
+        )
+    elif extend_backward:
         # 向前扩展模式: 从本地最早数据往前补, 叠加已有数据避免缺口。
         earliest_dt = _earliest_minute_datetime(repo)
         # 按交易日换算自然日 (7/5 系数)。>41 交易日时 +10 天余量覆盖节假日。

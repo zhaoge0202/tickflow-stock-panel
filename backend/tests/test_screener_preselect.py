@@ -241,6 +241,32 @@ def test_preselect_payload_uses_next_trade_day_and_main_board_only(monkeypatch, 
     assert [row["symbol"] for row in result["rows"]] == ["000001.SZ"]
 
 
+def test_preselect_payload_ignores_strategies_without_auction_algorithm(monkeypatch, tmp_path):
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=tmp_path),
+    )
+
+    class _Engine:
+        def has(self, _sid):
+            return True
+
+    monkeypatch.setattr(auction_preselect.strategy_config, "list_overrides", lambda *_args: {})
+    monkeypatch.setattr(auction_preselect, "ScreenerService", lambda *_args, **_kwargs: SimpleNamespace(
+        latest_date=lambda: date(2026, 8, 11),
+    ))
+
+    payload = auction_preselect.build_preselect_payload(
+        repo,
+        _Engine(),
+        as_of=date(2026, 8, 11),
+        trade_date=date(2026, 8, 12),
+        strategy_ids=["low_volatility_leader"],
+    )
+
+    assert payload["status"] == "empty_strategies"
+    assert payload["results"] == {}
+
+
 class _MonitorEngine:
     def latest_strategy_results(self):
         return {}

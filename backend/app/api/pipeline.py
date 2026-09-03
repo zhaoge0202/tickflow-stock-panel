@@ -34,12 +34,19 @@ async def run_now(request: Request) -> dict:
     repo = request.app.state.repo
     capset = request.app.state.capabilities
 
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        pass
+    include_minute = bool(body.get("include_minute"))
+
     # 检测卡死的 running job (如 reload 后孤儿 task / 网络读无限阻塞)。
     # reap_stale 会在 /run 和 /jobs/{id} 轮询端点都调用,保证卡死后能自愈。
     job_store.reap_stale()
 
     # 单飞: 复用任何活跃 (pending∨running) 任务, is_new=False 时不再调度新任务
-    job_id, is_new = job_store.create()
+    job_id, is_new = job_store.create(long_running=include_minute)
     if not is_new:
         return {"job_id": job_id, "reused": True}
 
@@ -62,8 +69,18 @@ async def run_now(request: Request) -> dict:
             def _run() -> dict:
                 if qs:
                     with qs.paused():
-                        return daily_pipeline.run_now(repo, capset, on_progress=progress)
-                return daily_pipeline.run_now(repo, capset, on_progress=progress)
+                        return daily_pipeline.run_now(
+                            repo,
+                            capset,
+                            on_progress=progress,
+                            include_minute=include_minute,
+                        )
+                return daily_pipeline.run_now(
+                    repo,
+                    capset,
+                    on_progress=progress,
+                    include_minute=include_minute,
+                )
 
             result = await loop.run_in_executor(_long_task_executor, _run)
             job_store.succeed(job_id, result)

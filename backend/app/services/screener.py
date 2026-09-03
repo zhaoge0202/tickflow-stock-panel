@@ -502,3 +502,16 @@ class ScreenerService:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    def latest_strategy_date(self) -> date | None:
+        """返回当前可用于正式日线策略的最新日期。
+
+        enriched 最新分区可能是盘中实时快照，不能直接作为正式选股日期。
+        统一交给 strategy_date 模块按 15:30 截止时间过滤。
+        """
+        from app.services.strategy_date import latest_strategy_date
+
+        return latest_strategy_date(
+            self.repo.store.data_dir,
+            self.asset_type,
+        )

@@ -105,6 +105,29 @@ def test_sync_minute_single_uses_requested_days(monkeypatch):
     refresh.assert_called_once_with(repo, "kline_minute")
 
 
+def test_sync_minute_single_passes_selected_date(monkeypatch):
+    repo = MagicMock()
+    repo.resolve_asset_type.return_value = "stock"
+    capset = MagicMock()
+    sync = MagicMock(return_value=240)
+    refresh = MagicMock()
+    monkeypatch.setattr(kline_api, "_minute_allowed", lambda _: True)
+    monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
+    monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", refresh)
+
+    result = asyncio.run(kline_api.sync_minute_single(
+        _request(repo, capset),
+        {"symbol": "600177.SH", "date": "2026-07-15"},
+    ))
+
+    assert result["rows"] == 240
+    sync.assert_called_once_with(
+        ["600177.SH"], repo, capset, days=5,
+        force_full_days=True, target_date=date(2026, 7, 15),
+    )
+    refresh.assert_called_once_with(repo, "kline_minute")
+
+
 def test_sync_minute_single_rejects_invalid_days():
     with pytest.raises(HTTPException, match="days 必须在 1 到 30 之间"):
         asyncio.run(kline_api.sync_minute_single(

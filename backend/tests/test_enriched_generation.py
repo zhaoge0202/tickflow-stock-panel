@@ -13,6 +13,7 @@ from app.enriched_generation import (
     EnrichedPublication,
     get_enriched_generation,
 )
+from app import enriched_generation
 from app.tickflow.repository import DataStore, KlineRepository
 
 
@@ -119,6 +120,47 @@ def test_recovery_takes_over_when_owner_pid_is_dead_on_windows(tmp_path, monkeyp
     assert marker["state"] == "ready"
     assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
     assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
+
+
+def test_publication_replace_retries_windows_reader_lock(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"old")
+    real_replace = enriched_generation.os.replace
+    calls = {"count": 0}
+
+    def flaky_replace(source, destination):
+        if str(destination).endswith("part.parquet"):
+            calls["count"] += 1
+        if str(destination).endswith("part.parquet") and calls["count"] == 1:
+            raise PermissionError(5, "拒绝访问")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(enriched_generation.os, "replace", flaky_replace)
+    monkeypatch.setattr(enriched_generation.time, "sleep", lambda _seconds: None)
+
+    publication = EnrichedPublication(tmp_path, recover=True)
+    publication.write_parquet(_frame(13.0), out)
+    publication.commit()
+
+    assert calls["count"] == 2
+    assert pl.read_parquet(out)["close"].item() == pytest.approx(13.0)
+
+
+def test_publication_replace_failure_is_not_swallowed(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"old")
+
+    def always_fail(*_args, **_kwargs):
+        raise PermissionError(5, "拒绝访问")
+
+    monkeypatch.setattr(enriched_generation, "replace_with_retry", always_fail)
+    publication = EnrichedPublication(tmp_path, recover=True)
+
+    with pytest.raises(PermissionError, match="拒绝访问"):
+        publication.write_parquet(_frame(14.0), out)
+    assert out.read_bytes() == b"old"
 
 
 def test_panel_cache_generation_change_forces_recompute() -> None:

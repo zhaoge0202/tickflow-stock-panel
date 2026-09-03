@@ -18,6 +18,10 @@ from app.services import strategy_cache
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
 from app.services.screener import ScreenerService
+from app.services.strategy_date import (
+    cache_generated_after_cutoff,
+    reject_intraday_strategy_date,
+)
 from app.strategy import config as strategy_config
 
 logger = logging.getLogger(__name__)
@@ -207,6 +211,21 @@ def _results_with_ext(results: dict[str, dict], ext_values: dict[str, dict[str, 
     return {sid: _result_with_ext(r, ext_values) for sid, r in results.items()}
 
 
+def _resolve_screener_date(
+    svc: ScreenerService,
+    requested: date | None,
+    *,
+    timeframe: str = "1d",
+) -> date | None:
+    """解析筛选日期；正式日线策略盘中只允许使用已完成交易日。"""
+    if timeframe != "1d":
+        return requested or svc.latest_date()
+    if requested is not None:
+        reject_intraday_strategy_date(requested)
+        return requested
+    return svc.latest_strategy_date()
+
+
 def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]]) -> dict:
     if not ext_values:
         return cached
@@ -302,7 +321,10 @@ def strategies(
 def run_custom(req: CustomRequest, request: Request):
     repo = request.app.state.repo
     svc = ScreenerService(repo, asset_type=req.asset_type)
-    as_of = req.as_of or svc.latest_date()
+    try:
+        as_of = _resolve_screener_date(svc, req.as_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not as_of:
         raise HTTPException(status_code=400,
                             detail="无可用数据日期 — enriched 表为空,请先运行盘后管道")
@@ -322,7 +344,10 @@ def run_custom(req: CustomRequest, request: Request):
 def run_preset(req: PresetRequest, request: Request):
     repo = request.app.state.repo
     svc = ScreenerService(repo, asset_type=req.asset_type)
-    as_of = req.as_of or svc.latest_date()
+    try:
+        as_of = _resolve_screener_date(svc, req.as_of, timeframe=req.timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not as_of:
         raise HTTPException(status_code=400, detail="无可用数据日期")
 
@@ -443,15 +468,52 @@ def preselect(req: PreselectRequest, request: Request):
 
 def _cached_with_realtime(request: Request) -> dict:
     """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
-    data_dir = request.app.state.repo.store.data_dir
+    repo = request.app.state.repo
+    data_dir = repo.store.data_dir
+    try:
+        allowed: date | None = ScreenerService(repo).latest_strategy_date()
+    except Exception:  # noqa: BLE001
+        allowed = None
     cached = strategy_cache.read_cache(data_dir)
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
+    else:
+        # 旧版本可能在盘中把今天半成品写进缓存。正式策略页面不能继续消费这份
+        # 结果；保留监控引擎的实时叠加能力，但把正式缓存基准退回已完成日期。
+        try:
+            cached_as_of = date.fromisoformat(str(cached.get("as_of")))
+            cache_ready = cache_generated_after_cutoff(
+                cached_as_of,
+                cached.get("updated_at"),
+            )
+            if allowed is not None and (cached_as_of > allowed or not cache_ready):
+                cached = {
+                    "as_of": allowed.isoformat(),
+                    "results": {},
+                    "today_ever_rows": {},
+                    "updated_at": None,
+                }
+        except (TypeError, ValueError):
+            pass
 
     # 叠加监控引擎内存里的实时结果 (若有), 用新鲜数据覆盖同策略的盘后结果
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
     if monitor_engine is not None:
         realtime_results = monitor_engine.latest_strategy_results()
+        if allowed is not None:
+            # 监控引擎可以继续产生盘中快照，但不能把当天快照伪装成正式日线
+            # 策略结果覆盖到缓存读取接口。
+            filtered_realtime: dict = {}
+            for sid, result in realtime_results.items():
+                if not isinstance(result, dict) or not result.get("as_of"):
+                    filtered_realtime[sid] = result
+                    continue
+                try:
+                    if date.fromisoformat(str(result["as_of"])) <= allowed:
+                        filtered_realtime[sid] = result
+                except (TypeError, ValueError):
+                    continue
+            realtime_results = filtered_realtime
         if realtime_results:
             results = dict(cached.get("results") or {})
             results.update(realtime_results)
@@ -1123,12 +1185,17 @@ def run_all(request: Request, body: Optional[dict] = None):
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
 
-    # 解析日期
+    # 解析日期；日线默认使用正式策略日期，显式请求当天则由后端再次拦截。
     raw_date = body.get("as_of")
     if raw_date:
         as_of = date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
     else:
-        as_of = svc.latest_date()
+        as_of = _resolve_screener_date(svc, None, timeframe=timeframe)
+    if timeframe == "1d" and as_of is not None:
+        try:
+            reject_intraday_strategy_date(as_of)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not as_of:
         return {"as_of": None, "results": {}}
 

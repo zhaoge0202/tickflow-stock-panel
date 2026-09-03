@@ -105,6 +105,13 @@ _CORE_INDEXES = {
     "000016.SH": "上证50",
 }
 
+# Provider 会在多个请求线程中被分别实例化；闸门必须是模块级共享对象，
+# 否则每个实例各自限流仍会把 tdx-api 同时打满。
+# tdx-api 当前使用单个通达信连接/节点时，两个并发请求也会互相拖到
+# 业务超时；所有调用统一排队，保证实时分笔优先获得完整响应。
+_TDX_HTTP_CONCURRENCY_DEFAULT = 1
+_tdx_http_gate = threading.BoundedSemaphore(_TDX_HTTP_CONCURRENCY_DEFAULT)
+
 
 @dataclass
 class _TDXAPIConfig:
@@ -186,7 +193,15 @@ class TDXAPIProvider:
         def _fetch_one(symbol: str) -> pl.DataFrame | None:
             app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
             try:
-                rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
+                # tdx-api 的历史分钟接口按 date 返回单日数据；单日详情查询
+                # 必须显式传日期，否则服务端按当天返回，历史日期会被过滤为空。
+                request_date = None
+                if start_time is not None and end_time is not None and start_time.date() == end_time.date():
+                    request_date = start_time.strftime("%Y%m%d")
+                if request_date:
+                    rows = self._fetch_minute_rows_with_retry(symbol, kline_type, request_date)
+                else:
+                    rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
             except Exception as e:
                 logger.warning("tdx-api minute 拉取失败(%s): %s", app_symbol, e)
                 if single:
@@ -232,12 +247,14 @@ class TDXAPIProvider:
         out = [frame for frame in frames if frame is not None and not frame.is_empty()]
         return pl.concat(out, how="diagonal_relaxed") if out else pl.DataFrame()
 
-    def _fetch_minute_rows_with_retry(self, symbol: str, kline_type: str) -> list[dict]:
+    def _fetch_minute_rows_with_retry(
+        self, symbol: str, kline_type: str, trade_date: str | None = None,
+    ) -> list[dict]:
         """TDX 节点会偶发返回业务超时, 换节点重试可恢复。"""
         last_error: Exception | None = None
         for attempt in range(1, _MINUTE_FETCH_ATTEMPTS + 1):
             try:
-                return self._fetch_kline_rows(symbol, kline_type)
+                return self._fetch_kline_rows(symbol, kline_type, trade_date)
             except Exception as e:
                 last_error = e
                 logger.warning(
@@ -730,17 +747,35 @@ class TDXAPIProvider:
             return _preview(self.name, "financial", df)
         raise ValueError(f"tdx-api 不支持数据集: {dataset}")
 
-    def _fetch_kline_rows(self, symbol: str, kline_type: str) -> list[dict]:
+    def _fetch_kline_rows(
+        self, symbol: str, kline_type: str, trade_date: str | None = None,
+    ) -> list[dict]:
+        params = {"code": _to_tdx_code(symbol), "type": kline_type}
+        if kline_type.startswith("minute"):
+            # TDX 原生分钟 K 没有按日期查询，sidecar 会在带 date 时
+            # 拉取并过滤最近数据；无 date 的区间请求保持 2400 根限制，
+            # 避免后台同步无条件放大为 24000 根。
+            params["limit"] = "800" if trade_date == _cn_today().strftime("%Y%m%d") else "2400"
+        if trade_date:
+            params["date"] = trade_date
         data = self._request(
             "GET",
             "/api/kline-all/tdx",
-            params={"code": _to_tdx_code(symbol), "type": kline_type},
+            params=params,
             timeout=max(self.timeout, 60.0),
         )
         return list((data or {}).get("list") or [])
 
     def _request(self, method: str, path: str, **kwargs):
-        resp = self._client.request(method, path, **kwargs)
+        # tdx-api 内部还要占用通达信节点和代理连接。页面查询、后台入库、
+        # 实时轮询共用 sidecar 时，限制入口并发可避免业务层返回 HTTP 200 + 超时错误。
+        acquired = _tdx_http_gate.acquire(timeout=10.0)
+        if not acquired:
+            raise TimeoutError("tdx-api 请求并发过高，等待连接超时")
+        try:
+            resp = self._client.request(method, path, **kwargs)
+        finally:
+            _tdx_http_gate.release()
         resp.raise_for_status()
         payload = resp.json()
         if isinstance(payload, dict) and "code" in payload:

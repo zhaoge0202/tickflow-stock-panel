@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import datetime, timezone, timedelta
 
 from app.api import screener as screener_api
+from app import market_time
+from app.services import strategy_date
 
 
 class _MonitorEngine:
@@ -51,6 +54,29 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
     assert payload["results"] == {"strategy_a": {"total": 2, "as_of": "2026-07-20"}}
     assert payload["today_ever_counts"] == {"strategy_a": 4}
     assert "rows" not in payload["results"]["strategy_a"]
+
+
+def test_cached_discards_legacy_intraday_today_cache(monkeypatch, tmp_path):
+    enriched = tmp_path / "kline_daily_enriched"
+    for value in ("2026-09-02", "2026-09-03"):
+        partition = enriched / f"date={value}"
+        partition.mkdir(parents=True)
+        (partition / "part.parquet").write_bytes(b"placeholder")
+
+    cached = {
+        "as_of": "2026-09-03",
+        "results": {"strategy_a": {"as_of": "2026-09-03", "total": 1, "rows": []}},
+        "updated_at": 1,
+    }
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_args: cached)
+    now = lambda: datetime(2026, 9, 3, 14, 0, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr(market_time, "cn_now", now)
+    monkeypatch.setattr(strategy_date, "cn_now", now)
+
+    payload = screener_api._cached_with_realtime(_request(tmp_path))
+
+    assert payload["as_of"] == "2026-09-02"
+    assert payload["results"] == {}
 
 
 def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_membership(monkeypatch, tmp_path):
