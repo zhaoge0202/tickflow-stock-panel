@@ -1435,7 +1435,7 @@ def _populate_matrix_derived_arrays(
             # 异常, 由 _resolve_matrix_storage_fields 的 vector 装载路径显式失败。
             if "float_shares" in vector_fields:
                 raise ValueError("matrix turnover_rate requires float_shares")
-            logger.info(
+            logger.debug(
                 "turnover_rate unavailable (asset has no float_shares); keeping NaN column"
             )
         else:

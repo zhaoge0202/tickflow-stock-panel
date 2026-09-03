@@ -261,7 +261,7 @@ def validate(rule: dict) -> None:
         try:
             date.fromisoformat(remind.strip())
         except ValueError:
-            raise ValueError(f"remind_date 必须是 YYYY-MM-DD 日期: {remind!r}")
+            raise ValueError(f"remind_date 必须是 YYYY-MM-DD 日期: {remind!r}") from None
         lead = rule.get("lead_days", 0)
         if isinstance(lead, bool) or not isinstance(lead, int) or lead < 0:
             raise ValueError("lead_days 必须是非负整数 (提前提醒天数)")
