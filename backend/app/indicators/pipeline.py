@@ -1181,7 +1181,12 @@ def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
 
 
 def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -> float:
-    """从实时指数行情取某交易所首选基准的今日涨跌, 缺数据时 0。"""
+    """从实时指数行情取某交易所首选基准的今日涨跌 (小数制), 缺数据时 0。
+
+    入参 index_quotes 来自 quote_service 的指数展示缓存, 其 change_pct/pct/pct_change
+    列为百分数口径 (CONTRIBUTING §3.1), 消费前必须显式 /100 (#232);
+    close/prev_close 兜底路径本身就是小数, 不转换。
+    """
     if index_quotes is None or index_quotes.is_empty():
         return 0.0
     df = index_quotes.filter(pl.col("symbol").is_in(candidates))
@@ -1196,7 +1201,7 @@ def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -
         for col in ("change_pct", "pct", "pct_change"):
             v = row.get(col)
             if v is not None:
-                return float(v)
+                return float(v) / 100.0
         if row.get("close") is not None and row.get("prev_close") is not None and row["prev_close"]:
             return float(row["close"] / row["prev_close"] - 1)
     return 0.0

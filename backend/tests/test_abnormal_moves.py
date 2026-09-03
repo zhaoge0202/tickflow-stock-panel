@@ -12,6 +12,7 @@ from app.indicators.pipeline import (
     load_benchmark_momentum,
 )
 from app.services.abnormal_moves import (
+    _bench_rt_pct,
     _hist_cache,
     _hist_cache_lock,
     board_of,
@@ -87,7 +88,9 @@ def _write_sh_bench(tmp_path) -> None:
 
 def test_benchmark_momentum_today_math(tmp_path) -> None:
     _write_sh_bench(tmp_path)
-    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+    # 指数展示缓存为百分数口径 (quote_service._build_index_quotes 已 x100),
+    # 10.0 表示 +10%; 早期测试直接传小数 0.10 绕过了该契约, 未覆盖 #232
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [10.0]})
 
     out = benchmark_momentum_today(tmp_path, quotes)
     row = out.row(0, named=True)
@@ -103,6 +106,18 @@ def test_benchmark_momentum_today_math(tmp_path) -> None:
     assert abs(out0.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9
 
 
+def test_benchmark_momentum_today_percent_not_treated_as_decimal(tmp_path) -> None:
+    """#232 回归: 百分数 -1.88 (实际 -1.88%) 不得被当小数 (否则 1+rt=-0.88,
+    构造出负的指数点位, 偏离值被放大两个数量级)。"""
+    _write_sh_bench(tmp_path)
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [-1.88]})
+
+    out = benchmark_momentum_today(tmp_path, quotes)
+    row = out.row(0, named=True)
+    # 今收 = 15 x (1 - 0.0188) = 14.718; mom3d = 14.718/13 - 1
+    assert abs(row["bench_mom3d"] - (15.0 * 0.9812 / 13 - 1)) < 1e-9
+
+
 def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
     # 指数监控盘写入的今日行不能当昨收 (否则实时涨跌被重复叠加)
     today = date.today()
@@ -116,7 +131,8 @@ def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
 
 def test_attach_deviation_columns_today(tmp_path) -> None:
     _write_sh_bench(tmp_path)
-    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.10]})
+    # 百分数口径: 10.0 = +10% (#232)
+    quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [10.0]})
     # 单日帧: 增量路径产出的 momentum 列 (无 date 历史, 无法 shift 补算)
     today_df = pl.DataFrame(
         {
@@ -205,6 +221,21 @@ class _FakeQuotes:
         return pl.DataFrame(
             {"symbol": ["000001.SH"], "close": [3300.0], "prev_close": [3270.0]}
         )
+
+
+class _PercentQuotes:
+    """返回百分数口径的指数缓存 (与 _build_index_quotes 的 x100 输出同形态)。"""
+
+    def get_index_quotes(self):
+        return pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [-1.88]})
+
+
+def test_bench_rt_pct_converts_percent_to_decimal() -> None:
+    """#232 回归: _bench_rt_pct 必须把指数展示缓存的百分数转成小数,
+    与 enriched 侧小数制 change_pct 同口径参与 rt_delta 计算。"""
+    assert abs(_bench_rt_pct(_PercentQuotes()) - (-0.0188)) < 1e-12
+    # close/prev_close 兜底路径本身是小数, 不受影响
+    assert abs(_bench_rt_pct(_FakeQuotes()) - (3300.0 / 3270.0 - 1)) < 1e-12
 
 
 def test_build_overview_closeness_and_status() -> None:

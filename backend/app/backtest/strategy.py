@@ -497,20 +497,32 @@ _TURNOVER_FILTER_KEYS = (
     "turnover_max",
 )
 
+# 股票专属的价格界与板块过滤对非股票资产同样不可满足 (#215):
+# ETF 单价普遍 0.5~7 元, 会被 price_min=3 整列误杀; boards 按股票代码
+# 前缀匹配, ETF 代码不属于任何板块 → 掩码全 False, 静默零信号。
+_STOCK_ONLY_FILTER_KEYS = (
+    *_SHARE_CAP_FILTER_KEYS,
+    *_TURNOVER_FILTER_KEYS,
+    "price_min",
+    "price_max",
+    "boards",
+)
+
 
 def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
     """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值、流通
-    市值与换手率界对它们既无意义也不可满足: 依赖解析前先置 None, 避免解析出
-    total_shares/float_shares/turnover_rate 字段需求导致矩阵加载直接失败。
+    市值与换手率界对它们既无意义也不可满足: 依赖解析与运行期过滤前先置
+    None。价格界 (price_min/max) 与板块过滤 (boards) 是股票专属口径, 对
+    ETF 同样不可满足, 一并中和, 否则入场候选在运行期被静默清零 (#215)。
 
-    运行期过滤无需同步修改 —— polars 侧有列守卫 (engine._basic_filter_expr),
-    矩阵侧 _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN
-    界, 二者对缺失股本/换手率列本就降级为 no-op。
+    置 None 后: 依赖解析不再产出 total_shares/float_shares/turnover_rate
+    需求; polars 侧有列守卫 (engine._basic_filter_expr), 矩阵侧
+    _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN 界。
     """
     if asset_type == "stock" or not basic_filter:
         return basic_filter
     sanitized = dict(basic_filter)
-    for key in (*_SHARE_CAP_FILTER_KEYS, *_TURNOVER_FILTER_KEYS):
+    for key in _STOCK_ONLY_FILTER_KEYS:
         sanitized[key] = None
     return sanitized
 
@@ -844,7 +856,11 @@ class StrategyBacktestService:
         )
 
         overrides = first.overrides or {}
-        basic_filter = self._effective_basic_filter(strategy, overrides)
+        # 运行期过滤用的也是同一份 basic_filter: 在入口处按资产类型中和,
+        # 否则 boards/price_min 会在掩码阶段静默清零 ETF 候选 (#215)
+        basic_filter = _basic_filter_for_asset(
+            self._effective_basic_filter(strategy, overrides), first.asset_type
+        )
         entry_signals = self._effective_signals(overrides, "entry_signals", strategy.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", strategy.exit_signals)
         resolver = StrategyDependencyResolver()
@@ -1021,7 +1037,10 @@ class StrategyBacktestService:
 
         params = self._normalize_params(config.params or {}, s)
         overrides = config.overrides or {}
-        basic_filter = self._effective_basic_filter(s, overrides)
+        # 同回测 run 路径: 挖掘运行期也要按资产类型中和股票专属过滤键 (#215)
+        basic_filter = _basic_filter_for_asset(
+            self._effective_basic_filter(s, overrides), config.asset_type
+        )
         entry_signals = self._effective_signals(overrides, "entry_signals", s.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", s.exit_signals)
         if config.exit_fill == "signal_next_minute":

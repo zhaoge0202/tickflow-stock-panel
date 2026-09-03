@@ -335,10 +335,14 @@ class ScreenerService:
         # 用独立的 :memory: 连接 (而非复用 repo 共享连接的 cursor): conditions 是用户
         # 传入的 SQL 片段, 隔离连接下注入至多能碰 read_csv/read_parquet 文件; 若复用共享
         # 连接则会把 app 已注册的真实业务表也暴露给注入, 扩大攻击面。隔离连接创建开销极低。
+        # 再关闭 external_access, 让注入的文件读写函数 (read_parquet/COPY 等) 直接报错,
+        # 视图数据仍通过 con.register 注入, 不受该开关影响 (#224)。
         con = None
         try:
             import duckdb
-            con = duckdb.connect(database=":memory:")
+            con = duckdb.connect(
+                database=":memory:", config={"enable_external_access": False}
+            )
             con.register("enriched", df.to_arrow())
             where = " AND ".join(f"({c})" for c in conditions)
             sql = f"SELECT * FROM enriched WHERE {where}"

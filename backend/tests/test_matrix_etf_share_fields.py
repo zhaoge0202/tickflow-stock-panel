@@ -259,3 +259,30 @@ def test_stock_turnover_rate_still_derived_when_float_shares_present(tmp_path):
     assert np.isfinite(fields["turnover_rate"]).all()
     assert float(fields["turnover_rate"][0, 0]) == pytest.approx(1.0)
     assert float(fields["turnover_rate"][1, 0]) == pytest.approx(1.5)
+
+
+# ── #215: 运行期股票专属过滤键中和 ────────────────────────────
+
+def test_basic_filter_for_asset_neutralizes_stock_only_runtime_keys() -> None:
+    """#215 回归: boards 按股票代码前缀匹配、price_min=3 是股票专属口径,
+    对 ETF 不可满足 —— 运行期不中和会让入场候选在掩码阶段静默清零
+    (回测"正常完成"但零信号)。"""
+    from app.backtest.strategy import _basic_filter_for_asset
+    from app.strategy.engine import DEFAULT_BASIC_FILTER
+
+    sanitized = _basic_filter_for_asset(dict(DEFAULT_BASIC_FILTER), "etf")
+    for key in (
+        "price_min", "price_max", "boards",
+        "market_cap_min", "float_cap_min", "float_cap_max",
+        "turnover_min", "turnover_max",
+    ):
+        assert sanitized[key] is None, f"{key} 应被中和"
+
+    # 与资产类型无关的键保留原值
+    assert sanitized["amount_min"] == DEFAULT_BASIC_FILTER["amount_min"]
+    assert sanitized["exclude_st"] is True
+    assert sanitized["exclude_new_days"] == 30
+
+    # 股票口径完全不变
+    stock = _basic_filter_for_asset(dict(DEFAULT_BASIC_FILTER), "stock")
+    assert stock == DEFAULT_BASIC_FILTER

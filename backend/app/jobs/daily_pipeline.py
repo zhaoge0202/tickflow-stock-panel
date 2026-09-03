@@ -31,6 +31,41 @@ logger = logging.getLogger(__name__)
 ProgressCb = Callable[..., None]
 
 
+def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> list[str]:
+    """删除 symbol 覆盖不完整的 enriched 日期分区, 返回被删的日期 (#223)。
+
+    自选实时路径会在全市场 enriched 生成前提前创建当日分区 (只有几只自选),
+    仅按日期目录计数比较会把它误判为完整分区而跳过计算, 造成日K缺失与
+    均线错误。同日 enriched 行数 < daily 行数即判定为部分分区: 删除后
+    run_pipeline(new_dates_only=True) 会把它们当"新日期"全市场补齐, 与
+    data_integrity.prune_enriched_partitions 的修复语义一致。
+    daily 同日分区不存在 (今日日K尚未同步) 时不处理, 留给当日正常流程。
+    """
+    import shutil
+
+    import pyarrow.parquet as pq
+
+    def _rows(part_dir: Path) -> int:
+        total = 0
+        for f in part_dir.glob("*.parquet"):
+            try:
+                total += pq.ParquetFile(f).metadata.num_rows
+            except Exception:  # noqa: BLE001
+                return -1  # 不可读 → 不动, 交给既有完整性检查兜底
+        return total
+
+    pruned: list[str] = []
+    for part in enriched_dir.glob("date=*"):
+        daily_part = daily_dir / part.stem
+        if not daily_part.exists():
+            continue
+        e_rows, d_rows = _rows(part), _rows(daily_part)
+        if e_rows >= 0 and d_rows > 0 and e_rows < d_rows:
+            shutil.rmtree(part, ignore_errors=True)
+            pruned.append(part.stem.split("=")[1])
+    return pruned
+
+
 class PipelineStageError(RuntimeError):
     """管道有阶段软失败(数据可能陈旧)时抛出, 让上层 job_store 把任务标记为 failed。
 
@@ -352,6 +387,18 @@ def run_now(
     daily_dir = repo.store.data_dir / "kline_daily"
     daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
     prev_enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_exists else 0
+
+    # 部分分区修复 (#223): 删除被实时合并提前创建、覆盖不全的 enriched 分区,
+    # 让下方计数比较与增量计算把它们重新当新日期处理
+    if enriched_exists:
+        partial_pruned = _prune_partial_enriched_partitions(daily_dir, enriched_dir)
+        if partial_pruned:
+            logger.warning(
+                "compute_enriched: 发现 %d 个覆盖不全的 enriched 分区, 已删除待重算: %s",
+                len(partial_pruned), ", ".join(sorted(partial_pruned)[:10]),
+            )
+            enriched_exists = enriched_dir.exists() and any(enriched_dir.glob("date=*"))
+            prev_enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_exists else 0
 
     # 判断新日期方向: 找 daily 和 enriched 的日期集合做比较
     forward_incremental = False
