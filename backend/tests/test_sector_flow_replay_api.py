@@ -140,7 +140,7 @@ def test_market_intraday_timeline_returns_historical_points(tmp_path):
     )
 
     assert payload["has_ticks"] is True
-    assert payload["points"] == [_ms(9, 30), _ms(9, 31)]
+    assert payload["points"] == [_ms(9, 27), _ms(9, 28), _ms(9, 29), _ms(9, 30), _ms(9, 31)]
 
 
 def test_market_intraday_timeline_reads_after_today_realtime_fetch(monkeypatch, tmp_path):
@@ -169,7 +169,7 @@ def test_market_intraday_timeline_reads_after_today_realtime_fetch(monkeypatch, 
 
     assert calls == [True]
     assert payload["has_ticks"] is True
-    assert payload["points"] == [_ms(9, 30), _ms(9, 31)]
+    assert payload["points"] == [_ms(9, 27), _ms(9, 28), _ms(9, 29), _ms(9, 30), _ms(9, 31)]
 
 
 def test_market_intraday_timeline_fetches_today_when_ticks_are_sparse(monkeypatch, tmp_path):
@@ -385,7 +385,7 @@ def test_market_intraday_timeline_backfills_from_local_minute(monkeypatch, tmp_p
     assert timeline["backfill_status"] == "materialized"
     assert timeline["symbol_count"] == 2
     assert quote_tick_store.MINUTE_BACKFILL_SOURCE in timeline["sources"]
-    assert timeline["points"] == [_ms(9, 30), _ms(9, 31)]
+    assert timeline["points"] == [_ms(9, 27), _ms(9, 28), _ms(9, 29), _ms(9, 30), _ms(9, 31)]
 
     snapshot = screener_api.market_snapshot(
         _request(tmp_path),

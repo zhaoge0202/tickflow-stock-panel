@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from app.indicators.pipeline import compute_enriched, compute_enriched_single
+from app.indicators.pipeline import compute_enriched
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
@@ -59,6 +59,20 @@ def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | R
                 headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
             )
     return payload
+
+
+def _resolve_asset_type(repo, symbol: str) -> str:
+    """按 repo 能力解析资产类型，兼容轻量 API 测试桩。"""
+    resolver = getattr(repo, "resolve_asset_type", None)
+    if callable(resolver):
+        return resolver(symbol)
+    get_etf_symbols = getattr(repo, "get_etf_symbol_set", None)
+    if callable(get_etf_symbols) and symbol in (get_etf_symbols() or set()):
+        return "etf"
+    get_index_symbols = getattr(repo, "get_index_symbol_set", None)
+    if callable(get_index_symbols) and symbol in (get_index_symbols() or set()):
+        return "index"
+    return "stock"
 
 
 def _minute_allowed(capset) -> bool:
@@ -648,7 +662,7 @@ def get_daily_batch(request: Request, body: dict):
     etf_symbols: list[str] = []
     index_symbols: list[str] = []
     for s in symbols:
-        t = repo.resolve_asset_type(s)
+        t = _resolve_asset_type(repo, s)
         if t == "etf":
             etf_symbols.append(s)
         elif t == "index":
@@ -662,11 +676,21 @@ def get_daily_batch(request: Request, body: dict):
         if not df_stock.is_empty():
             frames.append(df_stock)
     for sym in etf_symbols:
-        sub = repo.get_etf_daily(sym, start, end, columns=cols)
+        getter = getattr(repo, "get_etf_daily", None)
+        sub = (
+            getter(sym, start, end, columns=cols)
+            if callable(getter)
+            else repo.get_daily_asset("etf", sym, start, end, columns=cols)
+        )
         if not sub.is_empty():
             frames.append(sub)
     for sym in index_symbols:
-        sub = repo.get_index_daily(sym, start, end, columns=cols)
+        getter = getattr(repo, "get_index_daily", None)
+        sub = (
+            getter(sym, start, end, columns=cols)
+            if callable(getter)
+            else repo.get_daily_asset("index", sym, start, end, columns=cols)
+        )
         if not sub.is_empty():
             frames.append(sub)
 
@@ -934,7 +958,7 @@ def get_minute_range(
 
     repo = request.app.state.repo
     symbol = normalize_symbol(symbol, repo)
-    asset_type = repo.resolve_asset_type(symbol)
+    asset_type = _resolve_asset_type(repo, symbol)
     stock_info = (
         _get_stock_info(repo, symbol)
         if asset_type == "stock"

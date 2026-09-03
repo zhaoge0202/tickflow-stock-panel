@@ -1042,7 +1042,10 @@ def compute_enriched(
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
     """写入 parquet 前裁剪到存储列 (14 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
-    return df.select(cols)
+    result = df.select(cols)
+    if {"symbol", "date"}.issubset(result.columns):
+        result = result.unique(subset=["symbol", "date"], keep="last")
+    return result
 
 
 # ================================================================

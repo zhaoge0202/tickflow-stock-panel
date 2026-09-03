@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from app.market_time import cn_today
+from app.market_time import CN_TZ, cn_today
 from app.services import (
     alert_store,
     decision_journal,
@@ -230,7 +230,8 @@ def _build_item(
 
 def _alerts_for_date(data_dir: Path, target_date: date, repo=None) -> list[dict]:
     # alerts_store 只能按最近 days 查, 这里再按交易日精确过滤。
-    events = alert_store.list_recent(data_dir, days=30, limit=5000)
+    # 决策台支持查看历史日期，不能用“距当前 30 天”过滤掉用户指定交易日。
+    events = alert_store.list_recent(data_dir, days=3650, limit=5000)
     ds = target_date.isoformat()
     out = []
     for ev in events:
@@ -335,7 +336,7 @@ def _risk_summary(position: dict | None, risk_flags: list[str]) -> dict | None:
 def _date_from_ms(ts: int) -> str:
     from datetime import datetime
 
-    return datetime.fromtimestamp(ts / 1000).date().isoformat()
+    return datetime.fromtimestamp(ts / 1000, tz=CN_TZ).date().isoformat()
 
 
 def _price(frame: dict | None) -> float | None:
