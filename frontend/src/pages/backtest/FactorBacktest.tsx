@@ -92,7 +92,9 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
   const [end, setEnd] = useState(TODAY)
   const [nGroups, setNGroups] = useState(5)
   const [weight, setWeight] = useState<'equal' | 'factor_weight'>('equal')
+  const [rebalance, setRebalance] = useState<'daily' | 'weekly' | 'monthly'>('daily')
   const [fees, setFees] = useState('2')
+  const [slippage, setSlippage] = useState('5')
   const [result, setResult] = useState<FactorBacktestResult | null>(null)
 
   const columns = useQuery({
@@ -129,9 +131,10 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
         start: start || null,
         end: end || undefined,
         n_groups: nGroups,
-        rebalance: 'daily',
+        rebalance,
         weight,
         fees_pct: Number(fees) / 10000,
+        slippage_bps: Number(slippage),
       }),
     onSuccess: (data) => {
       if (data.error) {
@@ -302,8 +305,21 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
             </select>
           </div>
           <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">佣金(万分之)</label>
-            <input type="number" value={fees} onChange={e => setFees(e.target.value)}
+            <label className="text-[11px] text-secondary block mb-1">调仓频率</label>
+            <select value={rebalance} onChange={e => setRebalance(e.target.value as any)} className={INPUT_CLS}>
+              <option value="daily">日度</option>
+              <option value="weekly">周度</option>
+              <option value="monthly">月度</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[11px] text-secondary block mb-1">佣金(万分之)</label>
+            <input type="number" min="0" value={fees} onChange={e => setFees(e.target.value)}
+              className={INPUT_CLS} />
+          </div>
+          <div>
+            <label className="text-[11px] text-secondary block mb-1">滑点(bp)</label>
+            <input type="number" min="0" value={slippage} onChange={e => setSlippage(e.target.value)}
               className={INPUT_CLS} />
           </div>
         </div>
@@ -322,7 +338,7 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
 
       {/* 结果面板 */}
       <section className="min-w-0 space-y-3 bg-base/15 px-3 py-3 xl:overflow-y-auto">
-        {result?.error && !result.ic_mean && (
+        {result?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             {result.error}
           </div>
@@ -352,7 +368,7 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
           <LoadingPanel symbolsText={symbols ? `${symbols.split(',').length} 只标的` : '全市场 · 当前区间'} />
         )}
 
-        {result && result.ic_mean != null && (
+        {result && !result.error && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -374,7 +390,7 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
                     {saveCandidate.isPending ? '保存中' : '保存候选'}
                   </button>
                   <span className="text-[11px] text-muted">
-                    Rank IC · 日度调仓
+                    Rank IC · {rebalance === 'daily' ? '日度' : rebalance === 'weekly' ? '周度' : '月度'}调仓
                   </span>
                   {result.elapsed_ms > 0 && (
                     <span className="flex items-center gap-1 text-[11px] text-muted">
@@ -384,24 +400,28 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
                   )}
                 </div>
               </div>
-              <div className="grid grid-cols-4 gap-4">
-                <StatCard
-                  label="IC 均值"
-                  value={result.ic_mean != null ? fmtPct(result.ic_mean) : null}
-                  highlight={result.ic_mean != null
-                    ? result.ic_mean > 0.03 ? 'bull' : result.ic_mean < -0.03 ? 'bear' : 'neutral'
-                    : undefined}
-                />
-                <StatCard label="IC 标准差" value={result.ic_std != null ? fmtPct(result.ic_std) : null} />
-                <StatCard
-                  label="ICIR"
-                  value={result.ir != null ? result.ir.toFixed(2) : null}
-                  highlight={result.ir != null
-                    ? Math.abs(result.ir) > 0.5 ? (result.ir > 0 ? 'bull' : 'bear') : 'neutral'
-                    : undefined}
-                />
-                <StatCard label="IC 胜率" value={result.ic_win_rate != null ? fmtPct(result.ic_win_rate) : null} />
-              </div>
+              {result.ic_mean != null ? (
+                <div className="grid grid-cols-4 gap-4">
+                  <StatCard
+                    label="IC 均值"
+                    value={fmtPct(result.ic_mean)}
+                    highlight={result.ic_mean > 0.03 ? 'bull' : result.ic_mean < -0.03 ? 'bear' : 'neutral'}
+                  />
+                  <StatCard label="IC 标准差" value={result.ic_std != null ? fmtPct(result.ic_std) : null} />
+                  <StatCard
+                    label="ICIR"
+                    value={result.ir != null ? result.ir.toFixed(2) : null}
+                    highlight={result.ir != null
+                      ? Math.abs(result.ir) > 0.5 ? (result.ir > 0 ? 'bull' : 'bear') : 'neutral'
+                      : undefined}
+                  />
+                  <StatCard label="IC 胜率" value={result.ic_win_rate != null ? fmtPct(result.ic_win_rate) : null} />
+                </div>
+              ) : (
+                <div className="rounded-btn border border-border bg-base/40 px-3 py-3 text-xs text-muted">
+                  标的数量过少，无法计算 IC/IR（需 ≥2 只）。可清空标的使用全市场，或补充更多标的。
+                </div>
+              )}
             </div>
 
             {/* IC 时序图 */}

@@ -44,6 +44,9 @@ export const storage = {
   /** 个股详情多日分时周期 */
   stockPreviewIntradayDays: kv<number>('stock_preview_intraday_days'),
 
+  /** 个股详情外链 URL 模板 (支持 {code}/{market}/{symbol}; 留空关闭) */
+  stockExternalTemplate: kv<string>('stock_external_template'),
+
   /** 策略结果列表列配置 */
   screenerResultColumns: kv<unknown[]>('screener_result_columns'),
 

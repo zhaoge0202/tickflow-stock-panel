@@ -13,7 +13,7 @@ import { storage } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StockPreviewDialog, type NavItem } from '@/components/StockPreviewDialog'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useStrategyPool } from '@/lib/useStrategyPool'
 import { StrategyCard, CardSize, loadCardSize, cardWrapCls } from '@/components/screener/StrategyCard'
@@ -134,7 +134,12 @@ export function Screener() {
   const [batchMsg, setBatchMsg] = useState<string>('')
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
-  const closePreview = useCallback(() => { setPreviewSymbol(null); setPreviewName('') }, [])
+  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
+  const closePreview = useCallback(() => {
+    setPreviewSymbol(null)
+    setPreviewName('')
+    setPreviewNavList([])
+  }, [])
   const [settingsStrategyId, setSettingsStrategyId] = useState<string | null>(null)
   const [showPoolDialog, setShowPoolDialog] = useState(false)
   const [showBuilder, setShowBuilder] = useState(false)
@@ -1561,6 +1566,7 @@ export function Screener() {
                     strategyLabelSuffix={displayMode === 'preselect' ? '盘后预选' : undefined}
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
+                    activeSymbol={previewSymbol}
                     watchlistSet={watchlistSet}
                     purchaseMarks={purchaseMarks}
                     purchaseSignalDate={!showAll && activeStrategy ? (result?.as_of || asOf) : undefined}
@@ -1575,7 +1581,7 @@ export function Screener() {
                         signalChangePct,
                         marked,
                       })}
-                    onPreview={(symbol, name) => { setPreviewSymbol(symbol); setPreviewName(name) }}
+                    onPreview={(symbol, name, navList) => { setPreviewSymbol(symbol); setPreviewName(name ?? ''); setPreviewNavList(navList ?? []) }}
                     onAddToWatchlist={(symbol, groupId) => toggleWatchlist.mutate({ symbol, action: 'add', groupId })}
                     onRemoveFromWatchlist={symbol => toggleWatchlist.mutate({ symbol, action: 'remove' })}
                     watchlistPending={toggleWatchlist.isPending}
@@ -1661,6 +1667,8 @@ export function Screener() {
         symbol={previewSymbol}
         name={previewName}
         onClose={closePreview}
+        navList={previewNavList}
+        onNavigate={(sym, n) => { setPreviewSymbol(sym); setPreviewName(n ?? '') }}
       />
 
       <StrategySettingsDialog

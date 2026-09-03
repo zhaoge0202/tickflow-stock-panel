@@ -24,6 +24,7 @@ const Data = lazy(() => import('./pages/Data').then(m => ({ default: m.Data })))
 const Monitor = lazy(() => import('./pages/Monitor').then(m => ({ default: m.Monitor })))
 const Decision = lazy(() => import('./pages/Decision').then(m => ({ default: m.Decision })))
 const Trading = lazy(() => import('./pages/Trading').then(m => ({ default: m.Trading })))
+const Lots = lazy(() => import('./pages/Lots').then(m => ({ default: m.Lots })))
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail').then(m => ({ default: m.AnalysisDetail })))
 const SectorFlow = lazy(() => import('./pages/SectorFlow').then(m => ({ default: m.SectorFlow })))
@@ -57,6 +58,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/financials',
   '/data',
   '/monitor',
+  '/lots',
   '/limit-ladder',
   '/indices',
   '/regime',
@@ -133,6 +135,7 @@ export const router = createBrowserRouter([
       { path: 'data', element: <Data /> },
       { path: 'monitor', element: <Monitor /> },
       { path: 'trading', element: <Trading /> },
+      { path: 'lots', element: <Lots /> },
       { path: 'limit-ladder', element: <LimitUpLadder /> },
       { path: 'indices', element: <Indices /> },
     { path: 'regime', element: <Regime /> },

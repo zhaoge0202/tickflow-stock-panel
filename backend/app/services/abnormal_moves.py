@@ -134,10 +134,11 @@ def _hist_snapshot(repo: Any) -> dict[str, Any]:
 
 
 def _bench_rt_pct(quote_service: Any) -> float:
-    """基准指数今日实时涨跌 (各候选均值, 缺数据时 0)。
+    """基准指数今日实时涨跌 (各候选均值, 小数制, 缺数据时 0)。
 
-    QuoteService 的指数行情 change_pct 是百分数值 (如 -1.02 表示 -1.02%),
-    这里转换成异动计算使用的小数制。
+    quote_service.get_index_quotes() 返回指数展示缓存, change_pct/pct/pct_change
+    为百分数口径 (CONTRIBUTING §3.1), 消费前显式 /100, 与 enriched 侧小数制
+    change_pct 对齐 (#232); close/prev_close 兜底路径本身是小数, 不转换。
     """
     try:
         df = quote_service.get_index_quotes()
