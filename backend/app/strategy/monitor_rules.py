@@ -18,9 +18,10 @@ import json
 import logging
 import math
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from app.services.fs_utils import atomic_write_text
 from app.strategy.custom_signals import ALLOWED_FIELDS
 from app.strategy.intraday_signals import uses_intraday_signals
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal", "volume_delta"}
+RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal", "volume_delta", "date"}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
@@ -100,7 +101,7 @@ def load_one(data_dir: Path, rule_id: str) -> dict | None:
 def save_one(data_dir: Path, rule: dict) -> None:
     p = _path(data_dir, rule["id"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(rule, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(rule, ensure_ascii=False, indent=2))
 
 
 def delete_one(data_dir: Path, rule_id: str) -> bool:
@@ -115,6 +116,22 @@ def delete_one(data_dir: Path, rule_id: str) -> bool:
 def _is_signal_field(field: str) -> bool:
     """判断 field 是否为布尔信号列 (signal_ / csg_ 前缀)。"""
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
+
+
+def date_rule_in_window(remind_date: str, lead_days: int, today: str) -> bool:
+    """提醒窗口 [remind_date - lead_days, remind_date] 是否包含 today (均 YYYY-MM-DD)。
+
+    只判自然日历窗口; 是否在交易时段由调用方决定。到期落在休市/节假日不会顺延,
+    需 lead_days 覆盖 (交易日历口径待 issue 定夺)。非法输入一律返回 False (fail-safe)。
+    """
+    try:
+        remind = date.fromisoformat(remind_date)
+        today_d = date.fromisoformat(today)
+        lead = max(0, int(lead_days or 0))
+    except (ValueError, TypeError):
+        return False
+    start = remind - timedelta(days=lead)
+    return start <= today_d <= remind
 
 
 def validate(rule: dict) -> None:
@@ -236,6 +253,20 @@ def validate(rule: dict) -> None:
                         raise ValueError(f"basic_filter.{key} 必须是正数字或 null")
                 else:
                     raise ValueError(f"basic_filter 不支持字段: {key}")
+    elif rule.get("type") == "date":
+        # 日期提醒: 纯日历, 锚定标的 (scope=symbols) 避免无对象的空提醒
+        remind = rule.get("remind_date")
+        if not isinstance(remind, str) or not remind.strip():
+            raise ValueError("日期提醒规则必须指定 remind_date")
+        try:
+            date.fromisoformat(remind.strip())
+        except ValueError:
+            raise ValueError(f"remind_date 必须是 YYYY-MM-DD 日期: {remind!r}")
+        lead = rule.get("lead_days", 0)
+        if isinstance(lead, bool) or not isinstance(lead, int) or lead < 0:
+            raise ValueError("lead_days 必须是非负整数 (提前提醒天数)")
+        if rule.get("conditions"):
+            raise ValueError("日期提醒规则不支持行情 conditions")
     else:
         # 信号/价格/市场类型: 需要 conditions
         conds = rule.get("conditions")
@@ -349,6 +380,12 @@ def normalize(rule: dict) -> dict:
         r["scope"] = "all"
         r["symbols"] = []
         r["group_id"] = None
+    # date 专属默认字段 (日期提醒): 纯日历窗口, 无行情条件, 每天至多一次
+    if r.get("type") == "date":
+        r["conditions"] = []
+        r.setdefault("remind_date", None)
+        r["lead_days"] = int(r.get("lead_days") or 0)
+        r["cooldown_seconds"] = 86400
     # abnormal 专属默认字段 (异动边缘监控)
     r.setdefault("abnormal_window", "any")
     r.setdefault("logic", "and")

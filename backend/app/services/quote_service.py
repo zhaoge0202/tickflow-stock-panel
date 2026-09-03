@@ -37,6 +37,26 @@ from app.market_time import cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.services.index_const import CORE_INDEX_SYMBOLS
 from app.strategy.intraday_signals import IntradaySignalEvaluator
+from app.strategy.monitor import format_alert_quote
+
+# 告警来源 → 中文标签 (webhook 标题 / 系统通知标题共用)
+SOURCE_LABELS = {
+    "strategy": "策略", "signal": "信号", "price": "价格",
+    "market": "异动", "ladder": "连板梯队", "sector": "板块",
+    "volume_delta": "放量", "abnormal": "异动", "date": "日期提醒",
+}
+
+
+def _body_with_quote(body: str, ev: dict) -> str:
+    """推送正文尾部补上触发时的现价/涨跌幅 (日期提醒无行情, 自然为空)。
+
+    默认告警的 message 已由引擎拼过引语 (monitor._default_message), 这里仅在正文
+    尚未带引语时追加, 避免「现价」出现两遍 (自定义 message 的规则则补上这一句)。
+    """
+    quote_tail = format_alert_quote(ev.get("price"), ev.get("change_pct"))
+    if not quote_tail or body.endswith(quote_tail):
+        return body
+    return f"{body} · {quote_tail}"
 
 logger = logging.getLogger(__name__)
 
@@ -1063,6 +1083,12 @@ class QuoteService:
                                 rule_events += engine.evaluate_abnormal(_overview.get("rows") or [])
                             except Exception as e:  # noqa: BLE001
                                 logger.warning("异动监控规则评估失败 (不影响其他告警): %s", e)
+                    # 日期提醒轮: 纯日历、无行情, 已在盘中; 引擎内按天 cooldown 保证每天一次
+                    if engine.has_rule_type("date"):
+                        try:
+                            rule_events = rule_events + engine.evaluate_date_rules()
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("日期提醒评估失败 (不影响其他告警): %s", e)
                     # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
                     # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
@@ -1427,11 +1453,6 @@ class QuoteService:
                 return
 
             # 反查规则, 过滤出启用推送的事件
-            source_labels = {
-                "strategy": "策略", "signal": "信号",
-                "price": "价格", "market": "异动", "ladder": "连板梯队",
-                "sector": "板块", "volume_delta": "放量",
-            }
             rules = engine.rules if engine is not None else {}
             enqueued = 0
             for ev in rule_events:
@@ -1442,12 +1463,14 @@ class QuoteService:
                 if not channels:
                     continue
                 source = ev.get("source", "")
-                source_label = source_labels.get(source, source or "通知")
+                source_label = SOURCE_LABELS.get(source, source or "通知")
                 symbol = ev.get("symbol") or ""
                 name = ev.get("name") or ""
                 message = ev.get("message") or ""
                 title = source_label
                 body = f"{symbol} {name} {message}".strip() if symbol else (message or name)
+                # 补上触发时的现价/涨跌幅, 让推送可执行 (止损到底触发在哪个价位)
+                body = _body_with_quote(body, ev)
                 # 提交到独立线程池, 不阻塞行情轮询线程 (webhook 慢/重试不拖累实时行情+告警)。
                 # 按渠道独立投递: 飞书 / 企业微信谁被勾选且已配置就推谁。
                 # 应用内 alerts.jsonl 记录与 SSE 已在前面完成, 不依赖 webhook 成败,
@@ -1481,10 +1504,7 @@ class QuoteService:
             for ev in all_alerts:
                 # 通知标题: 用 source 分类 (策略/信号/价格/异动)
                 source = ev.get("source", "")
-                source_label = {
-                    "strategy": "策略", "signal": "信号",
-                    "price": "价格", "market": "异动", "sector": "板块",
-                }.get(source, source or "通知")
+                source_label = SOURCE_LABELS.get(source, source or "通知")
 
                 name = ev.get("name") or ""
                 symbol = ev.get("symbol") or ""
@@ -1495,6 +1515,8 @@ class QuoteService:
                     body = f"{symbol} {name} {message}".strip()
                 else:
                     body = message or name
+                # 补上触发时的现价/涨跌幅 (日期提醒无行情, 自然为空)
+                body = _body_with_quote(body, ev)
 
                 title = f"TickFlow · {source_label}"
                 notify_adapter.notify(title, body)

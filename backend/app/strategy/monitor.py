@@ -25,6 +25,7 @@ from app.market_time import cn_today
 from app.strategy import config as _strategy_config
 from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用运算符构造器
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
+from app.strategy.monitor_rules import date_rule_in_window
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,17 @@ _SIGNAL_CN: dict[str, str] = {
 def _signal_cn_name(name: str) -> str:
     """返回信号/字段的中文名, 找不到原样返回 (与前端 cnSignal 对齐)。"""
     return _SIGNAL_CN.get(name, name)
+
+
+def format_alert_quote(price, change_pct) -> str:
+    """告警正文尾部: '现价 1650.0 · +10.0%'。price/pct 均可缺; pct 为小数制。"""
+    parts = []
+    if price is not None:
+        parts.append(f"现价 {price}")
+    if change_pct is not None:
+        sign = "+" if change_pct >= 0 else ""
+        parts.append(f"{sign}{change_pct * 100:.1f}%")
+    return " · ".join(parts)
 
 
 @dataclass
@@ -323,6 +335,10 @@ class MonitorRuleEngine:
         self._rules: dict[str, dict] = {}  # rule_id → rule
         # (rule_id, symbol, event_type) → 上次触发时间戳(秒)。用于 cooldown 去重。
         self._last_fire: dict[tuple[str, str, str], float] = {}
+        # date 规则每个交易日只在首个轮询评估一次; 规则集变更时失效重评
+        self._date_eval_day: str | None = None
+        self._date_eval_rules_version = -1
+        self._rules_version = 0  # set/add/remove/clear 递增, 供 date 缓存失效
         self._strategy_engine = None  # 延迟注入, type=strategy 规则用它跑选股
         # symbol → 股票名 (enriched DataFrame 已 drop name 列, 触发时从此映射回填)
         self._name_map: dict[str, str] = {}
@@ -428,6 +444,8 @@ class MonitorRuleEngine:
             rule.get("threshold_pct"),
             rule.get("window_minutes"),
             rule.get("abnormal_window"),
+            rule.get("remind_date"),
+            rule.get("lead_days"),
         )
 
     def set_rules(self, rules: list[dict]) -> None:
@@ -476,12 +494,14 @@ class MonitorRuleEngine:
             if key[0] in active_ids
         }
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
+        self._rules_version += 1
 
     def add_rule(self, rule: dict) -> None:
         if rule.get("enabled") is not False:
             self._rules[rule["id"]] = rule
         else:
             self._rules.pop(rule["id"], None)
+        self._rules_version += 1
 
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)
@@ -498,6 +518,7 @@ class MonitorRuleEngine:
         self._sector_condition_state = {
             k: v for k, v in self._sector_condition_state.items() if k[0] != rule_id
         }
+        self._rules_version += 1
 
     def clear(self) -> None:
         self._rules.clear()
@@ -506,6 +527,7 @@ class MonitorRuleEngine:
         self._strategy_signal_state.clear()
         self._strategy_signal_seen.clear()
         self._sector_condition_state.clear()
+        self._rules_version += 1
 
     @property
     def rules(self) -> dict[str, dict]:
@@ -669,7 +691,9 @@ class MonitorRuleEngine:
         for rule_id, rule in list(self._rules.items()):
             if rule.get("asset_type", "stock") != asset_type:
                 continue
-            if rule.get("type") in ("sector", "abnormal"):
+            if rule.get("type") in ("sector", "abnormal", "date"):
+                # 三者不走行情 DataFrame 评估, 各走 evaluate_sectors / evaluate_abnormal /
+                # evaluate_date_rules 专用路径
                 continue
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
@@ -681,6 +705,80 @@ class MonitorRuleEngine:
         self._latest_strategy_results = self._building_strategy_results
         self._active_matrix_snapshots.pop(asset_type, None)
 
+        return events
+
+    def evaluate_date_rules(self, now: float | None = None) -> list[dict]:
+        """纯日历评估 date 规则: 窗口命中 + 每天最多一次, 无行情条件。
+
+        由行情轮询在盘中调用 (quote_service._evaluate_monitors), 事件与 _evaluate_rule 同构。
+        窗口按自然日; 到期落在休市/节假日时需 lead_days 覆盖 (交易日历口径待 issue 定夺)。
+        每个交易日只在首个轮询完整评估一次, 其余轮次命中缓存直接跳过。
+        """
+        now = now if now is not None else time.time()
+        today_iso = cn_today().isoformat()
+        if self._date_eval_day == today_iso and self._date_eval_rules_version == self._rules_version:
+            return []
+        # 跨天首轮清掉已过期日期的按天 cooldown 键, 避免 _last_fire 无限累积
+        self._last_fire = {
+            key: value
+            for key, value in self._last_fire.items()
+            if not (key[1].startswith("_date_") and key[1] != f"_date_{today_iso}")
+        }
+
+        today_d = _dt.date.fromisoformat(today_iso)
+        events: list[dict] = []
+        for rule in list(self._rules.values()):
+            if rule.get("type") != "date" or rule.get("enabled") is False:
+                continue
+            remind = rule.get("remind_date") or ""
+            if not date_rule_in_window(remind, int(rule.get("lead_days", 0)), today_iso):
+                continue
+            # 按天隔离: 窗口内每天最多触发一次
+            key = (rule["id"], f"_date_{today_iso}", "date")
+            cooldown = int(rule.get("cooldown_seconds") or 86400)
+            last = self._last_fire.get(key)
+            if last is not None and (now - last) < cooldown:
+                continue
+            self._last_fire[key] = now
+
+            symbols = [s for s in rule.get("symbols", []) if s]
+            single_symbol = symbols[0] if len(symbols) == 1 else None
+            msg = rule.get("message") or f"日期提醒 · {today_iso}"
+            try:
+                remain = (_dt.date.fromisoformat(remind) - today_d).days
+            except ValueError:
+                remain = 0
+            msg += " · 今日到期" if remain <= 0 else f" · {remain}天后到期"
+            # 单标的由 ev.symbol 携带; 仅多标的时拼列表
+            if len(symbols) > 1:
+                shown = "、".join(symbols[:3]) + ("等" if len(symbols) > 3 else "")
+                msg = f"{msg} · {shown}"
+
+            ev = {
+                "ts": int(now * 1000),
+                "rule_id": rule["id"],
+                "rule_name": rule.get("name", ""),
+                "strategy_id": None,
+                "source": "date",
+                "type": "date_reminder",
+                "symbol": single_symbol or "",
+                "name": (self._name_map.get(single_symbol) or single_symbol) if single_symbol else None,
+                "message": msg,
+                "price": None,
+                "change_pct": None,
+                "signals": [],
+                "severity": rule.get("severity", "info"),
+                "conditions": [],
+                "logic": "and",
+            }
+            events.append(ev)
+            if self._alert_handler:
+                try:
+                    self._alert_handler(ev)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("alert handler failed: %s", e)
+        self._date_eval_day = today_iso
+        self._date_eval_rules_version = self._rules_version
         return events
 
     def evaluate_sectors(
@@ -1623,12 +1721,7 @@ class MonitorRuleEngine:
         # signal / price / market: 条件摘要 + 现价 + 涨跌幅
         # 条件摘要: 把 conditions (truth/比较) 拼成可读串, 如 "MA20金叉 且 量比>2"
         cond_text = self._format_conditions_text(rule, conditions)
-        price_text = f"现价 {price}" if price is not None else ""
-        pct_text = ""
-        if pct is not None:
-            sign = "+" if pct >= 0 else ""
-            pct_text = f"{sign}{pct * 100:.1f}%"
-        tail = " · ".join(s for s in (price_text, pct_text) if s)
+        tail = format_alert_quote(price, pct)
         if cond_text and tail:
             return f"{cond_text} · {tail}"
         return cond_text or tail or "监控触发"

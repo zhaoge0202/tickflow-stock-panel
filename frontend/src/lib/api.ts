@@ -868,7 +868,7 @@ export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal' | 'volume_delta'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal' | 'volume_delta' | 'date'
   asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
@@ -904,6 +904,24 @@ export interface MonitorRule {
   threshold_volume?: number                 // 单轮增量 >= 此值时报警
   threshold_amount?: number                 // metric=amount 时: 单轮增量 >= 此值(元)时报警
   basic_filter?: VDBasicFilter             // 基础过滤 (与策略 basic_filter 语义对齐)
+  // date 类型 (日期提醒): 纯日历窗口, 无行情 conditions
+  remind_date?: string | null   // YYYY-MM-DD
+  lead_days?: number            // 提前 N 天进入提醒窗口
+  lot_id?: string               // 由「持仓提醒」页生成的规则, 托管在批次页 (监控中心只读)
+}
+
+// 批次登记 (薄批次, 页面名"持仓提醒") — 只作监控规则生成的载体, 不做任何会计
+export interface Lot {
+  id: string
+  symbol: string
+  qty: number
+  cost_price: number
+  buy_date?: string | null
+  target_pct: number
+  stop_pct: number
+  remind_date?: string | null
+  lead_days: number
+  created_at?: string
 }
 
 export interface VDBasicFilter {
@@ -3112,6 +3130,19 @@ export const api = {
 
   monitorRuleDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/monitor-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ===== Lots (批次登记, 页面名"持仓提醒"; 保存/删除自动同步监控规则) =====
+  lotsList: () =>
+    request<{ lots: Lot[] }>('/api/lots'),
+
+  lotSave: (lot: Lot) =>
+    request<{ ok: boolean; lot: Lot }>('/api/lots', {
+      method: 'POST',
+      body: JSON.stringify(lot),
+    }),
+
+  lotDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/lots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** 模拟触发 ladder 封单监控 (Dev 调试, 不落盘不推送) */
   monitorRuleTestLadder: () =>
