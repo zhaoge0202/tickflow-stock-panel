@@ -7,7 +7,7 @@
  * placeholderData 内置"仅同 symbol 占位"守卫: 改日期范围/扩展字段时旧数据可暂显(不闪),
  * 切股时不透传上一只股票的数据(不误显示)。
  */
-import { api } from '@/lib/api'
+import { api, type KlineDailyLatestResponse, type KlineDailyResponse } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 /** 分时 tab 多日分时默认周期 (StockPanel 预取与弹窗存储回退共用, 避免魔数两处漂移) */
@@ -27,6 +27,34 @@ export function klineDailyQueryOptions(
       return prevKey?.[1] === symbol ? prev : undefined
     },
   }
+}
+
+export function klineDailyLatestQueryOptions(symbol: string) {
+  return {
+    queryKey: QK.klineLatest(symbol),
+    queryFn: () => api.klineDailyLatest(symbol),
+  }
+}
+
+export function mergeLatestKlineRow(
+  current: KlineDailyResponse | undefined,
+  latest: KlineDailyLatestResponse,
+): KlineDailyResponse | undefined {
+  if (!current || !latest.row || current.symbol !== latest.symbol) return current
+
+  const latestDate = String(latest.row.date).slice(0, 10)
+  const last = current.rows.at(-1)
+  if (!last) return { ...current, rows: [{ ...latest.row, date: latestDate }] }
+
+  const lastDate = String(last.date).slice(0, 10)
+  if (latestDate < lastDate) return current
+  if (latestDate === lastDate) {
+    return {
+      ...current,
+      rows: [...current.rows.slice(0, -1), { ...last, ...latest.row, date: latestDate }],
+    }
+  }
+  return { ...current, rows: [...current.rows, { ...latest.row, date: latestDate }] }
 }
 
 /**
