@@ -221,22 +221,21 @@ class PullScheduler:
         configs = store.load_all()
 
         active_ids: set[str] = set()
-        new_configs: list[ExtConfig] = []
+        enabled_configs: list[ExtConfig] = []
 
         for config in configs:
             if not config.pull or not config.pull.enabled or not config.pull.url:
                 continue
             active_ids.add(config.id)
-            if config.id not in self._tasks:
-                new_configs.append(config)
+            enabled_configs.append(config)
 
-        # 需要移除的 id (快照当前 task 字典的键, 避免遍历时改字典)
-        remove_ids = [cid for cid in list(self._tasks) if cid not in active_ids]
-
-        # 所有对 _tasks 的修改都提交到主循环里执行, 保证线程安全
+        # 对 _tasks 的一切读判断 (含增删 diff) 都放进主循环闭包里执行:
+        # refresh 可能从工作线程调用, 若在调用方线程读 _tasks 再把决策
+        # 提交回主循环, 两步之间主循环可能已改动字典 (TOCTOU, #203)。
+        # 此处只携带与 _tasks 无关的 config 数据跨线程。
         def _apply() -> None:
-            for config in new_configs:
-                if config.id not in self._tasks:  # 二次校验, 防重复
+            for config in enabled_configs:
+                if config.id not in self._tasks:
                     self._tasks[config.id] = self._loop.create_task(
                         self._run_loop(config)
                     )
@@ -244,11 +243,10 @@ class PullScheduler:
                         "PullScheduler: scheduled %s (every %d min)",
                         config.id, config.pull.schedule_minutes,
                     )
-            for cid in remove_ids:
-                task = self._tasks.pop(cid, None)
-                if task is not None:
-                    task.cancel()
-                    logger.info("PullScheduler: removed %s", cid)
+            for cid in [c for c in self._tasks if c not in active_ids]:
+                task = self._tasks.pop(cid)
+                task.cancel()
+                logger.info("PullScheduler: removed %s", cid)
 
         self._submit(_apply)
 
