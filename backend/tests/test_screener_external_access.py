@@ -37,7 +37,7 @@ def test_normal_condition_still_works() -> None:
 
 def test_injected_read_parquet_is_rejected() -> None:
     # 注入试图读任意文件: external_access 关闭后 DuckDB 直接报错,
-    # run_custom 的 except 分支吞错返回空结果, 而非泄漏文件内容
+    # run() 的 except 分支吞错返回空结果, 而非泄漏文件内容
     svc = _service_with_panel(_panel())
     result = svc.run(
         date(2026, 9, 2),
@@ -45,6 +45,25 @@ def test_injected_read_parquet_is_rejected() -> None:
         limit=10,
     )
     assert result.rows == []
+
+
+def test_injected_read_of_valid_parquet_leaks_nothing(tmp_path) -> None:
+    # 用合法 parquet 做注入目标才能区分新旧代码: /etc/passwd 不是 parquet,
+    # 未加固的连接读它也会报错; 合法同构文件在未加固连接下会真的混入结果
+    victim = tmp_path / "victim.parquet"
+    _panel().write_parquet(victim)
+    svc = _service_with_panel(pl.DataFrame(
+        {"symbol": ["999999.SZ"], "close": [99.0], "turnover_rate": [9.0]}
+    ))
+    result = svc.run(
+        date(2026, 9, 2),
+        [f"1=1) UNION SELECT * FROM read_parquet('{victim}') --"],
+        limit=10,
+    )
+    # 加固后注入被拒 → 整条查询 fail-closed 返回空 (或至多剩原面板行);
+    # 未加固时 victim 的 2 行会混入结果
+    assert all(r["symbol"] == "999999.SZ" for r in result.rows)
+    assert len(result.rows) <= 1
 
 
 def test_injected_copy_write_is_rejected(tmp_path) -> None:
