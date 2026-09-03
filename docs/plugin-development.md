@@ -160,10 +160,11 @@ class MyProvider:
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
 
-    def get_realtime_indices(self, symbols: list[str]) -> list[dict]:
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
         """(可选)指数实时快照 → list[dict], 行字段与 get_realtime 一致。
         A 股快照普遍不含指数(fuyao 的指数在独立端点); 声明 realtime 的源
-        强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败软返回 []。"""
+        强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败返回 None,
+        成功但无数据返回 []。"""
 
     def get_financials(self, table, symbols, latest_only=False) -> pl.DataFrame:
         """财务数据(声明 financial 数据集时实现, table 见 financial_sync 调用)。"""
@@ -217,7 +218,7 @@ class MyProvider:
 | 方法 | 失败行为 |
 | --- | --- |
 | `get_realtime` | **软失败**: 返回 `[]` + warning 日志, 保证轮询线程不中断 |
-| `get_realtime_indices` | **软失败**: 返回 `[]` + warning 日志; 指数缓存为空走日K兜底 |
+| `get_realtime_indices` | **软失败**: 返回 `None` + warning 日志, 保留上轮有效缓存; 成功无数据返回 `[]` |
 | `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
 

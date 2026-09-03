@@ -624,17 +624,28 @@ class QuoteService:
                     # 指数补充: A 股快照通常不含指数。插件可选实现
                     # get_realtime_indices(symbols) 用独立端点补拉 (如 fuyao 指数快照);
                     # 未实现的源指数缓存为空, 由日K兜底接管。
+                    replace_index_cache = True
                     fetch_indices = getattr(provider, "get_realtime_indices", None)
                     if callable(fetch_indices):
                         wanted = sorted(set(CORE_INDEX_SYMBOLS) | self._collect_monitor_index_symbols())
                         try:
-                            records = records + (fetch_indices(wanted) or [])
+                            fetched_indices = fetch_indices(wanted)
+                            if fetched_indices is None:
+                                replace_index_cache = False
+                            else:
+                                records = records + fetched_indices
                         except Exception as e:  # noqa: BLE001
                             logger.warning("自定义源指数行情拉取失败: %s", e)
+                            replace_index_cache = False
                 except Exception as e:  # noqa: BLE001
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
-                self._process_full_market_records(records, t0=t0, now_ts=now_ts)
+                self._process_full_market_records(
+                    records,
+                    t0=t0,
+                    now_ts=now_ts,
+                    replace_index_cache=replace_index_cache,
+                )
                 return
             # 自定义源未配置 realtime → 回退 TickFlow
 
@@ -721,7 +732,14 @@ class QuoteService:
 
         self._process_full_market_records(records, t0=t0, now_ts=now_ts)
 
-    def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
+    def _process_full_market_records(
+        self,
+        records: list[dict],
+        *,
+        t0: float,
+        now_ts: float,
+        replace_index_cache: bool = True,
+    ) -> None:
         """把全市场 records 写盘并增量计算 enriched。"""
         from app.services import preferences
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
@@ -753,9 +771,12 @@ class QuoteService:
             self._fetch_ms = fetch_ms
             self._fetched_at = fetched_at
             self._symbol_count = len(stock_records)
-            self._index_symbol_count = len(index_records)
             self._etf_symbol_count = len(etf_records)
-            self._index_quotes_cache = self._build_index_quotes(index_records)
+            if replace_index_cache:
+                self._index_symbol_count = len(index_records)
+                self._index_quotes_cache = self._build_index_quotes(index_records)
+            else:
+                logger.info("指数本轮获取失败,沿用上轮缓存: %d 只", self._index_symbol_count)
 
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)

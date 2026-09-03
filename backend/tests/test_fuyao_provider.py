@@ -319,11 +319,11 @@ def test_realtime_indices_skips_bj_symbols(monkeypatch):
     assert fake.calls == [["000001.SH"]]  # 全 .BJ 时根本不发请求
 
 
-def test_realtime_indices_error_returns_empty(monkeypatch):
+def test_realtime_indices_error_returns_none(monkeypatch):
     provider, _ = _index_provider_with(
         monkeypatch, error=fc.FuyaoError("扶摇接口错误 code=1002: Unknown thscode")
     )
-    assert provider.get_realtime_indices(["000001.SH"]) == []
+    assert provider.get_realtime_indices(["000001.SH"]) is None
 
 
 def test_client_requires_api_key():
