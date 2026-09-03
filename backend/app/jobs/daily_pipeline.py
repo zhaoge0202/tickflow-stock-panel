@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import date as _date, time as _time, timedelta as _td
+from datetime import date as _date, timedelta as _td
 from pathlib import Path
 
 import polars as pl
@@ -22,7 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.market_time import cn_now, cn_today
+from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now, cn_today
 from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
@@ -31,7 +31,7 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[..., None]
-_DAILY_BATCH_READY_TIME = _time(15, 30)
+_DAILY_BATCH_READY_TIME = DAILY_STRATEGY_READY_TIME
 
 
 class PipelineStageError(RuntimeError):
@@ -126,6 +126,8 @@ def run_now(
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
     override_start_date: _date | None = None,
+    *,
+    include_minute: bool = False,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
@@ -134,6 +136,8 @@ def run_now(
 
     override_start_date: 传入时强制走 batch 拉取分支,用该日期作为日K/除权/指数的
         拉取起点(到今天),用于「数据修正/补数据」场景。None 时走原有自动判定逻辑。
+    include_minute: 是否在本次任务中同步分钟 K。默认关闭，避免分钟 K 阻塞日线
+        enriched 和正式策略结果；分钟 K 由独立调度任务或分钟同步接口负责。
     """
     emit = on_progress or _noop
     skipped: list[str] = []
@@ -565,35 +569,15 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
-    from app.services import preferences
-    minute_on = preferences.get_minute_sync_enabled()
-    minute_days = preferences.get_minute_sync_days()
     written_minute = 0
-    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        minute_start = today - _td(days=minute_days)
-        emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
-        logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
-        minute_symbols = _resolve_minute_symbols(capset, repo)
-        def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
-            emit("sync_minute", 90 + int(3 * cur / tot),
-                 f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
-                 stage_pct=int(100 * cur / tot), skip_log=True)
-        written_minute = kline_sync.sync_and_persist_minute(
-            minute_symbols, repo, capset, days=minute_days,
-            on_chunk_done=_minute_chunk_progress,
-        )
-        minute_dir = repo.store.data_dir / "kline_minute"
-        minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
-        emit("sync_minute", 93, f"分钟K完成,覆盖 {minute_cover_days} 天")
-        logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
-        _invalidate("minute")
+    # Step 2.5: 分钟 K 默认拆为独立任务，避免全市场分钟数据拖住日线结果。
+    if include_minute:
+        minute_result = run_minute_sync(repo, capset, on_progress=emit)
+        written_minute = int(minute_result.get("minute_rows") or 0)
+        skipped.extend(minute_result.get("skipped_stages") or [])
     else:
         skipped.append("sync_minute")
-        if minute_on:
-            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
-        else:
-            logger.info("sync_minute skipped: user disabled")
+        logger.info("sync_minute skipped: independent task")
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
@@ -725,6 +709,58 @@ def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
     return _resolve_universe(capset, repo)
 
 
+def run_minute_sync(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    on_progress: ProgressCb | None = None,
+) -> dict:
+    """独立执行分钟 K 同步，不参与日线 enriched 计算。"""
+    from app.services import preferences
+
+    emit = on_progress or _noop
+    minute_on = preferences.get_minute_sync_enabled()
+    minute_days = preferences.get_minute_sync_days()
+    if not minute_on:
+        logger.info("sync_minute skipped: user disabled")
+        return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
+    if not capset.has(Cap.KLINE_MINUTE_BATCH):
+        logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
+        return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
+
+    today = cn_today()
+    minute_start = today - _td(days=minute_days)
+    emit("sync_minute", 5, f"获取分钟K [{minute_start} ~ {today}]…")
+    logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
+    minute_symbols = _resolve_minute_symbols(capset, repo)
+
+    def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+        emit(
+            "sync_minute",
+            5 + int(90 * cur / max(tot, 1)),
+            f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+            stage_pct=int(100 * cur / max(tot, 1)),
+            skip_log=True,
+        )
+
+    written = kline_sync.sync_and_persist_minute(
+        minute_symbols,
+        repo,
+        capset,
+        days=minute_days,
+        on_chunk_done=_minute_chunk_progress,
+    )
+    minute_dir = repo.store.data_dir / "kline_minute"
+    minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
+    emit("sync_minute", 95, f"分钟K完成,覆盖 {minute_cover_days} 天")
+    logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
+    _invalidate("minute")
+    return {
+        "minute_rows": written,
+        "universe_size": len(minute_symbols),
+        "minute_cover_days": minute_cover_days,
+    }
+
+
 def _refresh_instruments_view(repo: KlineRepository) -> None:
     """单独刷新 instruments 视图。"""
     d = repo.store.data_dir.as_posix()
@@ -764,7 +800,7 @@ def _push_phase_change_alert(data_dir) -> None:
     logger.info("phase change alert: %s (severity=%s)", msg, severity)
 
 
-def _run_tracked(fn, job_label: str) -> bool:
+def _run_tracked(fn, job_label: str, *, long_running: bool = False) -> bool:
     """调度触发时包装 JobStore 跟踪，确保同步历史有记录。
 
     单飞: 若已有活跃(pending∨running)任务(手动同步中), 本次调度直接跳过, 不并发。
@@ -773,7 +809,7 @@ def _run_tracked(fn, job_label: str) -> bool:
     """
     from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
 
-    job_id, is_new = job_store.create()
+    job_id, is_new = job_store.create(long_running=long_running)
     if not is_new:
         logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
         return False
@@ -1073,12 +1109,45 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             repo.refresh_cache()
         return result
 
+    def _minute_then_refresh(on_progress=None):
+        # 分钟任务同样读取热更新后的能力集，并暂停实时写入，避免与分钟分区
+        # 的读改写并发。run_minute_sync 自身不触碰日线/enriched。
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        qs = getattr(app_state, "quote_service", None)
+        if qs:
+            with qs.paused():
+                return run_minute_sync(repo, capset_live, on_progress=on_progress)
+        return run_minute_sync(repo, capset_live, on_progress=on_progress)
+
+    def _scheduled_minute_task():
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        if not preferences.get_minute_sync_enabled() or not capset_live.has(Cap.KLINE_MINUTE_BATCH):
+            logger.info("scheduled minute_sync skipped: disabled or capability unavailable")
+            return
+        _run_tracked(_minute_then_refresh, "minute_sync", long_running=True)
+
     scheduler.add_job(
         lambda: _scheduled_pipeline_task(_pipeline_then_refresh),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),
         id="daily_pipeline",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
+    # 分钟 K 在日线任务启动后 30 分钟单独执行。日线任务只负责日K/enriched，
+    # 其 job 已可在日线完成后立即结束；分钟 K 另有长任务超时和进度记录。
+    minute_total = sched["hour"] * 60 + sched["minute"] + 30
+    minute_hour, minute_minute = divmod(minute_total, 60)
+    minute_hour %= 24
+    scheduler.add_job(
+        _scheduled_minute_task,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=minute_hour, minute=minute_minute,
+                            timezone="Asia/Shanghai"),
+        id="minute_pipeline",
         misfire_grace_time=3600,
         replace_existing=True,
     )

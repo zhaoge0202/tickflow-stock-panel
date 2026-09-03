@@ -11,6 +11,7 @@ interface Props {
 }
 
 const LIMIT = 300
+const HISTORY_LIMIT = 5000
 
 function todayLocalISO() {
   const now = new Date()
@@ -20,29 +21,49 @@ function todayLocalISO() {
   return `${y}-${m}-${d}`
 }
 
+function marketClosedToday() {
+  const now = new Date()
+  const minutes = now.getHours() * 60 + now.getMinutes()
+  return minutes >= 15 * 60 + 30
+}
+
 export function StockTradeTicksPanel({ symbol, date }: Props) {
   const qc = useQueryClient()
   const persistKeyRef = useRef('')
   const isToday = date === todayLocalISO()
+  // 收盘后不再用实时 300 条视图，改取当天完整成交；盘中才轮询 recent。
+  const fullDayMode = !isToday || marketClosedToday()
   const queryKey = useMemo(
-    () => QK.tradeTicks(symbol, date, 'auto', 'recent', LIMIT, 'desc'),
-    [date, symbol],
+    () => QK.tradeTicks(symbol, date, 'auto', fullDayMode ? 'all' : 'recent', fullDayMode ? HISTORY_LIMIT : LIMIT, 'desc'),
+    [date, symbol, fullDayMode],
   )
 
   const ticks = useQuery({
     queryKey,
-    queryFn: () => api.tradeTicks(
-      symbol,
-      date,
-      'auto',
-      'recent',
-      LIMIT,
-      'desc',
-      isToday ? Date.now() : undefined,
-    ),
+    queryFn: async () => {
+      const next = await api.tradeTicks(
+        symbol,
+        date,
+        'auto',
+        fullDayMode ? 'all' : 'recent',
+        fullDayMode ? HISTORY_LIMIT : LIMIT,
+        'desc',
+        isToday ? Date.now() : undefined,
+      )
+      // tdxapi 短暂超时后，后端会返回 mysql_fallback 空结果。
+      // 这是一次失败回退，不应覆盖本查询已经展示的有效实时数据。
+      const previous = qc.getQueryData<NonNullable<typeof next>>(queryKey)
+      if (next.source === 'mysql_fallback' && next.rows.length === 0 && (previous?.rows.length ?? 0) > 0) {
+        return {
+          ...previous,
+          warning: next.warning,
+        }
+      }
+      return next
+    },
     enabled: !!symbol && !!date,
     staleTime: 0,
-    refetchInterval: isToday ? 3000 : false,
+    refetchInterval: isToday && !fullDayMode ? 3000 : false,
     refetchIntervalInBackground: true,
   })
 
@@ -82,12 +103,12 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
   })
 
   useEffect(() => {
-    if (!symbol || !date) return
+    if (!symbol || !date || !isToday) return
     const key = `${symbol}|${date}`
     if (persistKeyRef.current === key) return
     persistKeyRef.current = key
     autoPersist.mutate()
-  }, [symbol, date])
+  }, [symbol, date, isToday])
 
   const refreshTicks = useCallback(async () => {
     await refetchTicks({ cancelRefetch: true })
@@ -112,6 +133,11 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
           )}
           {ticks.data?.time_precision === 'minute' && (
             <span className="rounded bg-muted/10 px-1.5 py-0.5 text-[10px] text-muted">分钟精度</span>
+          )}
+          {ticks.data?.warning && (
+            <span className="max-w-[420px] truncate text-[10px] text-warning" title={ticks.data.warning}>
+              {ticks.data.warning}
+            </span>
           )}
           {mysqlRows > 0 && (
             <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">已存 {mysqlRows}</span>

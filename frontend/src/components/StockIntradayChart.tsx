@@ -63,7 +63,7 @@ export function StockIntradayChart({
   })
 
   const fetchMinute = useMutation({
-    mutationFn: () => api.syncMinuteSingle(symbol),
+    mutationFn: () => api.syncMinuteSingle(symbol, undefined, date ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
       qc.invalidateQueries({ queryKey: QK.klineMinute(symbol, date ?? '') })
@@ -73,6 +73,7 @@ export function StockIntradayChart({
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
   const minuteError = minute.error instanceof Error ? minute.error.message : '分钟K请求失败'
+  const fetchMinuteError = fetchMinute.error instanceof Error ? fetchMinute.error.message : '分钟K获取失败'
   // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
   // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
   const sourceIsNone = minute.data?.source === 'none'
@@ -106,6 +107,16 @@ export function StockIntradayChart({
             <div className="flex items-center justify-center h-full gap-2 text-xs text-accent">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>正在获取分钟K数据…</span>
+            </div>
+          ) : fetchMinute.isError ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <div className="max-w-[90%] text-center text-xs text-danger">{fetchMinuteError}</div>
+              <button
+                onClick={() => fetchMinute.mutate()}
+                className="px-4 py-1.5 rounded-btn bg-elevated text-secondary text-xs font-medium hover:bg-elevated/80 transition-colors duration-150"
+              >
+                重试
+              </button>
             </div>
           ) : isIndex ? (
             // 指数: 分钟K仅支持实时读取, 无落库获取入口

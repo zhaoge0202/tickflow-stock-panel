@@ -1259,7 +1259,7 @@ async def sync_minute(request: Request):
 async def sync_minute_single(request: Request, body: dict):
     """手动拉取单只股票的分钟K并落库 (前复权)。
 
-    body: { "symbol": "000001.SZ" }
+    body: { "symbol": "000001.SZ", "date": "2026-07-15" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
     """
     import asyncio
@@ -1277,6 +1277,16 @@ async def sync_minute_single(request: Request, body: dict):
         if requested_days < 1 or requested_days > 30:
             raise HTTPException(status_code=400, detail="days 必须在 1 到 30 之间")
 
+    requested_date = body.get("date")
+    target_date = None
+    if requested_date is not None:
+        if not isinstance(requested_date, str):
+            raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD 字符串")
+        try:
+            target_date = date.fromisoformat(requested_date.strip())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD 字符串") from e
+
     repo = request.app.state.repo
     capset = request.app.state.capabilities
 
@@ -1292,7 +1302,10 @@ async def sync_minute_single(request: Request, body: dict):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
+        kwargs = {"days": days, "force_full_days": True}
+        if target_date is not None:
+            kwargs["target_date"] = target_date
+        return kline_sync.sync_and_persist_minute([symbol], repo, capset, **kwargs)
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 

@@ -1,9 +1,53 @@
 """Polars parquet helpers."""
 from __future__ import annotations
 
+import logging
+import time
+from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
+
+
+def replace_with_retry(
+    src: Path,
+    dst: Path,
+    *,
+    attempts: int = 10,
+    delay_s: float = 0.5,
+) -> None:
+    """原子替换 parquet，并穿过 Windows 读端的短暂文件占用。"""
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if delay_s < 0:
+        raise ValueError("delay_s must not be negative")
+
+    last: PermissionError | None = None
+    for index in range(attempts):
+        try:
+            src.replace(dst)
+            if index:
+                logger.info(
+                    "parquet replace succeeded after %d blocked attempt(s): %s",
+                    index,
+                    dst,
+                )
+            return
+        except PermissionError as exc:
+            last = exc
+            if index == 0:
+                logger.warning(
+                    "parquet replace blocked by concurrent reader, retrying "
+                    "(total <= %.1fs): %s",
+                    attempts * delay_s,
+                    dst,
+                )
+            if index < attempts - 1:
+                time.sleep(delay_s)
+
+    raise last  # type: ignore[misc]  # attempts >= 1 时 last 必已赋值
 
 DAILY_STORAGE_SCHEMA: dict[str, pl.DataType] = {
     "symbol": pl.Utf8,

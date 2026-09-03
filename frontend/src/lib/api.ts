@@ -2813,10 +2813,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
     }),
-  syncMinuteSingle: (symbol: string, days?: number) =>
+  syncMinuteSingle: (symbol: string, days?: number, date?: string) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
-      body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
+      body: JSON.stringify({
+        symbol,
+        ...(days != null ? { days } : {}),
+        ...(date ? { date } : {}),
+      }),
     }),
   clearMinute: () =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
@@ -4227,9 +4231,11 @@ export interface DataStatus {
     total_size_mb: number
   }
   next_pipeline_run: string | null
+  next_minute_run: string | null
   next_instruments_run: string | null
   last_pipeline_run: string | null
   last_instruments_run: string | null
+  latest_strategy_date: string | null
   checked_at: string
   indicators_ready?: boolean
 }

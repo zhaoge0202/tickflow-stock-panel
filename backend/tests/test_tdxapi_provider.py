@@ -91,6 +91,39 @@ def test_get_minute_normalizes_tdx_minute_kline(monkeypatch):
     assert df["volume"][0] == 2
 
 
+def test_get_minute_passes_historical_date_to_tdxapi(monkeypatch):
+    calls = []
+
+    def fake(self, method, path, **kwargs):
+        calls.append(kwargs["params"])
+        return {"list": []}
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+    TDXAPIProvider().get_minute(
+        ["600722.SH"],
+        dt.datetime(2026, 8, 18, 9, 30),
+        dt.datetime(2026, 8, 18, 15, 0),
+    )
+
+    assert calls == [{"code": "sh600722", "type": "minute1", "limit": "2400", "date": "20260818"}]
+
+
+def test_request_releases_shared_http_gate_on_error(monkeypatch):
+    provider = TDXAPIProvider()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sidecar unavailable")
+
+    monkeypatch.setattr(provider._client, "request", fail)
+    with pytest.raises(RuntimeError, match="sidecar unavailable"):
+        provider._request("GET", "/api/test")
+
+    # 失败请求也必须释放闸门，否则后续所有请求会逐渐被卡死。
+    acquired = tp._tdx_http_gate.acquire(timeout=0.1)
+    assert acquired
+    tp._tdx_http_gate.release()
+
+
 def test_get_minute_retries_transient_tdx_failure(monkeypatch):
     calls = 0
 
@@ -147,7 +180,7 @@ def test_get_minute_fetches_symbols_concurrently_and_keeps_order(monkeypatch):
     lock = threading.Lock()
     progress: list[tuple[int, int]] = []
 
-    def fake_fetch(symbol, _kline_type):
+    def fake_fetch(symbol, _kline_type, _trade_date=None):
         nonlocal running, max_running
         with lock:
             running += 1

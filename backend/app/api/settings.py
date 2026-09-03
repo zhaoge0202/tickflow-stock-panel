@@ -1586,6 +1586,18 @@ def update_pipeline_schedule(req: PipelineScheduleIn, request: Request) -> dict:
                 timezone="Asia/Shanghai",
             ),
         )
+        minute_total = sched["hour"] * 60 + sched["minute"] + 30
+        minute_hour, minute_minute = divmod(minute_total, 60)
+        if scheduler.get_job("minute_pipeline"):
+            scheduler.reschedule_job(
+                "minute_pipeline",
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=minute_hour % 24,
+                    minute=minute_minute,
+                    timezone="Asia/Shanghai",
+                ),
+            )
         logger.info("pipeline rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
 
     return sched

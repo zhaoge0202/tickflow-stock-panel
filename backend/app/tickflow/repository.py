@@ -12,12 +12,10 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -33,38 +31,11 @@ from app.enriched_generation import (
     get_enriched_generation,
 )
 from app.market_time import cn_today
-from app.parquet import scan_enriched_parquet
+from app.parquet import replace_with_retry, scan_enriched_parquet
 
 logger = logging.getLogger(__name__)
 
 _HISTORY_SYMBOL_BATCH_SIZE = 512
-
-
-def replace_with_retry(src: Path, dst: Path, *, attempts: int = 10, delay_s: float = 0.5) -> None:
-    """os.replace 的 Windows 读锁重试版。
-
-    分区 parquet 的读端 (polars scan_parquet / DuckDB read_parquet 视图) 在扫描进行
-    期间持有句柄; Windows 不允许替换"仍被读端打开"的目标文件 (PermissionError,
-    WinError 5), Linux 的 inode 交换语义则无此限制。读端扫描通常亚秒级完成,
-    短退避重试即可穿过并发读窗口; attempts 次仍被占用则原样抛出, 由上层记录失败。
-    """
-    last: PermissionError | None = None
-    for i in range(attempts):
-        try:
-            src.replace(dst)
-            if i:
-                logger.info("parquet replace succeeded after %d blocked attempt(s): %s", i, dst)
-            return
-        except PermissionError as e:
-            last = e
-            if i == 0:
-                logger.warning(
-                    "parquet replace blocked by concurrent reader, retrying (total <= %.1fs): %s",
-                    attempts * delay_s, dst,
-                )
-            if i < attempts - 1:
-                time.sleep(delay_s)
-    raise last  # type: ignore[misc]  # attempts >= 1 时 last 必已赋值
 
 
 def enriched_dirname(asset_type: str) -> str:

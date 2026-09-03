@@ -13,6 +13,8 @@ from typing import Any, BinaryIO
 
 import polars as pl
 
+from app.parquet import replace_with_retry
+
 
 class EnrichedGenerationUnavailableError(RuntimeError):
     """The enriched dataset has no stable generation available for readers."""
@@ -259,7 +261,7 @@ class EnrichedPublication:
                 os.fsync(stream.fileno())
             with _exclusive_generation_lock(self.data_dir, self.asset_type):
                 self._claim_or_verify()
-                os.replace(temporary, out)
+                replace_with_retry(temporary, out)
                 _fsync_directory(out.parent)
                 self._changed = True
         finally:

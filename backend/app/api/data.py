@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
+from app.services.strategy_date import latest_strategy_date
 
 logger = logging.getLogger(__name__)
 
@@ -585,6 +586,7 @@ def status(request: Request) -> dict:
     repo = request.app.state.repo
     scheduler = getattr(request.app.state, "scheduler", None)
     data_dir = repo.store.data_dir
+    latest_formal_date = latest_strategy_date(data_dir, "stock")
 
     return {
         "daily":       _get_table_stats("daily",       lambda: _safe_aggregate_daily(repo)),
@@ -606,8 +608,11 @@ def status(request: Request) -> dict:
         # 调度
         "next_instruments_run": _next_cron_run(scheduler, "pre_market_instruments"),
         "next_pipeline_run":    _next_cron_run(scheduler, "daily_pipeline"),
+        "next_minute_run":      _next_cron_run(scheduler, "minute_pipeline"),
         "last_instruments_run": _last_finished("instruments"),
         "last_pipeline_run":    _last_finished("pipeline"),
+        # enriched.latest_date 可能是盘中实时半成品；正式日线策略使用独立口径。
+        "latest_strategy_date": latest_formal_date.isoformat() if latest_formal_date else None,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),

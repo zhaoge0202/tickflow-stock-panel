@@ -42,6 +42,20 @@ _CACHE_FILENAME = "strategy_cache.json"
 _file_lock = threading.Lock()
 
 
+def _crossed_daily_cutoff(as_of: str, old_updated_at: Any) -> bool:
+    """判断是否刚从盘中缓存切换到收盘后的正式缓存。"""
+    from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now
+
+    now = cn_now()
+    if as_of != now.date().isoformat() or now.weekday() >= 5:
+        return False
+    cutoff = datetime.combine(now.date(), DAILY_STRATEGY_READY_TIME, tzinfo=now.tzinfo)
+    try:
+        return float(old_updated_at) < cutoff.timestamp() * 1000
+    except (TypeError, ValueError):
+        return True
+
+
 def _cache_path(data_dir: Path) -> Path:
     return data_dir / "user_data" / _CACHE_FILENAME
 
@@ -137,8 +151,13 @@ def _write_cache_locked(
     old = _read_cache_unlocked(data_dir)
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
+    reset_intraday_cache = (
+        old is not None
+        and old_as_of == as_of
+        and _crossed_daily_cutoff(as_of, old.get("updated_at"))
+    )
 
-    if old_as_of == as_of:
+    if old_as_of == as_of and not reset_intraday_cache:
         merged_results = {**(old.get("results") or {}), **results}
     else:
         merged_results = results
@@ -148,7 +167,7 @@ def _write_cache_locked(
     for sid, r in results.items():
         current_row_maps[sid] = _rows_to_symbol_map(r.get("rows", []))
 
-    if old_as_of and old_as_of == as_of and old_ever_rows:
+    if old_as_of and old_as_of == as_of and old_ever_rows and not reset_intraday_cache:
         # 同一天: 合并 — 用当前行数据更新旧数据 (保持最新价格等)
         merged_rows: dict[str, dict[str, dict]] = {}
         all_keys = set(old_ever_rows.keys()) | set(current_row_maps.keys())

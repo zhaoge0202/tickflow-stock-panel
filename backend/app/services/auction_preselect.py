@@ -23,6 +23,8 @@ DEFAULT_PRESELECT_STRATEGY_IDS = (
     "custom_dual_edge_focus",
     "custom_dual_edge_v3",
 )
+# 当前盘后预选算法是双刃合专属的竞价观察算法，不能套用到普通策略。
+SUPPORTED_PRESELECT_STRATEGY_IDS = frozenset(DEFAULT_PRESELECT_STRATEGY_IDS)
 MAIN_BOARD_FILTER = ["沪主板", "深主板"]
 DEFAULT_LIMIT_PER_STRATEGY = 5
 MAX_LIMIT_PER_STRATEGY = 30
@@ -50,11 +52,23 @@ def build_preselect_payload(
     """
     now = datetime.now(tz=CN_TZ)
     svc = ScreenerService(repo, asset_type=asset_type)
-    signal_date = as_of or svc.latest_date()
+    if as_of is not None:
+        signal_date = as_of
+    else:
+        resolver = getattr(svc, "latest_strategy_date", None)
+        signal_date = resolver() if resolver is not None else svc.latest_date()
     trade_day = trade_date or cn_today()
     requested_ids = _normalize_strategy_ids(strategy_ids)
     if requested_ids is None:
         requested_ids = [sid for sid in DEFAULT_PRESELECT_STRATEGY_IDS if engine.has(sid)]
+    else:
+        unknown = [sid for sid in requested_ids if not engine.has(sid)]
+        if unknown:
+            raise ValueError(f"unknown strategies: {unknown}")
+        requested_ids = [
+            sid for sid in requested_ids
+            if sid in SUPPORTED_PRESELECT_STRATEGY_IDS
+        ]
     limit = _limit(limit_per_strategy)
 
     base = {

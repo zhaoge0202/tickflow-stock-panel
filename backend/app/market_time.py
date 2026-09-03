@@ -17,6 +17,10 @@ _MORNING_END = dt_time(11, 30)
 _AFTERNOON_START = dt_time(13, 0)
 _AFTERNOON_END = dt_time(15, 0)
 
+# 日线策略的正式数据截止时间。盘中 enriched 可能已经有实时增量，但在此之前
+# 只能作为监控快照，不能作为正式日线选股结果。
+DAILY_STRATEGY_READY_TIME = dt_time(15, 30)
+
 
 def cn_now() -> datetime:
     """当前北京时间 (带时区)。"""
@@ -97,3 +101,26 @@ def is_trading_weekday(d: date | None = None) -> bool:
     """
     return (d or cn_today()).weekday() < 5
 
+
+def latest_completed_strategy_date(
+    available_dates: list[date] | tuple[date, ...] | set[date],
+    now: datetime | None = None,
+) -> date | None:
+    """从本地日期集合中返回当前可用于正式日线策略的最新日期。
+
+    工作日 15:30 前排除今天，避免把盘中实时写入的半成品当成收盘结果；
+    15:30 后允许使用今天（若本地确有该分区），周末只回看工作日分区。
+    不判断节假日，
+    因为本地分区本身才是数据可用性的权威来源。
+    """
+    if not available_dates:
+        return None
+    now = now or cn_now()
+    cutoff = now.date()
+    if now.weekday() < 5 and now.time() < DAILY_STRATEGY_READY_TIME:
+        cutoff -= timedelta(days=1)
+    eligible = [
+        value for value in available_dates
+        if value <= cutoff and value.weekday() < 5
+    ]
+    return max(eligible) if eligible else None

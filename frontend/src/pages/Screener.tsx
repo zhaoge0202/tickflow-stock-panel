@@ -104,6 +104,13 @@ function resolveAuctionTradeDate(asOf: string, now = new Date()): string {
 // 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
 const SHOW_STRATEGY_STORE = false
 
+// 盘后预选目前只针对双刃合竞价观察算法，普通策略必须展示自己的正式结果。
+const PRESELECT_STRATEGY_IDS = new Set([
+  'custom_dual_edge',
+  'custom_dual_edge_focus',
+  'custom_dual_edge_v3',
+])
+
 const HISTORY_PAGE_SIZE = 10
 const HISTORY_EVENT_LABELS: Record<StrategyHistoryEvent['event_type'], string> = {
   selected: '策略选出',
@@ -258,11 +265,11 @@ export function Screener() {
       && summaryQuery.data?.results[activeStrategy]?.as_of === asOf,
   })
 
-  // 默认日期 = enriched 最新日期（始终跟随最新）
+  // 默认日期 = 最近已完成的正式策略日期；盘中不跟随 enriched 当天半成品。
   useEffect(() => {
-    const latest = dataStatus.data?.enriched?.latest_date
+    const latest = dataStatus.data?.latest_strategy_date
     if (latest) setAsOf(latest)
-  }, [dataStatus.data?.enriched?.latest_date])
+  }, [dataStatus.data?.latest_strategy_date])
 
   const strategyPresets = useMemo(
     () => (strategies.data?.presets ?? []).filter(s => s.asset_types.includes(assetType)),
@@ -300,7 +307,7 @@ export function Screener() {
   const auctionStrategyIdsKey = useMemo(() => visiblePool.join(','), [visiblePool])
   const isLatestStockDate = assetType === 'stock'
     && !!asOf
-    && asOf === dataStatus.data?.enriched?.latest_date
+    && asOf === dataStatus.data?.latest_strategy_date
   const preselectQuery = useQuery({
     queryKey: QK.screenerPreselect(asOf, auctionTradeDate, auctionStrategyIdsKey, 5, extColumnsParam || undefined),
     queryFn: () => api.screenerPreselect(
@@ -617,12 +624,14 @@ export function Screener() {
     if (!preselectResults) return 0
     return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
   }, [preselectResults])
+  const activeStrategySupportsPreselect = !!activeStrategy && PRESELECT_STRATEGY_IDS.has(activeStrategy)
   const activePreselectRows = useMemo(() => {
     if (showAll || !activeStrategy || !preselectResults) return []
     return preselectResults[activeStrategy]?.rows ?? []
   }, [showAll, activeStrategy, preselectResults])
   const preselectActive = (
     assetType === 'stock'
+    && activeStrategySupportsPreselect
     && strictPoolTotal === 0
     && !auctionConfirmationActive
     && !!preselectResults
@@ -913,7 +922,9 @@ export function Screener() {
   }
 
   const minDate = dataStatus.data?.enriched?.earliest_date ?? ''
-  const maxDate = dataStatus.data?.enriched?.latest_date ?? ''
+  const maxDate = dataStatus.data?.latest_strategy_date
+    ?? dataStatus.data?.enriched?.latest_date
+    ?? ''
 
   const batchAdd = useWatchlistBatchAdd()
 
