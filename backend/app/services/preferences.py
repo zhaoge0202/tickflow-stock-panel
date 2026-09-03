@@ -308,8 +308,8 @@ def get_financial_provider() -> str:
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
 
 def get_pipeline_pull_a_share() -> bool:
-    """A 股日K固定拉取。"""
-    return True
+    """是否拉取 A 股日K。默认 True。"""
+    return load().get("pipeline_pull_a_share", True)
 
 
 def get_pipeline_pull_etf() -> bool:
@@ -453,7 +453,7 @@ def set_mainline_filter_config(cfg: dict) -> dict:
     return get_mainline_filter_config()
 
 
-_PIPELINE_PULL_KEYS = ("pipeline_pull_etf", "pipeline_pull_index")
+_PIPELINE_PULL_KEYS = ("pipeline_pull_a_share", "pipeline_pull_etf", "pipeline_pull_index")
 
 
 def get_pipeline_pull_types() -> dict:

@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 import numpy as np
@@ -19,6 +19,10 @@ from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+# 旧信号回测的指标 warmup 日历窗口 (#201): 与 backtest.factor.FACTOR_WARMUP_DAYS
+# 同源 (120 交易日 → 保守取日历日), 覆盖 MA60/MACD/BOLL 等最长回看
+_WARMUP_CALENDAR_DAYS = 120 * 1.6
 
 # vectorbt 是 optional extras(见 pyproject.toml).未装时只有 backtest 不可用,其他功能正常.
 _vbt = None
@@ -118,6 +122,31 @@ _SIGNAL_COLS: dict[SignalKind, str] = {
 }
 
 
+def _build_max_hold_exits(entries: pd.DataFrame, max_hold_days: int) -> pd.DataFrame:
+    """为每个入场信号在 max_hold_days 个交易日后生成一个强制退出信号。
+
+    返回与 entries 同形状的布尔矩阵, 仅在「入场位之后第 max_hold_days 个交易日」置
+    True(不含入场位本身), 供调用方与用户 exits 做 OR。
+
+    两处易错点(见 #198):
+    - 必须从全 False 起步。若用 `entries.copy()` 起步会把入场位当成退出位,
+      导致入场当日即被强制平仓。
+    - 用单步定位写入 `iloc[row, col_loc]`。链式 `iloc[row][col] = True` 写入的是
+      临时行副本, 在 pandas Copy-on-Write 语义下不会落到原矩阵(pandas 3.x 直接报错),
+      强制退出信号会静默丢失。
+    """
+    out = pd.DataFrame(False, index=entries.index, columns=entries.columns)
+    n = len(entries)
+    for col in entries.columns:
+        col_loc = out.columns.get_loc(col)
+        entry_rows = np.where(entries[col].to_numpy())[0]
+        for i in entry_rows:
+            end_i = min(int(i) + max_hold_days, n - 1)
+            if end_i > i:
+                out.iloc[end_i, col_loc] = True
+    return out
+
+
 class BacktestService:
     def __init__(self, repo: KlineRepository) -> None:
         self.repo = repo
@@ -137,11 +166,17 @@ class BacktestService:
         try:
             from app.tickflow.repository import enriched_dirname
             enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
+            # 指标 warmup (#201): MA/MACD/RSI/BOLL 需要区间前的历史窗口,
+            # 直接按 [start,end] 过滤后 compute_all 会让区间头部的指标失真。
+            # 与挖掘侧同款公式 (mining_runtime: warmup = max(120, bars*1.6)),
+            # 此处指标最长回看约 120 交易日, 取保守日历日窗口; 数据不足时
+            # 自然退化 (有多少算多少)。计算完成后裁回 [start,end]。
+            warmup_start = start - timedelta(days=_WARMUP_CALENDAR_DAYS)
             df = (
                 scan_enriched_parquet(enriched_glob)
                 .filter(
                     (pl.col("symbol").is_in(symbols))
-                    & (pl.col("date") >= start)
+                    & (pl.col("date") >= warmup_start)
                     & (pl.col("date") <= end)
                 )
                 .sort(["date", "symbol"])
@@ -157,6 +192,7 @@ class BacktestService:
         # 即时计算指标 + 信号
         from app.indicators.pipeline import compute_all
         df = compute_all(df)
+        df = df.filter(pl.col("date") >= start)
 
         # 选择需要的列
         needed_cols = [
@@ -270,16 +306,10 @@ class BacktestService:
             if config.stop_loss_pct is not None:
                 pf_kwargs["sl_stop"] = abs(config.stop_loss_pct)
             if config.max_hold_days is not None:
-                # vectorbt 没有内置 max-hold;用时间退出近似:
-                # 在 max_hold_days 后强制 exit
-                exits_idx = entries.copy()
-                for col in entries.columns:
-                    entry_rows = np.where(entries[col].values)[0]
-                    for i in entry_rows:
-                        end_i = min(i + config.max_hold_days, len(entries) - 1)
-                        if end_i > i:
-                            exits_idx.iloc[end_i][col] = True
-                pf_kwargs["exits"] = (exits | exits_idx).astype(bool)
+                # vectorbt 没有内置 max-hold;用时间退出近似:入场后第 max_hold_days
+                # 个交易日强制 exit, 与用户 exits 做 OR(保留原有信号退出)。
+                forced_exits = _build_max_hold_exits(entries, config.max_hold_days)
+                pf_kwargs["exits"] = (exits | forced_exits).astype(bool)
 
             pf = vbt.Portfolio.from_signals(**pf_kwargs)
         except Exception as e:  # noqa: BLE001

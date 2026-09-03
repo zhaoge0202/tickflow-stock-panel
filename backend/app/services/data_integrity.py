@@ -8,6 +8,7 @@
 - null              → batch 拉取 / 盘后计算写入的权威历史 → 完整
 - d < 今天 且 时刻 < d 15:00 → 盘中快照 (停机前实时写的) → 坏
 - d < 今天 且 时刻 ≥ d 15:00 → 尾盘定版 (close_final) → 完整
+- batch 权威行中仅夹杂少量零成交实时行 → 停牌残留 → 忽略
 - d == 今天         → 实时更新中, 属正常, 不校验
 - 分区缺失的工作日  → 缺口 (工作日近似; 节假日误报的代价是一次空范围拉取,
   merge-upsert 空写, 无害)
@@ -108,6 +109,62 @@ def _is_snapshot(day: date, quote_ts_ms: int | None) -> bool:
     return ts.date() == day and ts.time() < CLOSE_CUTOFF
 
 
+def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | None) -> bool:
+    """判断整个分区是否仍是盘中快照, 而非同步后遗留的停牌实时行。
+
+    batch 行用 null quote_ts 标识权威历史。实时轮询曾把停牌股票的 09:15、
+    零成交记录写入分区; 后续 batch 会过滤停牌日, merge-upsert 因而留下这些
+    孤立行。若分区已有 batch 行, 且当日收盘前的实时行全部零成交, 则它们不应
+    让整个分区反复进入修复。整分区都是实时行时仍按快照处理, 包括盘前零成交。
+    """
+    if not _is_snapshot(day, quote_ts_max_ms):
+        return False
+
+    start_ms = int(datetime.combine(day, dt_time.min, tzinfo=CN_TZ).timestamp() * 1000)
+    cutoff_ms = int(datetime.combine(day, CLOSE_CUTOFF, tzinfo=CN_TZ).timestamp() * 1000)
+    authoritative_rows = 0
+    suspicious_rows = 0
+
+    for path in sorted(part_dir.glob("*.parquet")):
+        try:
+            schema = pl.read_parquet_schema(path)
+            if "quote_ts" not in schema:
+                continue
+            columns = [
+                name for name in ("quote_ts", "volume", "amount")
+                if name in schema
+            ]
+            frame = pl.read_parquet(path, columns=columns).with_columns(
+                pl.col("quote_ts").cast(pl.Int64, strict=False),
+            )
+            authoritative_rows += frame["quote_ts"].null_count()
+            suspicious = frame.filter(
+                pl.col("quote_ts").is_between(start_ms, cutoff_ms, closed="left")
+            )
+            if suspicious.is_empty():
+                continue
+            suspicious_rows += suspicious.height
+
+            activity_columns = [
+                name for name in ("volume", "amount") if name in suspicious.columns
+            ]
+            if not activity_columns:
+                return True
+            has_activity = suspicious.select(
+                pl.any_horizontal(
+                    pl.col(name).cast(pl.Float64, strict=False).fill_null(0) > 0
+                    for name in activity_columns
+                ).any()
+            ).item()
+            if has_activity:
+                return True
+        except Exception as e:
+            logger.debug("snapshot residue scan skipped %s: %s", path, e)
+            return True
+
+    return suspicious_rows > 0 and authoritative_rows <= suspicious_rows
+
+
 def _candidate_days(today: date, lookback_days: int) -> list[date]:
     """最近 lookback_days 自然日内、严格早于今天的工作日 (节假日近似, 误报无害)。"""
     days: list[date] = []
@@ -157,7 +214,7 @@ def scan_recent_integrity(
                 continue
             part_dir = base / f"date={day.isoformat()}"
             quote_ts = _quote_ts_max_ms(part_dir)
-            if _is_snapshot(day, quote_ts):
+            if _partition_is_snapshot(day, part_dir, quote_ts):
                 issues.append(IntegrityIssue(day=day, table=table, kind="snapshot"))
 
     issues.sort(key=lambda i: (i.day, i.table))

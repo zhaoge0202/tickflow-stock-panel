@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database,
   Play,
+  Square,
   Loader2,
   HardDrive,
   Clock,
@@ -103,6 +104,16 @@ export function Data() {
     onSuccess: ({ job_id }) => {
       setActiveJobId(job_id)
       startTime.current = Date.now()
+    },
+  })
+
+  // 停止同步: 二次确认后调 cancel 端点 (协作式终止, 当前分块完成后线程自行退出)
+  const [showStopConfirm, setShowStopConfirm] = useState(false)
+  const stopSync = useMutation({
+    mutationFn: () => api.pipelineJobCancel(activeJobId!),
+    onSuccess: () => {
+      setShowStopConfirm(false)
+      qc.invalidateQueries({ queryKey: QK.pipelineJob(activeJobId!) })
     },
   })
 
@@ -589,13 +600,23 @@ export function Data() {
               disabled={isStarting}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-accent/25 to-accent/10 border border-accent/30 text-accent text-xs font-medium hover:from-accent/35 hover:to-accent/20 disabled:opacity-40 transition-all duration-150"
             >
-              {(isRunning || isStarting) ? (
+              {(isStarting || isRunning) ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Play className="h-3.5 w-3.5" />
               )}
               {isStarting ? '启动中…' : isRunning ? '同步中…' : '立即同步'}
             </button>
+            {isRunning && !!activeJobId && (
+              <button
+                onClick={() => setShowStopConfirm(true)}
+                title="停止当前同步任务"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-danger/12 border border-danger/30 text-danger text-xs font-medium hover:bg-danger/20 transition-all duration-150"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                停止
+              </button>
+            )}
             <button
               onClick={() => setOpenSettings('pipeline-scope')}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
@@ -1152,6 +1173,64 @@ export function Data() {
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
             <MinuteSyncConfig hasCap={hasMinuteCap} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
           </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      {/* 停止同步二次确认弹窗 */}
+      <AnimatePresence>
+        {showStopConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              onClick={() => !stopSync.isPending && setShowStopConfirm(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              className="relative w-[90vw] max-w-[420px] rounded-card border border-border bg-base shadow-2xl p-6"
+            >
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 h-10 w-10 rounded-full bg-danger/12 flex items-center justify-center">
+                  <AlertTriangle className="h-5 w-5 text-danger" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-foreground mb-1.5">确认停止数据同步？</h3>
+                  <p className="text-xs text-secondary leading-relaxed">
+                    当前任务将在<span className="text-foreground font-medium">正在拉取的分块完成后</span>中断（协作式停止，不会损坏已写入的数据）。
+                  </p>
+                  <p className="mt-2 text-[11px] text-danger/90 leading-relaxed">
+                    停止后再次拉取需要重新走完整管道（拉取 → 指标计算 → 监控规则），无法从停止处续跑。
+                  </p>
+                  <div className="mt-2 flex items-start gap-1.5 text-[11px] text-muted">
+                    <Info className="h-3.5 w-3.5 shrink-0 mt-px text-muted" />
+                    <span>已写入的部分数据会保留，下次同步时覆盖或补齐。</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 mt-5">
+                <button
+                  onClick={() => setShowStopConfirm(false)}
+                  disabled={stopSync.isPending}
+                  className="px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:bg-elevated/80 text-sm transition-colors disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => stopSync.mutate()}
+                  disabled={stopSync.isPending}
+                  className="px-3 py-1.5 rounded-btn bg-danger/90 text-base text-sm font-medium hover:bg-danger disabled:opacity-50 transition-colors"
+                >
+                  {stopSync.isPending ? '停止中…' : '确认停止'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

@@ -978,11 +978,16 @@ def filter_halt_days(df: pl.DataFrame) -> pl.DataFrame:
 
     停牌日的 open/high 必然为 0 (无集合竞价)。注意 close 可能被数据源
     填充为前收盘价而非 0, 因此不能用 "OHLC 全零" 判断, 否则会漏过这类
-    停牌记录 (如 *ST 撤销风险警示的停牌日), 污染 MA/ATR 等指标。
+    停牌记录 (如 *ST 撤销风险警示的停牌日), 污染 MA/ATR 等指标。旧版实时
+    落盘还会先把 open/high=0 填成 close, 对这类历史数据用零成交量和零成交额
+    作为兼容判据。
     """
     if df.is_empty() or "open" not in df.columns or "high" not in df.columns:
         return df
-    return df.filter(~((pl.col("open") == 0) & (pl.col("high") == 0)))
+    halted = (pl.col("open") == 0) & (pl.col("high") == 0)
+    if "volume" in df.columns and "amount" in df.columns:
+        halted = halted | ((pl.col("volume") == 0) & (pl.col("amount") == 0))
+    return df.filter(~halted)
 
 
 # ================================================================
@@ -1182,10 +1187,11 @@ def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
 
 
 def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -> float:
-    """从实时指数行情取某交易所首选基准的今日涨跌, 缺数据时 0。
+    """从实时指数行情取某交易所首选基准的今日涨跌 (小数制), 缺数据时 0。
 
-    index_quotes 来自 QuoteService.get_index_quotes, 其中 change_pct 已统一为
-    百分数值 (如 -1.02 表示 -1.02%); 这里转换为内部小数制。
+    入参 index_quotes 来自 quote_service 的指数展示缓存, 其 change_pct/pct/pct_change
+    列为百分数口径 (CONTRIBUTING §3.1), 消费前必须显式 /100 (#232);
+    close/prev_close 兜底路径本身就是小数, 不转换。
     """
     if index_quotes is None or index_quotes.is_empty():
         return 0.0

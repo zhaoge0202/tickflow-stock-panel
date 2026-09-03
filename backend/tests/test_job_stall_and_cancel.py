@@ -165,3 +165,44 @@ def test_run_slot_reap_release_prevents_zombie_release():
     pipeline_jobs.release_run_slot("jobB")
     assert pipeline_jobs.try_acquire_run_slot("jobC") is True
     pipeline_jobs.release_run_slot("jobC")
+
+
+# ── 手动取消 API 端点契约 (数据页「停止」按钮) ──────────────────────────
+
+def test_manual_cancel_endpoint_contract(monkeypatch, tmp_path):
+    """POST /api/pipeline/jobs/{id}/cancel: running/pending 可停, 终态 400, 未知 404。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.pipeline import router
+
+    monkeypatch.setattr(preferences, "load", lambda: {})
+    store = JobStore(store_dir=tmp_path / "jobs")
+    monkeypatch.setattr("app.api.pipeline.job_store", store)
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    # 未知 job → 404
+    assert client.post("/api/pipeline/jobs/nope/cancel").status_code == 404
+
+    # running → 协作式终止: 标 failed + 置取消标志 + 释放执行槽
+    jid = _make_running_job(store, timeout_s=60)
+    pipeline_jobs.try_acquire_run_slot(jid)
+    resp = client.post(f"/api/pipeline/jobs/{jid}/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelled": jid}
+    j = store.get(jid)
+    assert j["status"] == "failed"
+    assert "手动取消" in j["error"]
+    assert pipeline_jobs.is_cancelled(jid)
+    assert pipeline_jobs.try_acquire_run_slot("next") is True
+
+    # 已终态 (failed) → 400 拒绝重复取消
+    assert client.post(f"/api/pipeline/jobs/{jid}/cancel").status_code == 400
+
+    # 停止后可再建新任务 (再次拉取走完整管道的单飞基础)
+    jid2, is_new = store.create(timeout_s=60)
+    assert is_new is True
+    assert store.active_id() == jid2

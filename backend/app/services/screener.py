@@ -104,7 +104,9 @@ class ScreenerService:
             return pl.DataFrame()
 
         try:
-            df = self.repo._ensure_date_column(pl.read_parquet(target_parquet), target_date)
+            df = pl.read_parquet(target_parquet)
+            if "date" not in df.columns:
+                df = df.with_columns(pl.lit(target_date).cast(pl.Date).alias("date"))
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_for_date failed: %s", e)
             return pl.DataFrame()
@@ -162,8 +164,10 @@ class ScreenerService:
         # 加载 warmup 历史 (目标日期前 ~120 天)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
+        # turnover_rate 是 enriched 存储列, 必须随行透传: 否则即时计算后该列
+        # 丢失, 自定义 SQL 用它做条件会 Binder Error 被吞成空结果 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (
@@ -204,8 +208,12 @@ class ScreenerService:
         parts: list[pl.DataFrame] = []
         for offset in range(0, len(symbols), _HISTORY_SYMBOL_BATCH_SIZE):
             batch = symbols[offset:offset + _HISTORY_SYMBOL_BATCH_SIZE]
-            df_hist = self.repo._collect_unique_symbol_date(  # noqa: SLF001
-                history_lf.filter(pl.col("symbol").is_in(batch))
+            df_hist = (
+                history_lf
+                .filter(pl.col("symbol").is_in(batch))
+                .collect(engine="streaming")
+                .unique(subset=["symbol", "date"], keep="last")
+                .sort(["symbol", "date"])
             )
             if df_hist.is_empty():
                 continue
@@ -278,8 +286,9 @@ class ScreenerService:
         start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (
@@ -369,10 +378,14 @@ class ScreenerService:
         # 用独立的 :memory: 连接 (而非复用 repo 共享连接的 cursor): conditions 是用户
         # 传入的 SQL 片段, 隔离连接下注入至多能碰 read_csv/read_parquet 文件; 若复用共享
         # 连接则会把 app 已注册的真实业务表也暴露给注入, 扩大攻击面。隔离连接创建开销极低。
+        # 再关闭 external_access, 让注入的文件读写函数 (read_parquet/COPY 等) 直接报错,
+        # 视图数据仍通过 con.register 注入, 不受该开关影响 (#224)。
         con = None
         try:
             import duckdb
-            con = duckdb.connect(database=":memory:")
+            con = duckdb.connect(
+                database=":memory:", config={"enable_external_access": False}
+            )
             con.register("enriched", df.to_arrow())
             where = " AND ".join(f"({c})" for c in conditions)
             sql = f"SELECT * FROM enriched WHERE {where}"

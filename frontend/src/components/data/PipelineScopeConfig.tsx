@@ -39,24 +39,21 @@ export function PipelineScopeConfig() {
       </p>
       <div className="space-y-1.5">
         {ITEMS.map((item) => {
-          const locked = item.key === 'pipeline_pull_a_share'
-          const on = locked || getValue(item.key, item.defaultOn)
+          const on = getValue(item.key, item.defaultOn)
           return (
             <div key={item.key}>
               <label
-                className={`flex items-start gap-2.5 rounded-card border px-3 py-2.5 transition-colors ${
-                  locked ? 'cursor-default' : 'cursor-pointer'
-                } ${on ? 'border-accent/40 bg-accent/[0.05]' : 'border-border bg-base/30 hover:border-border/70'}`}
+                className={`flex items-start gap-2.5 rounded-card border px-3 py-2.5 cursor-pointer transition-colors ${
+                  on ? 'border-accent/40 bg-accent/[0.05]' : 'border-border bg-base/30 hover:border-border/70'
+                }`}
               >
                 <button
                   type="button"
-                  onClick={() => {
-                    if (!locked) updateToggle.mutate({ [item.key]: !on } as never)
-                  }}
-                  disabled={locked || updateToggle.isPending}
+                  onClick={() => updateToggle.mutate({ [item.key]: !on } as never)}
+                  disabled={updateToggle.isPending}
                   className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
                     on ? 'bg-accent border-accent' : 'bg-base border-border'
-                  } ${locked ? 'opacity-80' : ''}`}
+                  }`}
                   role="checkbox"
                   aria-checked={on}
                 >

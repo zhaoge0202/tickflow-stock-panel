@@ -1244,6 +1244,11 @@ class StrategyEngine:
         basic_filter = dict(strategy.basic_filter or {})
         if overrides.get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
+        # 策略扫描的运行期过滤同样要按资产类型中和股票专属键 (boards/价格界),
+        # 否则 ETF 候选在矩阵掩码阶段被静默清零 (#215); 函数级导入避免
+        # engine ↔ backtest.strategy 的模块级循环依赖 (与上方 matrix 导入同模式)
+        from app.backtest.strategy import _basic_filter_for_asset
+        basic_filter = _basic_filter_for_asset(basic_filter, context.asset_type)
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         asset_mask = None
         if pool:

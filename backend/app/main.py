@@ -25,6 +25,7 @@ from app.api import (
     indices,
     intraday,
     kline,
+    lots,
     manual_positions,
     market_breadth,
     market_recap,
@@ -549,6 +550,7 @@ app.include_router(strategy_history.router)
 app.include_router(strategy_purchase_marks.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
+app.include_router(lots.router)
 app.include_router(alerts.router)
 app.include_router(decision.router)
 app.include_router(manual_positions.router)

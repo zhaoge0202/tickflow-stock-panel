@@ -80,12 +80,18 @@ def test_get_minute_datetime_is_beijing_wall_clock(monkeypatch):
     assert df["symbol"][0] == "600519.SH"
 
 
-def test_get_realtime_passthrough(monkeypatch):
+def test_get_realtime_normalizes_units_without_mutating_bridge_rows(monkeypatch):
     rows = [{"symbol": "600519.SH", "name": "贵州茅台", "last_price": 1200.0,
-             "prev_close": 1194.0, "open": 1186.0, "high": 1203.0, "low": 1180.0, "volume": 16325}]
+             "prev_close": 1194.0, "open": 1186.0, "high": 1203.0, "low": 1180.0,
+             "volume": 16325, "amount": 159095, "change_pct": -1.15,
+             "timestamp": 1787193740000}]
     _patch_run_job(monkeypatch, {"realtime": {"ok": True, "op": "realtime", "rows": rows}})
     out = StockSDKProvider().get_realtime()
-    assert out == rows
+    assert abs(out[0]["change_pct"] - (-0.0115)) < 1e-12
+    assert out[0]["amount"] == 1_590_950_000
+    assert out[0]["timestamp"] == 1787193740000
+    assert rows[0]["change_pct"] == -1.15
+    assert rows[0]["amount"] == 159095
     required = {"symbol", "last_price", "prev_close", "open", "high", "low", "volume"}
     assert required <= set(out[0].keys())
 
@@ -141,7 +147,7 @@ def test_bridge_uses_utf8_error_tolerant_subprocess(monkeypatch):
     assert kwargs["errors"] == "replace"
 
 
-def test_bridge_mjs_resolves_local_stock_sdk_on_windows_path(tmp_path):
+def test_bridge_mjs_resolves_local_sdk_and_maps_realtime_timestamp(tmp_path):
     if shutil.which("node") is None:
         raise AssertionError("node is required for stock-sdk bridge path regression test")
 
@@ -155,7 +161,18 @@ def test_bridge_mjs_resolves_local_stock_sdk_on_windows_path(tmp_path):
         encoding="utf-8",
     )
     (pkg_dir / "index.js").write_text(
-        "export class StockSDK { static version = 'fake-local' }\n",
+        """export class StockSDK {
+  static version = 'fake-local'
+  constructor() {
+    this.batch = { cn: async () => [{
+      code: '600519', marketId: '1', name: '贵州茅台', price: 1200,
+      prevClose: 1194, open: 1186, high: 1203, low: 1180,
+      volume: 16325, amount: 159095, changePercent: 0.5,
+      timestamp: 1787193740000
+    }] }
+  }
+}
+""",
         encoding="utf-8",
     )
 
@@ -171,6 +188,17 @@ def test_bridge_mjs_resolves_local_stock_sdk_on_windows_path(tmp_path):
     assert proc.returncode == 0
     result = json.loads(proc.stdout)
     assert result == {"ok": True, "op": "ping", "version": "fake-local"}
+    realtime_proc = subprocess.run(
+        ["node", str(bridge_path)],
+        input=json.dumps({"op": "realtime"}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+    )
+    assert realtime_proc.returncode == 0
+    row = json.loads(realtime_proc.stdout)["rows"][0]
+    assert row["timestamp"] == 1787193740000
 
 
 def test_plugin_discovered_in_loader():

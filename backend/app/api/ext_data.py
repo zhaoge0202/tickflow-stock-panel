@@ -682,6 +682,30 @@ def dimension_intraday(
 # 文件上传
 # ---------------------------------------------------------------------------
 
+# 扩展数据 CSV/Excel 上传上限(与自选截图 OCR 的 12MB 上限属同类保护, 见 watchlist.py)。
+# 通过分块写入临时文件, 超限即拒绝, 避免 `await file.read()` 把整个文件读入内存。
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _write_upload_capped(file: UploadFile, dest: Path, max_bytes: int) -> None:
+    """分块把上传文件写入 dest, 累计超过 max_bytes 立即拒绝(413)。
+
+    避免一次性 `await file.read()` 把整个文件读入内存(大文件可能触发高内存占用、
+    进程 OOM 或服务不可用); 超限时停止继续读取与落盘。
+    """
+    total = 0
+    with dest.open("wb") as f:
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(413, f"文件过大(上限 {max_bytes // (1024 * 1024)}MB)")
+            f.write(chunk)
+
+
 @router.post("/{config_id}/upload")
 async def upload_data(
     request: Request,
@@ -704,9 +728,7 @@ async def upload_data(
     tmp_dir = Path(tempfile.mkdtemp())
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
-        with tmp_path.open("wb") as f:
-            content = await file.read()
-            f.write(content)
+        await _write_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
 
         # 直接读取文件，不做列重命名
         if suffix == ".csv":
@@ -939,9 +961,7 @@ async def detect_fields(
     tmp_dir = Path(tempfile.mkdtemp())
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
-        with tmp_path.open("wb") as f:
-            content = await file.read()
-            f.write(content)
+        await _write_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
 
         # 直接读取，不要求 symbol 列
         if suffix == ".csv":

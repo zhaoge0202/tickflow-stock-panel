@@ -20,13 +20,16 @@ export function useFinancialStatus() {
   })
 }
 
-export function useFinancialMetrics(symbol?: string) {
-  return useQuery({
+export function financialMetricsQueryOptions(symbol?: string) {
+  return {
     queryKey: FINANCIAL_QK.metrics(symbol),
     queryFn: () => api.financialMetrics(symbol),
-    enabled: !!symbol,
     staleTime: 300_000,
-  })
+  }
+}
+
+export function useFinancialMetrics(symbol?: string) {
+  return useQuery({ ...financialMetricsQueryOptions(symbol), enabled: !!symbol })
 }
 
 export function useFinancialIncome(symbol?: string) {

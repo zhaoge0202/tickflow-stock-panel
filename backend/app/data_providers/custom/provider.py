@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -132,6 +133,23 @@ class GenericHTTPProvider:
                     )
         return errors
 
+    def _request_rows_retry(
+        self, cfg, symbols: list[str], *, start_time=None, end_time=None, retries: int = 1
+    ) -> list[dict]:
+        """单批请求 + 短退避重试。仍失败抛出, 由调用方决定隔离粒度 (#226)。"""
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self._request_rows(
+                    cfg, symbols=symbols, start_time=start_time, end_time=end_time
+                )
+            except Exception as e:  # noqa: BLE001
+                last = e
+                if attempt < retries:
+                    time.sleep(1.0 * (attempt + 1))
+        assert last is not None
+        raise last
+
     def get_daily(
         self,
         symbols: list[str],
@@ -143,15 +161,35 @@ class GenericHTTPProvider:
         cfg = self._dataset("daily")
         frames: list[pl.DataFrame] = []
         chunks = chunked(symbols, cfg.batch)
+        failed: list[str] = []
         for i, chunk in enumerate(chunks):
             sleep_between_batches(i, cfg.rpm)
-            rows = self._request_rows(cfg, symbols=chunk, start_time=start_time, end_time=end_time)
+            try:
+                rows = self._request_rows_retry(
+                    cfg, chunk, start_time=start_time, end_time=end_time
+                )
+            except Exception as e:  # noqa: BLE001
+                # 单批失败只隔离该批 (#226): 之前任一批 502 会让整个 stage
+                # 抛异常, 已成功批次的结果留在内存里全部丢弃
+                failed.extend(chunk)
+                logger.warning(
+                    "custom daily: batch %d/%d failed (%d symbols), skipped: %s",
+                    i + 1, len(chunks), len(chunk), e,
+                )
+                if on_chunk_done:
+                    on_chunk_done(i + 1, len(chunks))
+                continue
             df = self._mapped_frame(cfg, rows)
             df = normalize_daily(df, source=self.name)
             if not df.is_empty():
                 frames.append(df)
             if on_chunk_done:
                 on_chunk_done(i + 1, len(chunks))
+        if failed:
+            logger.warning(
+                "custom daily: %d/%d symbols missing due to batch failures: %s",
+                len(failed), len(symbols), ", ".join(failed[:20]),
+            )
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     def get_adj_factors(
@@ -165,15 +203,33 @@ class GenericHTTPProvider:
         cfg = self._dataset("adj_factor")
         frames: list[pl.DataFrame] = []
         chunks = chunked(symbols, cfg.batch)
+        failed: list[str] = []
         for i, chunk in enumerate(chunks):
             sleep_between_batches(i, cfg.rpm)
-            rows = self._request_rows(cfg, symbols=chunk, start_time=start_time, end_time=end_time)
+            try:
+                rows = self._request_rows_retry(
+                    cfg, chunk, start_time=start_time, end_time=end_time
+                )
+            except Exception as e:  # noqa: BLE001
+                failed.extend(chunk)
+                logger.warning(
+                    "custom adj_factor: batch %d/%d failed (%d symbols), skipped: %s",
+                    i + 1, len(chunks), len(chunk), e,
+                )
+                if on_chunk_done:
+                    on_chunk_done(i + 1, len(chunks))
+                continue
             df = self._mapped_frame(cfg, rows)
             df = normalize_adj_factors(df, source=self.name)
             if not df.is_empty():
                 frames.append(df)
             if on_chunk_done:
                 on_chunk_done(i + 1, len(chunks))
+        if failed:
+            logger.warning(
+                "custom adj_factor: %d/%d symbols missing due to batch failures: %s",
+                len(failed), len(symbols), ", ".join(failed[:20]),
+            )
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     def get_realtime(self) -> list[dict]:
@@ -293,18 +349,45 @@ class GenericHTTPProvider:
             return pl.DataFrame()
         return pl.concat(frames, how="diagonal_relaxed")
 
-    @staticmethod
-    def _normalize_minute(df: pl.DataFrame) -> pl.DataFrame:
+    @classmethod
+    def _normalize_minute(cls, df: pl.DataFrame) -> pl.DataFrame:
         """把映射后的 df 规范成 minute canonical 列。"""
         if df.is_empty():
             return df
         if "datetime" in df.columns and df.schema["datetime"] != pl.Datetime("us"):
+            if df.schema["datetime"] == pl.Utf8:
+                # 字符串 datetime 直接 cast 会整体置 null (polars 不做字符串解析);
+                # 先解析再对齐微秒精度 (#225, 参照
+                # kline_sync._enforce_minute_beijing_wallclock 的处理)。
+                # Series 级立即解析: 表达式错误要到 collect 才抛, 无法按格式回退
+                df = df.with_columns(cls._parse_datetime_series(df["datetime"]))
             df = df.with_columns(pl.col("datetime").cast(pl.Datetime("us"), strict=False))
         for col in ("open", "high", "low", "close", "volume", "amount"):
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
         keep = [c for c in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount") if c in df.columns]
         return df.select(keep) if keep else pl.DataFrame()
+
+    _DATETIME_STR_FORMATS = (
+        None,  # 自动推断
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    )
+
+    @classmethod
+    def _parse_datetime_series(cls, s: pl.Series) -> pl.Series:
+        """逐格式尝试解析字符串 datetime; 均失败返回全 null (宽松语义)。"""
+        for fmt in cls._DATETIME_STR_FORMATS:
+            try:
+                return (
+                    s.str.to_datetime(strict=False, format=fmt)
+                    if fmt else s.str.to_datetime(strict=False)
+                )
+            except Exception:  # noqa: BLE001 — 该格式不适用, 换下一个
+                continue
+        return pl.Series("datetime", [None] * s.len(), dtype=pl.Datetime("us"))
 
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
         cfg = self._dataset(dataset)

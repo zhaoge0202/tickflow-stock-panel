@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -17,13 +17,13 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
-  abnormal: '异动监控', volume_delta: '轮询放量',
+  abnormal: '异动监控', volume_delta: '轮询放量', date: '日期提醒',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -40,6 +40,7 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
   abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
   volume_delta: 'bg-rose-500/10 text-rose-400 border-rose-500/20 dark:text-rose-300',
+  date:     'bg-violet-500/10 text-violet-500 border-violet-500/20 dark:text-violet-300',
 }
 
 /**
@@ -133,7 +134,7 @@ export function Monitor() {
   }, [searchParams, setSearchParams])
 
   // 触发记录: 过滤 + 统计 (提升到主组件, 供 header 行使用)
-  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal' | 'volume_delta'>('all')
+  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal' | 'volume_delta' | 'date'>('all')
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
@@ -214,7 +215,7 @@ export function Monitor() {
               <SectionHeader icon={BellRing} title="触发记录" />
               {/* 过滤标签 */}
               <div className="flex flex-wrap items-center gap-0.5">
-                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal', 'volume_delta'] as const).map(f => (
+                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal', 'volume_delta', 'date'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setFilter(f)}
@@ -339,6 +340,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
+  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
 
   const clearMut = useMutation({
@@ -366,6 +368,22 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   }
 
   const events = (alertsQuery.data as any)?.alerts ?? []
+
+  // 切股导航列表: 有 symbol 的触发记录 (按展示顺序)
+  const alertsNavItems = useMemo(
+    () => toNavItems(events.filter((ev: AlertEvent) => ev.symbol)),
+    [events],
+  )
+  const handlePreviewEvent = useCallback((ev: AlertEvent) => {
+    setPreviewEv(ev)
+    setPreviewNavList(alertsNavItems)
+  }, [alertsNavItems])
+  // 弹窗内切股: 来自成分弹窗则更新 memberPreview, 否则按 symbol 找到对应事件 (保住 triggerInfo)
+  const handleNavigate = useCallback((sym: string, name?: string) => {
+    if (memberPreview) { setMemberPreview({ symbol: sym, name }); return }
+    const ev = events.find((e: AlertEvent) => e.symbol === sym)
+    if (ev) setPreviewEv(ev)
+  }, [memberPreview, events])
 
   return (
     <div className="space-y-3">
@@ -418,7 +436,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             const board = boardTag(ev.symbol)
                             return (
                               <button
-                                onClick={() => setPreviewEv(ev)}
+                                onClick={() => handlePreviewEvent(ev)}
                                 className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                                 title="点击查看日K"
                               >
@@ -497,7 +515,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           const board = boardTag(ev.symbol)
                           return (
                             <button
-                              onClick={() => setPreviewEv(ev)}
+                              onClick={() => handlePreviewEvent(ev)}
                               className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                               title="点击查看日K"
                             >
@@ -627,15 +645,18 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
           signals: previewEv.signals,
           message: previewEv.message,
         } : null}
-        onClose={() => { setPreviewEv(null); setMemberPreview(null) }}
+        navList={previewNavList}
+        onNavigate={handleNavigate}
+        onClose={() => { setPreviewEv(null); setMemberPreview(null); setPreviewNavList([]) }}
       />
 
       <DimensionMembersDialog
         target={dimensionTarget}
         onClose={() => setDimensionTarget(null)}
-        onStockClick={(symbol, name) => {
+        onStockClick={(symbol, name, navList) => {
           setDimensionTarget(null)
           setMemberPreview({ symbol, name })
+          setPreviewNavList(navList ?? alertsNavItems)
         }}
       />
     </div>
@@ -694,6 +715,14 @@ function RulesList({ rulesQuery, onEdit }: {
     staleTime: 300000,
   })
   const symbolNames = namesQuery.data?.names ?? {}
+
+  // 切股导航列表: 个股规则 (取第一个 symbol, 按展示顺序)
+  const rulesNavItems = useMemo(
+    () => rules
+      .filter(r => r.scope === 'symbols' && r.symbols.length > 0)
+      .map(r => ({ symbol: r.symbols[0], name: symbolNames[r.symbols[0]] ?? undefined })),
+    [rules, symbolNames],
+  )
 
   const del = useMutation({
     mutationFn: api.monitorRuleDelete,
@@ -760,6 +789,9 @@ function RulesList({ rulesQuery, onEdit }: {
                   <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold', SOURCE_BADGE_STYLE[r.type] ?? 'bg-elevated text-muted')}>
                     {TYPE_LABEL[r.type]}
                   </span>
+                  {r.lot_id && (
+                    <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-emerald-400/10 text-emerald-500" title="由「持仓提醒」页托管, 请在持仓提醒页修改或删除">批次</span>
+                  )}
                   {r.asset_type === 'index' && (
                     <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-sky-500/10 text-sky-400">指数</span>
                   )}
@@ -798,40 +830,51 @@ function RulesList({ rulesQuery, onEdit }: {
                   {!r.enabled && <span className="shrink-0 text-[9px] text-secondary">· 停用</span>}
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
-                  <button
-                    onClick={() => toggleEnabled(r)}
-                    title={r.enabled ? '停用' : '启用'}
-                    className={cn(
-                      'p-1 rounded-md transition-all cursor-pointer',
-                      r.enabled ? 'text-accent hover:bg-accent/10' : 'text-muted hover:bg-elevated hover:text-accent',
-                    )}
-                  >
-                    <Zap className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={() => onEdit(r)}
-                    className="p-1 rounded-md text-secondary transition-all hover:bg-accent/10 hover:text-accent cursor-pointer"
-                    title="编辑"
-                  >
-                    <Settings2 className="h-3.5 w-3.5" />
-                  </button>
-                  {confirmId === r.id ? (
-                    <button
-                      onClick={() => handleClickDelete(r.id)}
-                      title="再次点击确认删除"
-                      className="inline-flex items-center gap-1 rounded-md bg-danger/15 px-1.5 py-0.5 text-[9px] font-medium text-danger border border-danger/30 animate-pulse cursor-pointer"
+                  {r.lot_id ? (
+                    <span
+                      className="inline-flex items-center rounded-md border border-border/60 bg-elevated/60 px-1.5 py-0.5 text-[9px] text-secondary"
+                      title="由「持仓提醒」页生成的规则, 该页托管; 启停/修改/删除请到持仓提醒页"
                     >
-                      <Trash2 className="h-2.5 w-2.5" />确认
-                    </button>
+                      批次托管
+                    </span>
                   ) : (
-                    <button
-                      onClick={() => handleClickDelete(r.id)}
-                      disabled={del.isPending}
-                      className="p-1 rounded-md text-secondary transition-all hover:bg-danger/10 hover:text-danger cursor-pointer"
-                      title="删除"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => toggleEnabled(r)}
+                        title={r.enabled ? '停用' : '启用'}
+                        className={cn(
+                          'p-1 rounded-md transition-all cursor-pointer',
+                          r.enabled ? 'text-accent hover:bg-accent/10' : 'text-muted hover:bg-elevated hover:text-accent',
+                        )}
+                      >
+                        <Zap className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => onEdit(r)}
+                        className="p-1 rounded-md text-secondary transition-all hover:bg-accent/10 hover:text-accent cursor-pointer"
+                        title="编辑"
+                      >
+                        <Settings2 className="h-3.5 w-3.5" />
+                      </button>
+                      {confirmId === r.id ? (
+                        <button
+                          onClick={() => handleClickDelete(r.id)}
+                          title="再次点击确认删除"
+                          className="inline-flex items-center gap-1 rounded-md bg-danger/15 px-1.5 py-0.5 text-[9px] font-medium text-danger border border-danger/30 animate-pulse cursor-pointer"
+                        >
+                          <Trash2 className="h-2.5 w-2.5" />确认
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleClickDelete(r.id)}
+                          disabled={del.isPending}
+                          className="p-1 rounded-md text-secondary transition-all hover:bg-danger/10 hover:text-danger cursor-pointer"
+                          title="删除"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -871,6 +914,12 @@ function RulesList({ rulesQuery, onEdit }: {
                   <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
                     {r.direction === 'up' ? '涨势偏离' : r.direction === 'down' ? '跌势偏离' : '涨跌双向'}
                   </span>
+                </div>
+              ) : r.type === 'date' ? (
+                <div className="mt-1 flex items-center gap-1 pl-0.5 text-[9px] text-secondary">
+                  <span>提醒 {r.remind_date ?? ''}</span>
+                  {(r.lead_days ?? 0) > 0 && <span>· 提前{r.lead_days}天</span>}
+                  <span>· 仅交易日盘中评估</span>
                 </div>
               ) : r.type === 'volume_delta' ? (
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
@@ -930,6 +979,8 @@ function RulesList({ rulesQuery, onEdit }: {
       <StockPreviewDialog
         symbol={previewSymbol}
         name={previewSymbol ? symbolNames[previewSymbol] : undefined}
+        navList={rulesNavItems}
+        onNavigate={(sym) => setPreviewSymbol(sym)}
         onClose={() => setPreviewSymbol(null)}
       />
     </div>
