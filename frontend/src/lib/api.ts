@@ -234,6 +234,20 @@ export interface KlineRow {
   [key: string]: any
 }
 
+export interface KlineDailyResponse {
+  symbol: string
+  name?: string
+  stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
+  rows: KlineRow[]
+  source?: string
+}
+
+export interface KlineDailyLatestResponse {
+  symbol: string
+  row: KlineRow | null
+  source: 'live' | 'none'
+}
+
 // ===== Watchlist =====
 export interface WatchlistEntry {
   symbol: string
@@ -2082,17 +2096,15 @@ export const api = {
     request<CapabilitiesResponse>('/api/capabilities/redetect', { method: 'POST' }),
 
   klineDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }, extColumns?: string) =>
-    request<{
-      symbol: string
-      name?: string
-      stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
-      rows: KlineRow[]
-      source?: string
-    }>(
+    request<KlineDailyResponse>(
       (dateRange
         ? `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&start_date=${dateRange.start}&end_date=${dateRange.end}`
         : `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`)
       + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : ''),
+    ),
+  klineDailyLatest: (symbol: string) =>
+    request<KlineDailyLatestResponse>(
+      `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,
     ),
   klineDailyBatch: (symbols: string[], days = 12) =>
     request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {

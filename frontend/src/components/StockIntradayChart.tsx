@@ -40,7 +40,7 @@ export function StockIntradayChart({
     // 避免读到分钟增量落盘的上一轮本地分区; 历史日期后端自行忽略 live。
     ...klineMinuteQueryOptions(symbol, date ?? undefined, refetchIntervalMs != null),
     enabled: !!symbol && !!date,
-    refetchInterval: refetchIntervalMs,
+    refetchInterval: query => query.state.data?.source === 'none' ? false : refetchIntervalMs,
   })
 
   const fetchMinute = useMutation({
