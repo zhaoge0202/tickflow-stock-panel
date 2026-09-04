@@ -198,6 +198,36 @@ def test_is_temperature_rejected_false_for_other_400():
     assert _is_temperature_rejected(exc) is False
 
 
+def test_thinking_body_rejected_falls_back_to_default_mode():
+    """DeepSeek thinking 禁用参数被 400 拒绝时, 去参重试而非直接失败。"""
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "unknown parameter: thinking"}},
+        request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
+    )
+    exc = openai.BadRequestError(
+        "bad request", response=response,
+        body={"error": {"message": "unknown parameter: thinking"}},
+    )
+    kwargs = {"max_tokens": None, "extra_body": {"thinking": {"type": "disabled"}}}
+    retry = ai_provider._openai_retry_kwargs(exc, kwargs)
+    assert retry == {"max_tokens": None}
+    # 原 kwargs 不被修改
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    # 与 thinking 无关的 400 不触发该回退
+    response_other = httpx.Response(
+        400,
+        json={"error": {"message": "model not found"}},
+        request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
+    )
+    exc_other = openai.BadRequestError(
+        "bad request", response=response_other,
+        body={"error": {"message": "model not found"}},
+    )
+    assert ai_provider._openai_retry_kwargs(exc_other, kwargs) is None
+
+
 def test_is_temperature_rejected_false_for_non_400():
     response = httpx.Response(
         401,

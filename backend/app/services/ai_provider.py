@@ -504,6 +504,7 @@ def _openai_client(api_key: str, timeout: float):
 # 只在 400 明确指出对应参数时移除该参数并重试; 每个参数最多移除一次。
 _TEMP_REJECT_HINTS = ("temperature", "only 1 is allowed")
 _REASONING_EFFORT_REJECT_HINTS = ("reasoning_effort", "reasoning effort")
+_THINKING_BODY_REJECT_HINTS = ("thinking",)
 
 
 def _is_temperature_rejected(exc: Exception) -> bool:
@@ -526,6 +527,16 @@ def _is_reasoning_effort_rejected(exc: Exception) -> bool:
     )
 
 
+def _is_thinking_body_rejected(exc: Exception) -> bool:
+    """True if the upstream 400 specifically rejects the thinking extra_body."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = _openai_error_detail(exc) or str(exc)
+    return _openai_error_param(exc) == "thinking" or any(
+        h in text.lower() for h in _THINKING_BODY_REJECT_HINTS
+    )
+
+
 def _openai_error_param(exc: Exception) -> str:
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
@@ -544,6 +555,11 @@ def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
         return retry_kwargs
     if "reasoning_effort" in retry_kwargs and _is_reasoning_effort_rejected(exc):
         retry_kwargs.pop("reasoning_effort")
+        return retry_kwargs
+    if "extra_body" in retry_kwargs and _is_thinking_body_rejected(exc):
+        # DeepSeek thinking 禁用参数被拒 (模型/API 版本差异): 回退默认思考模式
+        # 重试; 报告若因此被推理挤占正文, 由 _iter_openai_text 显式报错。
+        retry_kwargs.pop("extra_body")
         return retry_kwargs
     return None
 
