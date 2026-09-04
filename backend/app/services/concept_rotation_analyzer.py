@@ -278,10 +278,10 @@ def _build_user_prompt(signals: dict, overview: dict, days: int, dates: list[str
         _build_signal_block("🎰 游资特征 (排名波动大)", signals.get("hot_money", [])),
     ]
 
-    from app.services.ai_provider import sanitize_focus
-    safe_focus = sanitize_focus(focus)
-    if safe_focus:
-        parts.extend(["", f"本次分析请特别关注: {safe_focus}"])
+    from app.services.ai_provider import build_focus_instruction
+    focus_instruction = build_focus_instruction(focus, report_name=f"{dim}轮动分析报告")
+    if focus_instruction:
+        parts.extend(["", focus_instruction])
 
     return "\n".join(parts)
 
@@ -374,6 +374,7 @@ async def analyze_rotation_stream(
             temperature=0.5,
             # 不限制输出(推理模型思考 token 计入预算, 见 ai_provider.stream_ai_text)
             max_tokens=None,
+            prefer_final_answer=True,
         ):
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
