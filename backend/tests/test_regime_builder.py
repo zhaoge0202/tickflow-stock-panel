@@ -14,6 +14,7 @@ from datetime import date
 
 import polars as pl
 import pytest
+from polars.testing import assert_frame_equal
 
 from app.services import regime_builder
 
@@ -181,6 +182,87 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
     r1_all = out_all.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
     assert r1_all["limit_up"] == 1      # A 计入
     assert r1_all["up_count"] == 2      # A,C 上涨
+
+
+def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
+    """回归 #241: fallback 不得保留所有批次的个股明细后再统一聚合。"""
+    from app.services import market_mainline, preferences
+
+    target_dates = [date(2026, 1, day) for day in range(2, 6)]
+    enriched_dir = tmp_path / "kline_daily_enriched"
+    for trade_date in target_dates:
+        partition = enriched_dir / f"date={trade_date.isoformat()}"
+        partition.mkdir(parents=True)
+        (partition / "part.parquet").write_bytes(b"")
+
+    class _Store:
+        data_dir = tmp_path
+
+    class _FakeRepo:
+        store = _Store
+
+        def get_enriched_range(self, start, end):
+            return None
+
+        def get_instruments(self):
+            return pl.DataFrame()
+
+        def get_historical_shares(self):
+            return pl.DataFrame()
+
+    def _batch_frame(batch_start, batch_end):
+        dates = [d for d in target_dates if batch_start <= d <= batch_end]
+        rows = []
+        for trade_date in dates:
+            for symbol, change_pct in (("A", 0.05), ("B", -0.03)):
+                rows.append({
+                    "date": trade_date,
+                    "symbol": symbol,
+                    "close": 10.0,
+                    "change_pct": change_pct,
+                    "amount": 1e8,
+                    "ma20": 9.0,
+                    "signal_limit_up": symbol == "A",
+                    "signal_limit_down": False,
+                    "signal_broken_limit_up": False,
+                    "consecutive_limit_ups": 1 if symbol == "A" else 0,
+                    "_prev_consec": 0,
+                })
+        return pl.DataFrame(rows)
+
+    monkeypatch.setattr(preferences, "get_regime_batch_days", lambda: 2)
+    monkeypatch.setattr(preferences, "get_regime_warmup_days", lambda: 40)
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
+    monkeypatch.setattr(market_mainline, "load_risk_warning_symbols", lambda *a, **k: {"A"})
+    monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *a, **k: {})
+    monkeypatch.setattr(
+        regime_builder,
+        "_compute_batch",
+        lambda repo, enriched, instruments, shares, start, end, warmup: _batch_frame(start, end),
+    )
+
+    aggregate_input_heights = []
+    original_aggregate = regime_builder._aggregate_daily
+
+    def _recording_aggregate(df, index_pct_map=None):
+        aggregate_input_heights.append(df.height)
+        return original_aggregate(df, index_pct_map)
+
+    monkeypatch.setattr(regime_builder, "_aggregate_daily", _recording_aggregate)
+
+    result = regime_builder.run_regime_batch(_FakeRepo(), target_dates[0], target_dates[-1])
+    expected_detail = pl.concat([
+        _batch_frame(target_dates[0], target_dates[1]),
+        _batch_frame(target_dates[2], target_dates[3]),
+    ]).filter(pl.col("symbol") == "B")
+    expected = original_aggregate(expected_detail, {})
+
+    assert result.height == len(target_dates)
+    assert aggregate_input_heights == [2, 2]
+    assert result["up_count"].to_list() == [0, 0, 0, 0]
+    assert result["down_count"].to_list() == [1, 1, 1, 1]
+    assert result["limit_up"].sum() == 0
+    assert_frame_equal(result.sort("date"), expected.sort("date"))
 
 
 # ───────────────────────── 持久化(upsert) ─────────────────────────
