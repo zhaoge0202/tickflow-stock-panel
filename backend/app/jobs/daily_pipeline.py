@@ -979,11 +979,12 @@ def _maybe_push_review(content: str, meta: dict) -> None:
     """复盘报告归档后, 按 review_push_channels 选定的外部工具逐个推送完整报告。
 
     定时生成与手动生成共用本函数 (手动归档端点 POST /api/market-recap/reports 也会调用)。
-    channels 为空则不推送; 'feishu' 复用监控中心的全局飞书 Webhook 通道。
+    channels 为空则不推送; 复用监控中心的全局外部渠道配置。
     推送失败静默降级 (Webhook 是辅助通道), 不影响已归档的报告。
     """
     try:
-        from app.services import preferences, webhook_adapter
+        from app import secrets_store
+        from app.services import email_adapter, preferences, webhook_adapter
 
         channels = preferences.get_review_push_channels()
         if not channels:
@@ -1015,6 +1016,33 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     url, "每日复盘", full_body
                 )
                 logger.info("review push(wecom) %s", "sent" if ok else "failed")
+            elif ch == "custom":
+                url = preferences.get_custom_webhook_url()
+                if not url:
+                    logger.info("review push(custom) skipped: webhook not configured")
+                    continue
+                ok = webhook_adapter.send_custom(
+                    url,
+                    "每日复盘",
+                    content,
+                    "market_review",
+                    meta,
+                    secrets_store.get_custom_webhook_secret(),
+                )
+                logger.info("review push(custom) %s", "sent" if ok else "failed")
+            elif ch == "email":
+                config = preferences.get_email_smtp_config()
+                if not email_adapter.is_configured(config):
+                    logger.info("review push(email) skipped: SMTP not configured")
+                    continue
+                email_body = (f"{subtitle}\n\n{content}" if subtitle else content)
+                ok = email_adapter.send_email(
+                    config,
+                    secrets_store.get_email_smtp_password(),
+                    "每日复盘",
+                    email_body,
+                )
+                logger.info("review push(email) %s", "sent" if ok else "failed")
             # 未来更多渠道在此追加分支
     except Exception as e:  # noqa: BLE001
         logger.warning("review push error: %s", e)

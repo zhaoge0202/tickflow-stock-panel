@@ -537,6 +537,10 @@ def get_preferences() -> dict:
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
+        "custom_webhook_url": preferences.get_custom_webhook_url(),
+        "custom_webhook_secret_set": bool(secrets_store.get_custom_webhook_secret()),
+        "email_smtp_config": preferences.get_email_smtp_config(),
+        "email_smtp_password_set": bool(secrets_store.get_email_smtp_password()),
         "wecom_bot_id": preferences.get_wecom_bot_id(),
         "wecom_bot_secret": preferences.get_wecom_bot_secret(),
         "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
@@ -1232,8 +1236,88 @@ def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
     return {"wecom_webhook_url": saved_url}
 
 
+class CustomWebhookPrefsIn(BaseModel):
+    url: str
+    # None preserves the stored secret; an explicit empty string clears it.
+    secret: str | None = None
+
+
+@router.put("/preferences/custom-webhook")
+def update_custom_webhook(req: CustomWebhookPrefsIn) -> dict:
+    """Configure the generic third-party JSON webhook and optional HMAC secret."""
+    from app.services import preferences, webhook_adapter
+
+    url = (req.url or "").strip()
+    if url and not webhook_adapter.is_valid_custom_url(url):
+        raise HTTPException(status_code=400, detail="Webhook 地址必须是完整的 HTTP(S) URL")
+    saved_url = preferences.set_custom_webhook_url(url)
+    if not saved_url:
+        secrets_store.set_custom_webhook_secret("")
+    elif req.secret is not None:
+        secrets_store.set_custom_webhook_secret(req.secret)
+    return {
+        "custom_webhook_url": saved_url,
+        "custom_webhook_secret_set": bool(secrets_store.get_custom_webhook_secret()),
+    }
+
+
+class EmailSmtpPrefsIn(BaseModel):
+    host: str
+    port: int = Field(default=465, ge=1, le=65535)
+    security: Literal["ssl", "starttls", "none"] = "ssl"
+    username: str = ""
+    # None preserves the stored password; an explicit empty string clears it.
+    password: str | None = None
+    from_address: str = ""
+    to_addresses: list[str] = Field(default_factory=list)
+
+
+@router.put("/preferences/email-smtp")
+def update_email_smtp(req: EmailSmtpPrefsIn) -> dict:
+    """Configure the SMTP transport shared by monitor alerts and review reports."""
+    from app.services import email_adapter, preferences
+
+    host = (req.host or "").strip()
+    username = (req.username or "").strip()
+    from_address = (req.from_address or username).strip()
+    recipients = list(dict.fromkeys(item.strip() for item in req.to_addresses if item.strip()))
+    if host:
+        if not from_address or not email_adapter.is_valid_email(from_address):
+            raise HTTPException(status_code=400, detail="请填写有效的发件人邮箱")
+        if not recipients or any(not email_adapter.is_valid_email(item) for item in recipients):
+            raise HTTPException(status_code=400, detail="请至少填写一个有效的收件人邮箱")
+        effective_password = (
+            secrets_store.get_email_smtp_password()
+            if req.password is None
+            else req.password
+        )
+        if username and not effective_password:
+            raise HTTPException(status_code=400, detail="已填写 SMTP 登录用户名，请同时填写密码或授权码")
+    else:
+        username = ""
+        from_address = ""
+        recipients = []
+
+    config = preferences.set_email_smtp_config({
+        "host": host,
+        "port": req.port,
+        "security": req.security,
+        "username": username,
+        "from_address": from_address,
+        "to_addresses": recipients,
+    })
+    if not host or not username:
+        secrets_store.set_email_smtp_password("")
+    elif req.password is not None:
+        secrets_store.set_email_smtp_password(req.password)
+    return {
+        "email_smtp_config": config,
+        "email_smtp_password_set": bool(secrets_store.get_email_smtp_password()),
+    }
+
+
 class WebhookTestIn(BaseModel):
-    channel: Literal["feishu", "wecom"]
+    channel: Literal["feishu", "wecom", "custom", "email"]
 
 
 @router.post("/preferences/webhook-test")
@@ -1259,16 +1343,43 @@ def test_webhook(req: WebhookTestIn) -> dict:
         secret = preferences.get_feishu_webhook_secret()
         # 诊断用途单次尝试: 失败即返回, 不等生产退避重试 (~17s)
         ok = webhook_adapter.send_feishu(url, title, body, secret, max_attempts=1)
-    else:  # wecom
+    elif req.channel == "wecom":
         url = preferences.get_wecom_webhook_url()
         if not url:
             return {"ok": False, "detail": "尚未配置企业微信 Webhook，请先保存"}
         if not webhook_adapter.is_valid_wecom_url(url):
             return {"ok": False, "detail": "已保存的企业微信 Webhook 地址非法，请重新保存"}
         ok = webhook_adapter.send_wecom(url, title, body)
+    elif req.channel == "custom":
+        url = preferences.get_custom_webhook_url()
+        if not url:
+            return {"ok": False, "detail": "尚未配置第三方 Webhook，请先保存"}
+        if not webhook_adapter.is_valid_custom_url(url):
+            return {"ok": False, "detail": "已保存的第三方 Webhook 地址非法，请重新保存"}
+        ok = webhook_adapter.send_custom(
+            url,
+            title,
+            body,
+            event_type="test",
+            secret=secrets_store.get_custom_webhook_secret(),
+            max_attempts=1,
+        )
+    else:  # email
+        from app.services import email_adapter
+
+        config = preferences.get_email_smtp_config()
+        if not email_adapter.is_configured(config):
+            return {"ok": False, "detail": "尚未完整配置邮件 SMTP，请先保存"}
+        ok = email_adapter.send_email(
+            config,
+            secrets_store.get_email_smtp_password(),
+            title,
+            body,
+            max_attempts=1,
+        )
 
     if ok:
-        return {"ok": True, "detail": "测试消息已发送，请到群内查收"}
+        return {"ok": True, "detail": "测试消息已发送，请检查对应接收端"}
     return {"ok": False, "detail": "推送失败：网络不可达或地址/密钥不正确，详情见后端日志"}
 
 
@@ -1353,7 +1464,7 @@ def update_webhook_enabled_default(req: WebhookEnabledDefaultIn) -> dict:
 
 
 class WebhookDefaultChannelsIn(BaseModel):
-    channels: list[str]  # 多选: ['feishu','wecom'] 等; 空数组=默认不推送
+    channels: list[str]  # 多选: feishu / wecom / custom / email; 空数组=不推送
 
 
 @router.put("/preferences/webhook-default-channels")
@@ -1796,7 +1907,7 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
 
 
 class ReviewPushIn(BaseModel):
-    channels: list[str]  # 多选: ['feishu'] 等; 空数组=不推送。微信等开发中
+    channels: list[str]  # 多选: feishu / wecom / custom / email; 空数组=不推送
 
 
 @router.put("/preferences/review-push")

@@ -121,3 +121,32 @@ def test_mining_schedule_setter_rejects_invalid_weekday(weekday):
 def test_mining_schedule_setter_rejects_invalid_profile():
     with pytest.raises(ValueError, match="profile"):
         preferences.set_mining_schedule(True, 4, "exploratory")
+
+
+def test_external_push_channel_whitelists_include_custom_and_email(_isolated):
+    assert preferences.set_webhook_default_channels([
+        "custom", "email", "custom", "unsupported",
+    ]) == ["custom", "email"]
+    assert preferences.set_review_push_channels([
+        "email", "wecom", "unsupported",
+    ]) == ["email", "wecom"]
+
+
+def test_email_smtp_config_falls_back_from_malformed_stored_values(_isolated):
+    preferences.save({
+        "email_smtp_config": {
+            "host": " smtp.example.com ",
+            "port": "invalid",
+            "security": "invalid",
+            "to_addresses": "alerts@example.com",
+        },
+    })
+
+    assert preferences.get_email_smtp_config() == {
+        "host": "smtp.example.com",
+        "port": 465,
+        "security": "ssl",
+        "username": "",
+        "from_address": "",
+        "to_addresses": [],
+    }

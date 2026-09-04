@@ -109,6 +109,12 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
         monitor_rules.validate(_rule("pool_entry", score_min=90, score_max=70))
     monitor_rules.validate(_rule("buy_signal", "pool_exit"))
 
+    normalized = monitor_rules.normalize(_rule(
+        "pool_entry",
+        webhook_channels=["feishu", "custom", "email", "unsupported"],
+    ))
+    assert normalized["webhook_channels"] == ["feishu", "custom", "email"]
+
 
 def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals():
     day = date(2026, 7, 24)
