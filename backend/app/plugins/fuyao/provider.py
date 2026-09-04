@@ -401,11 +401,12 @@ class FuyaoProvider:
         logger.info("扶摇实时行情拉取完成: %d 条(丢弃 %d 行)", len(records), dropped)
         return records
 
-    def get_realtime_indices(self, symbols: list[str]) -> list[dict]:
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
         """指数实时快照 → 内部 realtime record (可选插件协议, quote_service 鸭子类型调用)。
 
         A 股快照不含指数, 指数在扶摇是独立端点; 覆盖沪深交易所指数 + 同花顺板块,
-        无北交所 (未知代码会整批 1002 连坐, .BJ 直接跳过)。失败软返回空列表。
+        无北交所 (未知代码会整批 1002 连坐, .BJ 直接跳过)。失败返回 None,
+        让上层与“成功但无数据”的空列表区分, 保留上轮有效指数缓存。
         """
         wanted = [s for s in symbols if s and not s.upper().endswith(".BJ")]
         if not wanted:
@@ -414,7 +415,7 @@ class FuyaoProvider:
             rows, server_ts = self._get_client().index_snapshot(wanted)
         except FuyaoError as e:
             logger.warning("扶摇指数行情拉取失败: %s", e)
-            return []
+            return None
 
         fetched_ms = server_ts or int(time.time() * 1000)
         records = []

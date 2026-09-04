@@ -140,7 +140,7 @@
 - 每个能力独立路由，禁止跟随/派生特殊值（`same_as_daily` 已下线）；存量非法偏好值由 preferences getter 回退默认自愈，不做迁移。
 - 边界注记：分时监控由分钟能力兜底（`intraday_monitor_support`），不单设分时能力；`full_minute`（全量分钟）数据集已开放插件/自定义源声明；`depth5` 已进矩阵但插件数据集白名单暂未开放，当前仅 TickFlow 提供。
 - 实时指数为产品级固定契约，不走路由矩阵：展示层（侧栏指数条、市场总览）固定核心四只（`backend/app/services/index_const.py` 单一权威：上证/深成/创业板/科创综指），后端各消费方与前端 Layout 引用同一份定义不建副本；指数页保留但标的固定为核心四只（无全指数搜索/浏览，`/api/index/list`、`/api/index/search` 已下线）；侧栏指数多选配置已下线，相关偏好（`realtime_index_symbols`/`sidebar_index_symbols`/`indices_nav_pinned`/`realtime_pull_index`/`realtime_index_mode`）已删除。监控规则的指数标的不受限——quote_service 把核心四只 + 启用规则的指数并入显式拉取。
-- 自定义源指数补充协议：A 股快照普遍不含指数（fuyao 实测无指数，指数在其独立端点）。provider 可实现可选方法 `get_realtime_indices(symbols) -> list[dict]`（record 结构与 realtime 一致），quote_service 在自定义源分支鸭子类型调用补拉；未实现的源指数缓存为空，由本地日K兜底接管。fuyao 指数快照有连坐语义——请求混入未知代码整批失败，插件侧必须先行过滤不支持的后缀（如 `.BJ`）。
+- 自定义源指数补充协议：A 股快照普遍不含指数（fuyao 实测无指数，指数在其独立端点）。provider 可实现可选方法 `get_realtime_indices(symbols) -> list[dict] | None`（record 结构与 realtime 一致），quote_service 在自定义源分支鸭子类型调用补拉；`None` 表示请求失败，保留上轮有效指数缓存，`[]` 表示成功但无数据；未实现的源指数缓存为空，由本地日K兜底接管。fuyao 指数快照有连坐语义——请求混入未知代码整批失败，插件侧必须先行过滤不支持的后缀（如 `.BJ`）。
 
 ## 5. 领域专项要求
 
