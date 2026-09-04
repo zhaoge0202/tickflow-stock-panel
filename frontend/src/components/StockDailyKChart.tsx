@@ -38,7 +38,8 @@ interface Props {
   showMarkerToggle?: boolean
   showMA?: boolean
   showInfoBar?: boolean
-  visibleBars?: number
+  /** 初始可见蜡烛根数; 'all' = 适配显示全部数据 */
+  visibleBars?: number | 'all'
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void

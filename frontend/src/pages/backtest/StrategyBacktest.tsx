@@ -30,6 +30,7 @@ import { toast } from '@/components/Toast'
 import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
+import { PicksSymbolKlineModal } from './components/PicksSymbolKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 import { ScoringEditor } from '@/components/ScoringEditor'
@@ -1011,7 +1012,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
   const [tradePageSize, setTradePageSize] = useState(10)
-  const [selectedTrade, setSelectedTrade] = useState<StrategyBacktestTrade | null>(null)
+  /** 回测K线覆盖层: 单笔交易回放 / 标的全区间回放, 由 union 保证至多开一个 */
+  const [chartOverlay, setChartOverlay] = useState<
+    | { kind: 'trade'; trade: StrategyBacktestTrade }
+    | { kind: 'symbol'; symbol: string }
+    | null
+  >(null)
+  const selectedTrade = chartOverlay?.kind === 'trade' ? chartOverlay.trade : null
+  const picksSymbol = chartOverlay?.kind === 'symbol' ? chartOverlay.symbol : null
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
@@ -2355,7 +2363,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                               ) : (
                                 <div className="flex flex-wrap gap-1.5">
                                   {row.buys.map((t, i) => (
-                                    <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
+                                    <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setChartOverlay({ kind: 'trade', trade: t })} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
@@ -2366,7 +2374,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                               ) : (
                                 <div className="flex flex-wrap gap-1.5">
                                   {row.sells.map((t, i) => (
-                                    <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
+                                    <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setChartOverlay({ kind: 'trade', trade: t })} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
@@ -2429,9 +2437,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                       </thead>
                       <tbody>
                         {visibleTrades.map((t: StrategyBacktestTrade, i: number) => (
-                          <tr key={`${t.symbol}-${t.entry_date}-${tradeStart + i}`} className="border-t border-border hover:bg-elevated/50 transition-colors group">
+                          <tr
+                            key={`${t.symbol}-${t.entry_date}-${tradeStart + i}`}
+                            onClick={() => setChartOverlay({ kind: 'trade', trade: t })}
+                            title="点击查看该笔交易的K线回放"
+                            className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer"
+                          >
                             <td className="px-4 py-2.5">
-                              <div className="font-medium text-foreground group-hover:text-accent transition-colors">
+                              <div className="font-medium text-foreground transition-colors group-hover:text-accent">
                                 {t.name || t.symbol}
                               </div>
                               <div className="mt-0.5 font-mono text-[11px] text-muted">{t.symbol}</div>
@@ -2523,9 +2536,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                     </thead>
                     <tbody>
                       {result.per_symbol_stats.map((r) => (
-                        <tr key={r.symbol} className="border-t border-border hover:bg-elevated/50 transition-colors group">
+                        <tr
+                          key={r.symbol}
+                          onClick={() => setChartOverlay({ kind: 'symbol', symbol: r.symbol })}
+                          title="点击查看该标的在回测期的K线 (标注每次买卖)"
+                          className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer"
+                        >
                           <td className="px-4 py-2">
-                            <div className="font-medium text-foreground group-hover:text-accent transition-colors">
+                            <div className="font-medium text-foreground transition-colors group-hover:text-accent">
                               {symbolNames[r.symbol] || r.symbol}
                             </div>
                             <div className="mt-0.5 font-mono text-[11px] text-muted">{r.symbol}</div>
@@ -2886,7 +2904,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         </>
       )}
 
-      <TradeKlineModal trade={selectedTrade} onClose={() => setSelectedTrade(null)} />
+      <TradeKlineModal trade={selectedTrade} onClose={() => setChartOverlay(null)} />
+      <PicksSymbolKlineModal
+        symbol={picksSymbol}
+        result={result}
+        periodStart={resultStartDate}
+        periodEnd={resultEndDate}
+        onClose={() => setChartOverlay(null)}
+      />
     </div>
   )
 }
