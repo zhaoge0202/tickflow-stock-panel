@@ -141,11 +141,8 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
     if not enriched_dir.exists():
         return pl.DataFrame()
 
-    # 兼容返回裸 DataFrame 的实现: 元组解包会把两列 DataFrame 拆成两个 Series,
-    # Series.is_empty() 能通过但后续 group_by 报 'Series' object has no attribute
-    # 'group_by'(用户反馈的重算偶发报错), 故按实际形态取值而不盲目解包
-    loaded = _load_concept_map_df(repo, kind)
-    map_df = loaded[0] if isinstance(loaded, tuple) else loaded
+    # _load_concept_map_df 恒返回 (map_df, count), 命中缓存不再返回裸 DataFrame (#186)
+    map_df, _ = _load_concept_map_df(repo, kind)
     if map_df.is_empty():
         return pl.DataFrame()
 

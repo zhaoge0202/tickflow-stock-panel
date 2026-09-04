@@ -95,13 +95,16 @@ def _load_concept_map_df(repo, kind: str = "concept") -> tuple[pl.DataFrame, int
         ).unique()
     else:
         map_df = pl.DataFrame(schema={"_sym_up": pl.Utf8, kind: pl.Utf8})
-    _map_cache[kind] = map_df
+    # 缓存与返回值同构 ((map_df, count) 元组): 旧版只缓存裸 map_df, 命中路径
+    # 返回 DataFrame 被调用方当元组解包, 600s 内二次访问必报错 (#186)
+    payload = (map_df, len(members_seen))
+    _map_cache[kind] = payload
     _map_ts[kind] = now
-    return map_df, len(members_seen)
+    return payload
 
 
 # 维度映射缓存: {kind: (map_df, count)}。按 kind 隔离(概念/行业分别缓存)。
-_map_cache: dict[str, pl.DataFrame] = {}
+_map_cache: dict[str, tuple[pl.DataFrame, int]] = {}
 _map_ts: dict[str, float] = {}
 
 
@@ -138,15 +141,8 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     if cached and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
         return _slice_cached(cached, days)
 
-    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 polars DataFrame。
-    #    兼容返回裸 DataFrame 的实现: 元组解包会把两列拆成 Series(见
-    #    market_mainline.compute_mainline_range 同类处理)。
-    loaded = _load_concept_map_df(repo, kind)
-    if isinstance(loaded, tuple):
-        map_df, member_count = loaded
-    else:
-        map_df = loaded
-        member_count = loaded[kind].n_unique() if kind in loaded.columns else 0
+    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 (map_df, count) 元组 (#186)。
+    map_df, member_count = _load_concept_map_df(repo, kind)
     if map_df.is_empty():
         logger.info("rps_rotation: no %s data (ext dimension not fetched yet)", kind)
         return {"dates": [], "columns": {}, "concept_count": 0}
