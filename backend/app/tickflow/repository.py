@@ -582,7 +582,7 @@ class KlineRepository:
             # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
             try:
                 from datetime import timedelta
-                from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
+                from app.indicators.pipeline import compute_enriched_history_window
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
@@ -600,28 +600,22 @@ class KlineRepository:
                 if not df_hist.is_empty():
                     instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
 
+                    # 分批执行 指标→偏离→信号→涨跌停 (与整帧顺序等价, 各步骤均
+                    # over("symbol") 分组), 峰值内存与标的总量解耦 (#208)
                     step = time.perf_counter()
-                    logger.info("enriched refresh step start: compute indicators")
-                    df_full = compute_indicators(df_hist)
-                    logger.info("enriched refresh step done: compute indicators rows=%d (%.2fs)", len(df_full), time.perf_counter() - step)
-
-                    # 异动偏离列 (deviate_Nd = 个股动量 - 基准指数动量), 运行时附着
-                    from app.indicators.pipeline import attach_deviation_columns
-                    df_full = attach_deviation_columns(df_full, self.store.data_dir)
-
-                    step = time.perf_counter()
-                    logger.info("enriched refresh step start: compute signals")
-                    df_full = compute_signals(df_full)
-                    logger.info("enriched refresh step done: compute signals (%.2fs)", time.perf_counter() - step)
-                    if instruments is not None and not instruments.is_empty():
-                        step = time.perf_counter()
-                        logger.info("enriched refresh step start: compute limit signals")
-                        df_full = compute_limit_signals(
-                            df_full,
-                            instruments,
-                            historical_shares=self.get_historical_shares(),
-                        )
-                        logger.info("enriched refresh step done: compute limit signals (%.2fs)", time.perf_counter() - step)
+                    logger.info("enriched refresh step start: compute window (batched)")
+                    df_full = compute_enriched_history_window(
+                        df_hist,
+                        self.store.data_dir,
+                        instruments=instruments,
+                        historical_shares=(
+                            self.get_historical_shares()
+                            if instruments is not None and not instruments.is_empty()
+                            else None
+                        ),
+                    )
+                    logger.info("enriched refresh step done: compute window rows=%d (%.2fs)",
+                                len(df_full), time.perf_counter() - step)
 
                     # JOIN instruments 到完整历史 (filter_history/basic_filter 需要 name/股本等列)
                     if instruments is not None and not instruments.is_empty():
