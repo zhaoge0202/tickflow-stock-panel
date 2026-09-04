@@ -2440,8 +2440,16 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                           <tr
                             key={`${t.symbol}-${t.entry_date}-${tradeStart + i}`}
                             onClick={() => setChartOverlay({ kind: 'trade', trade: t })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                setChartOverlay({ kind: 'trade', trade: t })
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
                             title="点击查看该笔交易的K线回放"
-                            className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer"
+                            className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-inset"
                           >
                             <td className="px-4 py-2.5">
                               <div className="font-medium text-foreground transition-colors group-hover:text-accent">
@@ -2539,8 +2547,16 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                         <tr
                           key={r.symbol}
                           onClick={() => setChartOverlay({ kind: 'symbol', symbol: r.symbol })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              setChartOverlay({ kind: 'symbol', symbol: r.symbol })
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
                           title="点击查看该标的在回测期的K线 (标注每次买卖)"
-                          className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer"
+                          className="border-t border-border hover:bg-elevated/50 transition-colors group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-inset"
                         >
                           <td className="px-4 py-2">
                             <div className="font-medium text-foreground transition-colors group-hover:text-accent">
