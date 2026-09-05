@@ -818,6 +818,7 @@ export function EChartsCandlestick({
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
 }: Props) {
+  const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const dataRef = useRef(data)
@@ -983,13 +984,30 @@ export function EChartsCandlestick({
   // ===== 初始化 chart (只在 chartHeight 变化时重建) =====
   useEffect(() => {
     const el = containerRef.current
-    if (!el) return
+    const hoverEl = hoverSurfaceRef.current
+    if (!el || !hoverEl) return
 
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
 
+    const updateHoverVisibility = (active: boolean) => {
+      if (active === hoverActiveRef.current) return
+      hoverActiveRef.current = active
+      const infoEl = infoBarRef.current
+      if (!infoEl) return
+      const html = getInfoBarHTMLRef.current()
+      if (html) infoEl.innerHTML = html
+    }
+
+    // The outer chart surface stays under the pointer when the info bar wraps and
+    // pushes the canvas down, so hover visibility cannot oscillate at that boundary.
+    const handlePointerEnter = () => updateHoverVisibility(true)
+    const handlePointerLeave = () => updateHoverVisibility(false)
+    hoverEl.addEventListener('mouseenter', handlePointerEnter)
+    hoverEl.addEventListener('mouseleave', handlePointerLeave)
+
     // 鼠标移动 → 只更新 ref + DOM，不触发 React re-render
-    // 设计原则: 找不到有效数据时保持上次显示，永远不清空信息栏; 鼠标移出时仅隐藏「至今」。
+    // 设计原则: 找不到有效数据时保持上次显示，永远不清空信息栏。
     chart.on('updateAxisPointer', (event: any) => {
       const axesInfo = event.axesInfo
       const d = dataRef.current
@@ -1003,20 +1021,17 @@ export function EChartsCandlestick({
           if (idx >= 0 && idx < d.length) { foundIdx = idx; break }
         }
       }
-      const active = foundIdx >= 0
-      const idxChanged = foundIdx >= 0 && infoIdxRef.current !== foundIdx
-      const visChanged = active !== hoverActiveRef.current
-      hoverActiveRef.current = active
+      if (foundIdx < 0) return
+      const idxChanged = infoIdxRef.current !== foundIdx
       if (idxChanged) infoIdxRef.current = foundIdx
-      // 竖虚线显隐或悬停 K 线变化 → 重绘一次信息栏 (控制「至今」字段显隐 + 当前 K 线数据)
-      if (visChanged || idxChanged) {
+      // 悬停 K 线变化 → 重绘一次信息栏; 显隐由外层图表区域 enter/leave 负责。
+      if (idxChanged) {
         const infoEl = infoBarRef.current
         if (infoEl) {
           const html = getInfoBarHTMLRef.current()
           if (html) infoEl.innerHTML = html  // 只在有内容时更新
         }
       }
-      if (foundIdx < 0) return
       // 更新子图 graphic (仅悬停 K 线变化时; 纯显隐切换不影响副图)
       if (idxChanged) triggerInfoBarUpdate()
     })
@@ -1071,6 +1086,8 @@ export function EChartsCandlestick({
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
+      hoverEl.removeEventListener('mouseenter', handlePointerEnter)
+      hoverEl.removeEventListener('mouseleave', handlePointerLeave)
       chart.getZr().off('dblclick', handlePriceDoubleClick)
       ro.disconnect()
       chart.dispose()
@@ -1225,7 +1242,7 @@ export function EChartsCandlestick({
   }, [])
 
   return (
-    <div className="w-full">
+    <div ref={hoverSurfaceRef} className="w-full">
       {/* 主图信息栏 — 内容由 JS 直接操作 innerHTML */}
       {showInfoBar && (
         <div ref={infoBarRef} style={{ backgroundColor: CT().infoBarBg }}
