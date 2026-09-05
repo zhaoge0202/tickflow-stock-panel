@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CircleAlert, CircleCheck, FlaskConical, PenLine, Play, Save, ShieldQuestion } from 'lucide-react'
+import { ChevronRight, CircleAlert, CircleCheck, FlaskConical, PenLine, Play, Save, ShieldQuestion } from 'lucide-react'
 import { toast } from '@/components/Toast'
 import { api, type FactorTrialResponse, type FactorValidateResponse } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -17,45 +17,53 @@ const TEMPLATES: { label: string; formula: string; note: string }[] = [
   { label: '波动变化', formula: 'ts_std(close / ts_delay(close, 1) - 1, 20)', note: '20 日滚动日收益波动' },
   { label: '换手异动', formula: 'ts_zscore(turnover_rate, 60)', note: '换手率相对自身 60 日分布的 z 分' },
   { label: '乖离组合', formula: 'zscore(close / ma20 - 1) - zscore(ts_mean(turnover_rate, 5))', note: '价格乖离与换手均值的截面差' },
+  { label: '低波动', formula: 'rank(-ts_std(change_pct, 20))', note: '20 日日收益波动最低 (低波动异象)' },
+  { label: '量比回落', formula: 'rank(-ts_zscore(vol_ratio_5d, 60))', note: '量比回落到自身 60 日低位' },
+  { label: 'RSI超卖', formula: 'rank(-ts_mean(rsi_14, 5))', note: '近 5 日 RSI 均值最低的超卖标的' },
+  { label: '低振幅', formula: 'rank(-ts_mean(amplitude, 20))', note: '20 日平均振幅最低 (缩量休整)' },
+  { label: '隔夜反转', formula: 'rank(-overnight_ret_20d)', note: '20 日累计隔夜收益的反转' },
+  { label: '距高点回落', formula: 'rank(-distance_to_high_60d)', note: '距 60 日高点回撤最深的标的' },
+  { label: '换手稳定', formula: 'rank(-ts_std(turnover_rate, 20))', note: '换手率波动最低 (筹码稳定)' },
 ]
 
-/** 后端 dsl.OPERATORS 的全部 25 个算子, 按家族分组; 点击插入, 悬停显示签名与约束。 */
-const OPERATOR_GROUPS: { label: string; ops: { name: string; desc: string }[] }[] = [
+/** 后端 dsl.OPERATORS 的全部 25 个算子, 按家族分组; name=chip 名, sig=完整签名, desc=中文说明。
+ *  chips 面板负责点击插入, 速查表负责阅读 — 同一份数据两个视图。 */
+const OPERATOR_GROUPS: { label: string; ops: { name: string; sig: string; desc: string }[] }[] = [
   {
     label: '时序', ops: [
-      { name: 'ts_mean', desc: 'ts_mean(x,n) 滚动均值, n∈[2,512]' },
-      { name: 'ts_sum', desc: 'ts_sum(x,n) 滚动求和, n∈[2,512]' },
-      { name: 'ts_std', desc: 'ts_std(x,n) 滚动标准差, n∈[2,512]' },
-      { name: 'ts_max', desc: 'ts_max(x,n) 滚动最大值, n∈[2,512]' },
-      { name: 'ts_min', desc: 'ts_min(x,n) 滚动最小值, n∈[2,512]' },
-      { name: 'ts_delay', desc: 'ts_delay(x,n) n 期前的值, n≤512 (禁止负数)' },
-      { name: 'ts_delta', desc: 'ts_delta(x,n) n 期差分 (x − n 期前的值)' },
-      { name: 'ts_rank', desc: 'ts_rank(x,n) 滚动分位' },
-      { name: 'ts_zscore', desc: 'ts_zscore(x,n) 滚动 z 分' },
-      { name: 'ts_corr', desc: 'ts_corr(x,y,n) 滚动相关系数' },
-      { name: 'ts_cov', desc: 'ts_cov(x,y,n) 滚动协方差' },
-      { name: 'ts_quantile', desc: 'ts_quantile(x,n,q) 滚动分位, q∈(0,1)' },
-      { name: 'decay_linear', desc: 'decay_linear(x,n) 线性衰减加权均值 (近端权重大)' },
+      { name: 'ts_mean', sig: 'ts_mean(x,n)', desc: '滚动均值 · n∈[2,512]' },
+      { name: 'ts_sum', sig: 'ts_sum(x,n)', desc: '滚动求和 · n∈[2,512]' },
+      { name: 'ts_std', sig: 'ts_std(x,n)', desc: '滚动标准差 · n∈[2,512]' },
+      { name: 'ts_max', sig: 'ts_max(x,n)', desc: '滚动最大值 · n∈[2,512]' },
+      { name: 'ts_min', sig: 'ts_min(x,n)', desc: '滚动最小值 · n∈[2,512]' },
+      { name: 'ts_delay', sig: 'ts_delay(x,n)', desc: 'n 期前的值 · n≤512' },
+      { name: 'ts_delta', sig: 'ts_delta(x,n)', desc: 'n 期差分 · x − n 期前' },
+      { name: 'ts_rank', sig: 'ts_rank(x,n)', desc: '滚动分位' },
+      { name: 'ts_zscore', sig: 'ts_zscore(x,n)', desc: '滚动 z 分' },
+      { name: 'ts_corr', sig: 'ts_corr(x,y,n)', desc: '滚动相关系数' },
+      { name: 'ts_cov', sig: 'ts_cov(x,y,n)', desc: '滚动协方差' },
+      { name: 'ts_quantile', sig: 'ts_quantile(x,n,q)', desc: '滚动分位 · q∈(0,1)' },
+      { name: 'decay_linear', sig: 'decay_linear(x,n)', desc: '线性衰减加权 · 近端权重大' },
     ],
   },
   {
     label: '截面', ops: [
-      { name: 'rank', desc: 'rank(x) 当日横截面百分位' },
-      { name: 'zscore', desc: 'zscore(x) 当日横截面 z 分' },
-      { name: 'winsorize', desc: 'winsorize(x,k) 截面截尾至 μ±kσ, k∈[1,6] 默认 3' },
+      { name: 'rank', sig: 'rank(x)', desc: '当日横截面百分位' },
+      { name: 'zscore', sig: 'zscore(x)', desc: '当日横截面 z 分' },
+      { name: 'winsorize', sig: 'winsorize(x,k)', desc: '截面截尾至 μ±kσ · k∈[1,6] 默认 3' },
     ],
   },
   {
     label: '工具', ops: [
-      { name: 'if_else', desc: 'if_else(c,a,b) 条件选择' },
-      { name: 'min', desc: 'min(a,b) 两值取小' },
-      { name: 'max', desc: 'max(a,b) 两值取大' },
-      { name: 'log', desc: 'log(x) 自然对数' },
-      { name: 'abs', desc: 'abs(x) 绝对值' },
-      { name: 'sign', desc: 'sign(x) 符号函数' },
-      { name: 'sqrt', desc: 'sqrt(x) 平方根' },
-      { name: 'power', desc: 'power(x,c) 幂运算, |c|≤4' },
-      { name: 'clamp', desc: 'clamp(x,lo,hi) 截断到 [lo,hi]' },
+      { name: 'if_else', sig: 'if_else(c,a,b)', desc: '条件选择' },
+      { name: 'min', sig: 'min(a,b)', desc: '两值取小' },
+      { name: 'max', sig: 'max(a,b)', desc: '两值取大' },
+      { name: 'log', sig: 'log(x)', desc: '自然对数' },
+      { name: 'abs', sig: 'abs(x)', desc: '绝对值' },
+      { name: 'sign', sig: 'sign(x)', desc: '符号函数' },
+      { name: 'sqrt', sig: 'sqrt(x)', desc: '平方根' },
+      { name: 'power', sig: 'power(x,c)', desc: '幂运算 · |c|≤4' },
+      { name: 'clamp', sig: 'clamp(x,lo,hi)', desc: '截断到 [lo,hi]' },
     ],
   },
 ]
@@ -289,27 +297,47 @@ export function FactorEditor({ editId = '' }: { editId?: string }) {
 
         {/* 算子/字段点选插入: 写公式不用背名字 */}
         <div className="space-y-1.5">
-          <div>
-            <div className="mb-1 text-[10px] text-muted">算子 ({OPERATOR_COUNT}) · 点击插入 · 悬停看签名与约束</div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1" role="group" aria-label="插入算子">
+          <details
+            ref={el => { if (el) el.open = true }}
+            className="group rounded-btn border border-border/60 bg-base/40 px-2.5 py-1.5 text-[10px]"
+          >
+            <summary className="flex cursor-pointer select-none items-center gap-1 font-medium text-foreground transition-colors hover:text-accent [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="h-3 w-3 shrink-0 text-accent transition-transform group-open:rotate-90" />
+              算子（{OPERATOR_COUNT} 个 · 时序 / 截面 / 工具）
+              <span className="font-normal text-muted">· 点击签名插入</span>
+            </summary>
+            <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2" role="group" aria-label="插入算子">
               {OPERATOR_GROUPS.map(group => (
-                <div key={group.label} className="flex flex-wrap items-center gap-1">
-                  <span className="shrink-0 text-[10px] text-muted">{group.label}</span>
-                  {group.ops.map(op => (
-                    <button key={op.name} type="button" title={op.desc} onClick={() => insertSnippet(`${op.name}(`)} className={CHIP_CLS}>
-                      {op.name}
-                    </button>
-                  ))}
+                <div key={group.label} className="rounded-btn border border-border/50 bg-base/30 px-2 py-1.5">
+                  <div className="mb-1 font-medium text-secondary">{group.label} <span className="font-normal text-muted">({group.ops.length})</span></div>
+                  <div className="space-y-0.5">
+                    {group.ops.map(op => (
+                      <button
+                        key={op.name}
+                        type="button"
+                        title={`点击插入 ${op.sig} — ${op.desc}`}
+                        onClick={() => insertSnippet(`${op.name}(`)}
+                        className="flex w-full cursor-pointer items-baseline gap-2 rounded px-1 py-px text-left leading-4 transition-colors hover:bg-accent/10"
+                      >
+                        <code className="w-36 shrink-0 truncate font-mono text-accent">{op.sig}</code>
+                        <span className="text-muted">{op.desc}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
-          </div>
-          <details className="rounded-btn border border-border bg-base/40 px-2.5 py-1.5 text-[10px] text-muted">
-            <summary className="cursor-pointer text-secondary">可用字段 ({columns.data?.columns.length ?? 0}) · 点击插入</summary>
-            <div className="mt-1.5 max-h-40 space-y-1.5 overflow-y-auto">
+            <div className="mt-1.5 text-muted">四则运算 <code className="font-mono text-accent">+ - * /</code> · 除零→空值 · 括号可任意分组</div>
+          </details>
+          <details className="group rounded-btn border border-border/60 bg-base/40 px-2.5 py-1.5 text-[10px]">
+            <summary className="flex cursor-pointer select-none items-center gap-1 font-medium text-foreground transition-colors hover:text-accent [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="h-3 w-3 shrink-0 text-accent transition-transform group-open:rotate-90" />
+              可用字段 ({columns.data?.columns.length ?? 0}) · 点击插入
+            </summary>
+            <div className="mt-1.5 max-h-64 space-y-1.5 overflow-y-auto">
               {fieldGroups.map(([group, cols]) => (
                 <div key={group}>
-                  <div className="mb-0.5 text-[10px] text-muted">{group}</div>
+                  <div className="mb-0.5 text-[10px] font-medium text-secondary">{group}</div>
                   <div className="flex flex-wrap gap-1">
                     {cols.map(col => (
                       <button
@@ -319,7 +347,7 @@ export function FactorEditor({ editId = '' }: { editId?: string }) {
                         onClick={() => insertSnippet(col.id)}
                         className={CHIP_CLS}
                       >
-                        <span className="font-mono">{col.id}</span>
+                        <span className="font-mono text-accent">{col.id}</span>
                         <span className="ml-1 font-sans text-muted">{col.label}</span>
                       </button>
                     ))}
@@ -341,7 +369,7 @@ export function FactorEditor({ editId = '' }: { editId?: string }) {
             type="button"
             onClick={runBoth}
             disabled={!formula.trim() || validate.isPending}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-btn border border-border bg-surface px-3 text-xs font-medium text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+            className="ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-btn border border-border bg-surface px-3 text-xs font-medium text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
           >
             <ShieldQuestion className="h-3.5 w-3.5" />
             {validate.isPending ? '校验中…' : '校验'}
