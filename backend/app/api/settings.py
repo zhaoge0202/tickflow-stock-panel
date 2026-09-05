@@ -1292,7 +1292,7 @@ def update_email_smtp(req: EmailSmtpPrefsIn) -> dict:
             else req.password
         )
         if username and not effective_password:
-            raise HTTPException(status_code=400, detail="已填写 SMTP 登录用户名，请同时填写密码或授权码")
+            raise HTTPException(status_code=400, detail="已填写 SMTP 登录用户名, 请同时填写密码或授权码")
     else:
         username = ""
         from_address = ""
@@ -1353,9 +1353,9 @@ def test_webhook(req: WebhookTestIn) -> dict:
     elif req.channel == "custom":
         url = preferences.get_custom_webhook_url()
         if not url:
-            return {"ok": False, "detail": "尚未配置第三方 Webhook，请先保存"}
+            return {"ok": False, "detail": "尚未配置第三方 Webhook, 请先保存"}
         if not webhook_adapter.is_valid_custom_url(url):
-            return {"ok": False, "detail": "已保存的第三方 Webhook 地址非法，请重新保存"}
+            return {"ok": False, "detail": "已保存的第三方 Webhook 地址非法, 请重新保存"}
         ok = webhook_adapter.send_custom(
             url,
             title,
@@ -1369,7 +1369,7 @@ def test_webhook(req: WebhookTestIn) -> dict:
 
         config = preferences.get_email_smtp_config()
         if not email_adapter.is_configured(config):
-            return {"ok": False, "detail": "尚未完整配置邮件 SMTP，请先保存"}
+            return {"ok": False, "detail": "尚未完整配置邮件 SMTP, 请先保存"}
         ok = email_adapter.send_email(
             config,
             secrets_store.get_email_smtp_password(),
@@ -1379,7 +1379,7 @@ def test_webhook(req: WebhookTestIn) -> dict:
         )
 
     if ok:
-        return {"ok": True, "detail": "测试消息已发送，请检查对应接收端"}
+        return {"ok": True, "detail": "测试消息已发送, 请检查对应接收端"}
     return {"ok": False, "detail": "推送失败：网络不可达或地址/密钥不正确，详情见后端日志"}
 
 

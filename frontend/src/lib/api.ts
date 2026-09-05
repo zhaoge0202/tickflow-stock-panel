@@ -177,18 +177,6 @@ export interface LevelSeries {
   atr?: { stop_loss: (number | null)[]; take_profit: (number | null)[] }
 }
 
-export interface MainCostEstimate {
-  estimated_main_cost: number | null
-  main_cost_peak: number | null
-  main_core_cost_low: number | null
-  main_core_cost_high: number | null
-  /** 小数制:0.10 表示估算浮盈 10% */
-  main_profit_rate: number | null
-  main_net_amount: number
-  /** 0~1,表示输入数据完整度,不是结果真实准确率 */
-  confidence: number
-}
-
 export interface StockLevels {
   levels: Record<LevelType, PriceLevel[]>
   close: number | null
@@ -197,8 +185,6 @@ export interface StockLevels {
   /** dates 与 series 对齐;前端按自身 rows 的日期映射,缺失填 null */
   dates?: string[]
   series?: LevelSeries
-  /** 疑似主力成本统计估算;旧后端响应可能不存在该字段 */
-  main_cost?: MainCostEstimate
 }
 
 export interface AiStockReport {
