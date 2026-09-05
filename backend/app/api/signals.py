@@ -87,6 +87,24 @@ def get_options():
             groups.append({"key": cat, "label": label,
                            "fields": [{"key": f, "label": ENRICHED_COLUMNS.get(f, f)} for f in cat_fields]})
 
+    # 注册表因子 (虚拟/自定义/复合): 历史路径由 compute_signals 复用评分物化
+    # 管线补算; 已是物化列的基础因子 (rsi_14 等) 上面已分组, 此处跳过。
+    from app.factors.registry import all_factors
+
+    factor_groups: dict[str, list[dict[str, str]]] = {}
+    for spec in all_factors():
+        if spec.id in allowed:
+            continue
+        label = spec.label
+        if spec.warmup_bars > 1:
+            label = f"{label} · 预热{spec.warmup_bars}日"
+        if list(spec.asset_types) == ["stock"]:
+            label = f"{label} · 仅股票"
+        factor_groups.setdefault(spec.group or "因子", []).append({"key": spec.id, "label": label})
+    for group_label, group_fields in factor_groups.items():
+        groups.append({"key": f"factor:{group_label}", "label": f"因子 · {group_label}", "fields": group_fields})
+        fields.extend(group_fields)
+
     return {
         "fields": fields,
         "groups": groups,

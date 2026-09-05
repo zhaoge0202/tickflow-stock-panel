@@ -666,9 +666,12 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     if want:
         df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
 
-    # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）
+    # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）。
+    # 条件引用的注册表因子列先复用评分物化管线补算 (虚拟/自定义/复合均可)。
     from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs(), needed=needed)
+    exprs = _get_custom_signal_exprs()
+    df = custom_signals.materialize_factor_columns(df, exprs, needed=needed)
+    df = custom_signals.inject(df, exprs, needed=needed)
 
     return df
 
@@ -1053,12 +1056,27 @@ def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
 
 DEVIATION_WINDOWS: tuple[int, ...] = (3, 10, 30)
 
-# 各交易所基准指数 (偏离值规则的「对应指数」近似): 优先分类指数, 缺失时回退
+# 各板块基准指数 (偏离值规则的「对应指数」, 按交易所官方口径): 优先首选, 缺失时回退
+# - 沪主板:   上证A指 → 上证指数 (两者差异可忽略)
+# - 科创板:   科创50 (上交所《交易规则》2026修订 6.12 指定基准) → 上证A指
+# - 深主板:   深证A指 → 深证成指 (深交所投教口径)
+# - 创业板:   创业板综合指数 → 深证A指 (深交所投教口径)
+# - 北交所:   北证50 → 上证指数 (北交所《交易规则》5.4.4)
 _BENCHMARK_PREFERENCE: dict[str, list[str]] = {
-    "SH": ["000002.SH", "000001.SH"],   # 上证A指 → 上证指数
-    "SZ": ["399107.SZ", "399001.SZ"],   # 深证A指 → 深证成指
-    "BJ": ["899050.BJ", "000001.SH"],   # 北证50 → 上证指数
+    "SH": ["000002.SH", "000001.SH"],
+    "STAR": ["000688.SH", "000002.SH"],
+    "SZ": ["399107.SZ", "399001.SZ"],
+    "GEM": ["399102.SZ", "399107.SZ"],
+    "BJ": ["899050.BJ", "000001.SH"],
 }
+
+# 偏离值计算需要的全部基准指数 (quote_service 并入实时显式拉取, 不依赖监控规则)
+BENCHMARK_INDEX_SYMBOLS: frozenset[str] = frozenset(
+    sym for cands in _BENCHMARK_PREFERENCE.values() for sym in cands
+)
+
+# 全部板块基准键 (SH/STAR/SZ/GEM/BJ)
+BENCH_KEYS: tuple[str, ...] = tuple(_BENCHMARK_PREFERENCE)
 
 _benchmark_cache: dict[str, tuple[float, pl.DataFrame | None]] = {}
 _BENCHMARK_CACHE_TTL = 600.0
@@ -1067,7 +1085,8 @@ _BENCHMARK_CACHE_TTL = 600.0
 def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
     """读取指数日K, 计算各基准指数的滚动 N 日涨跌幅。
 
-    返回长表: date, bench_exchange, bench_close, bench_mom3d, bench_mom10d, bench_mom30d。
+    返回长表: date, bench_key, bench_close, bench_mom3d, bench_mom10d, bench_mom30d。
+    bench_key 为板块基准键 (SH/STAR/SZ/GEM/BJ, 见 _BENCHMARK_PREFERENCE)。
     bench_close 供盘中路径外推今日基准动量 (benchmark_momentum_today)。
     无可用指数数据时返回 None (偏离列置 null, 不阻塞主流程)。
     进程内按 data_dir 缓存 (TTL 10 分钟)。
@@ -1085,11 +1104,11 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
         index_glob = str(Path(data_dir) / "kline_index_daily" / "**" / "*.parquet")
         wanted: list[str] = []
         bench_of: dict[str, str] = {}
-        for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+        for bench_key, candidates in _BENCHMARK_PREFERENCE.items():
             for sym in candidates:
                 if sym not in bench_of:
                     wanted.append(sym)
-                    bench_of[sym] = exchange
+                    bench_of[sym] = bench_key
         lf = scan_daily_parquet(
             index_glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float")
         )
@@ -1102,15 +1121,15 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
         if not df_idx.is_empty():
             available = set(df_idx["symbol"].to_list())
             picked = [s for s in wanted if s in available]
-            # 每个交易所取优先级最高的可用基准; 全缺时回退到任一可用基准。
-            # 同一基准可服务多个交易所 (如北证50 缺失时北交所回退上证指数)。
+            # 每个板块取优先级最高的可用基准; 全缺时回退到任一可用基准。
+            # 同一基准可服务多个板块 (如科创50 缺失时科创板回退上证A指)。
             pairs: list[tuple[str, str]] = []
-            for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+            for bench_key, candidates in _BENCHMARK_PREFERENCE.items():
                 hit = next((s for s in candidates if s in available), None)
                 if hit is None and picked:
                     hit = picked[0]
                 if hit is not None:
-                    pairs.append((hit, exchange))
+                    pairs.append((hit, bench_key))
             df_bench = df_idx.filter(pl.col("symbol").is_in([p[0] for p in pairs]))
             if not df_bench.is_empty():
                 df_bench = df_bench.with_columns(
@@ -1119,16 +1138,16 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
                     (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"_bm{n}")
                     for n in DEVIATION_WINDOWS
                 ]).rename({f"_bm{n}": f"bench_mom{n}d" for n in DEVIATION_WINDOWS})
-                exchange_map = pl.DataFrame({
+                key_map = pl.DataFrame({
                     "symbol": [p[0] for p in pairs],
-                    "bench_exchange": [p[1] for p in pairs],
+                    "bench_key": [p[1] for p in pairs],
                 })
                 frame = (
-                    df_bench.join(exchange_map, on="symbol", how="inner")
-                    .select(["date", "bench_exchange", "close",
+                    df_bench.join(key_map, on="symbol", how="inner")
+                    .select(["date", "bench_key", "close",
                              *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
                     .rename({"close": "bench_close"})
-                    .unique(subset=["date", "bench_exchange"])
+                    .unique(subset=["date", "bench_key"])
                 )
     except Exception as exc:  # noqa: BLE001
         logger.warning("基准指数偏离数据加载失败: %s", exc)
@@ -1138,14 +1157,21 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
     return frame
 
 
-def _bench_exchange_expr() -> pl.Expr:
-    """symbol 后缀 → 交易所 (SH/SZ/BJ), 无法识别时 null。"""
+def _bench_key_expr() -> pl.Expr:
+    """symbol → 板块基准键 (SH/STAR/SZ/GEM/BJ), 无法识别时 null。
+
+    北交所按后缀; 沪市按 68 前缀区分科创板; 深市按 30 前缀区分创业板。
+    与 abnormal_moves.board_of 的板块判定同口径。
+    """
+    code = pl.col("symbol").str.slice(0, 6)
+    suffix = pl.col("symbol").str.slice(-2).str.to_uppercase()
     return (
-        pl.col("symbol").str.slice(-2).str.to_uppercase().replace(
-            {ex: ex for ex in _BENCHMARK_PREFERENCE},
-            default=None,
-            return_dtype=pl.Utf8,
-        )
+        pl.when(suffix == "BJ").then(pl.lit("BJ"))
+        .when((suffix == "SH") & code.str.starts_with("68")).then(pl.lit("STAR"))
+        .when(suffix == "SH").then(pl.lit("SH"))
+        .when((suffix == "SZ") & code.str.starts_with("30")).then(pl.lit("GEM"))
+        .when(suffix == "SZ").then(pl.lit("SZ"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
     )
 
 
@@ -1172,8 +1198,8 @@ def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
             for n in missing
         ])
     out = (
-        df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
-        .join(bench, left_on=["_bench_ex", "date"], right_on=["bench_exchange", "date"], how="left")
+        df.with_columns(_bench_key_expr().alias("_bench_ex"))
+        .join(bench, left_on=["_bench_ex", "date"], right_on=["bench_key", "date"], how="left")
         .with_columns([
             (pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
             for n in DEVIATION_WINDOWS
@@ -1210,16 +1236,21 @@ def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -
     return 0.0
 
 
+def bench_rt_pct_for(index_quotes: pl.DataFrame | None, bench_key: str) -> float:
+    """板块基准键的指数今日实时涨跌 (小数制), 供异动总览实时叠加等外部消费。"""
+    return _bench_rt_pct_of(index_quotes, _BENCHMARK_PREFERENCE.get(bench_key, []))
+
+
 def benchmark_momentum_today(
     data_dir: Path,
     index_quotes: pl.DataFrame | None = None,
 ) -> pl.DataFrame | None:
-    """各交易所基准指数的「今日」N 日动量 (盘中实时外推)。
+    """各板块基准指数的「今日」N 日动量 (盘中实时外推)。
 
     基准日K parquet 盘中不含今日, 今日基准收盘 = 昨收 × (1 + 实时涨跌)。
-    N 日动量 = 今日基准收盘 / N 个交易日前的收盘 - 1; 交易所与
+    N 日动量 = 今日基准收盘 / N 个交易日前的收盘 - 1; 板块与
     load_benchmark_momentum 的选基逻辑一致 (同一 TTL 缓存帧)。
-    返回小表: bench_exchange, bench_mom3d, bench_mom10d, bench_mom30d。
+    返回小表: bench_key, bench_mom3d, bench_mom10d, bench_mom30d。
     无基准数据时 None。
     """
     bench = load_benchmark_momentum(data_dir)
@@ -1232,15 +1263,15 @@ def benchmark_momentum_today(
     if bench.is_empty():
         return None
     rows: list[dict[str, float | str]] = []
-    for ex in sorted(bench["bench_exchange"].unique().to_list()):
-        sub = bench.filter(pl.col("bench_exchange") == ex).sort("date")
+    for k in sorted(bench["bench_key"].unique().to_list()):
+        sub = bench.filter(pl.col("bench_key") == k).sort("date")
         closes = sub["bench_close"]
         if closes.len() == 0:
             continue
         yesterday_close = closes[-1]
-        rt = _bench_rt_pct_of(index_quotes, _BENCHMARK_PREFERENCE.get(ex, []))
+        rt = _bench_rt_pct_of(index_quotes, _BENCHMARK_PREFERENCE.get(k, []))
         row: dict[str, float | str] = {
-            "bench_exchange": ex,
+            "bench_key": k,
         }
         for n in DEVIATION_WINDOWS:
             base = closes[-n] if closes.len() >= n else None  # N 个交易日前 (不含今日)
@@ -1252,7 +1283,7 @@ def benchmark_momentum_today(
         rows.append(row)
     if not rows:
         return None
-    schema = {"bench_exchange": pl.Utf8, **{f"bench_mom{n}d": pl.Float64 for n in DEVIATION_WINDOWS}}
+    schema = {"bench_key": pl.Utf8, **{f"bench_mom{n}d": pl.Float64 for n in DEVIATION_WINDOWS}}
     return pl.DataFrame(rows, schema=schema)
 
 
@@ -1283,8 +1314,8 @@ def attach_deviation_columns_today(
         for n in DEVIATION_WINDOWS
     ]
     return (
-        df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
-        .join(bench, left_on="_bench_ex", right_on="bench_exchange", how="left")
+        df.with_columns(_bench_key_expr().alias("_bench_ex"))
+        .join(bench, left_on="_bench_ex", right_on="bench_key", how="left")
         .with_columns(exprs)
         .drop(["_bench_ex", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
     )

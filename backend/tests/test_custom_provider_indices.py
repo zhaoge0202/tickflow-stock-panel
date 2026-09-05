@@ -14,6 +14,7 @@ from typing import ClassVar
 
 import polars as pl
 
+from app.indicators.pipeline import BENCHMARK_INDEX_SYMBOLS
 from app.services import quote_service as qs
 from app.services.index_const import CORE_INDEX_SYMBOLS
 
@@ -66,7 +67,7 @@ def _service_with_provider(
     monkeypatch.setattr(custom_mod, "get_provider", lambda name: provider)
     monkeypatch.setattr(
         service, "_process_full_market_records",
-        lambda records, *, t0, now_ts, replace_index_cache=True: (
+        lambda records, *, t0, now_ts, replace_index_cache=True, final_boundary_ms=None: (
             captured.append(records),
             index_cache_replacements.append(replace_index_cache),
         ),
@@ -84,7 +85,7 @@ def test_custom_provider_fetch_appends_index_records(monkeypatch):
     assert "600519.SH" in symbols and "000001.SH" in symbols and "399001.SZ" in symbols
     assert replacements == [True]
     # 请求清单 = 核心四只 (无指数监控规则时)
-    assert provider.index_calls == [sorted(CORE_INDEX_SYMBOLS)]
+    assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS)]
 
 
 def test_custom_provider_monitor_indices_join_fetch(monkeypatch):
@@ -102,7 +103,7 @@ def test_custom_provider_monitor_indices_join_fetch(monkeypatch):
     service._app_state = SimpleNamespace(monitor_engine=_Engine())
     service._fetch_full_market_quotes()
 
-    assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | {"000300.SH"})]
+    assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS | {"000300.SH"})]
 
 
 def test_custom_provider_without_indices_protocol_is_silent(monkeypatch):

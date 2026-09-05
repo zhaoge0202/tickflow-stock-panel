@@ -66,6 +66,49 @@ _OP_BUILDERS = {
 }
 
 
+def allowed_fields() -> frozenset[str]:
+    """条件可引用字段 = 物化列白名单 并入 注册表因子 (虚拟/自定义/复合)。
+
+    因子列在历史路径 (compute_signals) 由 materialize_factor_columns 复用
+    评分物化管线补算; 盘中单日快照无滚动窗口, 依赖因子的信号被 inject 以
+    缺列告警跳过 (与日期偏移条件同样的优雅降级)。
+    """
+    from app.factors.registry import all_factors
+
+    return frozenset(ALLOWED_FIELDS | {spec.id for spec in all_factors()})
+
+
+def materialize_factor_columns(
+    df: pl.DataFrame,
+    exprs: dict[str, pl.Expr],
+    needed: set[str] | None = None,
+) -> pl.DataFrame:
+    """把信号表达式引用、且 df 缺失的注册表因子列补算出来。
+
+    复用评分物化路径 (materialize_scoring_columns) — 与检验/评分同一条计算
+    逻辑, 不引入第二套实现。非注册表列不在此处理 (缺列仍由 inject 告警跳过)。
+    """
+    if df.is_empty() or not exprs:
+        return df
+    cols = set(df.columns)
+    missing: set[str] = set()
+    for name, roots in expression_dependencies(exprs).items():
+        if needed is not None and name not in needed:
+            continue
+        missing.update(root for root in roots if root not in cols)
+    if not missing:
+        return df
+    from app.factors.registry import all_factors
+
+    factor_ids = {spec.id for spec in all_factors()}
+    to_compute = missing & factor_ids
+    if not to_compute:
+        return df
+    from app.strategy.scoring import materialize_scoring_columns
+
+    return materialize_scoring_columns(df, sorted(to_compute))
+
+
 # ── 持久化（镜像 strategy/config.py 的写法）──────────────
 def _dir(data_dir: Path) -> Path:
     d = data_dir / "user_data" / "custom_signals"
@@ -133,9 +176,10 @@ def _parse_right(right: str) -> tuple[str, object]:
         return ("const", float(right))
     if not isinstance(right, str):
         raise ValueError(f"非法右值: {right!r}")
+    allowed = allowed_fields()
     if right.startswith("field:"):
         col = right[len("field:"):]
-        if col not in ALLOWED_FIELDS:
+        if col not in allowed:
             raise ValueError(f"右值字段不在白名单: {col}")
         return ("field", col)
     # 纯数字
@@ -144,7 +188,7 @@ def _parse_right(right: str) -> tuple[str, object]:
     except ValueError:
         pass
     # 裸字段名 — 兜底容错, 仍受白名单约束
-    if right in ALLOWED_FIELDS:
+    if right in allowed:
         return ("field", right)
     raise ValueError(f"非法右值（应为 field:xxx 或数字）: {right!r}")
 
@@ -167,7 +211,7 @@ def validate(sig: dict) -> None:
         if not isinstance(c, dict):
             raise ValueError(f"第 {i+1} 个条件格式错误")
         left = c.get("left", "")
-        if left not in ALLOWED_FIELDS:
+        if left not in allowed_fields():
             raise ValueError(f"第 {i+1} 个条件: 字段 {left!r} 不在白名单")
         if c.get("op") not in OPS:
             raise ValueError(f"第 {i+1} 个条件: 运算符 {c.get('op')!r} 非法")

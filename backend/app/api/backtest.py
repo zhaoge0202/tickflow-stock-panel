@@ -128,9 +128,9 @@ class FactorColumnsResponse(BaseModel):
 
 @router.get("/factor/columns")
 def factor_columns():
-    """返回可用的因子列列表。"""
-    from app.backtest.factor import FACTOR_COLUMNS
-    return {"columns": FACTOR_COLUMNS}
+    """返回可用的因子列列表 (含运行期注册的自定义/复合因子)。"""
+    from app.factors.registry import factor_columns_view
+    return {"columns": factor_columns_view()}
 
 
 class FactorBacktestRequest(BaseModel):
@@ -149,9 +149,10 @@ class FactorBacktestRequest(BaseModel):
 @router.post("/factor/run")
 def factor_run(req: FactorBacktestRequest, request: Request):
     """因子回测 — IC/IR 分析 + 分层回测。"""
-    from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService, FactorConfig
+    from app.backtest.factor import FactorBacktestService, FactorConfig
+    from app.factors.registry import factor_columns_view
 
-    if req.factor_name not in {item["id"] for item in FACTOR_COLUMNS}:
+    if req.factor_name not in {item["id"] for item in factor_columns_view()}:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
 
     engine = _get_engine(request)
@@ -184,7 +185,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
 
 
 class FactorBatchRequest(BaseModel):
-    factor_names: list[str] = Field(..., min_length=1, max_length=64)
+    factor_names: list[str] = Field(..., min_length=1, max_length=96)  # 目录 77 + 自定义余量
     symbols: list[str] | None = None
     start: date | None = None
     end: date | None = None
@@ -200,13 +201,13 @@ class FactorBatchRequest(BaseModel):
 def factor_batch(req: FactorBatchRequest, request: Request):
     """批量筛选因子, 同一批次只加载并计算一次数据面板。"""
     from app.backtest.factor import (
-        FACTOR_COLUMNS,
         FactorBacktestService,
         FactorBatchConfig,
     )
+    from app.factors.registry import factor_columns_view
 
     factor_names = list(dict.fromkeys(req.factor_names))
-    allowed = {item["id"] for item in FACTOR_COLUMNS}
+    allowed = {item["id"] for item in factor_columns_view()}
     invalid = [name for name in factor_names if name not in allowed]
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")

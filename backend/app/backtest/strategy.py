@@ -591,6 +591,7 @@ class StrategyBacktestResult:
     trades: list[dict] = field(default_factory=list)
     per_symbol_stats: list[dict] = field(default_factory=list)
     strategy_info: dict = field(default_factory=dict)
+    factor_attribution: dict | None = None
     elapsed_ms: float = 0.0
     error: str | None = None
 
@@ -653,6 +654,56 @@ class BacktestResultPolicy:
         }
         keep = set(self.required_stats) | diagnostic
         return {key: value for key, value in stats.items() if key in keep}
+
+
+def _factor_attribution_summary(
+    snapshot: pl.DataFrame,
+    trades: list,
+) -> dict | None:
+    """v1 因子归因: 入场信号日因子快照 x 成交盈亏, 对比盈利/亏损单因子均值。
+
+    snapshot 来自 _apply_score 物化的候选行 (与评分同一条计算管线), 模拟结束后
+    按 (symbol, 信号日) 关联成交。快照缺失、无可关联行或因子列全空时返回 None,
+    归因失败不影响回测主结果。
+    """
+    factor_cols = [c for c in snapshot.columns if c not in ("symbol", "date")]
+    if not factor_cols or not trades:
+        return None
+    normalized = snapshot.with_columns(
+        pl.col("date").cast(pl.Utf8).str.slice(0, 10).alias("date")
+    )
+    symbols: list[str] = []
+    days: list[str] = []
+    pnls: list[float] = []
+    for trade in trades:
+        day = trade.entry_signal_date or trade.entry_date
+        if day is None:
+            continue
+        symbols.append(trade.symbol)
+        days.append(str(day)[:10])
+        pnls.append(float(trade.pnl_pct))
+    if not symbols:
+        return None
+    frame = pl.DataFrame({"symbol": symbols, "date": days, "pnl_pct": pnls})
+    joined = frame.join(normalized, on=["symbol", "date"], how="left")
+    win = joined.filter(pl.col("pnl_pct") > 0)
+    lose = joined.filter(pl.col("pnl_pct") <= 0)
+    factors: list[dict] = []
+    for col in factor_cols:
+        win_vals = win.get_column(col).drop_nulls().cast(pl.Float64)
+        lose_vals = lose.get_column(col).drop_nulls().cast(pl.Float64)
+        if win_vals.is_empty() and lose_vals.is_empty():
+            continue
+        factors.append({
+            "factor": col,
+            "win_mean": round(float(win_vals.mean()), 6) if not win_vals.is_empty() else None,
+            "lose_mean": round(float(lose_vals.mean()), 6) if not lose_vals.is_empty() else None,
+            "win_n": int(win_vals.len()),
+            "lose_n": int(lose_vals.len()),
+        })
+    if not factors:
+        return None
+    return {"factors": factors, "n_win": win.height, "n_lose": lose.height}
 
 
 @dataclass(frozen=True)
@@ -1012,6 +1063,8 @@ class StrategyBacktestService:
         t0 = time.perf_counter()
         run_id = uuid.uuid4().hex[:10]
         result_policy = result_policy or BacktestResultPolicy()
+        # 因子归因快照容器: 日线路径在 _apply_score 里填充, 其余路径保持空
+        factor_snapshot: dict = {}
 
         def _err(msg: str) -> StrategyBacktestResult:
             return StrategyBacktestResult(
@@ -1505,7 +1558,7 @@ class StrategyBacktestService:
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
             candidate_mask = basic_mask & candidate_filter_mask
-            panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
+            panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask, factor_snapshot=factor_snapshot)
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
             entry_mask = entry_mask & formal_range
@@ -1662,6 +1715,16 @@ class StrategyBacktestService:
 
         selected_stats = result_policy.select_stats(result.stats)
 
+        # 因子归因 (fail-open): 快照与成交按信号日关联, 失败只记日志不影响结果
+        factor_attribution = None
+        if factor_snapshot and result.trades and result_policy.include_trades:
+            try:
+                factor_attribution = _factor_attribution_summary(
+                    factor_snapshot["frame"], result.trades
+                )
+            except Exception as exc:
+                logger.warning("factor attribution failed: %s", exc)
+
         elapsed = (time.perf_counter() - t0) * 1000
 
         return StrategyBacktestResult(
@@ -1682,6 +1745,7 @@ class StrategyBacktestService:
                 else []
             ),
             strategy_info=strategy_info,
+            factor_attribution=factor_attribution,
             elapsed_ms=round(elapsed, 1),
         )
 
@@ -2465,6 +2529,7 @@ class StrategyBacktestService:
         s: StrategyDef,
         overrides: dict | None,
         universe_mask: pl.Series | None = None,
+        factor_snapshot: dict | None = None,
     ) -> pl.DataFrame:
         scoring = effective_scoring(s.meta.get("scoring"), overrides)
         directions = effective_scoring_directions(overrides)
@@ -2474,6 +2539,18 @@ class StrategyBacktestService:
         has_universe = universe_mask is not None and len(universe_mask) == len(panel)
         if has_universe:
             work = work.with_columns(universe_mask.rename("_score_universe"))
+
+        # 因子归因快照: 在临时因子列被 _finish 丢弃前, 截取候选行的
+        # (symbol, date, 因子值)。与评分共用同一份物化结果, 无第二次计算。
+        if factor_snapshot is not None:
+            snapshot_cols = ["symbol", "date"] + [
+                name for name in scoring if name in work.columns
+            ]
+            if len(snapshot_cols) > 2:
+                frame = work
+                if has_universe:
+                    frame = frame.filter(pl.col("_score_universe"))
+                factor_snapshot["frame"] = frame.select(snapshot_cols)
 
         def _value_in_universe(value: pl.Expr) -> pl.Expr:
             if has_universe:

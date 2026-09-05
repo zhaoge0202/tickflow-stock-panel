@@ -13,7 +13,6 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
-from app.backtest.factor import FACTOR_COLUMNS
 from app.backtest.mining import (
     MAX_BEAM_WIDTH,
     MAX_COMBINATION_SIZE,
@@ -21,6 +20,7 @@ from app.backtest.mining import (
     evaluate_candidate_gate,
 )
 from app.enriched_generation import EnrichedGenerationUnavailableError
+from app.factors.registry import factor_columns_view
 from app.services import preferences
 from app.services.mining_jobs import (
     RUN_STATUSES,
@@ -31,6 +31,7 @@ from app.services.mining_jobs import (
     MiningRunValidationError,
 )
 from app.services.mining_preflight import (
+    enriched_partition_dates,
     mining_availability,
     require_mining_availability,
 )
@@ -40,7 +41,9 @@ from app.services.mining_schedule import (
 )
 
 router = APIRouter(prefix="/api/backtest/mining", tags=["backtest"])
-_FACTOR_IDS = frozenset(str(item["id"]) for item in FACTOR_COLUMNS)
+# 校验时动态读取 (含运行期注册的自定义/复合因子)
+def _known_factor_ids() -> frozenset[str]:
+    return frozenset(str(item["id"]) for item in factor_columns_view())
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _SSE_POLL_SECONDS = 0.5
 _SSE_HEARTBEAT_SECONDS = 15.0
@@ -87,7 +90,7 @@ class MiningStartRequest(BaseModel):
     @field_validator("factor_names")
     @classmethod
     def _known_factors(cls, values: list[str]) -> list[str]:
-        unknown = sorted(set(values) - _FACTOR_IDS)
+        unknown = sorted(set(values) - _known_factor_ids())
         if unknown:
             raise ValueError(f"unknown mining factors: {unknown}")
         return values
@@ -117,6 +120,38 @@ class MiningSchedulePatch(BaseModel):
     mining_schedule_enabled: bool | None = None
     mining_schedule_weekday: int | None = Field(None, ge=0, le=4)
     mining_budget_profile: Literal["balanced", "strict"] | None = None
+
+
+class MiningAutoStartRequest(BaseModel):
+    """自动挖掘: 因子池由 L1 统计筛选自动生成, 不接受手动指定。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    asset_type: Literal["stock", "etf"] = "stock"
+    start: date | None = None
+    end: date | None = None
+    budget_profile: Literal["exploratory", "balanced", "strict"] = "balanced"
+    commission_pct: float = Field(0.0002, ge=0.0, le=0.05, allow_inf_nan=False)
+    stamp_tax_pct: float = Field(0.0005, ge=0.0, le=0.05, allow_inf_nan=False)
+    slippage_bps: float = Field(5.0, ge=0.0, le=1000.0, allow_inf_nan=False)
+    correlation_threshold: float = Field(0.75, gt=0.0, le=1.0, allow_inf_nan=False)
+    force: bool = False
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def _iso_dates(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("dates must use ISO YYYY-MM-DD format") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _date_range(self) -> MiningAutoStartRequest:
+        if self.start is not None and self.end is not None and self.start > self.end:
+            raise ValueError("start must not be after end")
+        return self
 
 
 @router.get("/availability")
@@ -235,6 +270,93 @@ def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="mining run not found") from exc
     except MiningRunValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/auto")
+def start_auto_run(payload: MiningAutoStartRequest, request: Request) -> dict[str, Any]:
+    """自动挖掘: L1 统计筛选全量因子 → 达标池 → 复用挖掘任务管理启动嵌套样本外验证。
+
+    筛选结果随请求持久化 (request.auto_screening), 供结果页展示达标因子清单与
+    失败原因分布; 无达标因子时返回 started=false 而不是报错。
+    """
+    from app.services.auto_mining import screen_all_factors
+
+    manager = _manager(request)
+    data_dir = request.app.state.repo.store.data_dir
+    try:
+        require_mining_availability(
+            data_dir,
+            asset_type=payload.asset_type,
+            budget_profile=payload.budget_profile,
+            start=payload.start,
+            end=payload.end,
+        )
+        engine = getattr(request.app.state, "backtest_engine", None)
+        if engine is None:
+            from app.backtest.engine import BacktestEngine
+
+            engine = BacktestEngine(request.app.state.repo)
+            request.app.state.backtest_engine = engine
+        all_dates = enriched_partition_dates(data_dir, payload.asset_type)
+        screen_end = payload.end or (all_dates[-1] if all_dates else date.today())
+        screening = screen_all_factors(
+            engine,
+            asset_type=payload.asset_type,
+            start=payload.start,
+            end=screen_end,
+            profile=payload.budget_profile,
+        )
+    except (MiningRunValidationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EnrichedGenerationUnavailableError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="行情数据正在更新(enriched 发布中), 请等数据更新完成后再开始挖掘",
+        ) from exc
+
+    if not screening["pool"]:
+        return {"started": False, "reason": "no_qualified_factors", "screening": screening}
+
+    worker_request = {
+        "factor_names": screening["pool"],
+        "strategy_ids": [],
+        "symbols": None,
+        "asset_type": payload.asset_type,
+        "start": payload.start.isoformat() if payload.start else None,
+        "end": payload.end.isoformat() if payload.end else None,
+        "budget_profile": payload.budget_profile,
+        "commission_pct": payload.commission_pct,
+        "stamp_tax_pct": payload.stamp_tax_pct,
+        "slippage_bps": payload.slippage_bps,
+        "correlation_threshold": payload.correlation_threshold,
+        "max_combination_factors": 4,
+        "beam_width": 12,
+        "max_finalists": MAX_FINALISTS,
+        "auto": True,
+        "auto_screening": screening,
+    }
+    try:
+        fingerprint = build_data_fingerprint(
+            request.app.state.repo,
+            request.app.state,
+            worker_request,
+        )
+        manifest = manager.start(
+            worker_request,
+            fingerprint,
+            force=payload.force,
+            source="auto",
+        )
+    except (MiningRunValidationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EnrichedGenerationUnavailableError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="行情数据正在更新(enriched 发布中), 请等数据更新完成后再开始挖掘",
+        ) from exc
+    except MiningRunStoreError as exc:
+        raise HTTPException(status_code=500, detail="failed to persist mining run") from exc
+    return {"started": True, "run": _project_run(manager.store, manifest), "screening": screening}
 
 
 @router.get("/runs/{run_id}/result")

@@ -42,16 +42,54 @@ def test_build_messages_contains_whitelist_fields_and_rules():
 
 
 def test_build_messages_only_contains_whitelisted_fields():
-    from app.strategy.custom_signals import ALLOWED_FIELDS
+    from app.strategy.custom_signals import allowed_fields
 
     system = build_messages("x")[0]["content"]
     # 只检查「字段清单」段落（可用字段 … 运算符），排除 JSON 格式示例里的 "name"
     field_section = system.split("运算符（op）", 1)[0]
     for field in ("ma20", "rsi_14", "boll_upper"):
         assert field in field_section
-    # 字段清单里出现的每个 key( 都必须在白名单内
+    # 字段清单里出现的每个 key( 都必须在白名单内 (物理列 ∪ 因子)
     keys = set(re.findall(r"([a-z0-9_]+)\(", field_section))
-    assert keys and keys <= ALLOWED_FIELDS
+    assert keys and keys <= allowed_fields()
+
+
+def test_build_messages_contains_factor_fields():
+    # 因子注册表字段应进入提示词 (因子·分组), 供 AI 直接构造因子条件
+    from app.factors.registry import all_factors
+
+    system = build_messages("动量强的票")[0]["content"]
+    field_section = system.split("运算符（op）", 1)[0]
+    factor_ids = {s.id for s in all_factors()}
+    listed = set(re.findall(r"([a-z0-9_]+)\(", field_section))
+    assert factor_ids & listed, "提示词应包含至少一个因子字段"
+    assert "因子·动量" in field_section
+    assert "预计算的因子值" in system
+
+
+def test_parse_and_validate_accepts_factor_condition():
+    # AI 输出以因子为条件字段: 应通过白名单校验
+    raw = json.dumps({
+        "name": "强动量",
+        "conditions": [
+            {"left": "momentum_20d", "op": ">=", "right": "0.1",
+             "leftDays": 0, "rightDays": 0}
+        ],
+    })
+    result = parse_and_validate(raw)
+    assert result["conditions"][0]["left"] == "momentum_20d"
+
+
+def test_parse_and_validate_accepts_bare_factor_rhs():
+    # 右值裸写因子名: 同样自动补 field: 前缀
+    raw = json.dumps({
+        "name": "动量走强",
+        "conditions": [
+            {"left": "momentum_5d", "op": ">", "right": "momentum_20d"}
+        ],
+    })
+    result = parse_and_validate(raw)
+    assert result["conditions"][0]["right"] == "field:momentum_20d"
 
 
 # ── parse_and_validate ──────────────────────────────────────

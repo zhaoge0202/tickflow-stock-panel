@@ -3768,6 +3768,12 @@ _MATRIX_COMPUTED_FEATURES = frozenset({
     "amihud_20d", "turnover_z_60d", "vol_price_corr_20d",
     "vwap_bias", "vol_trend_5_60",
     "limit_up_count_20d", "limit_up_count_60d",
+    # --- 扩充批次 (2026-09-05): 与注册表/scoring 口径一致的 16 个新虚拟因子 ---
+    "log_float_mv", "mom_accel_20_60", "rsi_14_delta_5d",
+    "overnight_ret_20d", "intraday_ret_20d", "downside_vol_20d",
+    "vol_regime_5_60", "amplitude_trend_20_60", "obv_trend_20d",
+    "amount_mean_20d", "turnover_mean_20d", "turnover_std_20d",
+    "position_240d", "distance_to_high_240d", "kdj_kd_diff",
 })
 
 
@@ -4016,6 +4022,81 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         hits = np.where(np.isfinite(consecutive) & (consecutive > 0), np.float32(1.0), np.float32(0.0))
         hits = hits.astype(np.float32)
         return valid_rolling_sum(hits, close_valid, window)
+    # --- 扩充批次 (2026-09-05): numpy 内核实现, 口径与 strategy/scoring.py 一致 ---
+    if name == "log_float_mv":
+        turnover = market.field("turnover_rate")
+        valid = close_valid & np.isfinite(turnover) & (turnover > 0) & (market.volume > 0)
+        out = np.full(market.shape, np.nan, dtype=np.float32)
+        np.multiply(market.close, market.volume, out=out, where=valid)
+        np.divide(out, turnover, out=out, where=valid)
+        np.log(out, out=out, where=valid)
+        return out
+    if name == "mom_accel_20_60" or name == "kdj_kd_diff":
+        left, right = (
+            (matrix_feature(market, "momentum_20d"), matrix_feature(market, "momentum_60d"))
+            if name == "mom_accel_20_60"
+            else (matrix_feature(market, "kdj_k"), matrix_feature(market, "kdj_d"))
+        )
+        out = np.full(market.shape, np.nan, dtype=np.float32)
+        np.subtract(left, right, out=out, where=np.isfinite(left) & np.isfinite(right))
+        return out
+    if name == "rsi_14_delta_5d":
+        rsi = matrix_feature(market, "rsi_14")
+        return rsi - valid_shift(rsi, 5, np.isfinite(rsi))
+    if name == "overnight_ret_20d":
+        overnight = _matrix_relative(market.open, matrix_feature(market, "prev_close"))
+        return valid_rolling_sum(overnight, np.isfinite(overnight), 20)
+    if name == "intraday_ret_20d":
+        intraday = _matrix_relative(market.close, market.open)
+        return valid_rolling_sum(intraday, np.isfinite(intraday), 20)
+    if name == "downside_vol_20d":
+        daily = matrix_feature(market, "change_pct")
+        downside = np.where(
+            np.isfinite(daily), np.minimum(daily, np.float32(0.0)), np.nan,
+        ).astype(np.float32)
+        mean_sq = valid_rolling_mean(np.square(downside, dtype=np.float32), np.isfinite(downside), 20)
+        out = np.full(market.shape, np.nan, dtype=np.float32)
+        np.sqrt(mean_sq, out=out, where=np.isfinite(mean_sq))
+        return out
+    if name == "vol_regime_5_60":
+        daily = matrix_feature(market, "change_pct")
+        valid = np.isfinite(daily)
+        return _matrix_ratio(
+            valid_rolling_std(daily, valid, 5, ddof=1),
+            valid_rolling_std(daily, valid, 60, ddof=1),
+        )
+    if name == "amplitude_trend_20_60":
+        amplitude = matrix_feature(market, "amplitude")
+        valid = np.isfinite(amplitude)
+        return _matrix_relative(
+            valid_rolling_mean(amplitude, valid, 20),
+            valid_rolling_mean(amplitude, valid, 60),
+        )
+    if name == "obv_trend_20d":
+        daily = matrix_feature(market, "change_pct")
+        volume_valid = close_valid & np.isfinite(market.volume)
+        signed = np.where(
+            np.isfinite(daily), np.sign(daily) * market.volume, np.nan,
+        ).astype(np.float32)
+        total = valid_rolling_sum(signed, volume_valid & np.isfinite(daily), 20)
+        scale = valid_rolling_mean(market.volume, volume_valid, 20) * np.float32(20.0)
+        return _matrix_ratio(total, scale)
+    if name == "amount_mean_20d":
+        amount = market.field("amount")
+        return valid_rolling_mean(amount / np.float32(1e8), np.isfinite(amount), 20)
+    if name == "turnover_mean_20d" or name == "turnover_std_20d":
+        turnover = market.field("turnover_rate")
+        valid = np.isfinite(turnover)
+        mean = valid_rolling_mean(turnover, valid, 20)
+        if name == "turnover_mean_20d":
+            return mean
+        return _matrix_ratio(valid_rolling_std(turnover, valid, 20, ddof=1), mean)
+    if name == "position_240d":
+        high = valid_rolling_max(market.close, close_valid, 240)
+        low = valid_rolling_min(market.close, close_valid, 240)
+        return _matrix_ratio(market.close - low, high - low)
+    if name == "distance_to_high_240d":
+        return _matrix_relative(market.close, valid_rolling_max(market.close, close_valid, 240))
     raise ValueError(f"unsupported matrix feature: {name}")
 
 

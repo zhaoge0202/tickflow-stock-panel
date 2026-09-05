@@ -465,3 +465,90 @@ def test_engine_abnormal_down_direction_event_type() -> None:
     events = engine.evaluate_abnormal([_row("600000.SH", ("3d", -0.16))], now=1006.0)
     assert len(events) == 1
     assert events[0]["type"] == "abnormal_down"
+
+
+# ── 板块基准路由: 科创板→科创50, 创业板→创业板综指 (交易所官方对应指数) ──
+
+def test_attach_deviation_columns_board_routing(tmp_path) -> None:
+    """科创板股票减科创50、创业板股票减创业板综指, 不再共用交易所 A 指。
+
+    构造 68/30 前缀股票 close 与各自官方基准同序列 → 偏离恰为 0。
+    """
+    days = [date(2026, 8, 13), date(2026, 8, 14), date(2026, 8, 15), date(2026, 8, 18)]
+    rows = [("000688.SH", d, 100.0 + i) for i, d in enumerate(days)]       # 科创50
+    rows += [("399102.SZ", d, 200.0 + 5 * i) for i, d in enumerate(days)]  # 创业板综指
+    _write_index_daily(tmp_path, rows)
+
+    stock = pl.DataFrame(
+        {
+            "symbol": ["688981.SH"] * 4 + ["300750.SZ"] * 4,
+            "date": days * 2,
+            "close": [100.0 + i for i in range(4)] + [200.0 + 5 * i for i in range(4)],
+        }
+    )
+    out = attach_deviation_columns(stock, tmp_path)
+    star = out.filter(pl.col("symbol") == "688981.SH").sort("date")["deviate_3d"][-1]
+    gem = out.filter(pl.col("symbol") == "300750.SZ").sort("date")["deviate_3d"][-1]
+    assert abs(star - 0.0) < 1e-9
+    assert abs(gem - 0.0) < 1e-9
+
+
+def test_attach_deviation_columns_star_fallback(tmp_path) -> None:
+    """科创50 数据缺失 → 回退上证A指, 偏离列不整体缺失。"""
+    days = [date(2026, 8, 13), date(2026, 8, 14), date(2026, 8, 15), date(2026, 8, 18)]
+    _write_index_daily(tmp_path, [("000002.SH", d, 10.0 + i) for i, d in enumerate(days)])
+
+    stock = pl.DataFrame(
+        {
+            "symbol": ["688981.SH"] * 4,
+            "date": days,
+            "close": [10.0 + i for i in range(4)],
+        }
+    )
+    out = attach_deviation_columns(stock, tmp_path)
+    dev = out.sort("date")["deviate_3d"][-1]
+    assert dev is not None
+    assert abs(dev - 0.0) < 1e-9
+
+
+def test_benchmark_momentum_today_gem_key(tmp_path) -> None:
+    """盘中外推按板块键产出: 创业板综指行情只喂 GEM 键的实时涨跌。"""
+    _write_index_daily(tmp_path, [("399102.SZ", d, 10.0 + i) for i, d in enumerate(_BENCH_DAYS)])
+    quotes = pl.DataFrame({"symbol": ["399102.SZ"], "change_pct": [10.0]})  # 百分数: +10%
+
+    out = benchmark_momentum_today(tmp_path, quotes)
+    gem = out.filter(pl.col("bench_key") == "GEM")
+    assert gem.height == 1
+    assert abs(gem["bench_mom3d"][0] - (15.0 * 1.10 / 13 - 1)) < 1e-9
+    # 其他键 (如 SH) 候选不在实时缓存 → rt=0, 用昨收外推
+    sh = out.filter(pl.col("bench_key") == "SH")
+    assert sh.height == 1
+    assert abs(sh["bench_mom3d"][0] - (15.0 / 13 - 1)) < 1e-9
+
+
+def test_build_overview_rt_overlay_uses_board_benchmark() -> None:
+    """实时叠加按板块基准: 创业板股减创业板综指今日涨跌, 不再全市场混均值。"""
+    with _hist_cache_lock:
+        _hist_cache.clear()
+
+    class _GemQuotes:
+        def get_index_quotes(self):
+            # 百分数口径: 创业板综指 +2%, 其余基准无行情 → 0
+            return pl.DataFrame({"symbol": ["399102.SZ"], "change_pct": [2.0]})
+
+    df = pl.DataFrame(
+        {
+            "symbol": ["300001.SZ", "600000.SH"],
+            "name": ["创业板股", "沪主板股"],
+            "close": [10.0, 20.0],
+            "change_pct": [0.10, 0.10],
+            "deviate_3d": [0.25, 0.25],
+            "deviate_10d": [None, None],
+            "deviate_30d": [None, None],
+        }
+    )
+    result = build_overview(_FakeRepo(df), _GemQuotes(), min_closeness=0.5)
+    by_symbol = {r["symbol"]: r for r in result["rows"]}
+    # 创业板: 0.25 + (0.10 - 0.02) = 0.33; 沪主板无对应行情: 0.25 + 0.10 = 0.35
+    assert abs(by_symbol["300001.SZ"]["windows"]["3d"]["value"] - 0.33) < 1e-9
+    assert abs(by_symbol["600000.SH"]["windows"]["3d"]["value"] - 0.35) < 1e-9

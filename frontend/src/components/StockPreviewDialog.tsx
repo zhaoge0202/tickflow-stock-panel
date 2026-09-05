@@ -585,7 +585,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                           }`}
                         >
                           {parseInt(w, 10)}日{' '}
-                          <span className={info.value >= 0 ? 'text-bull' : 'text-bear'}>{fmtPct(info.value, 1)}</span>
+                          <span className={info.value >= 0 ? 'text-bull' : 'text-bear'}>{fmtPct(info.value)}</span>
                           <span className="text-muted"> / ±{(info.threshold * 100).toFixed(0)}%</span>
                           <span className="text-muted"> · 接近{(info.closeness * 100).toFixed(0)}%</span>
                         </span>

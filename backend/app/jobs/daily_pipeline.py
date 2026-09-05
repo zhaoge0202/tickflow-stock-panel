@@ -66,6 +66,48 @@ def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> l
     return pruned
 
 
+def _prune_stale_price_partitions(
+    daily_dir: Path, enriched_dir: Path, max_dates: int = 5
+) -> list[str]:
+    """删除收盘价与官方日线不一致的 enriched 日期分区。
+
+    实时 flush 写入的当日分区行数与 daily 相同, 但收盘价可能停留在收盘集合
+    竞价前的快照 (实测: TickFlow 实时端点收盘后仍长期返回旧价, 3392/5554 只
+    股票当日收盘价与官方日线不符), #223 的行数校验识别不到。对最近若干交易日
+    做值级比对: enriched.raw_close 与 daily.close 任一标的差超过半个最小报价
+    单位即删分区, 由后续增量重算按官方日线全市场重建。
+    """
+    import shutil
+
+    common = sorted(
+        (
+            p.stem.split("=", 1)[1]
+            for p in enriched_dir.glob("date=*")
+            if (daily_dir / p.stem).exists()
+        ),
+        reverse=True,
+    )[:max_dates]
+    pruned: list[str] = []
+    for ds in common:
+        try:
+            daily = pl.read_parquet(
+                daily_dir / f"date={ds}" / "*.parquet", columns=["symbol", "close"]
+            )
+            enr = pl.read_parquet(
+                enriched_dir / f"date={ds}" / "*.parquet", columns=["symbol", "raw_close"]
+            )
+        except Exception:
+            continue  # 列缺失/不可读 → 交给既有完整性检查兜底
+        joined = enr.join(daily, on="symbol", how="inner").drop_nulls()
+        if joined.is_empty():
+            continue
+        bad = joined.filter((pl.col("raw_close") - pl.col("close")).abs() > 0.005)
+        if not bad.is_empty():
+            shutil.rmtree(enriched_dir / f"date={ds}", ignore_errors=True)
+            pruned.append(ds)
+    return pruned
+
+
 class PipelineStageError(RuntimeError):
     """管道有阶段软失败(数据可能陈旧)时抛出, 让上层 job_store 把任务标记为 failed。
 
@@ -388,14 +430,19 @@ def run_now(
     daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
     prev_enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_exists else 0
 
-    # 部分分区修复 (#223): 删除被实时合并提前创建、覆盖不全的 enriched 分区,
-    # 让下方计数比较与增量计算把它们重新当新日期处理
+    # 部分分区修复 (#223) + 收盘价过期分区修复: 删除被实时合并提前创建、覆盖不全
+    # 或收盘价停留在竞价前快照的 enriched 分区, 让下方计数比较与增量计算把它们
+    # 重新当新日期处理 (值级比对以官方日线为准, 实时源不纠错也能自愈)
     if enriched_exists:
         partial_pruned = _prune_partial_enriched_partitions(daily_dir, enriched_dir)
-        if partial_pruned:
+        stale_pruned = _prune_stale_price_partitions(daily_dir, enriched_dir)
+        pruned_dates = sorted(set(partial_pruned) | set(stale_pruned))
+        if pruned_dates:
             logger.warning(
-                "compute_enriched: 发现 %d 个覆盖不全的 enriched 分区, 已删除待重算: %s",
-                len(partial_pruned), ", ".join(sorted(partial_pruned)[:10]),
+                "compute_enriched: 发现 %d 个异常 enriched 分区 (覆盖不全 %d / 收盘价过期 %d), "
+                "已删除待重算: %s",
+                len(pruned_dates), len(partial_pruned), len(stale_pruned),
+                ", ".join(pruned_dates[:10]),
             )
             enriched_exists = enriched_dir.exists() and any(enriched_dir.glob("date=*"))
             prev_enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_exists else 0
