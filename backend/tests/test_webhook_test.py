@@ -89,6 +89,61 @@ def test_wecom_sends_saved_url(monkeypatch):
     assert "推送配置正确" in calls["body"]
 
 
+def test_custom_webhook_sends_saved_url_and_secret(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        "app.services.preferences.get_custom_webhook_url",
+        lambda: "https://example.com/tickflow",
+    )
+    monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "secret")
+    monkeypatch.setattr(
+        "app.services.webhook_adapter.send_custom",
+        lambda url, title, body, event_type, data=None, secret="", max_attempts=3:
+            calls.update(
+                url=url,
+                event_type=event_type,
+                secret=secret,
+                max_attempts=max_attempts,
+            ) or True,
+    )
+
+    result = run_webhook_test(WebhookTestIn(channel="custom"))
+
+    assert result["ok"] is True
+    assert calls == {
+        "url": "https://example.com/tickflow",
+        "event_type": "test",
+        "secret": "secret",
+        "max_attempts": 1,
+    }
+
+
+def test_email_sends_with_saved_smtp_config(monkeypatch):
+    calls = {}
+    config = {
+        "host": "smtp.example.com",
+        "port": 465,
+        "security": "ssl",
+        "username": "bot@example.com",
+        "from_address": "bot@example.com",
+        "to_addresses": ["alerts@example.com"],
+    }
+    monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: config)
+    monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "password")
+    monkeypatch.setattr(
+        "app.services.email_adapter.send_email",
+        lambda cfg, password, subject, body, max_attempts=2:
+            calls.update(config=cfg, password=password, subject=subject, max_attempts=max_attempts) or True,
+    )
+
+    result = run_webhook_test(WebhookTestIn(channel="email"))
+
+    assert result["ok"] is True
+    assert calls["config"] == config
+    assert calls["password"] == "password"
+    assert calls["max_attempts"] == 1
+
+
 def test_unknown_channel_rejected_by_pydantic():
     with pytest.raises(ValidationError):
-        WebhookTestIn(channel="wecom-bot")
+        WebhookTestIn(channel="sms")

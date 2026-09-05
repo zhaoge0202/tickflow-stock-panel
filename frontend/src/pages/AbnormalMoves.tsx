@@ -28,7 +28,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
  * 偏移异动计算量可控: 主开关默认关闭, 开启后才发起轮询 (每 60s 一次); 关闭后
  * 保留展示上次计算结果 (含计算时间, 取自 localStorage)。规则口径通过工具栏「?」
  * 展开查看。告警走系统监控体系: 在「监控中心」创建异动监控规则后由后端持续评估,
- * 统一触发记录/站内通知/飞书·企微推送。
+ * 统一触发记录/站内通知/外部渠道推送。
  */
 
 const WINDOW_KEYS = ['3d', '10d', '30d'] as const
@@ -86,7 +86,7 @@ export function AbnormalMoves() {
             <Link
               to="/monitor"
               className="inline-flex h-7 items-center gap-1 rounded border border-border bg-base px-2 text-[11px] text-secondary transition-colors hover:text-foreground"
-              title="在监控中心创建「异动监控」规则: 后台持续评估, 触发时统一走触发记录/站内通知/飞书·企微推送, 无需保持本页打开"
+              title="在监控中心创建「异动监控」规则: 后台持续评估, 触发时统一走触发记录/站内通知/外部渠道推送, 无需保持本页打开"
             >
               <Settings2 className="h-3 w-3" />
               告警规则
@@ -683,7 +683,7 @@ function DeviationView({ onPreview }: {
             </p>
             <p className="mx-auto mt-2 max-w-lg text-[11px] leading-relaxed text-muted/80">
               需要告警推送时, 在<Link to="/monitor?new=abnormal" className="text-accent hover:underline">监控中心</Link>
-              新建「异动监控」规则 —— 后台持续评估, 触发时统一走触发记录 / 站内通知 / 飞书·企微推送,
+              新建「异动监控」规则 —— 后台持续评估, 触发时统一走触发记录 / 站内通知 / 外部渠道推送,
               与本页开关互不影响。
             </p>
             <button

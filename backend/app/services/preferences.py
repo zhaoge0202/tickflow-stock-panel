@@ -580,9 +580,9 @@ def set_depth_finalize_time(hour: int, minute: int) -> dict:
     return {"hour": h, "minute": m}
 
 
-# 复盘推送可选渠道白名单 (企业微信已实现, 与飞书并列)
+# 监控与复盘共用的外部推送渠道白名单。
 # 多选: 不推送 = 空数组, 而非 'none'
-REVIEW_PUSH_CHANNELS = {"feishu", "wecom"}
+PUSH_CHANNELS = {"feishu", "wecom", "custom", "email"}
 
 
 def get_review_schedule() -> dict:
@@ -662,7 +662,7 @@ def get_review_push_channels() -> list[str]:
     d = load()
     raw = d.get("review_push_channels")
     if isinstance(raw, list):
-        return [c for c in raw if c in REVIEW_PUSH_CHANNELS]
+        return [c for c in raw if c in PUSH_CHANNELS]
     # 兼容老单选字符串
     if d.get("review_push_channel") == "feishu":
         return ["feishu"]
@@ -677,7 +677,7 @@ def set_review_push_channels(channels: list[str]) -> list[str]:
     seen: set[str] = set()
     cleaned: list[str] = []
     for c in channels or []:
-        if c in REVIEW_PUSH_CHANNELS and c not in seen:
+        if c in PUSH_CHANNELS and c not in seen:
             seen.add(c)
             cleaned.append(c)
     save({"review_push_channels": cleaned})
@@ -797,6 +797,71 @@ def set_wecom_webhook_url(url: str) -> str:
     return get_wecom_webhook_url()
 
 
+def get_custom_webhook_url() -> str:
+    """Generic third-party JSON Webhook URL shared by enabled rules and reviews."""
+    return str(load().get("custom_webhook_url") or "")
+
+
+def set_custom_webhook_url(url: str) -> str:
+    """Persist or clear the generic third-party JSON Webhook URL."""
+    value = str(url or "").strip()
+    save({"custom_webhook_url": value})
+    return value
+
+
+_EMAIL_SMTP_DEFAULTS = {
+    "host": "",
+    "port": 465,
+    "security": "ssl",
+    "username": "",
+    "from_address": "",
+    "to_addresses": [],
+}
+
+
+def get_email_smtp_config() -> dict:
+    """Return non-secret SMTP settings for the email notification channel."""
+    raw = load().get("email_smtp_config")
+    if not isinstance(raw, dict):
+        raw = {}
+    security = raw.get("security", _EMAIL_SMTP_DEFAULTS["security"])
+    if security not in {"ssl", "starttls", "none"}:
+        security = _EMAIL_SMTP_DEFAULTS["security"]
+    try:
+        port = int(raw.get("port", _EMAIL_SMTP_DEFAULTS["port"]))
+    except (TypeError, ValueError):
+        port = _EMAIL_SMTP_DEFAULTS["port"]
+    if not 1 <= port <= 65535:
+        port = _EMAIL_SMTP_DEFAULTS["port"]
+    recipients = raw.get("to_addresses")
+    if not isinstance(recipients, list):
+        recipients = []
+    return {
+        "host": str(raw.get("host") or "").strip(),
+        "port": port,
+        "security": security,
+        "username": str(raw.get("username") or "").strip(),
+        "from_address": str(raw.get("from_address") or "").strip(),
+        "to_addresses": [str(item).strip() for item in recipients if str(item).strip()],
+    }
+
+
+def set_email_smtp_config(config: dict) -> dict:
+    """Atomically persist the non-secret SMTP configuration group."""
+    normalized = {
+        "host": str(config.get("host") or "").strip(),
+        "port": int(config.get("port", 465)),
+        "security": str(config.get("security") or "ssl"),
+        "username": str(config.get("username") or "").strip(),
+        "from_address": str(config.get("from_address") or "").strip(),
+        "to_addresses": [
+            str(item).strip() for item in config.get("to_addresses", []) if str(item).strip()
+        ],
+    }
+    save({"email_smtp_config": normalized})
+    return get_email_smtp_config()
+
+
 # ===== 企业微信智能机器人 (API 模式 / 长连接) =====
 
 
@@ -863,7 +928,7 @@ def get_webhook_default_channels() -> list[str]:
     d = load()
     raw = d.get("webhook_default_channels")
     if isinstance(raw, list):
-        return [c for c in raw if c in REVIEW_PUSH_CHANNELS]
+        return [c for c in raw if c in PUSH_CHANNELS]
     # 兼容老布尔开关 (勾选即双推)
     if d.get("webhook_enabled_default") is True:
         return ["feishu", "wecom"]
@@ -875,7 +940,7 @@ def set_webhook_default_channels(channels: list[str]) -> list[str]:
     seen: set[str] = set()
     cleaned: list[str] = []
     for c in channels or []:
-        if c in REVIEW_PUSH_CHANNELS and c not in seen:
+        if c in PUSH_CHANNELS and c not in seen:
             seen.add(c)
             cleaned.append(c)
     save({"webhook_default_channels": cleaned})
