@@ -951,6 +951,19 @@ class StrategyEngine:
                     strategy_id=strategy_id,
                     exit_signal_hits=exit_signal_hits,
                 )
+            # 盘中信号列注入(csgi_): 实盘扫描与分钟回测共用本路径 — 与监控评估
+            # 同一特征构造器, 单点注入保证三处口径一致。
+            history = self._inject_intraday_signal_columns(history)
+            missing_csgi = [
+                name for name in s.required_features
+                if name.startswith("csgi_") and name not in history.columns
+            ]
+            if missing_csgi:
+                raise ValueError(
+                    "策略引用了未定义的盘中信号: "
+                    + ", ".join(sorted(missing_csgi))
+                    + " — 请先在「自定义信号」中创建(timeframe=intraday)后再运行"
+                )
             if s.minute_daily_bars > 0:
                 df = s.filter_minute_history_fn(history, params, daily=context.daily_history)
             else:
@@ -981,6 +994,15 @@ class StrategyEngine:
                     "策略引用了未定义的自定义信号: "
                     + ", ".join(sorted(missing_csg))
                     + " — 请先在「自定义信号」管理中创建对应信号后再运行"
+                )
+            missing_csgi = [
+                name for name in s.required_features
+                if name.startswith("csgi_")
+            ]
+            if missing_csgi:
+                raise ValueError(
+                    "盘中信号仅可用于分钟策略(timeframes=['1m']), 日线策略不支持: "
+                    + ", ".join(sorted(missing_csgi))
                 )
             df = s.filter_history_fn(df, params)
             if "date" in df.columns:
@@ -1554,6 +1576,48 @@ class StrategyEngine:
         "name", "total_shares", "float_shares", "amount",
         "turnover_rate", "change_pct", "pre_close",
     )
+
+    def _user_data_dir(self) -> Path | None:
+        """从策略目录推导 data_dir(…/strategies/custom → data_dir)。推不出则跳过注入。"""
+        for d in self._strategy_dirs:
+            if d.name == "custom" and d.parent.name == "strategies":
+                return d.parent.parent
+        return None
+
+    def _inject_intraday_signal_columns(self, minute_df: pl.DataFrame) -> pl.DataFrame:
+        """向当日分钟K帧注入自定义盘中信号列(csgi_, 当日条件上升沿)。
+
+        单点注入: 实盘分钟扫描与分钟回测 worker 共用本方法, 特征计算与
+        监控评估同源(intraday_features), 保证口径一致。无定义/帧为空时原样返回。
+        """
+        if minute_df is None or minute_df.is_empty() or "datetime" not in minute_df.columns:
+            return minute_df
+        data_dir = self._user_data_dir()
+        if data_dir is None:
+            return minute_df
+        try:
+            from app.strategy import custom_signals
+            from app.strategy.intraday_features import build_feature_frame
+
+            definitions = custom_signals.load_intraday_all(data_dir)
+            if not definitions:
+                return minute_df
+            exprs = custom_signals.build_intraday_expressions(definitions)
+            if not exprs:
+                return minute_df
+            frame = build_feature_frame(minute_df)
+            if frame.is_empty():
+                return minute_df
+            evaluated = custom_signals.apply_intraday_edges(frame, exprs).select(
+                ["symbol", "datetime", *exprs.keys()]
+            )
+            return minute_df.join(evaluated, on=["symbol", "datetime"], how="left").with_columns(
+                [pl.col(name).fill_null(False).cast(pl.Boolean).alias(name) for name in exprs]
+            )
+        except Exception as e:
+            # 注入失败不阻断策略执行: 未注入列会由 required_features 校验兜底报错
+            logger.warning("intraday signal inject failed: %s", e)
+            return minute_df
 
     @staticmethod
     def _join_basic_columns(df: pl.DataFrame, current: pl.DataFrame) -> pl.DataFrame:

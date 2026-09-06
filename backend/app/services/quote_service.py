@@ -1440,8 +1440,19 @@ class QuoteService:
             prev_close=prev_close,
             asset_type=asset_type,
             now=now,
+            signals=self._load_intraday_signal_defs(),
         )
         return self._intraday_signal_evaluator.inject(enriched, signals)
+
+    def _load_intraday_signal_defs(self) -> list[dict]:
+        """加载自定义盘中信号定义(带指纹缓存); 失败时退化为仅内置 4 信号。"""
+        try:
+            from app.strategy import custom_signals
+
+            return custom_signals.load_intraday_all(self._repo.store.data_dir)
+        except Exception as e:
+            logger.warning("load intraday signal defs failed: %s", e)
+            return []
 
     @staticmethod
     def _continuous_session_start_ms() -> float:

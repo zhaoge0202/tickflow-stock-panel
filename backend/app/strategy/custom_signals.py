@@ -202,11 +202,17 @@ def validate(sig: dict) -> None:
         raise ValueError("信号 name 不能为空")
     if sig.get("kind") not in ("entry", "exit", "both"):
         raise ValueError("kind 必须是 entry / exit / both")
+    timeframe = sig.get("timeframe", TIMEFRAME_DAILY)
+    if timeframe not in (TIMEFRAME_DAILY, TIMEFRAME_INTRADAY):
+        raise ValueError(f"timeframe 必须是 {TIMEFRAME_DAILY} / {TIMEFRAME_INTRADAY}: {timeframe!r}")
     conds = sig.get("conditions")
     if not isinstance(conds, list) or len(conds) == 0:
         raise ValueError("conditions 不能为空")
     if len(conds) > 8:
         raise ValueError("conditions 最多 8 条")
+    if timeframe == TIMEFRAME_INTRADAY:
+        _validate_intraday(sig)
+        return
     for i, c in enumerate(conds):
         if not isinstance(c, dict):
             raise ValueError(f"第 {i+1} 个条件格式错误")
@@ -317,3 +323,169 @@ def _expr_root_columns(expr: pl.Expr) -> set[str]:
         return set(names)
     except Exception:
         return set()
+
+
+# ══ 盘中信号(timeframe="intraday")═════════════════════════
+# 与日线自定义信号同一套 left/op/right 条件结构, 但:
+#   - 字段白名单换成分钟特征(intraday_features.INTRADAY_FEATURES);
+#   - 运算符额外支持 cross_up / cross_down(序列上穿/下穿 另一序列或阈值);
+#   - 不支持 leftDays/rightDays 日期偏移;
+#   - 信号列名前缀 csgi_, 注入对象是分钟特征帧而非日线 enriched。
+# 语义: 信号输出 = 当日条件组合的上升沿(false→true), 首根 bar 不触发。
+
+from app.strategy.intraday_features import INTRADAY_FEATURES  # noqa: E402
+
+TIMEFRAME_DAILY = "daily"
+TIMEFRAME_INTRADAY = "intraday"
+INTRADAY_PREFIX = "csgi_"
+INTRADAY_OPS = OPS | {"cross_up", "cross_down"}
+_EDGE_GROUP = ["symbol", "date"]
+
+
+def intraday_column_name(signal_id: str) -> str:
+    """盘中信号 id → 分钟帧列名(加 csgi_ 前缀)。"""
+    return f"{INTRADAY_PREFIX}{signal_id}"
+
+
+def _parse_right_intraday(right: object) -> tuple[str, object]:
+    """盘中条件的右值: ('const', float) 或 ('field', 特征名)。"""
+    if isinstance(right, (int, float)):
+        return ("const", float(right))
+    if not isinstance(right, str):
+        raise ValueError(f"非法右值: {right!r}")
+    if right.startswith("field:"):
+        col = right[len("field:"):]
+        if col not in INTRADAY_FEATURES:
+            raise ValueError(f"盘中右值字段不在白名单: {col}")
+        return ("field", col)
+    try:
+        return ("const", float(right))
+    except ValueError:
+        pass
+    if right in INTRADAY_FEATURES:
+        return ("field", right)
+    raise ValueError(f"非法盘中右值(应为 field:特征 或数字): {right!r}")
+
+
+def _validate_intraday(sig: dict) -> None:
+    """校验盘中信号定义, 非法抛 ValueError。"""
+    conds = sig.get("conditions")
+    for i, c in enumerate(conds):
+        if not isinstance(c, dict):
+            raise ValueError(f"第 {i+1} 个条件格式错误")
+        left = c.get("left", "")
+        if left not in INTRADAY_FEATURES:
+            raise ValueError(f"第 {i+1} 个条件: 盘中字段 {left!r} 不在白名单")
+        if c.get("op") not in INTRADAY_OPS:
+            raise ValueError(f"第 {i+1} 个条件: 运算符 {c.get('op')!r} 非法(盘中额外支持 cross_up/cross_down)")
+        _parse_right_intraday(c.get("right"))
+        if int(c.get("leftDays", 0) or 0) or int(c.get("rightDays", 0) or 0):
+            raise ValueError(f"第 {i+1} 个条件: 盘中信号不支持日期偏移(leftDays/rightDays)")
+    min_bars = sig.get("min_bars", 0)
+    try:
+        n = int(min_bars)
+    except (TypeError, ValueError):
+        raise ValueError(f"min_bars 必须是整数: {min_bars!r}")  # noqa: B904
+    if n < 0 or n > 240:
+        raise ValueError(f"min_bars 必须在 0..240 之间: {n}")
+
+
+def build_intraday_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
+    """把盘中信号编译为特征帧上的「条件」表达式(AND 组合, 未做上升沿)。
+
+    表达式在 intraday_features.build_feature_frame 产出的帧上求值;
+    上升沿须通过 apply_intraday_edges 在 DataFrame 层两步计算 —
+    对已含 .over() 窗口的组合表达式直接 shift().over() 是窗口嵌套,
+    Polars 会返回全 null。编译失败的信号跳过并告警。
+    """
+    out: dict[str, pl.Expr] = {}
+    for sig in signals:
+        if sig.get("enabled") is False or sig.get("timeframe") != TIMEFRAME_INTRADAY:
+            continue
+        try:
+            parts: list[pl.Expr] = []
+            for c in sig["conditions"]:
+                left = pl.col(c["left"])
+                kind, val = _parse_right_intraday(c["right"])
+                op = c["op"]
+                if op == "cross_up":
+                    # 前一根 bar 未满足 且 当前 bar 满足; 右值为常量时不 shift 字面量
+                    if kind == "field":
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) <= pl.col(val).shift(1).over(_EDGE_GROUP)
+                        cur_ok = left > pl.col(val)
+                    else:
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) <= val
+                        cur_ok = left > val
+                    parts.append(prev_ok & cur_ok)
+                elif op == "cross_down":
+                    if kind == "field":
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) >= pl.col(val).shift(1).over(_EDGE_GROUP)
+                        cur_ok = left < pl.col(val)
+                    else:
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) >= val
+                        cur_ok = left < val
+                    parts.append(prev_ok & cur_ok)
+                else:
+                    right = pl.col(val) if kind == "field" else val
+                    parts.append(_OP_BUILDERS[op](left, right))
+            combined = parts[0]
+            for p in parts[1:]:
+                combined = combined & p
+            out[intraday_column_name(sig["id"])] = combined
+        except Exception as e:
+            logger.warning("intraday signal compile failed %s: %s", sig.get("id"), e)
+    return out
+
+
+def apply_intraday_edges(frame: pl.DataFrame, exprs: dict[str, pl.Expr]) -> pl.DataFrame:
+    """对特征帧求值盘中信号: 先算条件列, 再取「当日条件上升沿」为布尔列。
+
+    上升沿: 条件 false→true 的那根 bar 为 true; 首根 bar(前值为 null)不触发;
+    条件含 null(特征不足)视为 false。四条消费路径(监控/实盘/回测/回放)
+    必须共用本函数, 保证口径一致。
+    """
+    if frame.is_empty() or not exprs:
+        return frame
+    df = frame.with_columns([e.fill_null(False).alias(n) for n, e in exprs.items()])
+    return df.with_columns([
+        (
+            pl.col(n)
+            & ~pl.col(n).shift(1).over(_EDGE_GROUP).fill_null(True)
+        ).cast(pl.Boolean).alias(n)
+        for n in exprs
+    ])
+
+
+# ── 盘中信号定义加载(带指纹缓存: 引擎/监控高频路径用) ──────────
+_intraday_cache: dict[Path, tuple[object, list[dict]]] = {}
+
+
+def _dir_fingerprint(d: Path) -> tuple:
+    """目录内 *.json 的 (文件名, mtime) 指纹 — 创建/删除/编辑都会变化。"""
+    try:
+        return tuple(sorted((f.name, f.stat().st_mtime_ns) for f in d.glob("*.json")))
+    except OSError:
+        return ()
+
+
+def load_intraday_all(data_dir: Path) -> list[dict]:
+    """读取全部启用的盘中信号定义(带缓存)。
+
+    盘中评估与引擎注入每分钟执行, 不宜每次全量读盘; save/delete 端点
+    调用 invalidate_intraday_cache() 主动失效。
+    """
+    d = _dir(data_dir)
+    fp = _dir_fingerprint(d)
+    cached = _intraday_cache.get(data_dir)
+    if cached is not None and cached[0] == fp:
+        return cached[1]
+    sigs = [
+        s for s in load_all(data_dir)
+        if s.get("timeframe") == TIMEFRAME_INTRADAY and s.get("enabled") is not False
+    ]
+    _intraday_cache[data_dir] = (fp, sigs)
+    return sigs
+
+
+def invalidate_intraday_cache() -> None:
+    _intraday_cache.clear()
