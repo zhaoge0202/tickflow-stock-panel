@@ -30,7 +30,8 @@ interface Props {
   showAvgLine?: boolean
 }
 
-function fmtAmt(v: number): string {
+function fmtAmt(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
   if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}亿`
   if (v >= 10_000) return `${(v / 10_000).toFixed(0)}万`
   return v.toFixed(0)

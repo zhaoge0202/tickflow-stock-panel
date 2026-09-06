@@ -11,10 +11,15 @@ export function computeIntradayAverage(data: MinuteKlineRow[]): number[] {
   const result: number[] = []
   let amount = 0
   let volume = 0
+  let hasAmount = true
   for (const row of data) {
-    amount += row.amount
+    if (typeof row.amount === 'number' && Number.isFinite(row.amount)) {
+      amount += row.amount
+    } else {
+      hasAmount = false
+    }
     volume += row.volume * 100
-    result.push(volume > 0 ? amount / volume : row.close)
+    result.push(hasAmount && volume > 0 ? amount / volume : row.close)
   }
   return result
 }

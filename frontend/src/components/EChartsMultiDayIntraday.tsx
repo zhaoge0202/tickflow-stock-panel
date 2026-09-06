@@ -29,7 +29,8 @@ interface InfoPoint {
   prevClose: number | null
 }
 
-function formatAmount(value: number): string {
+function formatAmount(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—'
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}亿`
   if (value >= 10_000) return `${(value / 10_000).toFixed(0)}万`
   return value.toFixed(0)
