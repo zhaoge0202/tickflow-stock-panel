@@ -82,6 +82,8 @@ class PullConfigReq(BaseModel):
     enabled: bool = False
     time_window_start: str | None = None   # "HH:MM", None=不限
     time_window_end: str | None = None     # "HH:MM", None=不限
+    # 接口按日查询的参数名 (如 "date"): 配置后支持历史回补, 且当日拉取也带日期参数
+    date_param: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class DetectUrlReq(BaseModel):
@@ -830,6 +832,7 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         enabled=body.enabled,
         time_window_start=body.time_window_start,
         time_window_end=body.time_window_end,
+        date_param=body.date_param,
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,
@@ -922,6 +925,38 @@ async def run_pull(request: Request, config_id: str):
             failed.pull.last_message = str(e)[:200]
             store.upsert(failed)
         raise HTTPException(400, f"拉取失败: {e}") from e
+
+
+@router.post("/{config_id}/backfill")
+async def backfill_history_ep(
+    request: Request,
+    config_id: str,
+    start: str = Query(..., description="开始日期 YYYY-MM-DD"),
+    end: str = Query(..., description="结束日期 YYYY-MM-DD (含)"),
+):
+    """历史回补: 按本地交易日逐日拉取并写入 timeseries 分区。
+
+    前提: 配置为 timeseries 模式且拉取配置了 date_param (接口支持按日期
+    查询)。幂等 —— 已存在的分区跳过, 失败单日不中断, 结果逐项返回。
+    """
+    store = _store(request)
+    config = store.get(config_id)
+    if not config:
+        raise HTTPException(404, f"配置 '{config_id}' 不存在")
+    try:
+        start_d = date.fromisoformat(start)
+        end_d = date.fromisoformat(end)
+    except ValueError as e:
+        raise HTTPException(422, f"日期格式错误 (应为 YYYY-MM-DD): {e}") from e
+
+    from app.services.ext_pull import backfill_history
+
+    try:
+        result = await backfill_history(config, _data_dir(request), start_d, end_d)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    _refresh_views(request)
+    return {"status": "ok", **result}
 
 
 # ---------------------------------------------------------------------------
