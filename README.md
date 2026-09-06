@@ -106,7 +106,7 @@
     </tr>
     <tr>
       <td nowrap>🧰 <b>数据扩展</b></td>
-      <td>数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析</td>
+      <td>数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析;时序表(如人气排行)支持按日历史回补,接口配日期参数即可逐日补齐</td>
       <td nowrap><a href="./docs/custom-data-source.md">custom-data-source.md</a></td>
     </tr>
   </tbody>
