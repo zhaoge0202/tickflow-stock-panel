@@ -188,6 +188,7 @@ def _strategy_detail(
         "description": description or s.meta.get("description", ""),
         "tags": s.meta.get("tags", []),
         "source": s.source,
+        "research_only": s.meta.get("research_only", False),
         "execution_backend": s.execution_backend,
         "asset_types": s.meta.get("asset_types", ["stock"]),
         "timeframes": s.meta.get("timeframes", ["1d"]),
@@ -307,14 +308,17 @@ def list_strategies(
     request: Request,
     asset_type: str | None = None,
     timeframe: str | None = None,
+    include_research: bool = False,
 ):
     engine = _get_engine(request)
     data_dir = _data_dir(request)
     all_overrides = strategy_config.list_overrides(data_dir)
 
     result = []
-    for meta in engine.list_strategies():
-        if meta.get("research_only"):
+    # include_research=True 时返回 research_only 草稿(供前端「草稿」分区展示/发布)。
+    # 默认 False 保持既有行为: 草稿不进公开列表。
+    for meta in engine.list_strategies(include_research=include_research):
+        if meta.get("research_only") and not include_research:
             continue
         if asset_type and asset_type not in meta.get("asset_types", ["stock"]):
             continue
@@ -1133,7 +1137,7 @@ def publish_ai_strategy(strategy_id: str, request: Request):
     except Exception as e:
         _restore_strategy_file(path, previous_code)
         engine.reload()
-        raise ValueError(f"策略发布失败: {e}") from e
+        raise HTTPException(status_code=500, detail=f"策略发布失败: {e}") from e
 
     _invalidate_strategy_runtime(request)
     return {"ok": True, "strategy_id": sid}

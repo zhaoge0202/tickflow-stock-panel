@@ -1100,7 +1100,12 @@ export function Screener() {
         onClose={() => setShowBuilder(false)}
         mode={builderMode}
         existingStrategyIds={allStrategyIds}
-        onSavedId={async id => {
+        onSavedId={async (id, researchOnly) => {
+          if (researchOnly) {
+            // AI 策略保存为 research_only 草稿, 不进入策略池, 提示用户去策略池发布
+            toast('AI 策略已保存为草稿，请在策略池「AI」标签发布后使用', 'success')
+            return
+          }
           const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)

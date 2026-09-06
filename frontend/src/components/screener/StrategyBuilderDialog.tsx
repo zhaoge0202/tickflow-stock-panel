@@ -180,7 +180,7 @@ MATRIX_STRATEGY = CustomMatrixStrategy()
 interface Props {
   open: boolean
   onClose: () => void
-  onSavedId?: (id: string) => void | Promise<void>
+  onSavedId?: (id: string, researchOnly?: boolean) => void | Promise<void>
   mode?: 'create' | 'modify'
   existingStrategyIds?: ReadonlySet<string>
 }
@@ -374,7 +374,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       const target = mode === 'modify' ? source : (tab === 'custom' ? 'custom' : 'ai')
       const id = resolveStrategyId(target)
       setStrategyId(id); setSource(target)
-      await api.strategySaveCodeV2({
+      const savedResult = await api.strategySaveCodeV2({
         strategy_id: id,
         code: draftCode,
         target_source: target,
@@ -387,7 +387,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       const genRules = parseRules(draftCode)
       const finalRules = (genRules || rules).trim()
       if (finalRules) { const saved = storage.strategyRules.get({}); saved[id] = finalRules; storage.strategyRules.set(saved) }
-      await onSavedId?.(id)
+      await onSavedId?.(id, savedResult.research_only)
       setTimeout(() => onClose(), 1000)
     } catch (e: any) { setError(String(e?.message ?? '保存失败')) }
     setSaving(false)

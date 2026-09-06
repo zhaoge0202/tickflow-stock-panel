@@ -54,13 +54,15 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState('')
   const [importMsg, setImportMsg] = useState('')
+  const [publishingId, setPublishingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
       // 不按周期过滤: 日线+分钟策略合并展示, 分钟策略以徽章区分
-      const d = await api.strategyList(undefined, 'all')
+      // include_research=true 同时拉取 research_only 草稿, 供 AI 标签「草稿」分区展示/发布
+      const d = await api.strategyList(undefined, 'all', true)
       setAllStrategies(d.strategies)
     } catch {
       setAllStrategies([])
@@ -86,8 +88,14 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const invalidPoolCount = draftPool.length - validDraft.length
 
   const available = useMemo(
-    () => allStrategies.filter(s => !draftPool.includes(s.id)),
+    () => allStrategies.filter(s => !s.research_only && !draftPool.includes(s.id)),
     [allStrategies, draftPool]
+  )
+
+  // research_only 草稿(AI 来源)单独列出, 供「发布」操作; 不进待选列表
+  const drafts = useMemo(
+    () => allStrategies.filter(s => s.research_only),
+    [allStrategies]
   )
 
   // 按 Tab 分组过滤待选
@@ -124,6 +132,20 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
     })
   }, [filteredAvailable])
 
+  // 发布 research_only 草稿 → 刷新后进入公开列表
+  const handlePublish = useCallback(async (id: string) => {
+    setPublishingId(id); setImportError(''); setImportMsg('')
+    try {
+      await api.strategyPublish(id)
+      await loadStrategies()
+      setImportMsg(`已发布: ${id}`)
+    } catch (e: any) {
+      setImportError(String(e?.message ?? '发布失败'))
+    } finally {
+      setPublishingId(null)
+    }
+  }, [loadStrategies])
+
   const handleImportFile = useCallback(async (file: File) => {
     setImporting(true); setImportError(''); setImportMsg('')
     try {
@@ -143,7 +165,10 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
       })
       await loadStrategies()
       setActiveTab(result.source === 'ai' ? 'ai' : 'custom')
-      setImportMsg(`已导入到${result.source === 'ai' ? 'AI' : '自定义'}策略: ${result.strategy_id}`)
+      const srcLabel = result.source === 'ai'
+        ? (result.research_only ? 'AI 草稿(发布后可用)' : 'AI 策略')
+        : '自定义策略'
+      setImportMsg(`已导入到${srcLabel}: ${result.strategy_id}`)
     } catch (e: any) {
       setImportError(String(e?.message ?? '导入失败'))
     } finally {
@@ -243,33 +268,69 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                     本组全加
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
-                  {filteredAvailable.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-[11px] text-muted">
-                      {available.length === 0 ? '全部已加入策略池' : '此分组无待选策略'}
+                <div className="flex-1 overflow-y-auto px-2 py-2">
+                  {activeTab === 'ai' && drafts.length > 0 && (
+                    <div className="mb-3">
+                      <div className="flex items-center justify-between px-1 mb-1">
+                        <span className="text-[10px] font-medium text-muted">草稿</span>
+                        <span className="text-[9px] text-muted">{drafts.length} 个待发布</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        {drafts.map(s => (
+                          <div
+                            key={s.id}
+                            className="flex items-center gap-2 px-2.5 py-1.5 rounded-btn border border-purple-500/15 bg-purple-500/5"
+                          >
+                            <span className="flex-1 min-w-0">
+                              <span className="text-[12px] text-foreground block truncate">
+                                {s.name} <span className="text-[10px] text-muted font-mono">{s.id}</span>
+                              </span>
+                              <span className="text-[10px] text-muted truncate block">{s.description}</span>
+                            </span>
+                            <button
+                              onClick={() => handlePublish(s.id)}
+                              disabled={publishingId === s.id}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-btn text-[10px] text-purple-400 border border-purple-500/25 bg-purple-500/10 hover:bg-purple-500/20 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
+                            >
+                              {publishingId === s.id && <Loader2 className="h-3 w-3 animate-spin" />}
+                              发布
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ) : filteredAvailable.map(s => (
-                    <button
-                      key={s.id}
-                      onClick={() => handleAdd(s.id)}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-btn
-                        hover:bg-accent/8 transition-colors cursor-pointer group text-left"
-                    >
-                      <span className="flex-1 min-w-0">
-                        <span className="text-[12px] text-foreground group-hover:text-accent transition-colors block truncate">
-                          {s.name} <span className="text-[10px] text-muted font-mono">{s.id}</span>
+                  )}
+                  {activeTab === 'ai' && drafts.length > 0 && (
+                    <div className="px-1 mb-1 text-[10px] font-medium text-muted">待选</div>
+                  )}
+                  <div className="space-y-0.5">
+                    {filteredAvailable.length === 0 ? (
+                      <div className="flex items-center justify-center h-24 text-[11px] text-muted">
+                        {available.length === 0 ? '全部已加入策略池' : '此分组无待选策略'}
+                      </div>
+                    ) : filteredAvailable.map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => handleAdd(s.id)}
+                        className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-btn
+                          hover:bg-accent/8 transition-colors cursor-pointer group text-left"
+                      >
+                        <span className="flex-1 min-w-0">
+                          <span className="text-[12px] text-foreground group-hover:text-accent transition-colors block truncate">
+                            {s.name} <span className="text-[10px] text-muted font-mono">{s.id}</span>
+                          </span>
+                          <span className="text-[10px] text-muted truncate block">{s.description}</span>
                         </span>
-                        <span className="text-[10px] text-muted truncate block">{s.description}</span>
-                      </span>
-                      <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
-                        {SOURCE_LABEL[s.source] ?? '内置'}
-                      </span>
-                      {s.timeframes?.includes('1m') && (
-                        <span className={TF_BADGE_CLS}>分钟</span>
-                      )}
-                      <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
-                    </button>
-                  ))}
+                        <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
+                          {SOURCE_LABEL[s.source] ?? '内置'}
+                        </span>
+                        {s.timeframes?.includes('1m') && (
+                          <span className={TF_BADGE_CLS}>分钟</span>
+                        )}
+                        <Plus className="h-3.5 w-3.5 text-muted/40 group-hover:text-accent shrink-0" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
