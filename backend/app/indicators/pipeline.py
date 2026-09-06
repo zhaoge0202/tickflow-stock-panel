@@ -667,6 +667,11 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
         df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
 
     # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）。
+    # 扩展表数值列先行 join (ext_ 因子列 = 帧上已有列): 信号条件与评分引用
+    # 都按列存在性解析。历史多日帧仅注入时序模式 —— 快照代表"最新值",
+    # 历史回看注入会引入未来数据 (CONTRIBUTING §5.3)。
+    from app.factors import ext_factors
+    df = ext_factors.attach_ext_columns(df, include_snapshot=False)
     # 条件引用的注册表因子列先复用评分物化管线补算 (虚拟/自定义/复合均可)。
     from app.strategy import custom_signals
     exprs = _get_custom_signal_exprs()
@@ -2124,6 +2129,12 @@ def compute_enriched_today(
         "_has_history_state",
     ]
     df = df.drop([c for c in drop_cols if c in df.columns])
+
+    # 扩展表数值列注入: 当日单日帧, 时序按当日分区对齐 + 快照最新值
+    # (include_snapshot 仅此处为 True —— 单日帧不存在"回看历史"的未来函数问题)。
+    # 帧缓存由 ext_factors 按分区/文件签名管理, 写入端变更自动失效。
+    from app.factors import ext_factors
+    df = ext_factors.attach_ext_columns(df, include_snapshot=True)
 
     # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
     # 复用模块级缓存 _custom_signal_exprs_today: 增量热路径每秒级执行,

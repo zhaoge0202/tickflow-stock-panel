@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 PREFIX = "csg_"                       # 自定义信号列名前缀
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 OPS = {">", ">=", "<", "<=", "==", "!="}
+# string 扩展字段 (概念/行业归属等) 的运算符: contains 为字面量包含
+# (非正则, 用户输入不进入 pattern 编译), ==/!= 为字符串精确比较。
+STRING_OPS = {"contains", "==", "!="}
+_MAX_STR_RIGHT = 64
 
 # 字段白名单：只允许这些列出现在条件里（防注入）。均为数值型。
 # 与 ENRICHED_COLUMNS 的数值列保持一致，排除 symbol/date/name 等非数值列。
@@ -63,19 +67,33 @@ _OP_BUILDERS = {
     "<=":  lambda c, v: c <= v,
     "==":  lambda c, v: c == v,
     "!=":  lambda c, v: c != v,
+    # literal=True: 右值按字面量匹配, 不当正则编译 (用户输入含 .* 等也安全)
+    "contains": lambda c, v: c.cast(pl.Utf8).str.contains(v, literal=True),
 }
 
 
+def _string_ext_fields() -> frozenset[str]:
+    """string 扩展字段列名 (概念/行业等); 解析/校验按字段 dtype 分发。"""
+    try:
+        from app.factors.ext_factors import ext_string_fields
+
+        return ext_string_fields()
+    except Exception:
+        return frozenset()
+
+
 def allowed_fields() -> frozenset[str]:
-    """条件可引用字段 = 物化列白名单 并入 注册表因子 (虚拟/自定义/复合)。
+    """条件可引用字段 = 物化列白名单 并入 注册表因子 与 string 扩展字段。
 
     因子列在历史路径 (compute_signals) 由 materialize_factor_columns 复用
     评分物化管线补算; 盘中单日快照无滚动窗口, 依赖因子的信号被 inject 以
     缺列告警跳过 (与日期偏移条件同样的优雅降级)。
+    string 扩展字段 (ext_{表}_{字段}, 概念/行业归属) 只支持 contains/==/!=,
+    在帧组装时由 attach_ext_columns 注入, 不注册为因子 (数值口径约束)。
     """
     from app.factors.registry import all_factors
 
-    return frozenset(ALLOWED_FIELDS | {spec.id for spec in all_factors()})
+    return frozenset(ALLOWED_FIELDS | {spec.id for spec in all_factors()} | _string_ext_fields())
 
 
 def materialize_factor_columns(
@@ -163,15 +181,27 @@ def _parse_days(c: dict, key: str, i: int) -> int:
     return n
 
 
-def _parse_right(right: str) -> tuple[str, object]:
-    """解析右值。返回 ('field', colname) 或 ('const', float)。
+def _parse_right(right: str, *, string_mode: bool = False) -> tuple[str, object]:
+    """解析右值。返回 ('field', colname) / ('const', float) / ('const_str', str)。
 
-    接受三种形式:
+    数值模式接受三种形式:
       - 数字 (int / float / 数字字符串) → 常量
       - "field:字段名" → 字段引用
       - 裸字段名 (在白名单内) → 自动视为字段引用
         (AI 生成偶尔漏写 field: 前缀; 白名单字段名不可能是数字, 无歧义)
+
+    string 模式 (左字段是 string 扩展字段): 只接受非空字符串字面量
+    (概念/行业名), 不支持字段引用 —— "字段A包含字段B" 无业务语义且
+    会与 field: 前缀解析产生歧义。
     """
+    if string_mode:
+        if not isinstance(right, str) or not right.strip():
+            raise ValueError("字符串条件的右值必须是非空字符串 (如概念/行业名)")
+        if right.startswith("field:"):
+            raise ValueError("字符串条件不支持字段引用右值, 请填字符串字面量")
+        if len(right) > _MAX_STR_RIGHT:
+            raise ValueError(f"字符串右值过长 (≤{_MAX_STR_RIGHT} 字符): {right[:20]}…")
+        return ("const_str", right.strip())
     if isinstance(right, (int, float)):
         return ("const", float(right))
     if not isinstance(right, str):
@@ -213,15 +243,25 @@ def validate(sig: dict) -> None:
     if timeframe == TIMEFRAME_INTRADAY:
         _validate_intraday(sig)
         return
+    string_fields = _string_ext_fields()
     for i, c in enumerate(conds):
         if not isinstance(c, dict):
             raise ValueError(f"第 {i+1} 个条件格式错误")
         left = c.get("left", "")
         if left not in allowed_fields():
             raise ValueError(f"第 {i+1} 个条件: 字段 {left!r} 不在白名单")
-        if c.get("op") not in OPS:
+        is_str = left in string_fields
+        if is_str:
+            if c.get("op") not in STRING_OPS:
+                raise ValueError(
+                    f"第 {i+1} 个条件: 字符串字段 {left!r} 仅支持 "
+                    f"{'/'.join(sorted(STRING_OPS))} 运算符"
+                )
+        elif c.get("op") == "contains":
+            raise ValueError(f"第 {i+1} 个条件: contains 仅用于字符串扩展字段")
+        elif c.get("op") not in OPS:
             raise ValueError(f"第 {i+1} 个条件: 运算符 {c.get('op')!r} 非法")
-        _parse_right(c.get("right"))   # 会校验右值字段/数字
+        _parse_right(c.get("right"), string_mode=is_str)   # 会校验右值字段/数字/字符串
         _parse_days(c, "leftDays", i)   # 左字段偏移
         _parse_days(c, "rightDays", i)  # 右字段偏移
 
@@ -250,6 +290,7 @@ def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str
     - 编译失败的信号被跳过并告警（不影响其它信号）。
     """
     out: dict[str, pl.Expr] = {}
+    string_fields = _string_ext_fields()
     for sig in signals:
         if sig.get("enabled") is False:
             continue
@@ -265,7 +306,12 @@ def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str
                     raise ValueError("盘中实时路径不支持日期偏移条件, 已跳过")
                 left = c["left"]
                 op = c["op"]
-                kind, val = _parse_right(c["right"])
+                is_str = left in string_fields
+                if is_str and op not in STRING_OPS:
+                    raise ValueError(f"字符串字段 {left!r} 不支持运算符 {op!r}")
+                if op == "contains" and not is_str:
+                    raise ValueError(f"contains 仅用于字符串扩展字段: {left!r}")
+                kind, val = _parse_right(c["right"], string_mode=is_str)
                 right_expr = _col(val, right_days) if kind == "field" else val
                 parts.append(_OP_BUILDERS[op](_col(left, left_days), right_expr))
             combined = parts[0]

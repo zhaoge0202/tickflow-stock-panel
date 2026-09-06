@@ -184,6 +184,26 @@ GOLDEN_WARMUP: dict[str, int] = {
     "distance_to_high_240d": 241,
 }
 
+@pytest.fixture(autouse=True)
+def _isolate_runtime_ext_factors(tmp_path, monkeypatch):
+    """扩展因子按 settings.data_dir 惰性注册: 计数/顺序黄金断言必须与
+    运行时 data/ 目录的扩展表配置隔离, 否则结果依赖本机数据。"""
+    from app import config as app_config
+    from app.factors import ext_factors
+
+    monkeypatch.setattr(app_config.settings, "data_dir", tmp_path)
+    ext_factors._frame_cache.clear()
+    ext_factors._sync_state = None
+    # 主动清掉其他测试泄漏进注册表的 ext_ 条目, 保证黄金断言密闭
+    from app.factors.registry import _REGISTRY
+
+    for fid in [k for k in list(_REGISTRY) if k.startswith(ext_factors.EXT_PREFIX)]:
+        _REGISTRY.pop(fid, None)
+    yield
+    ext_factors._frame_cache.clear()
+    ext_factors._sync_state = None
+
+
 
 def test_factor_columns_snapshot() -> None:
     """注册表生成的 FACTOR_COLUMNS 与收口前字面量逐项一致 (含顺序)。"""

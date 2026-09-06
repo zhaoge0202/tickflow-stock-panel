@@ -119,11 +119,24 @@ def get_options():
         groups.append({"key": f"factor:{group_label}", "label": f"因子 · {group_label}", "fields": group_fields})
         fields.extend(group_fields)
 
+    # string 扩展字段 (概念/行业归属等): 只进信号条件, 不注册为因子。
+    # stringFields 标记 + 独立分组, 前端据此切换运算符 (包含/等于/不等于)
+    # 与右值输入 (字符串文本, 不支持字段引用)。
+    from app.factors.ext_factors import ext_string_field_entries
+
+    str_entries = ext_string_field_entries()
+    if str_entries:
+        str_group = {"key": "ext_string", "label": "扩展 · 字符串", "fields": str_entries}
+        groups.append(str_group)
+        fields.extend(str_entries)
+
     return {
         "fields": fields,
         "groups": groups,
         "maxDays": custom_signals.MAX_DAYS,
         "operators": [">", ">=", "<", "<=", "==", "!="],
+        "stringFields": [e["key"] for e in str_entries],
+        "stringOperators": ["contains", "==", "!="],
         "kinds": [
             {"key": "entry", "label": "入场"},
             {"key": "exit", "label": "出场"},

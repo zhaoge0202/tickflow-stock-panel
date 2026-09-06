@@ -653,6 +653,14 @@ class FactorBacktestService:
             logger.warning("factors %s cannot be computed, missing columns: %s", factor_cols, missing)
             return panel
 
+        # 扩展表因子 (ext_ base 条目) = 外部物化列, 指标补算管线不认识;
+        # 请求的因子集合命中时在此按 (symbol, date) 时序对齐注入 (与
+        # compute_signals 同一原语, 历史帧不含快照 → 无未来函数)。
+        from app.factors import ext_factors
+
+        if factor_cols & ext_factors.ext_factor_ids():
+            panel = ext_factors.attach_ext_columns(panel, include_snapshot=False)
+
         from app.factors.registry import get_factor
         from app.indicators.pipeline import compute_indicators
 

@@ -794,6 +794,9 @@ export interface CustomSignalOptions {
   groups?: CustomSignalFieldGroup[]
   maxDays?: number
   operators: string[]
+  /** string 扩展字段 (概念/行业归属): 这些字段用 stringOperators + 字符串右值 */
+  stringFields?: string[]
+  stringOperators?: string[]
   kinds: { key: string; label: string }[]
 }
 

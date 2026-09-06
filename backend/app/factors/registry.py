@@ -334,11 +334,28 @@ def _ordered_specs() -> list[FactorSpec]:
     return ordered
 
 
+def _ensure_ext_factors() -> None:
+    """扩展表字段惰性同步 (配置目录签名幂等); 失败不阻断注册表读取。"""
+    try:
+        from app.factors.ext_factors import ensure_synced
+
+        ensure_synced()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("ext factor sync skipped", exc_info=True)
+
+
 def all_factors(
     asset_type: str | None = None,
     stable_only: bool = False,
 ) -> list[FactorSpec]:
-    """按目录顺序返回因子; asset_type 过滤适用资产, stable_only 过滤实验/废弃因子。"""
+    """按目录顺序返回因子; asset_type 过滤适用资产, stable_only 过滤实验/废弃因子。
+
+    返回前惰性同步扩展表因子 (ext_ 前缀 base 条目), 使信号字段白名单、
+    因子库列表和 AI 提示词看到同一份扩展字段清单。
+    """
+    _ensure_ext_factors()
     return [
         spec for spec in _ordered_specs()
         if (asset_type is None or asset_type in spec.asset_types)

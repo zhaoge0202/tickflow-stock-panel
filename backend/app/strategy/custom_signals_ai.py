@@ -62,6 +62,15 @@ def _format_fields() -> str:
         factor_groups.setdefault(spec.group, []).append(f"{spec.id}({label})")
     for group, items in sorted(factor_groups.items()):
         lines.append(f"因子·{group}: " + ", ".join(sorted(items)))
+    # string 扩展字段 (概念/行业归属): 只支持 contains/==/!=, 右值为字符串字面量
+    from app.factors.ext_factors import ext_string_field_entries
+
+    str_entries = ext_string_field_entries()
+    if str_entries:
+        lines.append(
+            "字符串字段(仅 contains/==/!=): "
+            + ", ".join(f"{e['key']}({e['label']})" for e in str_entries)
+        )
     return "\n".join(lines)
 
 
@@ -72,10 +81,12 @@ _SYSTEM_TEMPLATE = """你是A股量化信号设计专家。用户会描述一个
 其中「因子·」开头的行是平台预计算的因子值（动量/波动/量价等衍生特征），可直接比较数值构造条件。
 
 运算符（op）：>  >=  <  <=  ==  !=
+字符串字段额外支持 contains(包含子串, 如概念/行业归属判断), 右值为字符串字面量, 如 "AI"、"半导体".
 
 右值（right）：
 - 数字：写字符串形式，如 "2"、"3000"、"0.05"
 - 另一字段：必须带 "field:" 前缀，如 "field:ma20"；严禁裸写字段名，如 "macd_dea" 应写成 "field:macd_dea"
+- 字符串字面量: 仅当左字段是「字符串字段」时使用(配合 contains/==/!=), 如所属概念包含AI写成 {{"left": "字符串字段", "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}}
 
 日期偏移（leftDays / rightDays）：取 N 个交易日前的值，0 = 当日最新；范围 0~{max_days}。只有明确需要「前N日」时才使用偏移。
 
