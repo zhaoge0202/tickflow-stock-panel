@@ -141,6 +141,10 @@ class MyProvider:
                   on_chunk_done=None) -> pl.DataFrame:
         """日K: [symbol, date, open, high, low, close, volume, amount]; 不复权"""
 
+    def iter_daily(self, symbols, start_time, end_time, asset_type="stock",
+                   on_chunk_done=None) -> Iterator[pl.DataFrame]:
+        """(可选)有界分批返回与 get_daily 同形的日K; 全市场历史同步优先消费。"""
+
     def get_adj_factors(self, symbols, start_time, end_time, asset_type="stock",
                         on_chunk_done=None) -> pl.DataFrame:
         """除权因子: [symbol, trade_date, ex_factor]"""
@@ -241,6 +245,12 @@ provider 不应自行切换或回退到其他数据源。
 | `get_depth_batch` | 单批异常由服务隔离并保留其他批次; 不跨数据源回退 |
 | `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
+| `iter_daily` | 可选; 每批必须符合 `get_daily` 契约。流正常结束后才提交 staging; 未捕获异常会丢弃 staging。provider 内已定义的单标的软失败语义保持不变 |
+
+`iter_daily` 用于避免大范围日K同步在 provider 内累积完整 DataFrame。实现该方法后,
+`kline_sync` 会优先消费它; 未实现的 provider 继续调用 `get_daily`,保持兼容。批次大小应有
+明确上界,不得先把全部结果放入列表再 `concat`。`on_chunk_done(cur, total)` 必须覆盖空批次,
+确保最终 `cur == total`。
 
 ### get_realtime 行字段
 

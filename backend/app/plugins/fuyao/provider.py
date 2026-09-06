@@ -32,12 +32,13 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+import pyarrow.parquet as pq
 
 from app.data_providers.normalizer import DAILY_COLS, normalize_daily
 from app.indicators.pipeline import filter_halt_days
@@ -69,6 +70,12 @@ _DAILY10_DUMP_KIND = "daily-k-10d"
 _DAILY_DUMP_KIND = "daily-k"  # 10 年全量日K dump(约 172MB), 深窗口一次下载覆盖全市场
 _RECENT_DUMP_DAYS = 12  # 窗口跨度 ≤ 此天数时优先走 10d dump(覆盖 ≈10 个交易日)
 _PREV_CLOSE_BACKDAYS = 30  # 推导因子时向前找"除权日前收盘"的回看天数(容忍长期停牌)
+_DAILY_DUMP_BATCH_ROWS = 100_000
+_HIST_SYMBOL_BATCH = 50
+_DAILY_DUMP_COLUMNS = [
+    "thscode", "adjusted", "date_ms", "open_price", "high_price", "low_price",
+    "close_price", "volume", "turnover",
+]
 
 
 def get_api_key() -> str:
@@ -444,34 +451,147 @@ class FuyaoProvider:
         - 兜底: 单标的 historical 接口(窗口早于 dump 覆盖 / dump 不可用; 10 年自动分片,
           逐标的节流 + 进度回调)。
         """
+        chunks = [
+            df
+            for df in self.iter_daily(
+                symbols,
+                start_time=start_time,
+                end_time=end_time,
+                asset_type=asset_type,
+                on_chunk_done=on_chunk_done,
+            )
+            if not df.is_empty()
+        ]
+        return pl.concat(chunks, how="diagonal_relaxed") if chunks else pl.DataFrame()
+
+    def iter_daily(
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: str = "stock",
+        on_chunk_done: Callable[[int, int], None] | None = None,
+    ) -> Iterator[pl.DataFrame]:
+        """分批产出日K,供历史同步逐批落盘,避免全市场结果累积在内存。"""
         if not symbols or asset_type != "stock":
-            return pl.DataFrame()
+            return
         end_dt = end_time or datetime.now()
         start_dt = start_time or (end_dt - timedelta(days=365))
         start_d, end_d = start_dt.date(), end_dt.date()
+        symset = set(symbols)
 
         if (end_d - start_d).days <= _RECENT_DUMP_DAYS:
             try:
                 dump = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
                 if _dump_covers(dump, start_d, end_d):
-                    df = self._daily_from_dump(dump, set(symbols), start_d, end_d)
+                    df = self._daily_from_dump(dump, symset, start_d, end_d)
                     if on_chunk_done:
                         on_chunk_done(1, 1)
-                    logger.info("扶摇日K(10d dump)完成: %d 行 [%s ~ %s]", df.height, start_d, end_d)
-                    return df
-                logger.info("扶摇 10d dump 未覆盖窗口 [%s ~ %s], 尝试 10 年 dump", start_d, end_d)
+                    if not df.is_empty():
+                        yield df
+                    return
             except FuyaoError as e:
-                logger.warning("扶摇日K 10d dump 不可用, 尝试 10 年 dump: %s", e)
+                logger.warning("扶摇 10d dump 不可用: %s", e)
 
-        df = self._daily_from_big_dump(set(symbols), start_d, end_d)
-        if df is not None:
-            if on_chunk_done:
-                on_chunk_done(1, 1)
-            logger.info("扶摇日K(10 年 dump)完成: %d 行 [%s ~ %s]", df.height, start_d, end_d)
-            return df
-        df = self._daily_from_api(symbols, start_d, end_d, on_chunk_done)
-        logger.info("扶摇日K(单标的接口)完成: %d 行 [%s ~ %s]", df.height, start_d, end_d)
-        return df
+        dump_info = self._daily_dump_info()
+        sources: list[tuple[str, date, date]] = []
+        if dump_info:
+            _, dump_min, dump_max = dump_info
+            if start_d < dump_min:
+                sources.append(("api", start_d, min(end_d, dump_min - timedelta(days=1))))
+            overlap_start, overlap_end = max(start_d, dump_min), min(end_d, dump_max)
+            if overlap_start <= overlap_end:
+                sources.append(("dump", overlap_start, overlap_end))
+            tail_start = max(start_d, dump_max + timedelta(days=1))
+            if tail_start <= end_d and not _tail_ok(end_d, dump_max):
+                try:
+                    ten = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
+                    ten_dates = pl.from_epoch(
+                        ten["date_ms"].cast(pl.Int64) + _SH_MS, time_unit="ms"
+                    ).dt.date()
+                    ten_min, ten_max = ten_dates.min(), ten_dates.max()
+                except (FuyaoError, KeyError):
+                    ten_min = ten_max = None
+                if (
+                    ten_min is not None
+                    and ten_min <= dump_max + timedelta(days=1)
+                    and _tail_ok(end_d, ten_max)
+                ):
+                    sources.append(("10d", tail_start, end_d))
+                else:
+                    # 多年 dump 与请求终点之间存在不可验证的缺口,不能返回半段数据。
+                    sources = [("api", start_d, end_d)]
+        else:
+            sources.append(("api", start_d, end_d))
+
+        dump_batch_count = 0
+        if dump_info:
+            dump_rows = pq.ParquetFile(dump_info[0]).metadata.num_rows
+            dump_batch_count = max(
+                1, (dump_rows + _DAILY_DUMP_BATCH_ROWS - 1) // _DAILY_DUMP_BATCH_ROWS
+            )
+        api_batch_count = (len(symbols) + _HIST_SYMBOL_BATCH - 1) // _HIST_SYMBOL_BATCH
+        total = sum(
+            dump_batch_count if kind == "dump" else 1 if kind == "10d" else api_batch_count
+            for kind, _, _ in sources
+        )
+        done = 0
+        for kind, source_start, source_end in sources:
+            if source_start > source_end:
+                continue
+            if kind == "dump":
+                path = dump_info[0]  # type: ignore[index]
+                for df in self._iter_big_dump(path, symset, source_start, source_end):
+                    done += 1
+                    if on_chunk_done:
+                        on_chunk_done(done, total)
+                    if not df.is_empty():
+                        yield df
+            elif kind == "10d":
+                ten = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
+                df = self._daily_from_dump(ten, symset, source_start, source_end)
+                done += 1
+                if on_chunk_done:
+                    on_chunk_done(done, total)
+                if not df.is_empty():
+                    yield df
+            else:
+                batches = [
+                    symbols[i:i + _HIST_SYMBOL_BATCH]
+                    for i in range(0, len(symbols), _HIST_SYMBOL_BATCH)
+                ]
+                for batch in batches:
+                    rows: list[dict] = []
+                    for symbol in batch:
+                        rows.extend(_kline_rows(
+                            symbol,
+                            self._historical_bars(symbol, source_start, source_end),
+                        ))
+                        time.sleep(_HIST_INTERVAL_S)
+                    df = normalize_daily(rows, source=self.name)
+                    done += 1
+                    if on_chunk_done:
+                        on_chunk_done(done, total)
+                    if not df.is_empty():
+                        yield df
+
+    def _daily_dump_info(self) -> tuple[Path, date, date] | None:
+        """返回多年 dump 的路径和覆盖范围,不把大文件读入进程内存。"""
+        path = None
+        for candidate in sorted(_cache_dir().glob("daily_k__*.parquet"), reverse=True):
+            try:
+                dmin, dmax = _dump_date_range(candidate)
+            except Exception:
+                continue
+            if dmin is not None and dmax is not None:
+                return candidate, dmin, dmax
+        try:
+            path = self._ensure_dump_path(_DAILY_DUMP_KIND, "daily_k")
+            dmin, dmax = _dump_date_range(path)
+        except FuyaoError as e:
+            logger.warning("扶摇 10 年 dump 不可用, 回退单标的接口: %s", e)
+            return None
+        return (path, dmin, dmax) if dmin is not None and dmax is not None else None
 
     def _daily_from_dump(
         self, dump: pl.DataFrame, symset: set[str], start_d: date, end_d: date
@@ -480,6 +600,34 @@ class FuyaoProvider:
             pl.from_epoch(pl.col("date_ms") + _SH_MS, time_unit="ms").dt.date().alias("date")
         )
         return self._map_daily_dump(df, symset, start_d, end_d)
+
+    def _iter_big_dump(
+        self, path: Path, symset: set[str], start_d: date, end_d: date
+    ) -> Iterator[pl.DataFrame]:
+        """按固定 record batch 读取多年 dump,不做单次全量 collect。"""
+        parquet = pq.ParquetFile(path)
+        columns = [name for name in _DAILY_DUMP_COLUMNS if name in parquet.schema.names]
+        for batch in parquet.iter_batches(
+            batch_size=_DAILY_DUMP_BATCH_ROWS,
+            columns=columns,
+        ):
+            raw = pl.from_arrow(batch)
+            if raw.is_empty() or "date_ms" not in raw.columns or "thscode" not in raw.columns:
+                yield pl.DataFrame()
+                continue
+            start_ms, end_ms = _ms_of_date(start_d), _ms_of_date(end_d)
+            raw = raw.filter(
+                (pl.col("date_ms") >= start_ms)
+                & (pl.col("date_ms") <= end_ms)
+                & pl.col("thscode").is_in(sorted(symset))
+            )
+            if raw.is_empty():
+                yield pl.DataFrame()
+                continue
+            raw = raw.with_columns(
+                pl.from_epoch(pl.col("date_ms") + _SH_MS, time_unit="ms").dt.date().alias("date")
+            )
+            yield self._map_daily_dump(raw, symset, start_d, end_d)
 
     def _map_daily_dump(
         self, df: pl.DataFrame, symset: set[str], start_d: date, end_d: date
@@ -510,77 +658,6 @@ class FuyaoProvider:
         out = filter_halt_days(out)
         cols = [c for c in DAILY_COLS if c in out.columns]
         return out.select(cols).sort(["symbol", "date"]) if not out.is_empty() else out.select(cols)
-
-    def _daily_from_big_dump(
-        self, symset: set[str], start_d: date, end_d: date
-    ) -> pl.DataFrame | None:
-        """深窗口主路径: 10 年全量 dump(lazy 按需筛) + 必要时 10d dump 补尾。
-
-        覆盖不了(窗口早于 10 年 / dump 拉取失败)返回 None, 由调用方走单标的接口。
-        """
-        path = self._ensure_daily_big_dump(start_d)
-        if path is None:
-            return None
-        _, dmax = _dump_date_range(path)
-        big_hi = min(end_d, dmax)
-        # 窗口/标的过滤下推到 lazy 计划, 只物化需要的行(全量 10 年 ≈ 13.6M 行)
-        window = (
-            pl.scan_parquet(path)
-            .with_columns(
-                pl.from_epoch(pl.col("date_ms") + _SH_MS, time_unit="ms").dt.date().alias("date")
-            )
-            .filter(
-                (pl.col("date") >= start_d)
-                & (pl.col("date") <= big_hi)
-                & pl.col("thscode").is_in(sorted(symset))
-            )
-            .collect()
-        )
-        parts = [self._map_daily_dump(window, symset, start_d, big_hi)]
-        if not _tail_ok(end_d, dmax):
-            # 末端缺口(如 10 年 dump 是旧 release, end 是最近交易日): 10d dump 补尾
-            try:
-                ten = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
-                ten_dates = pl.from_epoch(
-                    ten["date_ms"].cast(pl.Int64) + _SH_MS, time_unit="ms"
-                ).dt.date()
-                ten_min, ten_max = ten_dates.min(), ten_dates.max()
-                if (
-                    ten_min is not None
-                    and ten_min <= dmax + timedelta(days=1)
-                    and _tail_ok(end_d, ten_max)
-                ):
-                    tail_start = max(start_d, dmax + timedelta(days=1))
-                    parts.append(self._daily_from_dump(ten, symset, tail_start, end_d))
-                else:
-                    return None  # 中段或尾部仍有缺口 → 单标的兜底, 不交缺口数据
-            except FuyaoError as e:
-                logger.warning("扶摇 10d dump 补尾失败: %s", e)
-                return None
-        non_empty = [p for p in parts if not p.is_empty()]
-        if not non_empty:
-            return pl.DataFrame()
-        out = pl.concat(non_empty, how="vertical_relaxed")
-        return out.unique(subset=["symbol", "date"], keep="last").sort(["symbol", "date"])
-
-    def _daily_from_api(
-        self,
-        symbols: list[str],
-        start_d: date,
-        end_d: date,
-        on_chunk_done: Callable[[int, int], None] | None,
-    ) -> pl.DataFrame:
-        frames: list[pl.DataFrame] = []
-        for i, sym in enumerate(symbols):
-            rows = self._historical_bars(sym, start_d, end_d)
-            time.sleep(_HIST_INTERVAL_S)
-            if rows:
-                df = normalize_daily(_kline_rows(sym, rows), default_symbol=sym, source=self.name)
-                if not df.is_empty():
-                    frames.append(df)
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(symbols))
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     def _historical_bars(self, symbol: str, start_d: date, end_d: date) -> list[dict]:
         """按 ≤10 年窗口分片拉取单标的原始日K。中途失败软返回已得行, 不抛出。"""
