@@ -40,20 +40,77 @@
 
 ## ✨ 核心功能
 
-| 模块&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 一句话 | 详见&nbsp;&nbsp;&nbsp; |
-| :--------------- | :--------------------------------------------------------------------- | :-------------------------------- |
-| 🔀 **能力路由**   | 多数据集(日K/除权/实时/分钟/盘口/财务,持续扩展)按源能力独立路由,任选组合 | [custom-data-source.md](./docs/custom-data-source.md) |
-| 🔍 **选股引擎**   | 25 个内置策略 + 分钟策略 + 自定义信号 + AI 生成,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
-| 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等 68 列指标与信号,一次扫表落盘 enriched Parquet    | [features.md](./docs/features.md) |
-| 🧪 **回测研究**   | 因子/策略/分钟回测 + 财务快照因子(点时口径),T+1/费用/滑点约束,评分策略附带因子归因 | [features.md](./docs/features.md) |
-| 🔬 **因子平台**   | DSL 自定义因子(编辑器 25 算子点选/试算/版本) + 检验/组合,与策略双向联动(一键生成策略/触发器引用因子/回测归因) | [factor-platform-plan.md](./docs/factor-platform-plan.md) |
-| ⛏️ **因子挖掘**   | 嵌套样本外搜索多因子排名组合,与自有策略对照,候选库显式发布、永不自动上线 | [mining.md](./docs/mining.md) |
-| 🌡️ **市场环境**   | 情绪周期 6 阶段(连板梯队驱动)+ 概念/行业主线排名,与 5 档环境分并存    | [market-phase.md](./docs/market-phase.md) |
-| 🚨 **异动监控**   | 竞价/盘中/偏移三类异动一页覆盖:同花顺风向标 + 当日信号聚合 + 交易所偏离值口径 | — |
-| 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
-| 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
-| 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘(龙虎榜/盘前风向标注入) + 炸板/翘板预警 | [features.md](./docs/features.md) |
-| 🧰 **数据扩展**   | 数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析 | [custom-data-source.md](./docs/custom-data-source.md) |
+<table>
+  <thead>
+    <tr>
+      <th nowrap align="left">模块</th>
+      <th align="left">一句话</th>
+      <th nowrap align="left">详见</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap>🔀 <b>能力路由</b></td>
+      <td>多数据集(日K/除权/实时/分钟/盘口/财务,持续扩展)按源能力独立路由,任选组合</td>
+      <td nowrap><a href="./docs/custom-data-source.md">custom-data-source.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🔍 <b>选股引擎</b></td>
+      <td>25 个内置策略 + 分钟策略 + 自定义信号 + AI 生成,Polars 毫秒级扫全 A 股</td>
+      <td nowrap><a href="./docs/strategy.md">strategy.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>📊 <b>指标流水线</b></td>
+      <td>MA/EMA/MACD/RSI/KDJ/布林/量比等 68 列指标与信号,一次扫表落盘 enriched Parquet</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🧪 <b>回测研究</b></td>
+      <td>因子/策略/分钟回测 + 财务快照因子(点时口径),T+1/费用/滑点约束,评分策略附带因子归因</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🔬 <b>因子平台</b></td>
+      <td>DSL 自定义因子(编辑器 25 算子点选/试算/版本) + 检验/组合,与策略双向联动(一键生成策略/触发器引用因子/回测归因)</td>
+      <td nowrap><a href="./docs/factor-platform-plan.md">factor-platform-plan.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>⛏️ <b>因子挖掘</b></td>
+      <td>嵌套样本外搜索多因子排名组合,与自有策略对照,候选库显式发布、永不自动上线</td>
+      <td nowrap><a href="./docs/mining.md">mining.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🌡️ <b>市场环境</b></td>
+      <td>情绪周期 6 阶段(连板梯队驱动)+ 概念/行业主线排名,与 5 档环境分并存</td>
+      <td nowrap><a href="./docs/market-phase.md">market-phase.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🚨 <b>异动监控</b></td>
+      <td>竞价/盘中/偏移三类异动一页覆盖:同花顺风向标 + 当日信号聚合 + 交易所偏离值口径</td>
+      <td nowrap>—</td>
+    </tr>
+    <tr>
+      <td nowrap>📡 <b>监控中心</b></td>
+      <td>四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>📈 <b>个股分析</b></td>
+      <td>9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🏆 <b>连板梯队</b></td>
+      <td>连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘(龙虎榜/盘前风向标注入) + 炸板/翘板预警</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🧰 <b>数据扩展</b></td>
+      <td>数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析</td>
+      <td nowrap><a href="./docs/custom-data-source.md">custom-data-source.md</a></td>
+    </tr>
+  </tbody>
+</table>
 
 <details>
 <summary><b>📦 主要页面与功能</b></summary>
@@ -256,18 +313,25 @@ flowchart TB
 
 ## 🚀 快速开始
 
-> 前置依赖:Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`(`npm i -g pnpm`)
+> 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`(`npm i -g pnpm`)
+>
+> 有 Docker 直接看 **方式 A**,一条命令拉现成镜像;完全不想碰命令行:看 **方式 C**,让本机 AI 帮你部署
 
-### 方式 A:Dev 模式(二次开发推荐)
+### 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
+
+本项目每次推送都由 GitHub Actions 自动构建多架构镜像(linux/amd64 · arm64)并发布到 GHCR,拿来即用,本地无需装 Python / Node,也不用现场 build:
 
 ```bash
-cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
-./dev.sh                   # Windows: .\dev.ps1
+docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/tick-stock-panel:latest
+# 打开 http://localhost:3018
 ```
 
-自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+- 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`。
+- 跑自己改过的代码:fork 后到仓库 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
+- 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
+- 现成镜像默认不含 stock-sdk 插件与老 CPU 兼容内核(合规与体积考虑),有此需求请用方式 B 自构建,详见 [docs/deployment.md](./docs/deployment.md)。
 
-### 方式 B:Docker(部署最省心)
+### 方式 B:Docker Compose(本地构建,全套挂载)
 
 ```bash
 cp .env.example .env
@@ -289,9 +353,31 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 > Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
 
-镜像已内置 **stock-sdk** 数据源插件(Node 运行时 + 依赖),开箱即用。
+镜像默认**不含** stock-sdk 插件(合规考虑);确需启用执行 `docker compose build --build-arg INCLUDE_STOCKSDK=1` 后再 `docker compose up -d`,详见 [docs/deployment.md](./docs/deployment.md)。
 
-> 📖 Docker 进阶、GitHub Actions 自构建、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
+> 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
+
+### 方式 C:本机 AI 代部署(小白推荐)
+
+装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),新建一个空文件夹用助手打开,把下面这段话原样发给它:
+
+```text
+帮我部署开源项目 https://github.com/shy3130/tick-stock-panel 到本机:
+克隆到当前文件夹;有 Docker 优先拉 ghcr.io/shy3130/tick-stock-panel:latest 现成镜像,没有就走 Dev 模式;
+缺少的依赖(Docker / Python / Node)帮我一起装好;
+最后告诉我浏览器打开哪个地址、需要填哪些 Key。
+```
+
+AI 会自动完成克隆、装依赖、启动服务,完成后浏览器打开 <http://localhost:3018> 即可;`TICKFLOW_API_KEY` 等配置按 AI 提示填,详见 [配置](#️-配置)。
+
+### 方式 D:Dev 模式(二次开发推荐)
+
+```bash
+cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
+./dev.sh                   # Windows: .\dev.ps1
+```
+
+自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
 
 ### 跑起来后的第一次使用
 
