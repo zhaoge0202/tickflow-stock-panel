@@ -208,7 +208,7 @@ export interface MinuteKlineRow {
   low: number
   close: number
   volume: number
-  amount: number
+  amount: number | null
 }
 
 export interface MinuteKlineSession {
