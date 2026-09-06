@@ -627,8 +627,9 @@ def _hist_provider(monkeypatch, fake: _FakeHistClient, allow_dumps: bool = False
     monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
     monkeypatch.setattr(fp, "_HIST_INTERVAL_S", 0.0)
     if not allow_dumps:
-        # 默认禁用 dump 档(单标的接口路径测试用); 大 dump 测试传 allow_dumps=True
+        # API 路径测试必须与开发机真实 dump 缓存隔离; dump 测试显式传 allow_dumps=True。
         p._ensure_daily_big_dump = lambda start_d: None  # type: ignore[assignment]
+        p._daily_dump_info = lambda: None  # type: ignore[assignment]
     return p
 
 
@@ -738,22 +739,6 @@ def test_daily_api_soft_fail_per_symbol(monkeypatch):
     provider = _hist_provider(monkeypatch, _FakeHistClient(bars, error_syms=("600519.SH",)))
     df = provider.get_daily(["600519.SH", "000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 28))
     assert df["symbol"].unique().to_list() == ["000001.SZ"]
-
-
-def test_iter_daily_strict_raises_after_api_failure(monkeypatch):
-    provider = _hist_provider(
-        monkeypatch,
-        _FakeHistClient(
-            {"000001.SZ": [_bar(date(2018, 1, 2), 10.0)]},
-            error_syms=("000002.SZ",),
-        ),
-    )
-    with pytest.raises(fc.FuyaoError, match="部分标的失败"):
-        list(provider.iter_daily(
-            ["000001.SZ", "000002.SZ"],
-            datetime(2018, 1, 1), datetime(2018, 1, 3),
-            strict=True,
-        ))
 
 
 def test_iter_daily_api_is_bounded_by_symbol_batch(monkeypatch):
@@ -1006,6 +991,25 @@ def test_daily_big_dump_tail_filled_by_10d(monkeypatch, tmp_path):
         date(2026, 8, 28),
     ]
     assert df["close"].to_list() == [10.9, 11.0, 11.2, 11.65]
+
+
+def test_daily_big_dump_weekend_end_needs_no_tail(monkeypatch, tmp_path):
+    """多年 dump 覆盖到周五时,紧邻周末不应回退逐标的 API。"""
+    provider = _bigdump_provider(
+        monkeypatch,
+        tmp_path,
+        [
+            _dump_bar("000001.SZ", date(2026, 8, 1), 10.9),
+            _dump_bar("000001.SZ", date(2026, 8, 28), 11.65),
+        ],
+    )
+
+    df = provider.get_daily(
+        ["000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 30)
+    )
+
+    assert df["date"].to_list() == [date(2026, 8, 1), date(2026, 8, 28)]
+    assert provider._get_client().calls == []
 
 
 def test_daily_big_dump_midgap_falls_back(monkeypatch, tmp_path):

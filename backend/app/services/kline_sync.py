@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
+import time
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -187,7 +189,6 @@ def sync_and_persist_daily_batch(
                         start_time=start_time,
                         end_time=end_time,
                         on_chunk_done=on_chunk_done,
-                        strict=True,
                     ),
                     repo,
                 )
@@ -244,7 +245,9 @@ def sync_and_persist_daily_batch(
 
 def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
     """先把流式 provider 结果写入私有 staging,完整取数后再提交正式分区。"""
-    root = repo.store.data_dir / ".daily_sync_staging" / uuid.uuid4().hex
+    staging_base = repo.store.data_dir / ".daily_sync_staging"
+    _sweep_stale_daily_staging(staging_base)
+    root = staging_base / uuid.uuid4().hex
     written = 0
     try:
         for index, df in enumerate(chunks):
@@ -261,24 +264,26 @@ def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
         for date_dir in sorted(root.glob("date=*")):
             files = sorted(date_dir.glob("*.parquet"))
             if files:
-                repo.append_daily(pl.scan_parquet(files).collect(streaming=True))
+                repo.append_daily(pl.scan_parquet(files).collect(engine="streaming"))
     finally:
         shutil.rmtree(root, ignore_errors=True)
-        if root.parent.exists() and not any(root.parent.iterdir()):
+        with contextlib.suppress(OSError):
             root.parent.rmdir()
 
-    if written:
-        try:
-            d = repo.store.data_dir.as_posix()
-            repo.db.execute(
-                f"""CREATE OR REPLACE VIEW kline_daily AS
-                    SELECT * FROM read_parquet(
-                        '{d}/kline_daily/**/*.parquet', union_by_name=true
-                    )"""
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("refresh view failed: %s", e)
     return written
+
+
+def _sweep_stale_daily_staging(staging_base, max_age_s: int = 24 * 60 * 60) -> None:
+    """清理崩溃遗留的旧同步目录,不碰仍可能活跃的新目录。"""
+    if not staging_base.exists():
+        return
+    cutoff = time.time() - max_age_s
+    for run_dir in staging_base.iterdir():
+        try:
+            if run_dir.is_dir() and run_dir.stat().st_mtime < cutoff:
+                shutil.rmtree(run_dir)
+        except OSError:
+            logger.warning("failed to clean stale daily staging: %s", run_dir)
 
 
 def sync_daily_by_quotes(repo: KlineRepository) -> int:

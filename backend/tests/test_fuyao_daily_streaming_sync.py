@@ -1,6 +1,7 @@
 """扶摇流式日K同步: 大历史不得在内存中累积后再写入。"""
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 
 import polars as pl
@@ -84,3 +85,23 @@ def test_sync_discards_staging_when_streaming_fails(monkeypatch, repo):
 
     assert not list((repo.store.data_dir / "kline_daily").glob("date=*"))
     assert not (repo.store.data_dir / ".daily_sync_staging").exists()
+
+
+def test_sync_sweeps_only_stale_staging(monkeypatch, repo):
+    staging = repo.store.data_dir / ".daily_sync_staging"
+    stale = staging / "stale"
+    fresh = staging / "fresh"
+    stale.mkdir(parents=True)
+    fresh.mkdir()
+    os.utime(stale, (1, 1))
+    provider = _StreamingProvider([])
+    _route_fuyao(monkeypatch, provider)
+
+    written = kline_sync.sync_and_persist_daily_batch(
+        ["000001.SZ"], repo, object(),
+        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+    )
+
+    assert written == 0
+    assert not stale.exists()
+    assert fresh.exists()
