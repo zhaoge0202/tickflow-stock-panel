@@ -592,15 +592,17 @@ PUSH_CHANNELS = {"feishu", "wecom", "custom", "email"}
 
 
 def get_review_schedule() -> dict:
-    """定时复盘调度 {"enabled": False, "hour": 15, "minute": 10}。默认关闭。
+    """定时复盘调度 {"enabled": False, "hour": 15, "minute": 40}。默认关闭。
 
-    A股 15:00 收盘, 默认时间设为 15:10(收盘后即时复盘), 强制下限 15:00。
+    默认 15:40: 盘后管道默认 15:35 启动, 留 5 分钟缓冲, 复盘使用管道
+    产出的最终口径数据 (含盘后量校正的日K/enriched)。强制下限 15:00 —
+    偏好收盘后即时复盘 (走实时快照缓存, 不等管道) 的用户可自行调早。
     """
-    d = load().get("review_schedule", {"enabled": False, "hour": 15, "minute": 10})
+    d = load().get("review_schedule", {"enabled": False, "hour": 15, "minute": 40})
     return {
         "enabled": bool(d.get("enabled", False)),
         "hour": d.get("hour", 15),
-        "minute": d.get("minute", 10),
+        "minute": d.get("minute", 40),
     }
 
 
