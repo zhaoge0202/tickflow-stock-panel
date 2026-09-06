@@ -1774,6 +1774,7 @@ export interface Preferences {
   depth_finalize_time: { hour: number; minute: number }
   review_schedule: { enabled: boolean; hour: number; minute: number }
   review_push_channels: string[]
+  review_push_mode?: 'auto' | 'manual'
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
@@ -2153,10 +2154,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled, hour, minute }),
     }),
-  updateReviewPush: (channels: string[]) =>
-    request<{ review_push_channels: string[] }>('/api/settings/preferences/review-push', {
+  updateReviewPush: (channels: string[], mode?: 'auto' | 'manual') =>
+    request<{ review_push_channels: string[]; review_push_mode: 'auto' | 'manual' }>('/api/settings/preferences/review-push', {
       method: 'PUT',
-      body: JSON.stringify({ channels }),
+      body: JSON.stringify({ channels, mode: mode ?? null }),
     }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
@@ -3160,6 +3161,7 @@ export const api = {
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
+    push?: boolean
   }) =>
     request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
       method: 'POST', body: JSON.stringify(r),

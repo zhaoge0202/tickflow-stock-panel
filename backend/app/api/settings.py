@@ -557,6 +557,7 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        "review_push_mode": preferences.get_review_push_mode(),
         **preferences.get_mining_schedule(),
     }
 
@@ -1908,16 +1909,23 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
 
 class ReviewPushIn(BaseModel):
     channels: list[str]  # 多选: feishu / wecom / custom / email; 空数组=不推送
+    mode: str | None = None  # 可选: auto=归档即推 / manual=仅显式 push; 不传则不变
 
 
 @router.put("/preferences/review-push")
 def update_review_push(req: ReviewPushIn) -> dict:
-    """复盘推送渠道(多选) — 选定把复盘报告(手动生成 / 定时生成归档后)推送到哪些外部工具。
+    """复盘推送设置(渠道多选 + 触发方式)。
 
     纯偏好, 与定时复盘 / 实时行情完全独立, 常驻可单独设置。空数组=不推送。
     实际推送由归档端点(POST /api/market-recap/reports)与定时任务(_run_scheduled_review)
-    在归档后读取本列表逐个推送。白名单外的渠道会被过滤掉。
+    在归档后读取渠道列表, 并按 review_push_mode 决定是否外发:
+      - manual: 定时复盘只归档不推送, 手动保存需显式 push=true
+      - auto: 归档即推(行为与旧逻辑一致)
+    白名单外的渠道会被过滤掉, 白名单外的 mode 值回退 manual。
     """
     from app.services import preferences
     saved = preferences.set_review_push_channels(req.channels)
-    return {"review_push_channels": saved}
+    mode = preferences.get_review_push_mode()
+    if req.mode is not None:
+        mode = preferences.set_review_push_mode(req.mode)
+    return {"review_push_channels": saved, "review_push_mode": mode}
