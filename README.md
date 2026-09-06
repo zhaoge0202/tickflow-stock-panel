@@ -357,7 +357,7 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 > 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
 
-### 方式 C:本机 AI 代部署(小白推荐)
+### 方式 C:本机 AI 代部署(AI玩家首选)
 
 装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),新建一个空文件夹用助手打开,把下面这段话原样发给它:
 
