@@ -740,6 +740,39 @@ def test_daily_api_soft_fail_per_symbol(monkeypatch):
     assert df["symbol"].unique().to_list() == ["000001.SZ"]
 
 
+def test_iter_daily_strict_raises_after_api_failure(monkeypatch):
+    provider = _hist_provider(
+        monkeypatch,
+        _FakeHistClient(
+            {"000001.SZ": [_bar(date(2018, 1, 2), 10.0)]},
+            error_syms=("000002.SZ",),
+        ),
+    )
+    with pytest.raises(fc.FuyaoError, match="部分标的失败"):
+        list(provider.iter_daily(
+            ["000001.SZ", "000002.SZ"],
+            datetime(2018, 1, 1), datetime(2018, 1, 3),
+            strict=True,
+        ))
+
+
+def test_iter_daily_api_is_bounded_by_symbol_batch(monkeypatch):
+    """历史 API 每批只产出固定 symbol 集合,不积累全市场 frames。"""
+    bars = {
+        "000001.SZ": [_bar(date(2018, 1, 2), 10.0)],
+        "000002.SZ": [_bar(date(2018, 1, 2), 11.0)],
+        "000003.SZ": [_bar(date(2018, 1, 2), 12.0)],
+    }
+    provider = _hist_provider(monkeypatch, _FakeHistClient(bars))
+    monkeypatch.setattr(fp, "_HIST_SYMBOL_BATCH", 2)
+    chunks = list(provider.iter_daily(
+        list(bars), datetime(2018, 1, 1), datetime(2018, 1, 3)
+    ))
+    assert [set(df["symbol"].to_list()) for df in chunks] == [
+        {"000001.SZ", "000002.SZ"}, {"000003.SZ"}
+    ]
+
+
 def test_daily_empty_symbols_or_non_stock_returns_empty(monkeypatch):
     provider = _hist_provider(monkeypatch, _FakeHistClient({}))
     assert provider.get_daily([], None, None).is_empty()
@@ -897,6 +930,37 @@ def test_daily_deep_window_uses_big_dump(monkeypatch, tmp_path):
     assert set(df["symbol"].to_list()) == {"000001.SZ"}
     assert df["date"].to_list() == [date(2026, 1, 5), date(2026, 6, 12), date(2026, 8, 14)]
     assert df["volume"].to_list() == [975_701.0, 12_345.0, 12_345.0]
+
+
+def test_iter_daily_big_dump_reads_bounded_record_batches(monkeypatch, tmp_path):
+    """多年 dump 分批读取,不经 LazyFrame collect() 物化整份文件。"""
+    rows = [_dump_bar("000001.SZ", date(2026, 1, 1) + timedelta(days=i), 10.0 + i)
+            for i in range(5)]
+    provider = _bigdump_provider(monkeypatch, tmp_path, rows)
+    monkeypatch.setattr(fp, "_DAILY_DUMP_BATCH_ROWS", 2)
+    chunks = list(provider.iter_daily(
+        ["000001.SZ"], datetime(2026, 1, 1), datetime(2026, 1, 5)
+    ))
+    assert [chunk.height for chunk in chunks] == [2, 2, 1]
+    assert [d for chunk in chunks for d in chunk["date"].to_list()] == [
+        date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3),
+        date(2026, 1, 4), date(2026, 1, 5),
+    ]
+
+
+def test_iter_daily_splits_older_history_from_big_dump(monkeypatch, tmp_path):
+    """请求跨 dump 起点时,只把 dump 外那段回退到历史 API。"""
+    provider = _bigdump_provider(
+        monkeypatch,
+        tmp_path,
+        [_dump_bar("000001.SZ", date(2020, 1, 2), 10.0)],
+    )
+    provider._client = _FakeHistClient({"000001.SZ": [_bar(date(2019, 12, 31), 9.0)]})
+    rows = pl.concat(list(provider.iter_daily(
+        ["000001.SZ"], datetime(2019, 12, 30), datetime(2020, 1, 2)
+    )))
+    assert rows["date"].to_list() == [date(2019, 12, 31), date(2020, 1, 2)]
+    assert len(provider._get_client().calls) == 1
 
 
 def test_daily_big_dump_tail_filled_by_10d(monkeypatch, tmp_path):

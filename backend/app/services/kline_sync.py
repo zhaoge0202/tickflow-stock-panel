@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
@@ -177,6 +179,18 @@ def sync_and_persist_daily_batch(
             end_time = end_date or datetime.now()
             days = count or 365
             start_time = start_date or (end_time - timedelta(days=days))
+            iter_daily = getattr(provider, "iter_daily", None)
+            if callable(iter_daily):
+                return _persist_daily_chunks(
+                    iter_daily(
+                        symbols,
+                        start_time=start_time,
+                        end_time=end_time,
+                        on_chunk_done=on_chunk_done,
+                        strict=True,
+                    ),
+                    repo,
+                )
             df = provider.get_daily(
                 symbols,
                 start_time=start_time,
@@ -226,6 +240,45 @@ def sync_and_persist_daily_batch(
         logger.warning("refresh view failed: %s", e)
 
     return df.height
+
+
+def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
+    """先把流式 provider 结果写入私有 staging,完整取数后再提交正式分区。"""
+    root = repo.store.data_dir / ".daily_sync_staging" / uuid.uuid4().hex
+    written = 0
+    try:
+        for index, df in enumerate(chunks):
+            if df.is_empty():
+                continue
+            for date_df in df.partition_by("date"):
+                dt = date_df["date"][0]
+                ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+                out = root / f"date={ds}" / f"part-{index}.parquet"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                date_df.write_parquet(out)
+                written += date_df.height
+
+        for date_dir in sorted(root.glob("date=*")):
+            files = sorted(date_dir.glob("*.parquet"))
+            if files:
+                repo.append_daily(pl.scan_parquet(files).collect(streaming=True))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        if root.parent.exists() and not any(root.parent.iterdir()):
+            root.parent.rmdir()
+
+    if written:
+        try:
+            d = repo.store.data_dir.as_posix()
+            repo.db.execute(
+                f"""CREATE OR REPLACE VIEW kline_daily AS
+                    SELECT * FROM read_parquet(
+                        '{d}/kline_daily/**/*.parquet', union_by_name=true
+                    )"""
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh view failed: %s", e)
+    return written
 
 
 def sync_daily_by_quotes(repo: KlineRepository) -> int:
