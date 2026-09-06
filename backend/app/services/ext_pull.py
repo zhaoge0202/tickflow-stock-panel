@@ -21,6 +21,26 @@ from app.services.ext_data import (
 logger = logging.getLogger(__name__)
 
 
+def outbound_headers(user_headers: dict[str, str] | None = None) -> dict[str, str]:
+    """扩展数据出站请求的默认标识头。
+
+    默认携带 User-Agent: tsp/<版本> 与 X-TSP-Client: tick-stock-panel,
+    供服务端 (如 tickflow-hub) 识别本项目的请求。用户在拉取配置里显式
+    设置的同名头优先 (大小写不敏感), 不被标识头覆盖。
+    """
+    from app import __version__
+
+    defaults = {
+        "User-Agent": f"tsp/{__version__}",
+        "X-TSP-Client": "tick-stock-panel",
+    }
+    override = {k.lower() for k in (user_headers or {})}
+    return {
+        **{k: v for k, v in defaults.items() if k.lower() not in override},
+        **(user_headers or {}),
+    }
+
+
 def _in_time_window(start: str | None, end: str | None) -> bool:
     """检查当前本地时间是否在每日时间窗口内。
 
@@ -144,7 +164,7 @@ async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict
 
     url = _with_date_param(pull.url, pull.date_param, target_date)
     async with httpx.AsyncClient(timeout=30) as client:
-        headers = pull.headers or {}
+        headers = outbound_headers(pull.headers)
         kwargs: dict[str, Any] = {"headers": headers}
 
         if pull.method.upper() == "POST" and pull.body:

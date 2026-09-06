@@ -864,13 +864,13 @@ async def test_pull(request: Request, config_id: str):
         raise HTTPException(400, "拉取未配置或 URL 为空")
 
     # 临时构建一个带新配置的 config 用于测试
-    from app.services.ext_pull import _extract_rows, _apply_field_map
+    from app.services.ext_pull import _extract_rows, _apply_field_map, outbound_headers
     import httpx
 
     pull = config.pull
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            headers = pull.headers or {}
+            headers = outbound_headers(pull.headers)
             kwargs: dict = {"headers": headers}
             if pull.method.upper() == "POST" and pull.body:
                 kwargs["content"] = pull.body

@@ -182,8 +182,11 @@ async def _fetch_json(url: str) -> list[dict]:
     """
     import httpx
 
+    # 延迟导入避免与 ext_pull 循环依赖; 出站请求带 tsp 标识头
+    from app.services.ext_pull import outbound_headers
+
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=outbound_headers())
         resp.raise_for_status()
         data = resp.json()
 

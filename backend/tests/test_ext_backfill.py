@@ -60,6 +60,7 @@ class _FakeClient:
 
     responses: ClassVar[dict[str, list]] = {}
     calls: ClassVar[list[str]] = []
+    header_calls: ClassVar[list[dict]] = []  # 每次请求实际发送的 headers
     errors: ClassVar[dict[str, Exception]] = {}
     fail_times: ClassVar[dict[str, int]] = {}  # url -> 还需失败的次数
     error_sequence: ClassVar[dict[str, list[Exception]]] = {}  # url -> 按序抛出后耗尽
@@ -75,6 +76,7 @@ class _FakeClient:
 
     async def request(self, method: str, url: str, **kwargs):
         _FakeClient.calls.append(url)
+        _FakeClient.header_calls.append(dict(kwargs.get("headers") or {}))
         seq = _FakeClient.error_sequence.get(url)
         if seq:
             raise seq.pop(0)
@@ -88,6 +90,7 @@ class _FakeClient:
 def fake_http(monkeypatch):
     _FakeClient.responses = {}
     _FakeClient.calls = []
+    _FakeClient.header_calls = []
     _FakeClient.errors = {}
     _FakeClient.fail_times = {}
     _FakeClient.error_sequence = {}
@@ -96,6 +99,46 @@ def fake_http(monkeypatch):
 
 
 # ── 纯函数 ────────────────────────────────────────────────
+
+def test_outbound_headers_default_and_override():
+    """出站标识头: 默认带 tsp UA + X-TSP-Client; 用户同名头优先 (大小写不敏感)。"""
+    from app.services.ext_pull import outbound_headers
+
+    h = outbound_headers()
+    assert h["User-Agent"].startswith("tsp/")
+    assert h["X-TSP-Client"] == "tick-stock-panel"
+
+    h2 = outbound_headers({"user-agent": "my-ua", "X-Custom": "1"})
+    assert h2["user-agent"] == "my-ua"          # 小写同名覆盖默认 UA
+    assert "User-Agent" not in h2                # 不重复发送
+    assert h2["X-TSP-Client"] == "tick-stock-panel"  # 未覆盖的标识头保留
+    assert h2["X-Custom"] == "1"
+
+
+async def test_fetch_rows_carries_tsp_identity(fake_http):
+    fake_http.responses["https://example.test/rank?date=2026-01-05"] = [_row("A", "2026-01-05")]
+    await fetch_rows_for_date(_cfg(), date(2026, 1, 5))
+    headers = fake_http.header_calls[-1]
+    assert headers["User-Agent"].startswith("tsp/")
+    assert headers["X-TSP-Client"] == "tick-stock-panel"
+
+
+async def test_fetch_rows_user_headers_take_precedence(fake_http):
+    cfg = ExtConfig(
+        id="hot", label="人气", mode="timeseries",
+        fields=_cfg().fields,
+        pull=PullConfig(
+            url="https://example.test/rank",
+            headers={"User-Agent": "custom-ua"},
+            date_param="date",
+        ),
+    )
+    fake_http.responses["https://example.test/rank?date=2026-01-05"] = [_row("A", "2026-01-05")]
+    await fetch_rows_for_date(cfg, date(2026, 1, 5))
+    headers = fake_http.header_calls[-1]
+    assert headers["User-Agent"] == "custom-ua"
+    assert headers["X-TSP-Client"] == "tick-stock-panel"
+
 
 def test_with_date_param_url_building():
     d = date(2026, 1, 5)
