@@ -487,17 +487,23 @@ def set_pipeline_index_symbols(symbols: str) -> str:
 
 
 def get_pipeline_schedule() -> dict:
-    """返回盘后管道调度时间 {"hour": 15, "minute": 30}。"""
-    d = load().get("pipeline_schedule", {"hour": 15, "minute": 30})
-    return {"hour": d.get("hour", 15), "minute": d.get("minute", 30)}
+    """返回盘后管道调度时间 {"hour": 15, "minute": 35}。
+
+    默认 15:35 而非 15:30 整: 盘后固定价交易 15:30 才彻底结束, 且供应商
+    聚合含盘后量的官方日K需要时间 —— 整点即拉可能写入不含盘后成交的
+    日线, 也与 quote 定版重试窗口终点 (15:30) 精确重合。留 5 分钟缓冲。
+    """
+    d = load().get("pipeline_schedule", {"hour": 15, "minute": 35})
+    return {"hour": d.get("hour", 15), "minute": d.get("minute", 35)}
 
 
 def set_pipeline_schedule(hour: int, minute: int) -> dict:
     h = max(0, min(23, hour))
     m = max(0, min(59, minute))
-    # 盘后不早于 15:00
-    if h * 60 + m < 15 * 60:
-        h, m = 15, 0
+    # 盘后管道不早于 15:35: 15:30 盘后固定价才终止 (量/额此前仍会变),
+    # 且供应商官方日线定稿需要缓冲 —— 更早启动可能固化不含盘后量的当日分区
+    if h * 60 + m < 15 * 60 + 35:
+        h, m = 15, 35
     save({"pipeline_schedule": {"hour": h, "minute": m}})
     return {"hour": h, "minute": m}
 

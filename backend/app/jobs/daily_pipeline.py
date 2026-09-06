@@ -2,7 +2,8 @@
 
 调度:
   09:10 盘前 — 同步个股维表 instruments (全量覆盖)
-  15:30 盘后 — 日K同步 + 增量除权因子 + enriched 计算 + 刷新视图
+  15:35 盘后 — 日K同步 + 增量除权因子 + enriched 计算 + 刷新视图
+  (默认 15:35: 盘后固定价 15:30 终止 + 供应商日线定稿缓冲, 见 preferences)
 
 盘后同步策略:
   日 K: QuoteService 交易时段已实时落盘 → 有数据时跳过 batch,首次拉 1 年区间
@@ -1123,7 +1124,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     """启动调度器。
 
     工作日 09:10 — 同步个股维表
-    工作日 HH:MM — 盘后管道（时间由用户偏好决定，默认 15:30）
+    工作日 HH:MM — 盘后管道（时间由用户偏好决定，默认 15:35）
     """
     from app.services import preferences
     sched = preferences.get_pipeline_schedule()
