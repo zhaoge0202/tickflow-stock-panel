@@ -57,6 +57,8 @@
 
 > 💡 **文件与范围铁律**:AI 生成的策略只生成一个 `.py` 文件,只 `import polars as pl`,绝不修改 `backend/`、`docs/`、`frontend/` 等现有文件。
 
+生成之后的持续改进(假设—验证—判定闭环),见 [AI 策略迭代指南](./strategy-iteration.md)。
+
 ### 📝 方式三:自定义编写 / 代码迁移
 
 可以在选股页「自定义编写」中直接编辑策略代码并保存,新建自定义策略会落入 `data/strategies/custom/`,文件名/ID 用 `custom_` 前缀。也可以手动把已有策略改写为 Polars 文件后放入该目录,引擎会自动发现。
