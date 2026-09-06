@@ -141,6 +141,13 @@ COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
 RUN codex --version
 
 ENV PYTHONPATH=/app
+# 运行时 uv 镜像源持久化: CMD 用 `uv run` 启动, 锁与 pyproject 不一致等场景下
+# uv 会在容器内重新解析/安装 —— 无源配置时默认 pypi.org, 国内网络会卡死启动
+# (实测阿里云 ECS)。与构建期 RUN 内的 export 同源, 这里让它跨层存活。
+ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
+ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
+    UV_EXTRA_INDEX_URL=${PYPI_FALLBACK}
 # 兜底时区: 交易时段判断已在代码里显式用北京时间 (app/market_time.py),
 # 此处让日志时间戳等其余 naive 时间也对齐北京时间。
 ENV TZ=Asia/Shanghai
