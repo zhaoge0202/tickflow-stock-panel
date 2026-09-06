@@ -99,7 +99,7 @@ def availability() -> tuple[bool, str]:
 | --- | --- | --- |
 | `change_pct` | **小数制**, `0.0366` = 3.66% | 接口给百分数(3.66)时必须在 provider 内显式 /100 |
 | `turnover_rate`(realtime 入口) | **小数制**, `0.05` = 5% | 下游 enriched 管道统一转百分数值存储 |
-| `volume` | 股 | |
+| `volume` | **手**, `436231` = 43,623,100 股 | 日K 与实时快照均以手计(1手=100股), 股票/ETF/指数一致(与上游 TickFlow 口径一致, 可用 amount÷volume÷100≈当日均价自验); 接口给股时必须在 provider 内显式 /100(参考 fuyao) |
 | `amount` / `turnover` | 元 | |
 | 日K OHLC | **不复权原始价** | 复权由 adj_factor + enriched 管道处理, provider 不得自行复权 |
 
@@ -260,7 +260,7 @@ provider 不应自行切换或回退到其他数据源。
 | `last_price` | ✅ | 最新价 |
 | `prev_close` | ✅ | 昨收, 涨跌幅推导基准 |
 | `open` / `high` / `low` | ✅ | 当日 OHLC |
-| `volume` | ✅ | 股 |
+| `volume` | ✅ | **手**(1手=100股) |
 | `amount` | 建议 | 成交额(元) |
 | `change_pct` | 建议 | **小数制**; 缺失时下游按 change_amount/prev_close 推导 |
 | `change_amount` | 建议 | 涨跌额(元) |
