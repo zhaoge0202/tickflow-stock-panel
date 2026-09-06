@@ -151,7 +151,7 @@ class MyProvider:
 
     def get_minute(self, symbols, start_time, end_time, asset_type="stock",
                    on_chunk_done=None, freq="1m") -> pl.DataFrame:
-        """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount]"""
+        """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount(元, 可空)]"""
 
     def get_intraday_batch(self, symbols, count=300, asset_type="stock") -> pl.DataFrame:
         """(声明 full_minute 数据集时实现) 全量分钟修复轮: 给定标的当日 1 分钟K,
@@ -207,6 +207,9 @@ provider 不应自行切换或回退到其他数据源。
 `date` 语义对齐；不要返回 UTC 或带时区的时间。前端分时图按交易时段时轴
 （09:30–11:30 / 13:00–15:00）映射每根K线，UTC 口径的帧会导致全部点位落在时轴外、
 分时图空白。
+
+`amount` 单位为元；数据源无法提供可靠的分钟成交额时应返回 `null`，不得伪造。
+成交额缺失后无法继续计算累计成交均价，前端会停止绘制后续均价线并显示 `—`。
 
 入口守卫（`kline_sync._enforce_minute_beijing_wallclock`）对所有分钟源强制归一：
 带时区 → 自动换算成北京墙钟；naive 但整体呈 UTC 特征（如 01:30）→ 自动 +8 纠偏并
