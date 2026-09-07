@@ -166,6 +166,15 @@ def _attach_worker_metrics(
         result["worker"] = metrics
 
 
+def _error_message(exc: BaseException) -> str:
+    """任务级错误文案: enriched 发布类失败对用户是"稍后再试", 不透出原始异常。"""
+    from app.enriched_generation import EnrichedGenerationUnavailableError
+
+    if isinstance(exc, EnrichedGenerationUnavailableError):
+        return "指标数据正在发布更新，请稍后重试"
+    return str(exc)
+
+
 def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
     sampler = _PeakRssSampler()
     sampler.start()
@@ -256,7 +265,7 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
             sampler.stop()
         event_queue.put({
             "type": "error",
-            "message": str(exc),
+            "message": _error_message(exc),
             "traceback": traceback.format_exc(),
         })
     finally:

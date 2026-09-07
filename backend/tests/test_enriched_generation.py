@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import date
 from types import SimpleNamespace
 
@@ -225,3 +227,120 @@ def test_live_flush_write_recovers_stale_marker_from_dead_process(
         (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
     )
     assert marker["state"] == "ready"
+
+
+def _stale_publishing_marker(tmp_path, owner_pid: int = 999999999) -> None:
+    (tmp_path / ".matrix_generation_stock.json").write_text(
+        json.dumps({
+            "state": "publishing",
+            "generation": "stale-generation",
+            "publication_id": "stale-publication",
+            "owner_pid": owner_pid,
+            "updated_at_ns": 0,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_reader_self_heals_stale_publishing_marker_from_dead_owner(tmp_path) -> None:
+    """读取方遇到属主已死的 publishing 标记应就地恢复 ready, 而非持续失败
+    直到某个写入方碰巧接管 (dev 热重载杀掉发布进程即产生这种孤儿)。"""
+    _stale_publishing_marker(tmp_path)
+
+    generation = get_enriched_generation(tmp_path, "stock")
+
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "ready"
+    # 恢复时换新 generation: 磁盘可能残留部分替换的文件, 按代缓存需要失效。
+    assert generation not in ("", "stale-generation")
+    assert generation == marker["generation"]
+    assert get_enriched_generation(tmp_path, "stock") == generation
+
+
+def test_reader_still_fails_closed_while_owner_is_alive(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("app.enriched_generation._process_is_alive", lambda pid: True)
+    _stale_publishing_marker(tmp_path, owner_pid=os.getpid() + 1)
+
+    with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
+        get_enriched_generation(tmp_path, "stock")
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "publishing"  # 标记未被读取方改动
+
+
+def test_reader_respects_active_in_process_publication(tmp_path) -> None:
+    publication = EnrichedPublication(tmp_path, recover=True)
+    publication.begin()
+    try:
+        with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
+            get_enriched_generation(tmp_path, "stock")
+    finally:
+        publication.abandon()
+
+    assert _is_ready_marker(tmp_path)
+
+
+def _is_ready_marker(tmp_path) -> bool:
+    marker = json.loads(
+        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
+    )
+    return marker["state"] == "ready"
+
+
+def test_data_generation_await_retries_during_publication(tmp_path, monkeypatch) -> None:
+    engine = BacktestEngine(KlineRepository(DataStore(tmp_path)))
+    calls = {"n": 0}
+
+    def flaky(asset_type: str = "stock"):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise EnrichedGenerationUnavailableError(
+                "enriched data is being published; retry after the update finishes"
+            )
+        return "gen-final"
+
+    monkeypatch.setattr(engine, "data_generation", flaky)
+    monkeypatch.setattr("app.backtest.engine._GENERATION_POLL_S", 0.001)
+
+    assert engine.data_generation_await("stock") == "gen-final"
+    assert calls["n"] == 3
+
+
+def test_data_generation_await_times_out_and_respects_cancel(
+    tmp_path, monkeypatch
+) -> None:
+    engine = BacktestEngine(KlineRepository(DataStore(tmp_path)))
+    monkeypatch.setattr("app.backtest.engine._GENERATION_POLL_S", 0.001)
+
+    def always_publishing(asset_type: str = "stock"):
+        raise EnrichedGenerationUnavailableError(
+            "enriched data is being published; retry after the update finishes"
+        )
+
+    monkeypatch.setattr(engine, "data_generation", always_publishing)
+
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        engine.data_generation_await("stock", timeout_s=0.01)
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        engine.data_generation_await("stock", cancel_event=cancel, timeout_s=30.0)
+
+
+def test_worker_error_message_translates_publishing_error() -> None:
+    from app.backtest.worker import _error_message
+    from app.enriched_generation import EnrichedGenerationUnavailableError
+
+    translated = _error_message(
+        EnrichedGenerationUnavailableError(
+            "enriched data is being published; retry after the update finishes"
+        )
+    )
+    assert translated == "指标数据正在发布更新，请稍后重试"
+    assert _error_message(ValueError("boom")) == "boom"
