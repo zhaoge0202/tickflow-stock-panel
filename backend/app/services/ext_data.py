@@ -477,7 +477,13 @@ def ensure_utf8_csv(file_path: Path) -> Path:
         except UnicodeDecodeError:
             continue
         out_path = file_path.with_suffix(file_path.suffix + ".utf8")
-        out_path.write_text(text, encoding="utf-8")
+        # newline="" 关闭写入时的换行转换。默认转换在 Windows 上把文本里的 \n
+        # 写成 \r\n，源文件本来就是 CRLF 时就变成 \r\r\n，多出来的 \r 被 Polars
+        # 当作最后一列内容的一部分：列名变成 "收盘价\r"，每行的值变成 "12.34\r"，
+        # 该列于是被推断为字符串而不是数值。本函数针对的同花顺/东财/通达信和
+        # Windows Excel 导出文件用的正是 CRLF。
+        with out_path.open("w", encoding="utf-8", newline="") as f:
+            f.write(text)
         logger.info("CSV 编码转换 %s → %s (%s)", file_path.name, out_path.name, enc)
         return out_path
     # 都无法解码：返回原路径，让 Polars 抛出更精确的原始错误
