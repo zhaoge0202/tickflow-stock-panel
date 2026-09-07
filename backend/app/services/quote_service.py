@@ -35,6 +35,7 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.parquet import scan_daily_parquet
+from app.polars_guard import guarded_collect
 from app.services.index_const import CORE_INDEX_SYMBOLS
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.strategy.monitor import format_alert_quote
@@ -1761,11 +1762,11 @@ class QuoteService:
                 table = {"etf": "kline_etf_daily", "index": "kline_index_daily"}.get(asset_type, "kline_daily")
                 daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
                 ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
-                hist_df = (
+                hist_df = guarded_collect(
                     scan_daily_parquet(daily_glob)
                     .filter(pl.col("date") >= cutoff)
-                    .sort(["symbol", "date"])
-                    .collect()
+                    .sort(["symbol", "date"]),
+                    priority="background",
                 )
                 if hist_df.is_empty():
                     return

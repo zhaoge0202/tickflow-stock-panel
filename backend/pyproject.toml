@@ -13,7 +13,9 @@ dependencies = [
     "python-multipart>=0.0.6",
     "sse-starlette>=2.0",
     # Data
-    "polars>=1.0",
+    # 1.44 起含流式引擎 executor 线程调度修复; 上限锁定一个已验证的大版本,
+    # 升级需重跑 scripts/stress_polars_concurrency.py 压测 (并发死锁回归)。
+    "polars>=1.44,<1.45",
     "duckdb>=1.0",
     "pyarrow>=16.0",
     "pandas>=2.2",                # 仅在 BacktestService 边界使用,见 §7.4 / ADR-19
@@ -45,7 +47,7 @@ dependencies = [
 # machines without AVX2/FMA support.
 # Enable with: uv sync --extra legacy-cpu
 legacy-cpu = [
-    "polars[rtcompat]>=1.0",
+    "polars[rtcompat]>=1.44,<1.45",
 ]
 
 # vectorbt 还会引入绘图、交互组件等完整分析栈，仍保持为可选 extras。

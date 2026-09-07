@@ -112,6 +112,29 @@ class Settings(BaseSettings):
     backtest_matrix_cache_prewarm: bool = True
     backtest_matrix_cache_prewarm_years: int = 5
 
+    # polars collect 并发闸 — polars 共享执行器在多线程并发 collect 下存在死锁
+    # (上游 #24448/#25754 同族), 限流并发是社区验证的缓解手段。background 限额
+    # 保证预热/增量等后台计算不占满闸位饿死页面读请求。
+    polars_collect_permits: int = 4
+    polars_collect_background_permits: int = 2
+
+    # 后端自愈看门狗 — 探测 collect 闸与全局写锁, 连续失败即退出交由
+    # supervisor 拉起 (见 app/watchdog.py)。误伤防护靠保守阈值。
+    watchdog_enabled: bool = True
+    watchdog_interval_s: float = 30.0
+    watchdog_probe_timeout_s: float = 15.0
+    watchdog_failure_threshold: int = 2
+
+    # 策略批量执行 (run_all / 策略页全量跑) 的并发 worker 上限。实测 2026-09-07:
+    # polars eager 操作内部已多线程并行, 外层再并发 4 worker 属超订, 41 策略
+    # 299.6s 慢于串行 — 默认 1 (串行)。保留开关供配合 POLARS_MAX_THREADS 调优实验。
+    strategy_run_all_workers: int = 1
+
+    # run_all 渐进式返回: HTTP 同步等待时限 (秒)。策略按历史耗时升序执行,
+    # 到点后已算完的随响应返回, 未算完的转后台继续算并逐个写入策略缓存,
+    # 前端轮询 cached-summary 点亮卡片。0 = 关闭 (整段阻塞, 旧行为)。
+    strategy_run_all_first_return_s: float = 15.0
+
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""
@@ -140,6 +163,20 @@ class Settings(BaseSettings):
             raise ValueError("ai_max_output_tokens must be positive")
         if self.ai_context_window <= 0:
             raise ValueError("ai_context_window must be positive")
+        if self.polars_collect_permits < 2:
+            raise ValueError("polars_collect_permits must be >= 2")
+        if not 1 <= self.polars_collect_background_permits < self.polars_collect_permits:
+            raise ValueError(
+                "polars_collect_background_permits must be in [1, polars_collect_permits)"
+            )
+        if self.watchdog_interval_s <= 0 or self.watchdog_probe_timeout_s <= 0:
+            raise ValueError("watchdog intervals must be positive")
+        if self.watchdog_failure_threshold < 1:
+            raise ValueError("watchdog_failure_threshold must be >= 1")
+        if self.strategy_run_all_workers < 1:
+            raise ValueError("strategy_run_all_workers must be >= 1")
+        if self.strategy_run_all_first_return_s < 0:
+            raise ValueError("strategy_run_all_first_return_s must be >= 0")
         return self
 
     @property
