@@ -1486,7 +1486,7 @@ def update_quote_interval(req: QuoteIntervalIn, request: Request) -> dict:
     """更新行情轮询间隔。按档位自动 clamp。"""
     qs = getattr(request.app.state, "quote_service", None)
     if not qs:
-        return {"interval": req.interval, "min_interval": qs.get_min_interval(), "max_interval": 60.0}
+        return {"interval": req.interval, "min_interval": 6.0, "max_interval": 60.0}
     clamped = qs.set_interval(req.interval)
     return {
         "interval": clamped,
