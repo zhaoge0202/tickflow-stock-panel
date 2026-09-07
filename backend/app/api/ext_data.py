@@ -24,13 +24,15 @@ from app.services.ext_data import (
     apply_config_mapping,
     detect_symbol_candidates,
     ensure_utf8_csv,
+    ext_api_key_field,
     fix_symbol_format,
+    get_ext_api_key,
     infer_fields_from_df,
     parse_upload_file,
     write_ext_parquet,
     rows_to_parquet,
 )
-from app.services.ext_pull import fetch_and_ingest, pull_scheduler
+from app.services.ext_pull import _request_json, fetch_and_ingest, pull_scheduler
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ext-data", tags=["ext-data"])
@@ -70,6 +72,16 @@ class IngestReq(BaseModel):
     rows: list[dict] = Field(..., min_length=1)
 
 
+class PullAuthReq(BaseModel):
+    """拉取接口鉴权方式 (与自定义行情源 AuthConfig 同口径)。
+
+    Key 本体存 secrets_store (secrets.json), 不写入 config.json。
+    """
+    type: Literal["none", "bearer", "header", "query"] = "none"
+    header: str = Field("Authorization", min_length=1, max_length=64)  # bearer/header 用
+    param: str = Field("token", min_length=1, max_length=64)          # query 用
+
+
 class PullConfigReq(BaseModel):
     """定时拉取配置请求。"""
     url: str = Field(..., min_length=1)
@@ -84,6 +96,13 @@ class PullConfigReq(BaseModel):
     time_window_end: str | None = None     # "HH:MM", None=不限
     # 接口按日查询的参数名 (如 "date"): 配置后支持历史回补, 且当日拉取也带日期参数
     date_param: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    # 鉴权方式; 请求中缺省 (None) = 保留现有配置, {"type":"none"} = 关闭鉴权
+    auth: PullAuthReq | None = None
+
+
+class ApiKeyReq(BaseModel):
+    """设置拉取接口 API Key; 空串 = 清除。"""
+    key: str = Field(..., max_length=4096)
 
 
 class DetectUrlReq(BaseModel):
@@ -386,6 +405,10 @@ def delete_config(request: Request, config_id: str):
     store = _store(request)
     if not store.delete(config_id):
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
+    # 同步清掉 secrets.json 里残留的拉取 API Key, 避免同名重建配置时误用旧 Key
+    from app import secrets_store
+
+    secrets_store.clear(ext_api_key_field(config_id))
     _refresh_views(request)
     return {"status": "deleted"}
 
@@ -819,7 +842,7 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
     if not config:
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
 
-    # 保留历史状态字段
+    # 保留历史状态字段; auth 缺省时沿用现有配置 (关闭鉴权需显式传 {"type":"none"})
     old_pull = config.pull
     config.pull = PullConfig(
         url=body.url,
@@ -833,6 +856,7 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         time_window_start=body.time_window_start,
         time_window_end=body.time_window_end,
         date_param=body.date_param,
+        auth=body.auth.model_dump() if body.auth else (old_pull.auth if old_pull else None),
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,
@@ -853,6 +877,38 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
     return {"status": "ok", "pull": config.pull.to_dict()}
 
 
+@router.get("/{config_id}/api-key")
+def get_pull_api_key(request: Request, config_id: str):
+    """查询拉取接口 API Key 状态。只返回脱敏值, 不返回明文。"""
+    store = _store(request)
+    config = store.get(config_id)
+    if not config:
+        raise HTTPException(404, f"配置 '{config_id}' 不存在")
+
+    from app import secrets_store
+
+    key = get_ext_api_key(config_id)
+    return {"key_set": bool(key), "masked_key": secrets_store.mask(key) if key else ""}
+
+
+@router.put("/{config_id}/api-key")
+def set_pull_api_key(request: Request, config_id: str, body: ApiKeyReq):
+    """设置 (或空串清除) 拉取接口的 API Key, 存 secrets.json (权限 0600)。"""
+    store = _store(request)
+    config = store.get(config_id)
+    if not config:
+        raise HTTPException(404, f"配置 '{config_id}' 不存在")
+
+    from app import secrets_store
+
+    value = body.key.strip()
+    if value:
+        secrets_store.save({ext_api_key_field(config_id): value})
+    else:
+        secrets_store.clear(ext_api_key_field(config_id))
+    return {"status": "ok", "key_set": bool(value), "masked_key": secrets_store.mask(value) if value else ""}
+
+
 @router.post("/{config_id}/pull/test")
 async def test_pull(request: Request, config_id: str):
     """测试拉取：请求外部 API 并返回预览数据，不写入。"""
@@ -863,23 +919,12 @@ async def test_pull(request: Request, config_id: str):
     if not config.pull or not config.pull.url:
         raise HTTPException(400, "拉取未配置或 URL 为空")
 
-    # 临时构建一个带新配置的 config 用于测试
-    from app.services.ext_pull import _extract_rows, _apply_field_map, outbound_headers
-    import httpx
+    # 复用正式拉取的请求实现 (UA 标识头 + 鉴权注入同一套口径), 不带日期参数
+    from app.services.ext_pull import _apply_field_map, _extract_rows
 
     pull = config.pull
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = outbound_headers(pull.headers)
-            kwargs: dict = {"headers": headers}
-            if pull.method.upper() == "POST" and pull.body:
-                kwargs["content"] = pull.body
-                if "content-type" not in {k.lower() for k in headers}:
-                    kwargs["headers"]["Content-Type"] = "application/json"
-            resp = await client.request(pull.method.upper(), pull.url, **kwargs)
-            resp.raise_for_status()
-            data = resp.json()
-
+        data = await _request_json(pull, config.id)
         rows = _extract_rows(data, pull.response_path)
         preview = _apply_field_map(rows[:5], pull.field_map)
         return {

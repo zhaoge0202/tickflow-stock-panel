@@ -15,6 +15,7 @@ import httpx
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
+    PullConfig,
     rows_to_parquet,
 )
 
@@ -131,6 +132,37 @@ def _with_date_param(url: str, date_param: str | None, day: date) -> str:
     return f"{url}{sep}{date_param}={day.isoformat()}"
 
 
+def _apply_auth(config_id: str, auth: dict | None, url: str, headers: dict[str, str]) -> str:
+    """把 secrets_store 里的 API Key 注入出站请求。
+
+    鉴权三型与自定义行情源 AuthConfig 同口径: bearer → {header: "Bearer <key>"},
+    header → {header: <key>}, query → ?{param}=<key>。Key 只存 secrets.json,
+    不落 config.json; 配置了鉴权但未设置 Key 时 fail-closed 直接报错,
+    避免不带凭据请求被服务端记成无效调用。返回 (可能追加了参数的) url。
+    """
+    from urllib.parse import quote
+
+    from app.services.ext_data import get_ext_api_key
+
+    auth_type = str((auth or {}).get("type") or "none").lower()
+    if auth_type == "none":
+        return url
+    key = get_ext_api_key(config_id)
+    if not key:
+        raise ValueError(f"已配置 {auth_type} 鉴权但未设置 API Key, 请在拉取设置中填写")
+    if auth_type == "bearer":
+        headers[str(auth.get("header") or "Authorization")] = f"Bearer {key}"
+    elif auth_type == "header":
+        headers[str(auth.get("header") or "Authorization")] = key
+    elif auth_type == "query":
+        name = str(auth.get("param") or "token")
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{name}={quote(key, safe='')}"
+    else:
+        raise ValueError(f"未知鉴权类型: {auth_type!r} (可选 none/bearer/header/query)")
+    return url
+
+
 def _assert_rows_date(rows: list[dict], day: date) -> None:
     """金融契约: 响应行的 date 字段 (若提供) 必须与请求日期一致。
 
@@ -152,6 +184,31 @@ def _assert_rows_date(rows: list[dict], day: date) -> None:
             )
 
 
+async def _request_json(pull: PullConfig, config_id: str, day: date | None = None) -> Any:
+    """发起一次拉取请求并返回解析后的 JSON。
+
+    正式拉取 (带日期参数) 与设置页"测试" (不带) 共用同一实现,
+    保证 UA 标识头与 API Key 鉴权注入只有一套口径。
+    """
+    url = _with_date_param(pull.url, pull.date_param, day) if day else pull.url
+    async with httpx.AsyncClient(timeout=30) as client:
+        headers = outbound_headers(pull.headers)
+        url = _apply_auth(config_id, pull.auth, url, headers)
+        kwargs: dict[str, Any] = {"headers": headers}
+
+        if pull.method.upper() == "POST" and pull.body:
+            kwargs["content"] = pull.body
+            if "content-type" not in {k.lower() for k in headers}:
+                kwargs["headers"]["Content-Type"] = "application/json"
+
+        resp = await client.request(pull.method.upper(), url, **kwargs)
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except Exception as e:
+            raise ValueError(f"响应不是有效 JSON: {e}") from e
+
+
 async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict]:
     """按日期请求外部 API 并解析为行 (不写盘)。空数据返回 []。
 
@@ -162,24 +219,7 @@ async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict
     if not pull or not pull.url:
         raise ValueError("拉取未配置或 URL 为空")
 
-    url = _with_date_param(pull.url, pull.date_param, target_date)
-    async with httpx.AsyncClient(timeout=30) as client:
-        headers = outbound_headers(pull.headers)
-        kwargs: dict[str, Any] = {"headers": headers}
-
-        if pull.method.upper() == "POST" and pull.body:
-            kwargs["content"] = pull.body
-            if "content-type" not in {k.lower() for k in headers}:
-                kwargs["headers"]["Content-Type"] = "application/json"
-
-        resp = await client.request(pull.method.upper(), url, **kwargs)
-        resp.raise_for_status()
-
-    # 解析 JSON
-    try:
-        data = resp.json()
-    except Exception as e:
-        raise ValueError(f"响应不是有效 JSON: {e}") from e
+    data = await _request_json(pull, config.id, day=target_date)
 
     # 提取行
     rows = _extract_rows(data, pull.response_path)

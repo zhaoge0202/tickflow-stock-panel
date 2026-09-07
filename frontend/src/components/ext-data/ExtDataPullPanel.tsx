@@ -1,7 +1,14 @@
-import { useState } from 'react'
-import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History } from 'lucide-react'
-import { api, type ExtDataBackfillResult, type ExtDataConfig } from '@/lib/api'
+import { useEffect, useState } from 'react'
+import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History, KeyRound } from 'lucide-react'
+import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth } from '@/lib/api'
 import { toast } from '@/components/Toast'
+
+const AUTH_TYPE_LABELS: Record<ExtPullAuth['type'], string> = {
+  none: '无',
+  bearer: 'Bearer Token',
+  header: '自定义请求头',
+  query: 'URL 查询参数',
+}
 
 export function ExtDataPullPanel({ config, onSaved }: {
   config: ExtDataConfig
@@ -23,6 +30,19 @@ export function ExtDataPullPanel({ config, onSaved }: {
   const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
   const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
+
+  // 接口鉴权: 方式入 pull 配置; Key 本体只存后端 secrets.json
+  const [authType, setAuthType] = useState<ExtPullAuth['type']>(pull?.auth?.type ?? 'none')
+  const [authHeader, setAuthHeader] = useState(pull?.auth?.header ?? 'Authorization')
+  const [authParam, setAuthParam] = useState(pull?.auth?.param ?? 'token')
+  const [apiKey, setApiKey] = useState('')
+  const [keyDirty, setKeyDirty] = useState(false)
+  const [keyInfo, setKeyInfo] = useState<{ key_set: boolean; masked_key: string } | null>(null)
+
+  useEffect(() => {
+    api.extDataApiKey(config.id).then(setKeyInfo).catch(() => {})
+  }, [config.id])
+
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [running, setRunning] = useState(false)
@@ -51,9 +71,14 @@ export function ExtDataPullPanel({ config, onSaved }: {
     if (headers === null) return null
     const field_map = parseJson(fieldMapStr, '字段映射')
     if (field_map === null) return null
+    const auth: ExtPullAuth = {
+      type: authType,
+      header: authHeader.trim() || 'Authorization',
+      param: authParam.trim() || 'token',
+    }
     return {
       url, method, headers, body: body || undefined,
-      response_path: responsePath, field_map,
+      response_path: responsePath, field_map, auth,
       schedule_minutes: schedule, enabled: enabledOverride ?? enabled,
       time_window_start: timeWindowStart || null,
       time_window_end: timeWindowEnd || null,
@@ -61,11 +86,22 @@ export function ExtDataPullPanel({ config, onSaved }: {
     }
   }
 
+  // Key 输入有改动时随配置一起保存 (空输入=清除); 未改动则跳过
+  const saveKeyIfNeeded = () =>
+    keyDirty
+      ? api.extDataApiKeySet(config.id, apiKey).then(r => {
+        setKeyInfo({ key_set: r.key_set, masked_key: r.masked_key })
+        setKeyDirty(false)
+        setApiKey('')
+      })
+      : Promise.resolve()
+
   const handleSave = (silent = false) => {
     const payload = buildPayload()
     if (!payload) return
     setSaving(true); setError('')
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => {
         onSaved()
         if (!silent) toast('配置已保存', 'success')
@@ -78,7 +114,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
     setTesting(true); setError(''); setTestResult(null)
     const payload = buildPayload()
     if (!payload) { setTesting(false); return }
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => api.extDataPullTest(config.id))
       .then(r => { setTestResult(r); onSaved() })
       .catch(e => setError(e.message || '测试失败'))
@@ -121,7 +158,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
     const payload = buildPayload(next)
     if (!payload) return
     setToggling(true); setError(''); setEnabled(next)
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => {
         onSaved()
         toast(next ? '定时拉取已启用 · 立即执行首次拉取' : '定时拉取已关闭', 'success')
@@ -173,10 +211,74 @@ export function ExtDataPullPanel({ config, onSaved }: {
           <div className="text-[10px] text-muted mb-1">Headers (JSON，可选)</div>
           <textarea
             value={headerStr} onChange={e => setHeaderStr(e.target.value)}
-            placeholder='{"Authorization": "Bearer xxx"}'
+            placeholder='{"X-Custom": "value"}'
             rows={2}
             className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40 resize-none"
           />
+        </div>
+
+        {/* ===== 接口鉴权 (API Key) ===== */}
+        <div className="rounded-card border border-border/60 bg-elevated/30 p-2.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-secondary">
+              <KeyRound className="h-3 w-3 text-muted" />
+              <span>接口鉴权 (API Key)</span>
+            </div>
+            {authType !== 'none' && keyInfo && (
+              <span className={`text-[9px] ${keyInfo.key_set ? 'text-emerald-500' : 'text-amber-500'}`}>
+                {keyInfo.key_set ? `已设置 ${keyInfo.masked_key}` : '未设置 Key'}
+              </span>
+            )}
+          </div>
+          <div className={`grid gap-2 ${authType === 'none' ? '' : 'grid-cols-2'}`}>
+            <div>
+              <div className="text-[10px] text-muted mb-1">鉴权方式</div>
+              <select
+                value={authType}
+                onChange={e => setAuthType(e.target.value as ExtPullAuth['type'])}
+                className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground"
+              >
+                {Object.entries(AUTH_TYPE_LABELS).map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+            </div>
+            {authType === 'query' && (
+              <div>
+                <div className="text-[10px] text-muted mb-1">参数名</div>
+                <input
+                  value={authParam} onChange={e => setAuthParam(e.target.value)}
+                  placeholder="token"
+                  className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+                />
+              </div>
+            )}
+            {(authType === 'bearer' || authType === 'header') && (
+              <div>
+                <div className="text-[10px] text-muted mb-1">请求头名称</div>
+                <input
+                  value={authHeader} onChange={e => setAuthHeader(e.target.value)}
+                  placeholder="Authorization"
+                  className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+                />
+              </div>
+            )}
+          </div>
+          {authType !== 'none' && (
+            <>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => { setApiKey(e.target.value); setKeyDirty(true) }}
+                autoComplete="new-password"
+                placeholder={keyInfo?.key_set ? '输入新 Key 覆盖 · 清空后保存 = 删除' : '输入 API Key'}
+                className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[11px] font-mono text-foreground placeholder:text-muted/40"
+              />
+              <div className="text-[9px] text-muted/70">
+                Key 仅存本机 secrets.json (不写入配置文件、不随配置导出)；随"保存配置 / 测试"一起生效。
+              </div>
+            </>
+          )}
         </div>
 
         {method === 'POST' && (

@@ -42,6 +42,7 @@ class PullConfig:
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
         "next_run", "time_window_start", "time_window_end", "date_param",
+        "auth",
     )
 
     def __init__(
@@ -62,6 +63,7 @@ class PullConfig:
         time_window_start: str | None = None,
         time_window_end: str | None = None,
         date_param: str | None = None,
+        auth: dict | None = None,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -81,6 +83,9 @@ class PullConfig:
         # 接口按日期查询的参数名 (如 "date"): 非 None 时请求
         # 带 ?{date_param}=YYYY-MM-DD, 支持历史回补; None = 接口只有当日快照
         self.date_param = date_param
+        # 拉取接口鉴权方式 {"type": "none|bearer|header|query", "header": ..., "param": ...},
+        # 与自定义行情源 AuthConfig 同口径; Key 本体存 secrets_store, 不落 config.json
+        self.auth = auth
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +105,7 @@ class PullConfig:
             "time_window_start": self.time_window_start,
             "time_window_end": self.time_window_end,
             "date_param": self.date_param,
+            "auth": self.auth,
         }
 
     @classmethod
@@ -123,7 +129,22 @@ class PullConfig:
             time_window_start=d.get("time_window_start"),
             time_window_end=d.get("time_window_end"),
             date_param=d.get("date_param"),
+            auth=d.get("auth"),
         )
+
+
+def ext_api_key_field(config_id: str) -> str:
+    """扩展数据拉取 API Key 在 secrets.json 中的字段名。"""
+    return f"ext_{config_id}_api_key"
+
+
+def get_ext_api_key(config_id: str) -> str:
+    """取扩展数据拉取接口的 API Key: secrets.json 优先, 环境变量 EXT_{ID}_API_KEY 兜底。"""
+    from app import secrets_store
+
+    return secrets_store.get_env_backed_secret(
+        ext_api_key_field(config_id), f"EXT_{config_id.upper()}_API_KEY"
+    )
 
 
 class ExtConfig:

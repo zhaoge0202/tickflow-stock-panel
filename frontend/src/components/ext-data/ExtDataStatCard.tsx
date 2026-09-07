@@ -144,7 +144,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
 
       <AnimatePresence>
         {settingsOpen && (
-          <SettingsModal title={`${config.label} · 设置`} onClose={() => setSettingsOpen(false)}>
+          <SettingsModal title={`${config.label} · 设置`} onClose={() => setSettingsOpen(false)} width="max-w-2xl">
             <div className="space-y-3">
               {onEdit && (
                 <button
