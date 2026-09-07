@@ -1,6 +1,7 @@
 """Screener API。"""
 from __future__ import annotations
 
+import contextlib
 import glob as _glob
 import logging
 import math
@@ -14,8 +15,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.config import settings
 from app.db_safe import is_valid_ext_ident, quote_ident
-from app.services import strategy_cache
+from app.services import strategy_cache, strategy_run_queue
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
@@ -379,6 +381,9 @@ def get_cached_summary(request: Request):
         sid: {
             "total": int(result.get("total") or 0),
             "as_of": result.get("as_of"),
+            # 渐进式 run_all 写入的计算时间戳; 监控实时叠加/旧缓存无此字段 → None,
+            # 前端视为新鲜 (有值即为最新一轮实时结果)
+            "computed_at": result.get("computed_at"),
         }
         for sid, result in results.items()
         if isinstance(result, dict)
@@ -497,6 +502,98 @@ def market_snapshot(request: Request):
     return {"as_of": str(as_of), "rows": rows}
 
 
+def _run_all_progressive(
+    *,
+    repo,
+    engine,
+    svc: ScreenerService,
+    as_of,
+    asset_type: str,
+    timeframe: str,
+    all_ids: list[str],
+    params_map: dict,
+    overrides_map: dict,
+    first_return_s: float,
+    t_total: float,
+) -> dict:
+    """run_all 渐进式执行: 快策略随响应先返回, 慢策略后台算完逐个落缓存。
+
+    执行全程在单飞执行器里 (见 services/strategy_run_queue.py): 相同请求
+    搭车现有执行, 不同请求排队; HTTP 侧只轮询状态快照到首返时限。
+    """
+    data_dir = repo.store.data_dir
+    key = (asset_type, timeframe, str(as_of), tuple(sorted(all_ids)))
+    ordered_ids = strategy_run_queue.order_strategy_ids(
+        all_ids, strategy_run_queue.load_run_timings(data_dir)
+    )
+
+    def job(handle: strategy_run_queue.StrategyRunHandle) -> None:
+        context = svc.build_strategy_context(
+            engine,
+            as_of,
+            ordered_ids,
+            timeframe=timeframe,
+            params_map=params_map,
+            overrides_map=overrides_map,
+        )
+        all_results: dict[str, dict] = {}
+        elapsed_map: dict[str, float] = {}
+        for sid in ordered_ids:
+            t0 = time.perf_counter()
+            single = engine.run_all(
+                context,
+                params_map=params_map,
+                overrides_map=overrides_map,
+                strategy_ids=[sid],
+                parallel=False,
+            )
+            result = single[sid]
+            payload = {
+                "total": result.total,
+                "as_of": str(as_of),
+                "rows": _safe(asdict(result)).get("rows", []),
+                "computed_at": int(time.time() * 1000),
+            }
+            all_results[sid] = payload
+            elapsed_map[sid] = (time.perf_counter() - t0) * 1000
+            # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到
+            try:
+                strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
+            except Exception:
+                logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
+            handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
+        # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序
+        if all_results:
+            with contextlib.suppress(Exception):
+                strategy_cache.write_cache(data_dir, str(as_of), all_results)
+        strategy_run_queue.record_run_timings(data_dir, elapsed_map)
+
+    handle = strategy_run_queue.MANAGER.get_or_submit(key, ordered_ids, job)
+    deadline = time.perf_counter() + first_return_s
+    snap = handle.snapshot()
+    while not snap["done"] and time.perf_counter() < deadline:
+        time.sleep(0.2)
+        snap = handle.snapshot()
+
+    done_results = snap["results"]
+    if snap["error"] and not done_results:
+        raise HTTPException(status_code=500, detail=snap["error"])
+    logger.info(
+        "run_all: first return %.1fms (%d done, %d pending)",
+        (time.perf_counter() - t_total) * 1000,
+        len(done_results),
+        len(snap["pending"]),
+    )
+    return {
+        "as_of": str(as_of),
+        "results": done_results,
+        "pending": snap["pending"],
+        "complete": snap["done"] and not snap["error"],
+        "error": snap["error"],
+        "started_at": snap["started_at_ms"],
+    }
+
+
 @router.post("/run_all")
 def run_all(request: Request, body: Optional[dict] = None):
     """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
@@ -556,6 +653,26 @@ def run_all(request: Request, body: Optional[dict] = None):
         for sid in all_ids
     }
     overrides_map = {sid: all_overrides.get(sid, {}) for sid in all_ids}
+
+    # 渐进式返回 (页面首屏路径): 按历史耗时升序执行, 首返时限内算完的随响应
+    # 返回, 慢策略转后台继续算并逐个写入策略缓存, 前端轮询 cached-summary 点亮。
+    # 仅日线 + summary_only (策略页卡片) 启用; 分钟/明细请求保持整段阻塞。
+    first_return_s = settings.strategy_run_all_first_return_s
+    if body.get("summary_only") and timeframe == "1d" and first_return_s > 0:
+        return _run_all_progressive(
+            repo=repo,
+            engine=engine,
+            svc=svc,
+            as_of=as_of,
+            asset_type=asset_type,
+            timeframe=timeframe,
+            all_ids=all_ids,
+            params_map=params_map,
+            overrides_map=overrides_map,
+            first_return_s=first_return_s,
+            t_total=t_total,
+        )
+
     try:
         context = svc.build_strategy_context(
             engine,

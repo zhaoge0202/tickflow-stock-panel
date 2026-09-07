@@ -10,6 +10,9 @@ const BASE = ''
 type RequestOptions = RequestInit & {
   /** 为 true 时不弹错误 toast（由调用方自行汇总提示，如多图串行队列） */
   quiet?: boolean
+  /** 请求超时毫秒数; null 关闭。默认 30s — 后端依赖 polars, 偶发挂起时无超时
+   *  会占满浏览器同源连接池, 拖垮整页所有请求 (表现为全部排队"已停止")。 */
+  timeoutMs?: number | null
 }
 
 export class ApiError extends Error {
@@ -22,14 +25,39 @@ export class ApiError extends Error {
   }
 }
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+/** 同步计算型接口 (回测/筛选等) 的放宽超时: 合法耗时可能远超轮询类接口。 */
+const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
+
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
-  const { quiet, ...fetchInit } = init ?? {}
+  const { quiet, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchInit } = init ?? {}
   const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
   if (!isFormData) headers['Content-Type'] = 'application/json'
   // 合并调用方传入的 headers (此前会被整体覆盖丢弃)
   Object.assign(headers, fetchInit.headers as Record<string, string> | undefined)
-  const res = await fetch(`${BASE}${path}`, { ...fetchInit, headers })
+  // 自带 signal 的调用方 (上传/串行队列) 由其自行控制中止; 其余走默认超时。
+  const ctl = timeoutMs == null || fetchInit.signal ? undefined : new AbortController()
+  const timeoutSeconds = Math.round((timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS) / 1000)
+  let timer: number | undefined
+  if (ctl && timeoutMs != null) timer = window.setTimeout(() => ctl.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...fetchInit,
+      headers,
+      ...(ctl ? { signal: ctl.signal } : {}),
+    })
+  } catch (err) {
+    if (ctl && err instanceof DOMException && err.name === 'AbortError') {
+      const msg = `请求超时（${timeoutSeconds}s）· ${path.split('?')[0]}`
+      if (!quiet) toast(msg, 'error')
+      throw new ApiError(msg, 0)
+    }
+    throw err
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer)
+  }
   if (!res.ok) {
     let detail = ''
     try {
@@ -364,6 +392,8 @@ export interface ScreenerResult {
 export interface ScreenerResultSummary {
   total: number
   as_of: string
+  /** 渐进式 run_all 写入的计算时间戳 (Unix ms); 监控实时叠加等来源无此字段 */
+  computed_at?: number | null
 }
 
 export interface ScreenerCachedSummary {
@@ -371,6 +401,20 @@ export interface ScreenerCachedSummary {
   results: Record<string, ScreenerResultSummary>
   today_ever_counts: Record<string, number>
   updated_at: number | null
+}
+
+/** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
+export interface ScreenerRunAllSummary {
+  as_of: string | null
+  results: Record<string, ScreenerResultSummary>
+  /** 尚未算完的策略 (后台继续, 逐个写入缓存) */
+  pending?: string[]
+  /** 全部算完时为 true */
+  complete?: boolean
+  /** 后台执行出错时的错误信息 (部分结果仍会返回) */
+  error?: string | null
+  /** 本次执行起点 (Unix ms, 后端时钟), 用于判断缓存结果是否属于本轮 */
+  started_at?: number | null
 }
 
 export interface ScreenerCachedResult {
@@ -2464,16 +2508,18 @@ export const api = {
   screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe }),
     }),
   screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
     }),
   screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock') =>
-    request<{ as_of: string | null; results: Record<string, ScreenerResultSummary> }>(
-      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true }) },
+    request<ScreenerRunAllSummary>(
+      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true }) },
     ),
   screenerCachedSummary: () =>
     request<ScreenerCachedSummary>('/api/screener/cached-summary'),
@@ -2563,6 +2609,7 @@ export const api = {
   }) =>
     request<BacktestResult>('/api/backtest/run', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 
@@ -2656,6 +2703,7 @@ export const api = {
   }) =>
     request<FactorBacktestResult>('/api/backtest/factor/run', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 
@@ -2673,6 +2721,7 @@ export const api = {
   }) =>
     request<FactorBatchResult>('/api/backtest/factor/batch', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 

@@ -48,7 +48,9 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
 
     payload = screener_api.get_cached_summary(_request(tmp_path, realtime))
 
-    assert payload["results"] == {"strategy_a": {"total": 2, "as_of": "2026-07-20"}}
+    assert payload["results"] == {
+        "strategy_a": {"total": 2, "as_of": "2026-07-20", "computed_at": None}
+    }
     assert payload["today_ever_counts"] == {"strategy_a": 4}
     assert "rows" not in payload["results"]["strategy_a"]
 
