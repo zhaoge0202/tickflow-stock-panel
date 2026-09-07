@@ -1,6 +1,7 @@
 """扩展数据服务 — 配置管理 + 文件解析 + Parquet 存储。"""
 from __future__ import annotations
 
+import codecs
 import copy
 import json
 import logging
@@ -453,6 +454,44 @@ def apply_config_mapping(df: pl.DataFrame, config: ExtConfig, data_dir: Path) ->
     return df
 
 
+# 编码识别与转换的分块大小，与 ext_data 上传写入用的块大小一致。
+_TRANSCODE_CHUNK_BYTES = 1024 * 1024
+
+
+def _decodes_as(file_path: Path, encoding: str) -> bool:
+    """整个文件能否按 encoding 完整解码，逐块判断，不把文件读进内存。"""
+    decoder = codecs.getincrementaldecoder(encoding)()
+    try:
+        with file_path.open("rb") as src:
+            while chunk := src.read(_TRANSCODE_CHUNK_BYTES):
+                decoder.decode(chunk)
+            decoder.decode(b"", True)  # 结尾处的半个字符也算解码失败
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _transcode_to_utf8(file_path: Path, out_path: Path, encoding: str) -> bool:
+    """按 encoding 逐块转成 UTF-8 写入 out_path；解码失败则删除半成品返回 False。
+
+    增量解码器负责跨块边界的多字节字符：GBK 一个汉字两字节，正好落在块边界
+    上时前半截会被留到下一块，不会被误判成解码失败。
+    """
+    decoder = codecs.getincrementaldecoder(encoding)()
+    try:
+        with (
+            file_path.open("rb") as src,
+            out_path.open("w", encoding="utf-8", newline="") as dst,
+        ):
+            while chunk := src.read(_TRANSCODE_CHUNK_BYTES):
+                dst.write(decoder.decode(chunk))
+            dst.write(decoder.decode(b"", True))
+    except UnicodeDecodeError:
+        out_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def ensure_utf8_csv(file_path: Path) -> Path:
     """确保 CSV 文件以 UTF-8 编码可读，非 UTF-8（如 GBK/GB18030）则转换。
 
@@ -463,27 +502,14 @@ def ensure_utf8_csv(file_path: Path) -> Path:
     返回值：若已是 UTF-8 则返回原路径；否则在同目录写一个 *.utf8 文件并返回它
     （调用方用临时目录，随目录一起清理）。
     """
-    raw = file_path.read_bytes()
     # BOM 处理：UTF-8-SIG 等带 BOM 文件直接交给 Polars（它认识 BOM）
-    try:
-        raw.decode("utf-8")
+    if _decodes_as(file_path, "utf-8"):
         return file_path  # 已是合法 UTF-8
-    except UnicodeDecodeError:
-        pass
     # 依次尝试常见中文编码，第一个能完整解码的即为命中
     for enc in ("gb18030", "gbk", "gb2312", "big5"):
-        try:
-            text = raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
         out_path = file_path.with_suffix(file_path.suffix + ".utf8")
-        # newline="" 关闭写入时的换行转换。默认转换在 Windows 上把文本里的 \n
-        # 写成 \r\n，源文件本来就是 CRLF 时就变成 \r\r\n，多出来的 \r 被 Polars
-        # 当作最后一列内容的一部分：列名变成 "收盘价\r"，每行的值变成 "12.34\r"，
-        # 该列于是被推断为字符串而不是数值。本函数针对的同花顺/东财/通达信和
-        # Windows Excel 导出文件用的正是 CRLF。
-        with out_path.open("w", encoding="utf-8", newline="") as f:
-            f.write(text)
+        if not _transcode_to_utf8(file_path, out_path, enc):
+            continue
         logger.info("CSV 编码转换 %s → %s (%s)", file_path.name, out_path.name, enc)
         return out_path
     # 都无法解码：返回原路径，让 Polars 抛出更精确的原始错误
