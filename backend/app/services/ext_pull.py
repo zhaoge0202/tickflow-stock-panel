@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from app.market_time import cn_now, cn_today
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -43,14 +44,19 @@ def outbound_headers(user_headers: dict[str, str] | None = None) -> dict[str, st
 
 
 def _in_time_window(start: str | None, end: str | None) -> bool:
-    """检查当前本地时间是否在每日时间窗口内。
+    """检查当前北京时间是否在每日时间窗口内。
 
     start/end 为 "HH:MM" 格式。两者都为 None 时不限制(返回 True)。
     支持跨午夜窗口(如 22:00-02:00)。
+
+    用北京时间而不是本地时间: 这个窗口是照着 A 股交易时段设的, 而
+    market_time 模块开篇就写明「服务器/容器本地时区不可靠 (python:slim
+    镜像默认 UTC)」。UTC 容器里 9:30-15:00 的窗口实际落在北京 17:30-23:00,
+    每天都在收盘之后。
     """
     if not start or not end:
         return True
-    now = datetime.now().strftime("%H:%M")
+    now = cn_now().strftime("%H:%M")
     if start <= end:
         return start <= now < end
     # 跨午夜: 如 22:00-02:00
@@ -258,7 +264,8 @@ async def fetch_and_ingest(
     Returns:
         (rows_written, date_str)
     """
-    day = target_date or date.today()
+    # 同上: 落盘分区按北京日期, 否则 UTC 容器在北京时间 08:00 之前写的是前一天。
+    day = target_date or cn_today()
     rows = await fetch_rows_for_date(config, day)
     if not rows:
         raise ValueError("提取到的行数为 0")
