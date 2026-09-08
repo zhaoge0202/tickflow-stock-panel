@@ -109,6 +109,22 @@ _auction_result_cache_lock = threading.Lock()
 _AUCTION_RESULT_CACHE_TTL_S = 30.0
 
 
+def _invalidate_auction_result_cache(
+    data_dir: Path,
+    trade_dates: set[str] | None = None,
+) -> None:
+    """失效受行情写入影响的竞价结果缓存。"""
+    data_key = str(Path(data_dir).resolve())
+    with _auction_result_cache_lock:
+        stale_keys = [
+            key for key in _auction_result_cache
+            if key[0] == data_key
+            and (trade_dates is None or key[1] in trade_dates)
+        ]
+        for key in stale_keys:
+            _auction_result_cache.pop(key, None)
+
+
 def append_many(
     data_dir: Path,
     records: list[dict],
@@ -126,6 +142,11 @@ def append_many(
     ingest_ts = int(time.time() * 1000)
     rows = [_normalize_record(r, source=source, ingest_ts=ingest_ts) for r in records]
     rows = [r for r in rows if r is not None]
+    if rows:
+        _invalidate_auction_result_cache(
+            data_dir,
+            {str(row["trade_date"]) for row in rows},
+        )
     key = str(data_dir)
     now = time.monotonic()
     keep_series = None
@@ -154,7 +175,9 @@ def append_many(
             or now - _last_flush[key] >= FLUSH_INTERVAL_S
         )
     if should_flush:
-        flush(data_dir)
+        summary["written"] = flush(data_dir)
+    else:
+        summary["written"] = 0
     return summary
 
 
@@ -173,6 +196,7 @@ def flush(data_dir: Path) -> int:
         grouped[(row["trade_date"], row["hour"])].append(row)
 
     written = 0
+    flushed_dates: set[str] = set()
     for (trade_date, hour), part_rows in grouped.items():
         target_dir = data_dir / "quote_ticks" / f"date={trade_date}" / f"hour={hour}"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -180,10 +204,13 @@ def flush(data_dir: Path) -> int:
         try:
             _quote_tick_frame(part_rows).write_parquet(path)
             written += len(part_rows)
+            flushed_dates.add(trade_date)
         except Exception as e:
             logger.warning("quote_ticks 写入失败(%s): %s", path, e)
             with _lock:
                 _buffers[key] = part_rows + _buffers.get(key, [])
+    if flushed_dates:
+        _invalidate_auction_result_cache(data_dir, flushed_dates)
     return written
 
 
@@ -384,6 +411,7 @@ def auction_result_fields(
                     pl.col("event_ts").cast(pl.Int64, strict=False),
                     pl.col("ingest_ts").cast(pl.Int64, strict=False),
                     pl.col("price_type").cast(pl.Utf8, strict=False),
+                    pl.col("market_phase").cast(pl.Utf8, strict=False),
                     pl.col("last_price").cast(pl.Float64, strict=False),
                     pl.col("volume").cast(pl.Float64, strict=False),
                     pl.col("amount").cast(pl.Float64, strict=False),
@@ -392,6 +420,7 @@ def auction_result_fields(
                     pl.col("symbol").is_not_null()
                     & pl.col("event_ts").is_between(start_ms, end_ms, closed="left")
                     & pl.col("price_type").fill_null("trade").ne("auction_reference")
+                    & pl.col("market_phase").fill_null("").ne("preopen_auction")
                     & (pl.col("last_price") > 0)
                     & (pl.col("volume") > 0)
                 )
@@ -478,6 +507,7 @@ def minute_bars_from_ticks(
                         "volume": pl.Float64,
                         "amount": pl.Float64,
                         "price_type": pl.Utf8,
+                        "market_phase": pl.Utf8,
                         "source": pl.Utf8,
                         "_baseline": pl.Boolean,
                     }
@@ -497,6 +527,7 @@ def minute_bars_from_ticks(
                     pl.col("volume").cast(pl.Float64, strict=False),
                     pl.col("amount").cast(pl.Float64, strict=False),
                     pl.col("price_type").cast(pl.Utf8, strict=False),
+                    pl.col("market_phase").cast(pl.Utf8, strict=False),
                     pl.col("source").cast(pl.Utf8, strict=False),
                 ])
                 .filter(
@@ -504,7 +535,6 @@ def minute_bars_from_ticks(
                     & (pl.col("source").fill_null("tdxapi") == "tdxapi")
                     & pl.col("event_ts").is_not_null()
                     & (pl.col("last_price") > 0)
-                    & (pl.col("price_type").fill_null("trade") != "auction_reference")
                 )
                 .with_columns(pl.lit(baseline).alias("_baseline"))
                 .with_columns(
@@ -548,10 +578,12 @@ def minute_bars_from_ticks(
             .sort(["symbol", "_effective_ts"])
             .with_columns([
                 (pl.col("volume") - pl.col("volume").shift(1).over("symbol"))
+                .fill_null(pl.col("volume"))
                 .fill_null(0)
                 .clip(lower_bound=0)
                 .alias("_volume_delta"),
                 (pl.col("amount") - pl.col("amount").shift(1).over("symbol"))
+                .fill_null(pl.col("amount"))
                 .fill_null(0)
                 .clip(lower_bound=0)
                 .alias("_amount_delta"),
@@ -562,11 +594,15 @@ def minute_bars_from_ticks(
             .sort(["symbol", "_dt"])
         )
         # 基线只参与上面相邻快照的差分，不应作为分钟K自身输出。
-        frame = frame.filter(~pl.col("_baseline"))
-        morning_start = datetime.combine(target_date, dt_time(9, 31)).replace(tzinfo=None)
-        morning_end = datetime.combine(target_date, dt_time(11, 31)).replace(tzinfo=None)
-        afternoon_start = datetime.combine(target_date, dt_time(13, 1)).replace(tzinfo=None)
-        afternoon_end = datetime.combine(target_date, dt_time(15, 1)).replace(tzinfo=None)
+        frame = frame.filter(
+            (~pl.col("_baseline"))
+            & (pl.col("price_type").fill_null("trade") != "auction_reference")
+            & (pl.col("market_phase").fill_null("") != "preopen_auction")
+        )
+        morning_start = datetime.combine(target_date, dt_time(9, 30)).replace(tzinfo=None)
+        morning_end = datetime.combine(target_date, dt_time(11, 30)).replace(tzinfo=None)
+        afternoon_start = datetime.combine(target_date, dt_time(13, 0)).replace(tzinfo=None)
+        afternoon_end = datetime.combine(target_date, dt_time(15, 0)).replace(tzinfo=None)
         frame = frame.filter(
             ((pl.col("_dt") >= morning_start) & (pl.col("_dt") < morning_end))
             | ((pl.col("_dt") >= afternoon_start) & (pl.col("_dt") < afternoon_end))

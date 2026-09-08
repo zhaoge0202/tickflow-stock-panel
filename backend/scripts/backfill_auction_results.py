@@ -144,8 +144,12 @@ def _fetch_one(
 
 def _run_day(data_dir: Path, target: date, workers: int) -> dict[str, Any]:
     symbols = _load_symbols(data_dir, target)
+    enriched_symbols = set(symbols)
     existing = quote_tick_store.auction_result_fields(data_dir, target_date=target)
-    existing_symbols = set(existing["symbol"].to_list()) if not existing.is_empty() else set()
+    existing_symbols = (
+        set(existing["symbol"].to_list()) & enriched_symbols
+        if not existing.is_empty() else set()
+    )
     missing = [symbol for symbol in symbols if symbol not in existing_symbols]
     if not missing:
         applied = apply_auction_result_fields_to_enriched(data_dir, target)
@@ -154,8 +158,12 @@ def _run_day(data_dir: Path, target: date, workers: int) -> dict[str, Any]:
             "missing_before": 0,
             "historical_found": 0,
             "written": 0,
-            "errors": 0,
+            "errors": 1 if applied.get("error") else 0,
             "enriched": applied,
+            "error_sample": (
+                [{"symbol": "<enriched>", "error": str(applied["error"])}]
+                if applied.get("error") else []
+            ),
         }
 
     providers = _WorkerProviders()
@@ -207,12 +215,35 @@ def _run_day(data_dir: Path, target: date, workers: int) -> dict[str, Any]:
             source="tdxapi_auction_result_history",
             force_flush=True,
         )
-        quote_tick_store._auction_result_cache.clear()
     else:
         append_summary = {}
 
     applied = apply_auction_result_fields_to_enriched(data_dir, target)
-    found_symbols = {row.get("symbol") for row in found}
+    if applied.get("error"):
+        errors.append({"symbol": "<enriched>", "error": str(applied["error"])})
+    found_symbols = {
+        str(row.get("symbol") or "") for row in found
+    } & enriched_symbols
+    expected_populated = len(existing_symbols | found_symbols)
+    if (
+        expected_populated > 0
+        and int(applied.get("populated", 0)) < expected_populated
+    ):
+        errors.append({
+            "symbol": "<enriched>",
+            "error": (
+                f"enriched 竞价覆盖不足: "
+                f"{applied.get('populated', 0)}/{expected_populated}"
+            ),
+        })
+    if records and int(append_summary.get("written", 0)) < len(records):
+        errors.append({
+            "symbol": "<quote_ticks>",
+            "error": (
+                f"quote_ticks 写入不足: "
+                f"{append_summary.get('written', 0)}/{len(records)}"
+            ),
+        })
     return {
         "symbols": len(symbols),
         "missing_before": len(missing),

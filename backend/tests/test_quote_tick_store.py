@@ -110,6 +110,7 @@ def test_auction_result_fields_ignore_reference_and_use_real_trade(tmp_path):
             "volume": 637.0,
             "amount": None,
             "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
             "source": "tdxapi",
         },
         {
@@ -143,6 +144,147 @@ def test_auction_result_fields_ignore_reference_and_use_real_trade(tmp_path):
     assert row["auction_result_price"] == 8.26
     assert row["auction_result_volume"] == 1102.0
     assert row["auction_result_amount"] == 910372.0
+
+
+def test_auction_result_cache_invalidates_after_new_tick(tmp_path):
+    quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE,
+    )
+    quote_tick_store.append_many(
+        tmp_path,
+        [{
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "last_price": 8.26,
+            "volume": 1102.0,
+            "amount": 910372.0,
+            "price_type": "trade",
+            "market_phase": "open_confirm",
+        }],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    result = quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE,
+    )
+
+    assert result.height == 1
+    assert result["auction_result_price"].item() == 8.26
+
+
+def test_apply_auction_result_uses_enriched_adjustment_ratio(tmp_path):
+    from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+
+    target = TRADE_DATE
+    enriched_path = (
+        tmp_path / "kline_daily_enriched" / f"date={target.isoformat()}" / "part.parquet"
+    )
+    enriched_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600177.SH"],
+        "date": [target],
+        "open": [9.0],
+        "high": [9.5],
+        "low": [8.5],
+        "close": [9.0],
+        "raw_close": [10.0],
+        "raw_high": [10.5],
+        "raw_low": [8.5],
+        "volume": [1000.0],
+        "amount": [900000.0],
+    }).write_parquet(enriched_path)
+    quote_tick_store.append_many(
+        tmp_path,
+        [{
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "last_price": 8.0,
+            "volume": 100.0,
+            "amount": 80000.0,
+            "price_type": "trade",
+            "market_phase": "open_confirm",
+        }],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    result = apply_auction_result_fields_to_enriched(tmp_path, target)
+    saved = pl.read_parquet(enriched_path)
+
+    assert result["changed"] is True
+    assert saved["auction_result_price"].item() == 7.2
+    assert saved["auction_result_volume"].item() == 100.0
+
+
+def test_minute_bars_from_ticks_keeps_session_opening_buckets(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 0),
+            "ingest_ts": _ms(9, 25, 1),
+            "last_price": 8.20,
+            "volume": 100.0,
+            "amount": 82000.0,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 30, 0),
+            "ingest_ts": _ms(9, 30, 1),
+            "last_price": 8.21,
+            "volume": 120.0,
+            "amount": 98520.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 31, 1),
+            "last_price": 8.22,
+            "volume": 150.0,
+            "amount": 123300.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(13, 0, 0),
+            "ingest_ts": _ms(13, 0, 1),
+            "last_price": 8.23,
+            "volume": 200.0,
+            "amount": 164600.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(13, 1, 0),
+            "ingest_ts": _ms(13, 1, 1),
+            "last_price": 8.24,
+            "volume": 260.0,
+            "amount": 197760.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=True,
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 30),
+        datetime(2026, 7, 8, 9, 31),
+        datetime(2026, 7, 8, 13, 0),
+        datetime(2026, 7, 8, 13, 1),
+    ]
+    assert result["volume"].to_list() == [20.0, 30.0, 50.0, 60.0]
 
 
 def test_minute_bars_from_ticks_uses_older_snapshot_as_cumulative_baseline(
@@ -238,7 +380,7 @@ def test_minute_bars_from_ticks_aligns_stale_event_time_to_ingest_time(tmp_path)
         datetime(2026, 7, 8, 9, 45),
         datetime(2026, 7, 8, 9, 46),
     ]
-    assert result["volume"].to_list() == [0.0, 20.0]
+    assert result["volume"].to_list() == [90.0, 20.0]
 
 
 def test_latest_can_read_historical_date_without_duplicate_rows(tmp_path):

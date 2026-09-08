@@ -1115,7 +1115,7 @@ def attach_auction_result_fields(
 def apply_auction_result_fields_to_enriched(
     data_dir: Path,
     target_date: date,
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | str]:
     """把当天 quote_ticks 的真实竞价结果补进 enriched 分区。"""
     from app.services import quote_tick_store
 
@@ -1128,7 +1128,54 @@ def apply_auction_result_fields_to_enriched(
         return {"rows": 0, "populated": 0, "changed": False}
     try:
         original = pl.read_parquet(path)
-        merged = attach_auction_result_fields(original, data_dir).sort("symbol")
+        base = original
+        missing_exprs = [
+            pl.lit(None, dtype=pl.Float64).alias(field)
+            for field in (
+                "auction_result_price",
+                "auction_result_volume",
+                "auction_result_amount",
+            )
+            if field not in base.columns
+        ]
+        if missing_exprs:
+            base = base.with_columns(missing_exprs)
+        joined = base.join(
+            result,
+            on=["symbol", "date"],
+            how="left",
+            suffix="_raw",
+        )
+        if {"close", "raw_close"}.issubset(joined.columns):
+            adjustment = (
+                pl.when(
+                    pl.col("raw_close").is_not_null()
+                    & (pl.col("raw_close") > 0)
+                )
+                .then(pl.col("close") / pl.col("raw_close"))
+                .otherwise(1.0)
+            )
+        else:
+            adjustment = pl.lit(1.0)
+        updates = [
+            pl.coalesce([
+                pl.col("auction_result_price_raw") * adjustment,
+                pl.col("auction_result_price"),
+            ]).alias("auction_result_price"),
+            pl.coalesce([
+                pl.col("auction_result_volume_raw"),
+                pl.col("auction_result_volume"),
+            ]).alias("auction_result_volume"),
+            pl.coalesce([
+                pl.col("auction_result_amount_raw"),
+                pl.col("auction_result_amount"),
+            ]).alias("auction_result_amount"),
+        ]
+        merged = joined.with_columns(updates).drop([
+            "auction_result_price_raw",
+            "auction_result_volume_raw",
+            "auction_result_amount_raw",
+        ]).sort("symbol")
         changed = not original.equals(merged)
         if changed:
             publication = EnrichedPublication(data_dir, "stock", recover=True)
@@ -1141,7 +1188,7 @@ def apply_auction_result_fields_to_enriched(
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("竞价结果附着 enriched 失败(%s): %s", path, exc)
-        return {"rows": 0, "populated": 0, "changed": False}
+        return {"rows": 0, "populated": 0, "changed": False, "error": str(exc)}
 
 
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:

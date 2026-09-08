@@ -573,14 +573,27 @@ def run_now(
                 "enriched_rows": int(applied.get("rows", 0)),
                 "enriched_populated": int(applied.get("populated", 0)),
             })
+            if applied.get("error"):
+                stage_errors.append(f"auction result: {applied['error']}")
             logger.info(
                 "auction_result: enriched %s/%s 行已附着",
                 applied.get("populated", 0), applied.get("rows", 0),
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning("竞价结果附着 enriched 失败(不阻塞日线管道): %s", e)
+            logger.warning("竞价结果附着 enriched 失败: %s", e)
+            stage_errors.append(f"auction result: {e}")
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
+    # enriched 竞价字段可能刚刚补入磁盘; 清掉消费侧的历史窗口缓存,
+    # 避免策略/动态回放继续持有旧字段。
+    try:
+        from app.services.auction_replay import invalidate_dynamic_history_cache
+        from app.services.screener import ScreenerService
+
+        ScreenerService.clear_history_cache()
+        invalidate_dynamic_history_cache(repo.store.data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("清理竞价消费缓存失败: %s", exc)
 
     # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0

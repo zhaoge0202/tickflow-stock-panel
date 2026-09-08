@@ -103,6 +103,7 @@ class MinuteRefreshService:
         self._round_lock = threading.Lock()  # 同时只允许一轮 (手动触发与定时轮互斥)
         self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
         self._last_quote_snapshot_minute: str | None = None
+        self._last_quote_snapshot_fingerprint: int | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -371,6 +372,12 @@ class MinuteRefreshService:
         )
 
     def _run_local_quote_ticks_round(self, started: float) -> None:
+        # 本地派生与手动/定时刷新共用同一轮锁;写入另外复用 repository 写锁,
+        # 避免与盘后分钟同步的读改写发生覆盖。
+        with self._round_lock:
+            self._run_local_quote_ticks_round_locked(started)
+
+    def _run_local_quote_ticks_round_locked(self, started: float) -> None:
         from app.services import kline_sync, quote_tick_store
 
         symbols = self._universe()
@@ -382,27 +389,52 @@ class MinuteRefreshService:
             self._repo.store.data_dir,
             target_date=cn_today(),
             symbols=symbols,
-            full=lag is None,
+            full=(
+                lag is None
+                or lag > _REPAIR_LAG_MINUTES
+                or self._empty_rounds >= _EMPTY_ROUNDS_TO_REPAIR
+            ),
         )
         if frame.is_empty():
             self._empty_rounds += 1
             self._state.last_error = "quote_ticks returned no minute data"
             return
-        latest_minute = str(frame["datetime"].max())
-        if latest_minute == self._last_quote_snapshot_minute:
-            self._state.last_round_at = time.time()
+        latest_datetime = frame["datetime"].max()
+        latest_minute = str(latest_datetime)
+        latest_rows = (
+            frame
+            .filter(pl.col("datetime") == latest_datetime)
+            .select(["symbol", "datetime", "close", "volume", "amount"])
+            .sort("symbol")
+        )
+        latest_ticks = quote_tick_store.latest(
+            self._repo.store.data_dir,
+            symbols=symbols,
+            target_date=cn_today(),
+        )
+        latest_ingest = max(
+            (int(row.get("ingest_ts") or 0) for row in latest_ticks),
+            default=0,
+        )
+        fingerprint = hash((latest_ingest, tuple(latest_rows.iter_rows())))
+        if (
+            latest_minute == self._last_quote_snapshot_minute
+            and fingerprint == self._last_quote_snapshot_fingerprint
+        ):
             self._state.last_round_ms = (time.perf_counter() - started) * 1000
             self._state.last_rows = 0
             self._state.last_symbols = frame["symbol"].n_unique()
             self._state.last_requests = 0
             self._state.last_mode = "quote_snapshot"
-            self._state.last_error = None
+            self._state.last_error = "quote_ticks unchanged"
             return
         write_started = time.perf_counter()
-        written = kline_sync._write_minute_partition(
-            frame,
-            self._repo.store.data_dir / "kline_minute",
-        )
+        write_lock = getattr(self._repo, "_write_lock", None) or contextlib.nullcontext()
+        with write_lock:
+            written = kline_sync._write_minute_partition(
+                frame,
+                self._repo.store.data_dir / "kline_minute",
+            )
         self._empty_rounds = 0
         self._state.rounds += 1
         self._state.last_round_at = time.time()
@@ -413,6 +445,7 @@ class MinuteRefreshService:
         self._state.last_mode = "quote_snapshot"
         self._state.last_error = None
         self._last_quote_snapshot_minute = latest_minute
+        self._last_quote_snapshot_fingerprint = fingerprint
         logger.info(
             "全量分钟[quote_snapshot] 第 %d 轮: 聚合 %.0fms, 落盘 %d 行, %d 标的",
             self._state.rounds,

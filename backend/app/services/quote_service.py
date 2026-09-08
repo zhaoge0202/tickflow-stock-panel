@@ -1111,6 +1111,11 @@ class QuoteService:
             provider_name = preferences.get_realtime_data_provider()
             if provider_name != "tdxapi":
                 return
+            # TDX 在周末/休市可能继续返回上一交易日快照; 秒级事实层也必须
+            # 服从工作日守卫, 否则后续回放/分钟派生会把旧快照当成新交易日。
+            if not is_trading_weekday():
+                logger.info("非工作日跳过 quote_ticks 与 quote_latest 写入")
+                return
 
             # MySQL: 全市场最新快照 (有界后台线程, 失败不阻塞行情轮询)
             from app.services.quote_snapshot_ingest import quote_snapshot_ingestor

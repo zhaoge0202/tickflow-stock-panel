@@ -1186,17 +1186,35 @@ def sync_auction_results(request: Request, body: dict | None = None):
     from app.api.data import invalidate_data_cache
     from app.jobs.daily_pipeline import _refresh_single_view
     from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+    from app.services.auction_replay import invalidate_dynamic_history_cache
+    from app.services.screener import ScreenerService
 
     repo = request.app.state.repo
     payload = body or {}
     raw_date = payload.get("date")
-    target = date.fromisoformat(str(raw_date)) if raw_date else repo.latest_daily_date()
+    if raw_date:
+        try:
+            target = date.fromisoformat(str(raw_date))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="date 必须是 YYYY-MM-DD",
+            ) from exc
+    else:
+        target = repo.latest_daily_date()
     if target is None:
         raise HTTPException(status_code=400, detail="本地没有可用的日K日期")
     applied = apply_auction_result_fields_to_enriched(repo.store.data_dir, target)
+    if applied.get("error"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"竞价结果写入失败: {applied['error']}",
+        )
     _refresh_single_view(repo, "kline_enriched")
     repo.clear_cache()
     repo.refresh_cache()
+    ScreenerService.clear_history_cache()
+    invalidate_dynamic_history_cache(repo.store.data_dir)
     invalidate_data_cache("enriched")
     return {"date": target.isoformat(), "enriched": applied}
 
