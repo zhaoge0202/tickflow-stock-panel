@@ -1666,7 +1666,9 @@ async def test_endpoint(req: TestEndpointIn) -> dict:
     import statistics
 
     base = req.url.rstrip("/")
-    rounds = max(1, min(10, req.rounds or _endpoints_cache.get("data", {}).get("testRounds", 5)))
+    # 缓存初值的 "data" 是 None(键存在, get 的默认值不生效), 端点清单未预热时要兜底
+    manifest = _endpoints_cache.get("data") or {}
+    rounds = max(1, min(10, req.rounds or manifest.get("testRounds", 5)))
     health_url = base + "/health"
 
     latencies: list[float] = []
