@@ -1,8 +1,8 @@
 """竞价秒级回放服务。
 
-用于复盘「盘后候选 + 09:23-09:25 最近竞价快照 + 09:25-09:30
-开盘 trade 快照确认」。逐秒帧会沿用最近已知快照, 并显式输出源事件时间和
-stale 秒数; 不会把没有原始事件的秒伪装成真实新 tick。
+用于复盘「盘后候选 + 09:15-09:25 竞价快照(展示最近 09:23-09:25)
++ 09:25-09:30 开盘 trade 快照确认」。逐秒帧会沿用最近已知快照, 并显式
+输出源事件时间和 stale 秒数; 不会把没有原始事件的秒伪装成真实新 tick。
 """
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ from app.services import quote_tick_store, strategy_cache
 logger = logging.getLogger(__name__)
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+# 竞价事实读取从 09:15 开始。部分标的在 09:23 前就不再刷新参考价，
+# 但该值仍是 09:25 前最后一个可用竞价事实，不能因展示窗口起点而丢弃。
+AUCTION_DATA_START = dt_time(9, 15)
+# 对外动态时间线仍从 09:25 的确认阶段展示，避免改变前端已有时序语义。
 AUCTION_START = dt_time(9, 23)
 AUCTION_END = dt_time(9, 25)
 TRADE_END = dt_time(9, 30)
@@ -57,7 +61,7 @@ def replay_cached_strategy_results(
 ) -> dict:
     """按真实 quote_ticks 回放竞价确认过程。
 
-    as_of_ts 传入时只返回该时刻的 frame; 不传时返回 09:23-09:30 的逐秒帧。
+    as_of_ts 传入时只返回该时刻的 frame; 不传时返回 09:25-09:30 的逐秒帧。
     没有新 tick 的秒只延续上一条源快照, 并带 stale_seconds。
     """
     cached = cached or {}
@@ -414,7 +418,7 @@ def backfill_recent_strategy_history(
         quote_rows = _read_quote_window_rows(
             data_dir,
             trade_day,
-            start_ts=_window_start_ms(trade_day, AUCTION_START),
+            start_ts=_window_start_ms(trade_day, AUCTION_DATA_START),
             end_ts=_window_start_ms(trade_day, TRADE_END),
         )
         if not quote_rows:
@@ -886,7 +890,7 @@ def _load_dynamic_history(
 
 
 def _load_dynamic_rows(data_dir: Path, trade_day: date, *, as_of_ts: int | None) -> list[dict]:
-    start_ts = _window_start_ms(trade_day, AUCTION_START)
+    start_ts = _window_start_ms(trade_day, AUCTION_DATA_START)
     window_end_ts = _window_start_ms(trade_day, TRADE_END)
     end_ts = window_end_ts
     if as_of_ts is not None:
@@ -900,7 +904,7 @@ def _load_dynamic_asof_inputs(
     *,
     as_of_ts: int,
 ) -> tuple[list[dict], dict, dict]:
-    start_ts = _window_start_ms(trade_day, AUCTION_START)
+    start_ts = _window_start_ms(trade_day, AUCTION_DATA_START)
     window_end_ts = _window_start_ms(trade_day, TRADE_END)
     end_ts = min(max(int(as_of_ts) + 1, start_ts), window_end_ts)
     entry = _quote_window_cache_entry(data_dir, trade_day)
@@ -940,7 +944,7 @@ def _load_dynamic_asof_inputs(
 
 
 def _read_quote_window_rows(data_dir: Path, trade_day: date, *, start_ts: int, end_ts: int) -> list[dict]:
-    window_start = _window_start_ms(trade_day, AUCTION_START)
+    window_start = _window_start_ms(trade_day, AUCTION_DATA_START)
     window_end = _window_start_ms(trade_day, TRADE_END)
     if start_ts >= window_start and end_ts <= window_end:
         parquet_rows = _quote_window_parquet_rows(data_dir, trade_day)
@@ -1016,7 +1020,7 @@ def _quote_window_cache_entry(data_dir: Path, trade_day: date) -> dict:
     rows = _scan_quote_window_rows(
         data_dir,
         trade_day,
-        start_ts=_window_start_ms(trade_day, AUCTION_START),
+        start_ts=_window_start_ms(trade_day, AUCTION_DATA_START),
         end_ts=_window_start_ms(trade_day, TRADE_END),
         paths=[item[0] for item in fingerprint],
     )
@@ -1606,6 +1610,10 @@ def _payload_base(status: str, signal_date: date, trade_day: date, now: datetime
             "start": AUCTION_START.strftime("%H:%M:%S"),
             "end": AUCTION_END.strftime("%H:%M:%S"),
         },
+        "auction_data_window": {
+            "start": AUCTION_DATA_START.strftime("%H:%M:%S"),
+            "end": AUCTION_END.strftime("%H:%M:%S"),
+        },
         "confirm_window": {
             "start": AUCTION_END.strftime("%H:%M:%S"),
             "end": TRADE_END.strftime("%H:%M:%S"),
@@ -1745,7 +1753,8 @@ def _load_rows(data_dir: Path, trade_day: date, symbols: set[str]) -> list[dict]
 
 
 def _classify_rows(rows: list[dict], trade_day: date) -> dict:
-    auction_start = _window_start_ms(trade_day, AUCTION_START)
+    auction_start = _window_start_ms(trade_day, AUCTION_DATA_START)
+    auction_match_start = _window_start_ms(trade_day, dt_time(9, 20))
     auction_end = _window_start_ms(trade_day, AUCTION_END)
     trade_end = _window_start_ms(trade_day, TRADE_END)
     auction_rows = []
@@ -1753,8 +1762,21 @@ def _classify_rows(rows: list[dict], trade_day: date) -> dict:
     invalid_trade_rows = []
     for row in rows:
         event_ts = int(row.get("event_ts") or 0)
-        if auction_start <= event_ts < auction_end and _is_auction_row(row):
-            auction_rows.append(row)
+        if auction_start <= event_ts < auction_end:
+            if _is_auction_row(row):
+                auction_rows.append(row)
+            elif (
+                event_ts >= auction_match_start
+                and _is_preopen_trade_snapshot(row)
+            ):
+                # 部分 TDX 节点在 09:20 后直接把有撮合量的竞价价放在
+                # K.Close/TotalHand/Amount 中，price_type 会被归一化为
+                # trade；此时若按类型硬过滤，会把真实竞价快照丢掉。
+                # 只在不可撤单阶段(09:20-09:25)且有正价格/成交量额时
+                # 视为竞价快照，不把 09:15-09:20 的昨收快照误算进去。
+                inferred = dict(row)
+                inferred["_auction_inferred"] = True
+                auction_rows.append(inferred)
         elif auction_end <= event_ts < trade_end and _is_trade_row(row):
             if _float_or_none(row.get("last_price")) in (None, 0):
                 invalid_trade_rows.append(row)
@@ -1943,6 +1965,7 @@ def _build_replay_row(
     row.update({
         "auction_replay_status": status,
         "auction_price": auction_price,
+        "auction_snapshot_inferred": bool((auction_row or {}).get("_auction_inferred")),
         "auction_change_pct": _float_or_none((auction_row or {}).get("auction_change_pct")),
         "auction_matched_volume": _float_or_none((auction_row or {}).get("auction_matched_volume")),
         "auction_unmatched_side": (auction_row or {}).get("auction_unmatched_side"),
@@ -1992,11 +2015,16 @@ def _quality(rows: list[dict], classified: dict, symbols: set[str]) -> dict:
     auction_rows = classified["auction_rows"]
     trade_rows = classified["trade_rows"]
     invalid_trade_rows = classified["invalid_trade_rows"]
+    inferred_auction_rows = [
+        row for row in auction_rows if row.get("_auction_inferred")
+    ]
     return {
         "requested_symbols": len(symbols),
         "raw_rows": len(rows),
         "auction_rows": len(auction_rows),
         "auction_symbols": _symbol_count(auction_rows),
+        "auction_inferred_rows": len(inferred_auction_rows),
+        "auction_inferred_symbols": _symbol_count(inferred_auction_rows),
         "trade_rows": len(trade_rows),
         "trade_symbols": _symbol_count(trade_rows),
         "invalid_trade_rows": len(invalid_trade_rows),
@@ -2091,6 +2119,20 @@ def _max_event_ts(rows) -> int | None:
 
 def _is_auction_row(row: dict) -> bool:
     return row.get("price_type") == "auction_reference" or row.get("market_phase") == "preopen_auction"
+
+
+def _is_preopen_trade_snapshot(row: dict) -> bool:
+    """判断 09:20 后被 TDX 归一化为 trade 的竞价快照。"""
+    if row.get("price_type") == "auction_reference":
+        return False
+    return (
+        _positive_float(row.get("last_price")) is not None
+        and (
+            _positive_float(row.get("volume")) is not None
+            or _positive_float(row.get("amount")) is not None
+            or _positive_float(row.get("auction_matched_volume")) is not None
+        )
+    )
 
 
 def _is_trade_row(row: dict) -> bool:

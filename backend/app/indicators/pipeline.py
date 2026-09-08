@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -299,7 +300,11 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
 
     is_ex = pl.col("trade_date") == pl.col("date")
     ratio = pl.col("cum_factor").fill_null(1.0) / pl.col("total_factor").fill_null(1.0)
-    price_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+    price_cols = [
+        c for c in (
+            "open", "high", "low", "close", "auction_result_price",
+        ) if c in df.columns
+    ]
 
     df = df.with_columns(
         [pl.col(c) * ratio for c in price_cols]
@@ -1039,8 +1044,108 @@ def compute_enriched(
     return df
 
 
+def attach_auction_result_fields(
+    df: pl.DataFrame,
+    data_dir: Path,
+) -> pl.DataFrame:
+    """将本地 quote_ticks 的 09:25 成交结果附着到日K输入帧。
+
+    竞价结果是独立的事实层，不属于日K供应商的 OHLCV 响应。按日期读取
+    quote_ticks 的窄列派生表，再按 ``symbol/date`` 左连接；已有值只有在本地
+    事实层提供新值时才覆盖。没有真实竞价成交的标的保留 null，后续策略必须
+    fail-closed，不能把日线 open 当作竞价价。
+    """
+    fields = (
+        "auction_result_price",
+        "auction_result_volume",
+        "auction_result_amount",
+    )
+    if df.is_empty() or "symbol" not in df.columns or "date" not in df.columns:
+        return df
+
+    missing_exprs = [
+        pl.lit(None, dtype=pl.Float64).alias(field)
+        for field in fields
+        if field not in df.columns
+    ]
+    base = df.with_columns(missing_exprs) if missing_exprs else df
+
+    from app.services import quote_tick_store
+
+    frames: list[pl.DataFrame] = []
+    for value in base["date"].drop_nulls().unique().to_list():
+        target_date = value.date() if isinstance(value, datetime) else value
+        if not isinstance(target_date, date):
+            continue
+        # 只扫描存在事实分区的日期；历史日线重算不应为每个交易日反复遍历
+        # quote_ticks 目录。
+        tick_dir = Path(data_dir) / "quote_ticks" / f"date={target_date.isoformat()}"
+        if not tick_dir.exists():
+            continue
+        symbols = (
+            base.filter(pl.col("date") == value)["symbol"]
+            .cast(pl.Utf8)
+            .unique()
+            .to_list()
+        )
+        result = quote_tick_store.auction_result_fields(
+            data_dir,
+            target_date=target_date,
+            symbols=symbols,
+        )
+        if not result.is_empty():
+            frames.append(result)
+    if not frames:
+        return base
+    auction = pl.concat(frames, how="vertical_relaxed").unique(
+        subset=["symbol", "date"], keep="last",
+    )
+    joined = base.join(auction, on=["symbol", "date"], how="left", suffix="_auction")
+    updates = []
+    drops = []
+    for field in fields:
+        right = f"{field}_auction"
+        if right not in joined.columns:
+            continue
+        updates.append(pl.coalesce([pl.col(right), pl.col(field)]).alias(field))
+        drops.append(right)
+    return joined.with_columns(updates).drop(drops)
+
+
+def apply_auction_result_fields_to_enriched(
+    data_dir: Path,
+    target_date: date,
+) -> dict[str, int | bool]:
+    """把当天 quote_ticks 的真实竞价结果补进 enriched 分区。"""
+    from app.services import quote_tick_store
+
+    result = quote_tick_store.auction_result_fields(
+        data_dir,
+        target_date=target_date,
+    )
+    path = Path(data_dir) / "kline_daily_enriched" / f"date={target_date.isoformat()}" / "part.parquet"
+    if result.is_empty() or not path.exists():
+        return {"rows": 0, "populated": 0, "changed": False}
+    try:
+        original = pl.read_parquet(path)
+        merged = attach_auction_result_fields(original, data_dir).sort("symbol")
+        changed = not original.equals(merged)
+        if changed:
+            publication = EnrichedPublication(data_dir, "stock", recover=True)
+            publication.write_parquet(merged, path)
+            publication.commit()
+        return {
+            "rows": merged.height,
+            "populated": int(merged["auction_result_price"].is_not_null().sum()),
+            "changed": changed,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("竞价结果附着 enriched 失败(%s): %s", path, exc)
+        return {"rows": 0, "populated": 0, "changed": False}
+
+
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (14 列)。"""
+    """写入 parquet 前裁剪到存储列。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     result = df.select(cols)
     if {"symbol", "date"}.issubset(result.columns):
@@ -1385,11 +1490,17 @@ def run_pipeline(data_dir: Path | None = None,
             if not hist_df.is_empty():
                 # 只取基础行情列做历史前缀
                 hist_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "auction_result_price",
+                                         "auction_result_volume", "auction_result_amount",
+                                         "raw_close", "raw_high", "raw_low"]
                              if c in hist_df.columns]
                 raw_full = pl.concat([hist_df.select(hist_cols), raw_new], how="diagonal_relaxed")
             else:
                 raw_full = raw_new
+
+            # 竞价结果来自当天 quote_ticks 的真实 09:25 成交行，不能从日K open
+            # 反推。没有事实的历史/停牌标的保留 null，交给策略按数据质量拒绝。
+            raw_full = attach_auction_result_fields(raw_full, d)
 
             enriched_new = compute_enriched(
                 raw_full,
@@ -1430,6 +1541,7 @@ def run_pipeline(data_dir: Path | None = None,
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
             raw_sym = raw_sym.collect(streaming=True)
             if not raw_sym.is_empty():
+                raw_sym = attach_auction_result_fields(raw_sym, d)
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
                 shares_sym = historical_shares.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_shares.is_empty() else historical_shares
@@ -1515,6 +1627,8 @@ def run_pipeline(data_dir: Path | None = None,
 
         if raw.is_empty():
             continue
+
+        raw = attach_auction_result_fields(raw, d)
 
         # 本批的 factors / instruments
         batch_factors = (
@@ -1709,12 +1823,17 @@ def compute_enriched_today(
     ])
     if "_adj_factor" in df.columns:
         af = pl.col("_adj_factor").fill_null(1.0)
-        df = df.with_columns([
+        price_updates = [
             (pl.col("open") * af).alias("open"),
             (pl.col("high") * af).alias("high"),
             (pl.col("low") * af).alias("low"),
             (pl.col("close") * af).alias("close"),
-        ])
+        ]
+        if "auction_result_price" in df.columns:
+            price_updates.append(
+                (pl.col("auction_result_price") * af).alias("auction_result_price")
+            )
+        df = df.with_columns(price_updates)
 
     # ---- volume 统一 Float64 ----
     df = df.with_columns(pl.col("volume").cast(pl.Float64))

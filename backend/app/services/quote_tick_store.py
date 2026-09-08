@@ -101,6 +101,13 @@ _series: dict[str, dict[str, deque[dict]]] = defaultdict(
 _last_flush: dict[str, float] = defaultdict(float)
 _quality: dict[str, dict] = {}
 
+# 09:25 竞价结果是从全市场 quote_ticks 中派生的窄表。实时行情每 3 秒落盘，
+# 不应让 enriched 计算每轮重复扫描数百万条事实；短 TTL 既能复用结果，也能
+# 在 09:25 成交行落盘后及时刷新。
+_auction_result_cache: dict[tuple[str, str], tuple[float, pl.DataFrame]] = {}
+_auction_result_cache_lock = threading.Lock()
+_AUCTION_RESULT_CACHE_TTL_S = 30.0
+
 
 def append_many(
     data_dir: Path,
@@ -318,6 +325,282 @@ def quality(
         "checked_at": now_ms,
     })
     return base
+
+
+def auction_result_fields(
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: list[str] | set[str] | None = None,
+) -> pl.DataFrame:
+    """从当天全市场 quote_ticks 提取 09:25 最终成交结果字段。
+
+    quote_ticks 中 ``auction_reference`` 是竞价过程中的虚拟参考价，不能直接
+    当作成交结果。这里仅取 09:25-09:30 窗口内的真实 ``trade`` 行，并按每只
+    标的最早事件保留一行。TDX 快照里的 volume/amount 是开盘成交后的累计值，
+    在该窗口第一条真实成交行上即为 09:25 成交量/额口径。
+
+    返回列为 ``symbol/date/auction_result_*``，没有事实时返回固定 schema 的空帧。
+    这是本地事实层派生，不访问外部 provider；历史缺失时调用方应保持空值，
+    不得伪造为日线 open。
+    """
+    empty = pl.DataFrame(schema={
+        "symbol": pl.Utf8,
+        "date": pl.Date,
+        "auction_result_price": pl.Float64,
+        "auction_result_volume": pl.Float64,
+        "auction_result_amount": pl.Float64,
+    })
+    ds = target_date.isoformat()
+    cache_key = (str(Path(data_dir).resolve()), ds)
+    now = time.monotonic()
+    with _auction_result_cache_lock:
+        cached = _auction_result_cache.get(cache_key)
+        if cached is not None and now - cached[0] < _AUCTION_RESULT_CACHE_TTL_S:
+            frame = cached[1]
+            if symbols:
+                return frame.filter(pl.col("symbol").is_in(sorted(symbols)))
+            return frame
+
+    base = Path(data_dir) / "quote_ticks" / f"date={ds}"
+    paths = sorted(base.rglob("*.parquet")) if base.exists() else []
+    if not paths:
+        frame = empty
+    else:
+        start_dt = datetime.combine(target_date, dt_time(9, 25)).replace(tzinfo=CN_TZ)
+        end_dt = datetime.combine(target_date, dt_time(9, 30)).replace(tzinfo=CN_TZ)
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+        try:
+            lf = scan_parquet_compat(
+                [str(path) for path in paths],
+                schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                hive_partitioning=False,
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            frame = (
+                lf.select([
+                    pl.col("symbol").cast(pl.Utf8),
+                    pl.col("event_ts").cast(pl.Int64, strict=False),
+                    pl.col("ingest_ts").cast(pl.Int64, strict=False),
+                    pl.col("price_type").cast(pl.Utf8, strict=False),
+                    pl.col("last_price").cast(pl.Float64, strict=False),
+                    pl.col("volume").cast(pl.Float64, strict=False),
+                    pl.col("amount").cast(pl.Float64, strict=False),
+                ])
+                .filter(
+                    pl.col("symbol").is_not_null()
+                    & pl.col("event_ts").is_between(start_ms, end_ms, closed="left")
+                    & pl.col("price_type").fill_null("trade").ne("auction_reference")
+                    & (pl.col("last_price") > 0)
+                    & (pl.col("volume") > 0)
+                )
+                .sort(["symbol", "event_ts", "ingest_ts"])
+                .unique(subset=["symbol"], keep="first")
+                .with_columns([
+                    pl.lit(target_date).cast(pl.Date).alias("date"),
+                    pl.col("last_price").alias("auction_result_price"),
+                    pl.col("volume").alias("auction_result_volume"),
+                    pl.when(pl.col("amount") > 0)
+                    .then(pl.col("amount"))
+                    .otherwise(pl.col("last_price") * pl.col("volume") * 100.0)
+                    .alias("auction_result_amount"),
+                ])
+                .select([
+                    "symbol", "date", "auction_result_price",
+                    "auction_result_volume", "auction_result_amount",
+                ])
+                .collect(engine="streaming")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("竞价结果事实读取失败(%s): %s", base, exc)
+            frame = empty
+
+    with _auction_result_cache_lock:
+        _auction_result_cache[cache_key] = (now, frame)
+    if symbols:
+        return frame.filter(pl.col("symbol").is_in(sorted(symbols)))
+    return frame
+
+
+def minute_bars_from_ticks(
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: list[str] | set[str],
+    full: bool = False,
+) -> pl.DataFrame:
+    """从全市场 quote_ticks 派生当日 1 分钟 K。
+
+    TDX 快照的 volume/amount 是累计值，先按 symbol 计算相邻快照差值，
+    再按分钟聚合。事件时间明显停在上一笔成交时，按同交易段的 ingest 时间
+    对齐，避免无价格变化的股票全天被压进少数几个分钟桶。稳态轮只读最近文件，
+    冷启动或长缺口才扫描当天分区。
+    """
+    schema = {
+        "symbol": pl.Utf8,
+        "datetime": pl.Datetime,
+        "open": pl.Float64,
+        "high": pl.Float64,
+        "low": pl.Float64,
+        "close": pl.Float64,
+        "volume": pl.Float64,
+        "amount": pl.Float64,
+    }
+    empty = pl.DataFrame(schema=schema)
+    wanted = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    base = Path(data_dir) / "quote_ticks" / f"date={target_date.isoformat()}"
+    if not wanted or not base.exists():
+        return empty
+    selected_paths = sorted(base.rglob("*.parquet"))
+    baseline_paths: list[Path] = []
+    if not full:
+        # 最近文件通常只覆盖最后几分钟，而 TDX 的 volume/amount 是从开盘
+        # 累计值。若直接从窗口第一条记录做差，会把整段历史成交量算进第一根
+        # 分钟K。额外读少量更早文件作为每只股票的累计量基线，仍保持稳态轮
+        # 的读取量有界；冷启动(full=True)则扫描全天，不需要这层补偿。
+        selected_paths = _recent_partition_paths(base, max_files=160)
+        recent_with_baseline = _recent_partition_paths(base, max_files=168)
+        selected_set = set(selected_paths)
+        baseline_paths = [
+            path for path in recent_with_baseline if path not in selected_set
+        ]
+    if not selected_paths:
+        return empty
+    try:
+        def _read_paths(paths: list[Path], *, baseline: bool) -> pl.DataFrame:
+            if not paths:
+                return pl.DataFrame(
+                    schema={
+                        "symbol": pl.Utf8,
+                        "event_ts": pl.Int64,
+                        "last_price": pl.Float64,
+                        "volume": pl.Float64,
+                        "amount": pl.Float64,
+                        "price_type": pl.Utf8,
+                        "source": pl.Utf8,
+                        "_baseline": pl.Boolean,
+                    }
+                )
+            lf = scan_parquet_compat(
+                [str(path) for path in paths],
+                schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                hive_partitioning=False,
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            return (
+                lf.select([
+                    pl.col("symbol").cast(pl.Utf8),
+                    pl.col("event_ts").cast(pl.Int64, strict=False),
+                    pl.col("ingest_ts").cast(pl.Int64, strict=False),
+                    pl.col("last_price").cast(pl.Float64, strict=False),
+                    pl.col("volume").cast(pl.Float64, strict=False),
+                    pl.col("amount").cast(pl.Float64, strict=False),
+                    pl.col("price_type").cast(pl.Utf8, strict=False),
+                    pl.col("source").cast(pl.Utf8, strict=False),
+                ])
+                .filter(
+                    pl.col("symbol").is_in(wanted)
+                    & (pl.col("source").fill_null("tdxapi") == "tdxapi")
+                    & pl.col("event_ts").is_not_null()
+                    & (pl.col("last_price") > 0)
+                    & (pl.col("price_type").fill_null("trade") != "auction_reference")
+                )
+                .with_columns(pl.lit(baseline).alias("_baseline"))
+                .with_columns(
+                    pl.when(_should_align_to_ingest_expr(target_date))
+                    .then(pl.col("ingest_ts"))
+                    .otherwise(pl.col("event_ts"))
+                    .alias("_effective_ts")
+                )
+                .collect(engine="streaming")
+            )
+
+        selected_frame = _read_paths(selected_paths, baseline=False)
+        if selected_frame.is_empty():
+            return empty
+        frames = [selected_frame]
+        if baseline_paths:
+            frames.append(_read_paths(baseline_paths, baseline=True))
+        frame = pl.concat(frames, how="vertical_relaxed")
+        if frame.is_empty():
+            return empty
+
+        # 基线只允许落在该 symbol 第一条选中快照之前。这样即使文件修改时间
+        # 与事件时间短暂乱序，也不会用未来累计量污染差分。
+        selected_first = (
+            frame.filter(~pl.col("_baseline"))
+            .group_by("symbol")
+            .agg(pl.col("_effective_ts").min().alias("_first_selected_ts"))
+        )
+        frame = (
+            frame.join(selected_first, on="symbol", how="left")
+            .filter(
+                ~pl.col("_baseline")
+                | (pl.col("_effective_ts") < pl.col("_first_selected_ts"))
+            )
+            .drop("_first_selected_ts")
+        )
+        frame = (
+            frame.with_columns(_event_datetime_expr("_effective_ts").alias("_dt"))
+            .sort(["symbol", "_effective_ts"])
+            .unique(subset=["symbol", "_effective_ts"], keep="last")
+            .sort(["symbol", "_effective_ts"])
+            .with_columns([
+                (pl.col("volume") - pl.col("volume").shift(1).over("symbol"))
+                .fill_null(0)
+                .clip(lower_bound=0)
+                .alias("_volume_delta"),
+                (pl.col("amount") - pl.col("amount").shift(1).over("symbol"))
+                .fill_null(0)
+                .clip(lower_bound=0)
+                .alias("_amount_delta"),
+            ])
+            # unique 之后 Polars 不再保留排序元数据；group_by_dynamic 要求
+            # 每个 symbol 的时间索引显式有序，否则 Windows/不同 Polars 版本
+            # 可能直接报 input data is not sorted。
+            .sort(["symbol", "_dt"])
+        )
+        # 基线只参与上面相邻快照的差分，不应作为分钟K自身输出。
+        frame = frame.filter(~pl.col("_baseline"))
+        morning_start = datetime.combine(target_date, dt_time(9, 31)).replace(tzinfo=None)
+        morning_end = datetime.combine(target_date, dt_time(11, 31)).replace(tzinfo=None)
+        afternoon_start = datetime.combine(target_date, dt_time(13, 1)).replace(tzinfo=None)
+        afternoon_end = datetime.combine(target_date, dt_time(15, 1)).replace(tzinfo=None)
+        frame = frame.filter(
+            ((pl.col("_dt") >= morning_start) & (pl.col("_dt") < morning_end))
+            | ((pl.col("_dt") >= afternoon_start) & (pl.col("_dt") < afternoon_end))
+        )
+        if frame.is_empty():
+            return empty
+        return (
+            frame.group_by_dynamic(
+                "_dt", every="1m", group_by="symbol", closed="left", label="left",
+            )
+            .agg([
+                pl.first("last_price").alias("open"),
+                pl.max("last_price").alias("high"),
+                pl.min("last_price").alias("low"),
+                pl.last("last_price").alias("close"),
+                pl.sum("_volume_delta").alias("volume"),
+                pl.sum("_amount_delta").alias("amount"),
+            ])
+            .rename({"_dt": "datetime"})
+            .select(list(schema))
+            .sort(["symbol", "datetime"])
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("quote_ticks 分钟K聚合失败(%s): %s", base, exc)
+        return empty
+
+
+def _event_datetime_expr(column: str) -> pl.Expr:
+    return (
+        pl.from_epoch(pl.col(column), time_unit="ms")
+        .dt.replace_time_zone("UTC")
+        .dt.convert_time_zone("Asia/Shanghai")
+        .dt.replace_time_zone(None)
+    )
 
 
 def read_ticks(

@@ -14,12 +14,14 @@ monkeypatch 替换; 自定义源侧用内存 fake provider 走真实边界包装
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import polars as pl
 
 from app.services import minute_refresh, preferences
 from app.services.minute_refresh import MinuteRefreshService, _in_continuous_session
+
+TRADE_DATE = date(2026, 8, 25)
 
 
 def _isolated_prefs(tmp_path, monkeypatch):
@@ -166,6 +168,53 @@ def test_run_round_writes_partition_and_updates_status(tmp_path, monkeypatch):
     assert st["last_round_at"] is not None
     assert st["last_error"] is None
     assert st["capability_ok"] is True
+
+
+def test_tdxapi_full_market_can_derive_minutes_from_quote_ticks(
+    tmp_path, monkeypatch,
+):
+    svc = _svc(tmp_path, monkeypatch)
+    svc._repo.store.data_dir = tmp_path
+    svc._app_state.quote_service = type(
+        "QuoteService", (), {"realtime_mode": lambda self: "full_market"}
+    )()
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(preferences, "get_realtime_quotes_enabled", lambda: True)
+    monkeypatch.setattr(minute_refresh, "cn_today", lambda: TRADE_DATE)
+    monkeypatch.setattr(
+        MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 0.2
+    )
+    minute_df = pl.DataFrame({
+        "symbol": ["600000.SH", "600001.SZ"],
+        "datetime": [datetime(2026, 8, 25, 9, 31)] * 2,
+        "open": [10.0, 11.0], "high": [10.1, 11.1],
+        "low": [9.9, 10.9], "close": [10.05, 11.05],
+        "volume": [100.0, 200.0], "amount": [1000.0, 2200.0],
+    })
+    captured = {}
+    monkeypatch.setattr(
+        "app.services.quote_tick_store.minute_bars_from_ticks",
+        lambda data_dir, **kwargs: captured.update(
+            data_dir=data_dir, kwargs=kwargs
+        ) or minute_df,
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: captured.update(
+            written=df.height, minute_dir=minute_dir
+        ) or df.height,
+    )
+
+    svc._run_round()
+
+    assert svc._local_quote_ticks_capable()
+    assert captured["data_dir"] == tmp_path
+    assert captured["kwargs"]["symbols"] == ["600000.SH"]
+    assert captured["kwargs"]["target_date"] == TRADE_DATE
+    assert captured["kwargs"]["full"] is False
+    assert captured["written"] == 2
+    assert svc.status()["last_mode"] == "quote_snapshot"
+    assert svc.status()["provider_effective"] == "tdxapi_quote_ticks"
 
 
 def test_run_round_records_error_when_burst_empty(tmp_path, monkeypatch):

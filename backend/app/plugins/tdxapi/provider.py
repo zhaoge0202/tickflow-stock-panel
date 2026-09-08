@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 _DATASETS = ("daily", "minute", "realtime", "trade_ticks", "auction_result", "financial")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 _QUOTE_BATCH = 50
-_QUOTE_WORKERS_DEFAULT = 8
+_QUOTE_WORKERS_DEFAULT = 4
 _QUOTE_WORKERS_MAX = 16
 _KLINE_BATCH = 8
 # 分钟K是单票 HTTP(I/O bound); 默认 8 并发, 可通过 TDX_API_MINUTE_WORKERS 上调。
@@ -36,6 +37,8 @@ _KLINE_BATCH = 8
 _MINUTE_WORKERS_DEFAULT = 8
 _MINUTE_WORKERS_MAX = 32
 _MINUTE_FETCH_ATTEMPTS = 3
+_REALTIME_FETCH_ATTEMPTS = 2
+_REALTIME_RETRY_DELAY = 0.2
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 # TDX /api/finance 只有单票财务快照(~37 字段), 不是完整三大表历史。
@@ -107,9 +110,9 @@ _CORE_INDEXES = {
 
 # Provider 会在多个请求线程中被分别实例化；闸门必须是模块级共享对象，
 # 否则每个实例各自限流仍会把 tdx-api 同时打满。
-# tdx-api 当前使用单个通达信连接/节点时，两个并发请求也会互相拖到
-# 业务超时；所有调用统一排队，保证实时分笔优先获得完整响应。
-_TDX_HTTP_CONCURRENCY_DEFAULT = 1
+# 与 tdx-api Web 层的 4 条行情连接对应。Provider 实例可能有多个，闸门
+# 必须是模块级共享对象，避免每个实例各自放行 4 个请求把 sidecar 打满。
+_TDX_HTTP_CONCURRENCY_DEFAULT = 4
 _tdx_http_gate = threading.BoundedSemaphore(_TDX_HTTP_CONCURRENCY_DEFAULT)
 
 
@@ -328,25 +331,47 @@ class TDXAPIProvider:
         symbols, codes = self._filter_invalid_quote_symbols(symbols)
         if not symbols:
             return []
-        try:
-            data = self._request("POST", "/api/batch-quote", json={"codes": codes})
-        except Exception as e:
-            missing_code = _missing_quote_code(e)
-            if missing_code:
-                self._remember_invalid_quote_code(missing_code)
-                remaining = [
-                    symbol
-                    for symbol, code in zip(symbols, codes, strict=True)
-                    if code.lower() != missing_code.lower()
-                ]
-                if len(remaining) < len(symbols):
+        data = None
+        last_error: Exception | None = None
+        for attempt in range(1, _REALTIME_FETCH_ATTEMPTS + 1):
+            try:
+                data = self._request("POST", "/api/batch-quote", json={"codes": codes})
+                last_error = None
+                break
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                # 代码不存在是确定性业务错误，立即剔除；不能按网络故障
+                # 重试两遍，否则全市场混入一只失效代码时会浪费一个槽位。
+                missing_code = _missing_quote_code(e)
+                if missing_code:
+                    self._remember_invalid_quote_code(missing_code)
+                    remaining = [
+                        symbol
+                        for symbol, code in zip(symbols, codes, strict=True)
+                        if code.lower() != missing_code.lower()
+                    ]
+                    if len(remaining) < len(symbols):
+                        logger.warning(
+                            "tdx-api 跳过失效实时行情代码 %s, 重试剩余 %d 只",
+                            missing_code,
+                            len(remaining),
+                        )
+                        return self._fetch_realtime_chunk(remaining, name_map)
+                if attempt < _REALTIME_FETCH_ATTEMPTS:
                     logger.warning(
-                        "tdx-api 跳过失效实时行情代码 %s, 重试剩余 %d 只",
-                        missing_code,
-                        len(remaining),
+                        "tdx-api realtime batch 暂时失败(%d/%d, %d symbols): %s",
+                        attempt,
+                        _REALTIME_FETCH_ATTEMPTS,
+                        len(symbols),
+                        e,
                     )
-                    return self._fetch_realtime_chunk(remaining, name_map)
-            if len(symbols) > 1:
+                    time.sleep(_REALTIME_RETRY_DELAY * attempt)
+
+        if last_error is not None:
+            e = last_error
+            # 网络/节点超时与代码无效不同。超时后继续二分会把一次故障
+            # 放大成几十个请求，进一步挤占连接池；仅对业务层批量错误拆分。
+            if len(symbols) > 1 and not _is_transient_realtime_error(e):
                 middle = len(symbols) // 2
                 logger.warning(
                     "tdx-api realtime batch 拉取失败(%d symbols), 拆分重试: %s",
@@ -769,7 +794,7 @@ class TDXAPIProvider:
     def _request(self, method: str, path: str, **kwargs):
         # tdx-api 内部还要占用通达信节点和代理连接。页面查询、后台入库、
         # 实时轮询共用 sidecar 时，限制入口并发可避免业务层返回 HTTP 200 + 超时错误。
-        acquired = _tdx_http_gate.acquire(timeout=10.0)
+        acquired = _tdx_http_gate.acquire(timeout=_tdx_http_gate_timeout())
         if not acquired:
             raise TimeoutError("tdx-api 请求并发过高，等待连接超时")
         try:
@@ -1253,6 +1278,15 @@ def _minute_workers() -> int:
     return max(1, min(_MINUTE_WORKERS_MAX, workers))
 
 
+def _tdx_http_gate_timeout() -> float:
+    """返回等待 sidecar 连接槽的上限,避免高峰期过早放弃批次。"""
+    try:
+        timeout = float(os.getenv("TDX_API_HTTP_GATE_TIMEOUT", "45") or 45)
+    except ValueError:
+        timeout = 45.0
+    return max(1.0, min(120.0, timeout))
+
+
 def _symbols_from_env() -> list[str]:
     raw = os.getenv("TDX_API_REALTIME_SYMBOLS", "")
     if not raw.strip():
@@ -1263,6 +1297,26 @@ def _symbols_from_env() -> list[str]:
 def _missing_quote_code(error: Exception) -> str | None:
     match = re.search(r"未查询到代码\[([^\]]+)\]", str(error))
     return match.group(1).strip() if match else None
+
+
+def _is_transient_realtime_error(error: Exception) -> bool:
+    """识别应保留原批次重试的连接/超时故障。"""
+    if isinstance(error, (TimeoutError, httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "超时",
+            "timeout",
+            "timed out",
+            "连接",
+            "connection",
+            "502",
+            "503",
+            "504",
+        )
+    )
 
 
 def _to_tdx_code(symbol: str | None) -> str:

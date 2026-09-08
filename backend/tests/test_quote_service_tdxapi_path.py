@@ -80,6 +80,44 @@ def test_fetch_full_market_quotes_uses_tdxapi_without_tickflow(monkeypatch):
     assert captured["records"][0]["symbol"] == "002491.SZ"
 
 
+def test_tdxapi_auction_fields_survive_quote_service_normalization(monkeypatch):
+    provider = FakeProvider()
+    captured = {}
+
+    import app.tickflow.client as tickflow_client
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(custom_sources, "provider_has_dataset", lambda name, dataset: True)
+    monkeypatch.setattr(custom_sources, "get_provider", lambda name: provider)
+    monkeypatch.setattr(QuoteService, "_custom_realtime_index_symbols", lambda self: [])
+    monkeypatch.setattr(
+        tickflow_client,
+        "get_paid_realtime_client",
+        lambda: (_ for _ in ()).throw(AssertionError("不应调用 TickFlow")),
+    )
+    monkeypatch.setattr(
+        QuoteService, "_process_full_market_records",
+        lambda self, records, **kwargs: captured.update(records=records),
+    )
+
+    original = provider.get_realtime
+    provider.get_realtime = lambda symbols=None: [
+        {
+            **original(symbols)[0],
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "auction_price": 10.2,
+            "auction_matched_volume": 637.0,
+        }
+    ]
+    QuoteService()._fetch_full_market_quotes()
+
+    assert captured["records"][0]["price_type"] == "auction_reference"
+    assert captured["records"][0]["auction_price"] == 10.2
+
+
 def test_fetch_full_market_quotes_supplements_manual_positions_for_tdxapi(monkeypatch, tmp_path):
     provider_calls = []
 

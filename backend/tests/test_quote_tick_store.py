@@ -98,6 +98,149 @@ def test_quote_tick_store_appends_latest_bars_and_quality(tmp_path):
     assert quality["missing_symbols"] == ["300750.SZ"]
 
 
+def test_auction_result_fields_ignore_reference_and_use_real_trade(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 0),
+            "ingest_ts": _ms(9, 25, 1),
+            "last_price": 8.30,
+            "volume": 637.0,
+            "amount": None,
+            "price_type": "auction_reference",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "ingest_ts": _ms(9, 25, 3),
+            "last_price": 8.26,
+            "volume": 1102.0,
+            "amount": 910372.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 26, 0),
+            "ingest_ts": _ms(9, 26, 1),
+            "last_price": 8.27,
+            "volume": 1200.0,
+            "amount": 992400.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"]
+    )
+
+    assert result.height == 1
+    row = result.row(0, named=True)
+    assert row["auction_result_price"] == 8.26
+    assert row["auction_result_volume"] == 1102.0
+    assert row["auction_result_amount"] == 910372.0
+
+
+def test_minute_bars_from_ticks_uses_older_snapshot_as_cumulative_baseline(
+    tmp_path, monkeypatch,
+):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    baseline = base / "baseline.parquet"
+    selected = base / "selected.parquet"
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 5),
+            "ingest_ts": _ms(9, 31, 6),
+            "last_price": 8.20,
+            "volume": 90.0,
+            "amount": 738000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(baseline)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 32, 5),
+            "ingest_ts": _ms(9, 32, 6),
+            "last_price": 8.21,
+            "volume": 100.0,
+            "amount": 821000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 33, 5),
+            "ingest_ts": _ms(9, 33, 6),
+            "last_price": 8.22,
+            "volume": 130.0,
+            "amount": 1068600.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(selected)
+
+    def fake_recent(_base, *, max_files):
+        return [selected] if max_files == 160 else [selected, baseline]
+
+    monkeypatch.setattr(quote_tick_store, "_recent_partition_paths", fake_recent)
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=False
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 32),
+        datetime(2026, 7, 8, 9, 33),
+    ]
+    assert result["volume"].to_list() == [10.0, 30.0]
+    assert result["amount"].to_list() == [83000.0, 247600.0]
+
+
+def test_minute_bars_from_ticks_aligns_stale_event_time_to_ingest_time(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            # 两次快照的 TDX 事件时间相同，但实际由 09:45/09:46 轮次采到。
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 45, 1),
+            "last_price": 8.20,
+            "volume": 90.0,
+            "amount": 738000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 46, 1),
+            "last_price": 8.21,
+            "volume": 110.0,
+            "amount": 902000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=True
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 45),
+        datetime(2026, 7, 8, 9, 46),
+    ]
+    assert result["volume"].to_list() == [0.0, 20.0]
+
+
 def test_latest_can_read_historical_date_without_duplicate_rows(tmp_path):
     quote_tick_store.append_many(tmp_path, [
         {"symbol": "002491.SZ", "last_price": 9.9, "timestamp": _ms_on(7, 14, 50)},

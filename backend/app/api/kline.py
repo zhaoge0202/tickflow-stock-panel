@@ -1180,6 +1180,27 @@ def refresh_views(request: Request):
     return {"status": "ok"}
 
 
+@router.post("/sync_auction_results")
+def sync_auction_results(request: Request, body: dict | None = None):
+    """把当天 quote_ticks 的真实开盘成交结果补进股票 enriched。"""
+    from app.api.data import invalidate_data_cache
+    from app.jobs.daily_pipeline import _refresh_single_view
+    from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+
+    repo = request.app.state.repo
+    payload = body or {}
+    raw_date = payload.get("date")
+    target = date.fromisoformat(str(raw_date)) if raw_date else repo.latest_daily_date()
+    if target is None:
+        raise HTTPException(status_code=400, detail="本地没有可用的日K日期")
+    applied = apply_auction_result_fields_to_enriched(repo.store.data_dir, target)
+    _refresh_single_view(repo, "kline_enriched")
+    repo.clear_cache()
+    repo.refresh_cache()
+    invalidate_data_cache("enriched")
+    return {"date": target.isoformat(), "enriched": applied}
+
+
 @router.post("/sync_minute")
 async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。

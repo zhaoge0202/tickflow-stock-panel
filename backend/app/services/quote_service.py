@@ -62,10 +62,15 @@ def _body_with_quote(body: str, ev: dict) -> str:
 
 logger = logging.getLogger(__name__)
 
-REALTIME_TEXT_FIELDS = {"symbol", "name", "session"}
+REALTIME_TEXT_FIELDS = {
+    "symbol", "name", "session", "price_type", "market_phase",
+    "auction_unmatched_side",
+}
 REALTIME_NUMERIC_FIELDS = {
     "last_price", "prev_close", "open", "high", "low", "volume", "amount",
     "change_pct", "change_amount", "amplitude", "turnover_rate",
+    "auction_price", "auction_matched_volume", "auction_unmatched_volume",
+    "auction_change_pct", "auction_unmatched_ratio", "auction_pressure_score",
 }
 REALTIME_RECORD_SCHEMA_OVERRIDES = {
     **{field: pl.Utf8 for field in REALTIME_TEXT_FIELDS},
@@ -833,6 +838,18 @@ class QuoteService:
                 "turnover_rate": ext.get("turnover_rate"),
                 "timestamp": q.get("timestamp"),
                 "session": q.get("session"),
+                # 保留 TDX 竞价参考行的类型和字段。若这里丢失
+                # price_type，quote_tick_store 会把参考价误记成 trade，
+                # 既污染竞价结果，也会被分钟累计量差分误纳入。
+                "price_type": q.get("price_type"),
+                "market_phase": q.get("market_phase"),
+                "auction_price": q.get("auction_price"),
+                "auction_matched_volume": q.get("auction_matched_volume"),
+                "auction_unmatched_side": q.get("auction_unmatched_side"),
+                "auction_unmatched_volume": q.get("auction_unmatched_volume"),
+                "auction_change_pct": q.get("auction_change_pct"),
+                "auction_unmatched_ratio": q.get("auction_unmatched_ratio"),
+                "auction_pressure_score": q.get("auction_pressure_score"),
             })
 
         self._process_full_market_records(records, t0=t0, now_ts=now_ts)
@@ -1011,6 +1028,15 @@ class QuoteService:
                 "turnover_rate": ext.get("turnover_rate"),
                 "timestamp": q.get("timestamp"),
                 "session": q.get("session"),
+                "price_type": q.get("price_type"),
+                "market_phase": q.get("market_phase"),
+                "auction_price": q.get("auction_price"),
+                "auction_matched_volume": q.get("auction_matched_volume"),
+                "auction_unmatched_side": q.get("auction_unmatched_side"),
+                "auction_unmatched_volume": q.get("auction_unmatched_volume"),
+                "auction_change_pct": q.get("auction_change_pct"),
+                "auction_unmatched_ratio": q.get("auction_unmatched_ratio"),
+                "auction_pressure_score": q.get("auction_pressure_score"),
             })
 
         index_set = self._repo.get_index_symbol_set() if self._repo else set()
@@ -1998,10 +2024,12 @@ class QuoteService:
                 from app.indicators.pipeline import compute_enriched_today
                 from app.market_time import trading_minutes_elapsed_from_ts, trading_minutes_elapsed
                 instruments = self._repo.get_instruments()
-                # 将 API 直接提供的补充字段 JOIN 到 daily_df
+                # 竞价结果在盘后管道从 quote_ticks 一次性附着；盘中热路径
+                # 不扫描数百万条事实文件，动态竞价由 auction replay 直接读
+                # quote_ticks，避免每轮实时行情重复做全市场磁盘扫描。
                 today_ohlcv = daily_df
                 if quote_extra is not None and not quote_extra.is_empty():
-                    today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
+                    today_ohlcv = today_ohlcv.join(quote_extra, on="symbol", how="left")
                 # 量比时间折算: 优先用行情 quote_ts (真实成交时间), 缺失则兜底服务端时间
                 elapsed_minutes: float | None = None
                 if "quote_ts" in daily_df.columns and not daily_df.is_empty():
