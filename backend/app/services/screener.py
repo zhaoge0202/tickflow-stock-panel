@@ -495,14 +495,16 @@ class ScreenerService:
         # minute parquet；当日分区尚未由分钟同步任务生成时，从 quote_ticks
         # 按累计量额差值聚合出可重启复用的 1m K，不依赖另一个全量分钟权限。
         try:
+            from app.market_time import cn_today
             from app.services import quote_tick_store
 
-            if df.is_empty():
+            if df.is_empty() or as_of == cn_today():
                 quote_bars = quote_tick_store.minute_bars_from_ticks(
                     self.repo.store.data_dir,
                     target_date=as_of,
                     symbols=symbols,
-                    full=True,
+                    # 已有本地分区时只读最近文件补齐尾部; 冷启动才扫描全天。
+                    full=df.is_empty(),
                 )
                 if not quote_bars.is_empty():
                     if df.is_empty():
