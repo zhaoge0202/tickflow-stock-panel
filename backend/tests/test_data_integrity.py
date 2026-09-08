@@ -624,3 +624,40 @@ def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch):
     )
     assert enriched_left == [f"date={yesterday.isoformat()}", f"date={today.isoformat()}"]
     assert result["enriched_days"] > 0
+
+
+def test_quotes_flush_partition_keeps_quote_ts_for_integrity_scan(tmp_path, monkeypatch):
+    """实时行情覆写当日分区必须写 quote_ts, 否则停机后自检漏判盘中快照。
+
+    盘中手动触发盘后管道时, "今天已有数据 → 实时行情覆写"分支会用
+    tf.quotes.get_by_universes 整分区覆写。若覆写不带 quote_ts, 停机后次日
+    启动自检把这份半日数据当成 batch 权威历史, 停机时刻的 close/volume 永久
+    留存并污染 lookback 指标 —— 正是本模块要拦的场景。
+    """
+    from app.services import kline_sync
+    from app.tickflow import client as tf_client
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    snapshot_ms = _ts_ms(FRIDAY, time(11, 58))
+
+    class _FakeQuotes:
+        @staticmethod
+        def get_by_universes(universes):
+            return [{
+                "symbol": "600001.SH",
+                "open": 10.0, "high": 10.2, "low": 9.8, "last_price": 10.1,
+                "volume": 1000.0, "amount": 10100.0,
+                "timestamp": snapshot_ms,
+            }]
+
+    monkeypatch.setattr(tf_client, "get_client", lambda: SimpleNamespace(quotes=_FakeQuotes))
+    monkeypatch.setattr(kline_sync, "cn_today", lambda: FRIDAY)
+
+    repo = KlineRepository(DataStore(tmp_path))
+    assert kline_sync.sync_daily_by_quotes(repo) == 1
+
+    issues = scan_recent_integrity(tmp_path, today=TODAY)
+    assert [(i.day, i.table, i.kind) for i in issues] == [(FRIDAY, "kline_daily", "snapshot")]
+
+    part_dir = tmp_path / "kline_daily" / f"date={FRIDAY.isoformat()}"
+    assert _quote_ts_max_ms(part_dir) == snapshot_ms
