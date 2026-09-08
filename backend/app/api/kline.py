@@ -27,7 +27,7 @@ router = APIRouter(prefix="/api/kline", tags=["kline"])
 def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | Response:
     """大 JSON 响应的传输压缩: 偏好开启 + 客户端接受 gzip + 响应超阈值才压。
 
-    分时/日K批量各自独立偏好键 (网络设置里大开关批量、子开关单独控制)。
+    分时/日K各自使用独立偏好键 (沿用已有 *_batch_compress 存储键保证兼容)。
     level 6 实测 13MB ≈ 290ms CPU 压掉 87%; level 9 要 2.5s 不可用。
     datetime → isoformat, 与 FastAPI jsonable_encoder 输出一致
     (前端 since 增量按字符串字典序比较, 格式必须与非压缩路径相同)。
@@ -393,7 +393,11 @@ def get_daily(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
-            return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
+            return _gzip_payload(
+                request,
+                {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []},
+                pref_key="daily_batch_compress",
+            )
         # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
         factors = pl.DataFrame()
         capset = getattr(request.app.state, "capabilities", None)
@@ -408,7 +412,11 @@ def get_daily(
         # 即使 live 模式也尝试追加实时蜡烛
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
-        return _attach_ext(resp, repo, symbol, ext_columns)
+        return _gzip_payload(
+            request,
+            _attach_ext(resp, repo, symbol, ext_columns),
+            pref_key="daily_batch_compress",
+        )
 
     rows = df.to_dicts()
 
@@ -416,7 +424,11 @@ def get_daily(
     rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
 
     resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "enriched"}
-    return _attach_ext(resp, repo, symbol, ext_columns)
+    return _gzip_payload(
+        request,
+        _attach_ext(resp, repo, symbol, ext_columns),
+        pref_key="daily_batch_compress",
+    )
 
 
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
@@ -879,13 +891,21 @@ def get_minute_range(
 
     # 指数分钟 K 不落本地仓库, 最新分时仍由 /api/index/minute 实时读取。
     if asset_type == "index":
-        return {**base_response, "sessions": [], "source": "none"}
+        return _gzip_payload(
+            request,
+            {**base_response, "sessions": [], "source": "none"},
+            pref_key="minute_batch_compress",
+        )
 
     end = cn_today()
     start = end - timedelta(days=days * 3 + 20)
     minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
     if minute.is_empty() or "datetime" not in minute.columns:
-        return {**base_response, "sessions": [], "source": "none"}
+        return _gzip_payload(
+            request,
+            {**base_response, "sessions": [], "source": "none"},
+            pref_key="minute_batch_compress",
+        )
 
     minute = minute.with_columns(
         pl.col("datetime").dt.date().alias("_trade_date"),
@@ -914,11 +934,15 @@ def get_minute_range(
                 "rows": rows,
             })
 
-    return {
-        **base_response,
-        "sessions": sessions,
-        "source": "local" if sessions else "none",
-    }
+    return _gzip_payload(
+        request,
+        {
+            **base_response,
+            "sessions": sessions,
+            "source": "local" if sessions else "none",
+        },
+        pref_key="minute_batch_compress",
+    )
 
 
 @router.get("/minute")
@@ -931,12 +955,14 @@ def get_minute(
     """读取某只股票某天的分钟 K 线。
 
     - 本地有完整数据(240条) → 直接返回
-    - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
+    - 本地无数据或不完整 → 从有效分钟数据源实时拉取返回(不写入)
+    - 自定义源失败时, 仅具备 TickFlow 单股分钟能力才回退 TickFlow
     - live=true 且当日连续竞价时段 → 跳过本地优先直接实时拉取:
       盘中分钟增量落盘的本地分区按 ≥60s 轮次更新, 90% 完整度启发式会让
       详情分时图停在上一增量轮, 与行情列表的节奏脱节
     """
     repo = request.app.state.repo
+    capset = request.app.state.capabilities
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
@@ -961,22 +987,29 @@ def get_minute(
         else:
             trade_date = today
     if trade_date is None:
-        # 本地无任何分钟K，尝试从 TickFlow 拉取当天
+        # 本地无任何分钟K, 尝试从当前有效分钟源拉取当天
         trade_date = cn_today()
-        df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
+        df = kline_sync.fetch_minute_single(
+            symbol, trade_date, asset_type=asset_type, capset=capset,
+        )
         price_limit = _get_price_limit_info(
             repo, symbol, trade_date, asset_type, stock_name,
         )
         prev_close = _get_previous_closes(
             repo, symbol, [trade_date], asset_type,
         ).get(trade_date)
-        return {
-            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
-            "asset_type": asset_type,
-            "price_limit": price_limit,
-            "prev_close": prev_close,
-        }
+        return _gzip_payload(
+            request,
+            {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(trade_date), "rows": df.to_dicts(),
+                "source": "live" if not df.is_empty() else "none",
+                "asset_type": asset_type,
+                "price_limit": price_limit,
+                "prev_close": prev_close,
+            },
+            pref_key="minute_batch_compress",
+        )
 
     prev_close = _get_previous_closes(
         repo, symbol, [trade_date], asset_type,
@@ -988,14 +1021,20 @@ def get_minute(
     if live and trade_date == cn_today() and in_continuous_session():
         # 详情分时轮询: 当日盘中实时拉取最新一根K, 不落盘; 拉空(源侧延迟/
         # 时段边界)则落回下方本地优先路径。
-        live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
+        live_df = kline_sync.fetch_minute_single(
+            symbol, trade_date, asset_type=asset_type, capset=capset,
+        )
         if not live_df.is_empty():
-            return {
-                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-                "date": str(trade_date), "rows": live_df.to_dicts(),
-                "source": "live", "asset_type": asset_type,
-                "price_limit": price_limit, "prev_close": prev_close,
-            }
+            return _gzip_payload(
+                request,
+                {
+                    "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                    "date": str(trade_date), "rows": live_df.to_dicts(),
+                    "source": "live", "asset_type": asset_type,
+                    "price_limit": price_limit, "prev_close": prev_close,
+                },
+                pref_key="minute_batch_compress",
+            )
 
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
@@ -1019,24 +1058,34 @@ def get_minute(
     is_complete = not df.is_empty() and len(df) >= expected * 0.9  # 允许 10% 容差
 
     if is_complete:
-        return {
+        return _gzip_payload(
+            request,
+            {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+                "asset_type": asset_type,
+                "price_limit": price_limit,
+                "prev_close": prev_close,
+            },
+            pref_key="minute_batch_compress",
+        )
+
+    # 本地不完整或无数据 → 从当前有效分钟源实时拉取
+    live_df = kline_sync.fetch_minute_single(
+        symbol, trade_date, asset_type=asset_type, capset=capset,
+    )
+    return _gzip_payload(
+        request,
+        {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+            "date": str(trade_date), "rows": live_df.to_dicts(),
+            "source": "live" if not live_df.is_empty() else "none",
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
-        }
-
-    # 本地不完整或无数据 → 从 TickFlow 实时拉取
-    live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
-    return {
-        "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-        "date": str(trade_date), "rows": live_df.to_dicts(),
-        "source": "live" if not live_df.is_empty() else "none",
-        "asset_type": asset_type,
-        "price_limit": price_limit,
-        "prev_close": prev_close,
-    }
+        },
+        pref_key="minute_batch_compress",
+    )
 
 
 @router.post("/sync")

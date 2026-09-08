@@ -70,9 +70,12 @@ def get_index_minute(
 ):
     """实时读取指数分钟 K。不写入股票分钟 parquet。"""
     repo = request.app.state.repo
+    capset = request.app.state.capabilities
     info = _index_info(repo, symbol)
     day = trade_date or date.today()
-    df = kline_sync.fetch_minute_single(symbol, day, asset_type="index")
+    df = kline_sync.fetch_minute_single(
+        symbol, day, asset_type="index", capset=capset,
+    )
     return {
         "symbol": symbol,
         "name": info.get("name"),
