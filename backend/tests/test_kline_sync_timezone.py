@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 from app.market_time import CN_TZ
 from app.services import kline_sync
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
 def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
@@ -30,7 +31,11 @@ def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
     monkeypatch.setattr(kline_sync, "_try_custom_minute", _fake_try_custom_minute)
     monkeypatch.setattr(kline_sync, "get_client", lambda: _FakeClient())
 
-    kline_sync.fetch_minute_single("600000.SH", date(2026, 8, 14))
+    kline_sync.fetch_minute_single(
+        "600000.SH",
+        date(2026, 8, 14),
+        capset=CapabilitySet({Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()}),
+    )
 
     start = datetime.fromtimestamp(captured["start_ms"] / 1000, tz=CN_TZ)
     end = datetime.fromtimestamp(captured["end_ms"] / 1000, tz=CN_TZ)

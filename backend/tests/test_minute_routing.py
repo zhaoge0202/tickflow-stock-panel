@@ -40,6 +40,18 @@ def _mock_minute_df(symbol: str = "600519.SH") -> pl.DataFrame:
     })
 
 
+def _empty_capset():
+    from app.tickflow.capabilities import CapabilitySet
+
+    return CapabilitySet()
+
+
+def _tickflow_minute_capset():
+    from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
+
+    return CapabilitySet({Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()})
+
+
 def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = True) -> None:
     """统一 mock 自定义分钟源路由前置: preferences + provider_has_dataset + get_provider。
 
@@ -131,6 +143,7 @@ def test_custom_provider_exception_no_500(monkeypatch):
     # fetch_minute_single: 自定义源异常 → fall through → TickFlow 异常 → 返回空
     df_single = kline_sync.fetch_minute_single(
         "600519.SH", date(2026, 1, 15), asset_type="stock",
+        capset=_tickflow_minute_capset(),
     )
     assert isinstance(df_single, pl.DataFrame)
     assert df_single.is_empty()
@@ -173,9 +186,15 @@ def test_asset_type_threaded_to_provider(monkeypatch):
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
     # 三次调用不同 asset_type
-    kline_sync.fetch_minute_single("600519.SH", date(2026, 1, 15), asset_type="stock")
-    kline_sync.fetch_minute_single("510300.SH", date(2026, 1, 15), asset_type="etf")
-    kline_sync.fetch_minute_single("000001.SH", date(2026, 1, 15), asset_type="index")
+    kline_sync.fetch_minute_single(
+        "600519.SH", date(2026, 1, 15), asset_type="stock", capset=_empty_capset(),
+    )
+    kline_sync.fetch_minute_single(
+        "510300.SH", date(2026, 1, 15), asset_type="etf", capset=_empty_capset(),
+    )
+    kline_sync.fetch_minute_single(
+        "000001.SH", date(2026, 1, 15), asset_type="index", capset=_empty_capset(),
+    )
 
     # spy 被调 3 次, 每次收到对应 asset_type
     assert spy.call_count == 3
@@ -197,7 +216,7 @@ def test_custom_success_skips_tickflow(monkeypatch):
     monkeypatch.setattr(kline_sync, "get_client", get_client_spy)
 
     df = kline_sync.fetch_minute_single(
-        "600519.SH", date(2026, 1, 15), asset_type="stock",
+        "600519.SH", date(2026, 1, 15), asset_type="stock", capset=_empty_capset(),
     )
 
     # 返回的是 mock provider 的 df
