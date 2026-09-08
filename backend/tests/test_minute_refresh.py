@@ -217,6 +217,122 @@ def test_tdxapi_full_market_can_derive_minutes_from_quote_ticks(
     assert svc.status()["provider_effective"] == "tdxapi_quote_ticks"
 
 
+def test_tdxapi_quote_ticks_uses_full_mode_for_stale_coverage(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, monkeypatch)
+    svc._repo.store.data_dir = tmp_path
+    svc._app_state.quote_service = type(
+        "QuoteService", (), {"realtime_mode": lambda self: "full_market"}
+    )()
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(preferences, "get_realtime_quotes_enabled", lambda: True)
+    monkeypatch.setattr(minute_refresh, "cn_today", lambda: TRADE_DATE)
+    monkeypatch.setattr(
+        MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 5.0
+    )
+    captured = {}
+    minute_df = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [datetime(2026, 8, 25, 9, 31)],
+        "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.05],
+        "volume": [100.0], "amount": [1000.0],
+    })
+    monkeypatch.setattr(
+        "app.services.quote_tick_store.minute_bars_from_ticks",
+        lambda data_dir, **kwargs: captured.update(kwargs) or minute_df,
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: df.height,
+    )
+
+    svc._run_round()
+
+    assert captured["full"] is True
+
+
+def test_tdxapi_quote_ticks_rewrites_changed_current_minute(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, monkeypatch)
+    svc._repo.store.data_dir = tmp_path
+    svc._app_state.quote_service = type(
+        "QuoteService", (), {"realtime_mode": lambda self: "full_market"}
+    )()
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(preferences, "get_realtime_quotes_enabled", lambda: True)
+    monkeypatch.setattr(minute_refresh, "cn_today", lambda: TRADE_DATE)
+    monkeypatch.setattr(
+        MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 0.2
+    )
+    frames = [
+        pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "datetime": [datetime(2026, 8, 25, 9, 31)],
+            "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.05],
+            "volume": [100.0], "amount": [1000.0],
+        }),
+        pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "datetime": [datetime(2026, 8, 25, 9, 31)],
+            "open": [10.0], "high": [10.2], "low": [9.9], "close": [10.15],
+            "volume": [140.0], "amount": [1400.0],
+        }),
+    ]
+    writes = []
+    monkeypatch.setattr(
+        "app.services.quote_tick_store.minute_bars_from_ticks",
+        lambda data_dir, **kwargs: frames.pop(0),
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: writes.append(df) or df.height,
+    )
+
+    svc._run_round()
+    svc._run_round()
+
+    assert len(writes) == 2
+    assert writes[-1]["close"].item() == 10.15
+
+
+def test_tdxapi_quote_ticks_does_not_refresh_health_on_unchanged_snapshot(
+    tmp_path, monkeypatch,
+):
+    svc = _svc(tmp_path, monkeypatch)
+    svc._repo.store.data_dir = tmp_path
+    svc._app_state.quote_service = type(
+        "QuoteService", (), {"realtime_mode": lambda self: "full_market"}
+    )()
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(preferences, "get_realtime_quotes_enabled", lambda: True)
+    monkeypatch.setattr(minute_refresh, "cn_today", lambda: TRADE_DATE)
+    monkeypatch.setattr(
+        MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 0.2
+    )
+    frame = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [datetime(2026, 8, 25, 9, 31)],
+        "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.05],
+        "volume": [100.0], "amount": [1000.0],
+    })
+    writes = []
+    monkeypatch.setattr(
+        "app.services.quote_tick_store.minute_bars_from_ticks",
+        lambda data_dir, **kwargs: frame,
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync._write_minute_partition",
+        lambda df, minute_dir: writes.append(df) or df.height,
+    )
+    monkeypatch.setattr(minute_refresh.time, "time", lambda: 100.0)
+
+    svc._run_round()
+    first_round_at = svc._state.last_round_at
+    svc._run_round()
+
+    assert len(writes) == 1
+    assert svc._state.last_round_at == first_round_at
+    assert svc._state.last_error == "quote_ticks unchanged"
+
+
 def test_run_round_records_error_when_burst_empty(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch)
     monkeypatch.setattr(

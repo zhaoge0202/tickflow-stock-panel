@@ -47,6 +47,31 @@ _backfill_cache: dict[tuple[str, tuple[str, ...]], float] = {}
 _BACKFILL_TTL_SECONDS = 30.0
 
 
+def invalidate_dynamic_history_cache(data_dir: Path | None = None) -> None:
+    """清理竞价动态回放的历史窗口和行情窗口缓存。"""
+    data_key = str(Path(data_dir).resolve()) if data_dir is not None else None
+    with _dynamic_history_lock:
+        if data_key is None:
+            _dynamic_history_cache.clear()
+        else:
+            stale_keys = [
+                key for key in _dynamic_history_cache
+                if key and key[0] == data_key
+            ]
+            for key in stale_keys:
+                _dynamic_history_cache.pop(key, None)
+    with _quote_window_lock:
+        if data_key is None:
+            _quote_window_cache.clear()
+        else:
+            stale_keys = [
+                key for key in _quote_window_cache
+                if key and key[0] == data_key
+            ]
+            for key in stale_keys:
+                _quote_window_cache.pop(key, None)
+
+
 def replay_cached_strategy_results(
     data_dir: Path,
     cached: dict | None,

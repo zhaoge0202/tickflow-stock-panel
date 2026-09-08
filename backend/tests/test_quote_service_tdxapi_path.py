@@ -322,6 +322,34 @@ def test_tdxapi_records_are_submitted_to_mysql_snapshot_writer(monkeypatch, tmp_
     assert captured["append"]["kwargs"] == {"source": "tdxapi", "series_symbols": {"002491.SZ"}}
 
 
+def test_tdxapi_quote_ticks_skip_weekend_snapshot(monkeypatch, tmp_path):
+    from app.services import preferences, quote_snapshot_ingest, quote_tick_store
+
+    calls = []
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(
+        "app.services.quote_service.is_trading_weekday", lambda d=None: False,
+    )
+    monkeypatch.setattr(
+        quote_snapshot_ingest.quote_snapshot_ingestor,
+        "submit",
+        lambda rows: calls.append(("mysql", rows)),
+    )
+    monkeypatch.setattr(
+        quote_tick_store,
+        "append_many",
+        lambda *args, **kwargs: calls.append(("ticks", args, kwargs)),
+    )
+
+    qs = QuoteService()
+    qs.set_repo(_Repo(tmp_path))
+    qs._append_quote_ticks_if_tdxapi([
+        {"symbol": "002491.SZ", "last_price": 10.2},
+    ])
+
+    assert calls == []
+
+
 def test_tdxapi_market_frame_persists_all_records_every_fetch(monkeypatch, tmp_path):
     from app.services import preferences, quote_snapshot_ingest, quote_tick_store
 
