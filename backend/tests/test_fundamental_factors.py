@@ -85,7 +85,7 @@ def test_attach_replaces_with_newer_announcement():
     assert roe[4] is None            # 4-5 公告日
     assert roe[5] == 20.0            # 4-6 起 20.0
     assert roe[13] == 20.0           # 4-14
-    assert roe[14] is None           # 4-15 二次公告日, 当天仍不可用 (严格大于)
+    assert roe[14] == 20.0           # 4-15 二次公告日: 新一期尚未生效, 仍保留上一期
     assert roe[15] == 33.0           # 4-16 起新公告生效
 
 
@@ -119,6 +119,25 @@ def test_matrix_field_matches_polars_attach():
                 assert np.isnan(actual), (name, row["date"], row["symbol"], actual)
             else:
                 np.testing.assert_allclose(actual, expected, rtol=1e-6)
+
+
+def test_matrix_field_matches_polars_attach_across_two_announcements():
+    """换报告期时两条路径仍须一致: 新公告当日应保留上一期值(前向填充不断档)。"""
+    panel = _daily_panel(date(2026, 4, 1), 20, ("600000.SH",))
+    snapshot = _snapshot_frame([
+        {"symbol": "600000.SH", "announce": "2026-04-05", "roe": 20.0},
+        {"symbol": "600000.SH", "announce": "2026-04-15", "roe": 33.0},
+    ])
+    attached = attach_fundamental_factors(panel, snapshot, ["roe_latest"]).sort("date")
+    market = build_market_data_matrix(panel)
+    matrix = build_fundamental_matrices(market, snapshot, ["roe_latest"])["roe_latest"]
+    column = market.symbols.index("600000.SH")
+    for row_index, value in enumerate(attached["roe_latest"].to_list()):
+        actual = matrix[row_index, column]
+        if value is None:
+            assert np.isnan(actual), (row_index, actual)
+        else:
+            np.testing.assert_allclose(actual, value, rtol=1e-6)
 
 
 def test_bps_nonpositive_gives_null_pb():

@@ -103,11 +103,18 @@ def attach_fundamental_factors(
     columns = sorted(
         {FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns}
     )
-    right = snapshot.select(["symbol", "_announce", *columns]).sort(["symbol", "_announce"])
+    # asof 键取生效日 (公告日次日) 而非公告日: 直接用公告日回看会在换报告期的
+    # 公告当日取到「尚未生效」的新一期并被门控置 null, 打断上一期的前向填充,
+    # 与矩阵路径 (searchsorted side="right") 不一致。
+    right = (
+        snapshot.select(["symbol", "_announce", *columns])
+        .with_columns(pl.col("_announce").dt.offset_by("1d").alias("_effective"))
+        .sort(["symbol", "_effective"])
+    )
     joined = panel.join_asof(
         right,
         left_on="date",
-        right_on="_announce",
+        right_on="_effective",
         by="symbol",
         strategy="backward",
         check_sortedness=False,  # 双侧均已按 (symbol, key) 排序, 免除逐组检查开销
@@ -128,7 +135,7 @@ def attach_fundamental_factors(
         expressions.append(
             pl.when(announced).then(value).otherwise(None).alias(name)
         )
-    return joined.with_columns(expressions)
+    return joined.with_columns(expressions).drop("_effective")
 
 
 def build_fundamental_matrices(
