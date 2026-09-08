@@ -263,7 +263,10 @@ class StrategyEngine:
             if not d.exists():
                 continue
             for f in sorted(d.glob("*.py")):
-                if f.name.startswith("_"):
+                # macOS 复制到 Windows 时会生成 ``._策略名.py`` 的
+                # AppleDouble 二进制元数据文件。它不是策略源码，不能交给
+                # UTF-8 解析器；下划线辅助模块同样不应注册为策略。
+                if f.name.startswith((".", "_")):
                     continue
                 try:
                     s = self._load_file(f)

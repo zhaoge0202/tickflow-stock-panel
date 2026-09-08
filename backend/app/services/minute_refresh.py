@@ -102,6 +102,7 @@ class MinuteRefreshService:
         self._state = _RefreshState()
         self._round_lock = threading.Lock()  # 同时只允许一轮 (手动触发与定时轮互斥)
         self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
+        self._last_quote_snapshot_minute: str | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -145,7 +146,22 @@ class MinuteRefreshService:
         try:
             from app.tickflow.capabilities import Cap
 
-            return capset.has(Cap.INTRADAY_UNIVERSE)
+            return capset.has(Cap.INTRADAY_UNIVERSE) or self._local_quote_ticks_capable()
+        except Exception:
+            return self._local_quote_ticks_capable()
+
+    def _local_quote_ticks_capable(self) -> bool:
+        """tdxapi 全市场实时快照可用时，允许本地派生分钟K。"""
+        if self._app_state is None or self._repo is None:
+            return False
+        try:
+            quote_service = getattr(self._app_state, "quote_service", None)
+            return (
+                preferences.get_realtime_data_provider() == "tdxapi"
+                and preferences.get_realtime_quotes_enabled()
+                and quote_service is not None
+                and quote_service.realtime_mode() == "full_market"
+            )
         except Exception:
             return False
 
@@ -155,6 +171,12 @@ class MinuteRefreshService:
             return preferences.get_full_minute_data_provider()
         except Exception:  # noqa: BLE001 — 偏好文件异常按 TickFlow 处理
             return "tickflow"
+
+    def effective_provider(self) -> str:
+        """返回本轮实际使用的数据源，避免状态把本地 quote_ticks 误报成 TickFlow。"""
+        if self._local_quote_ticks_capable():
+            return "tdxapi_quote_ticks"
+        return self._resolve_custom()[1]
 
     def _resolve_custom(self) -> tuple[object | None, str]:
         """解析自定义源。返回 (provider_or_None, effective_name):
@@ -281,6 +303,10 @@ class MinuteRefreshService:
         from app.services import kline_sync
 
         t0 = time.perf_counter()
+        if self._local_quote_ticks_capable():
+            self._run_local_quote_ticks_round(t0)
+            return
+
         custom, provider_name = self._resolve_custom()
         mode = self._select_mode()
         if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
@@ -344,6 +370,57 @@ class MinuteRefreshService:
             self._state.last_symbols, write_ms, written, self._state.last_round_ms,
         )
 
+    def _run_local_quote_ticks_round(self, started: float) -> None:
+        from app.services import kline_sync, quote_tick_store
+
+        symbols = self._universe()
+        if not symbols:
+            self._state.last_error = "empty universe (instruments 未加载)"
+            return
+        lag = self._today_coverage_lag_minutes()
+        frame = quote_tick_store.minute_bars_from_ticks(
+            self._repo.store.data_dir,
+            target_date=cn_today(),
+            symbols=symbols,
+            full=lag is None,
+        )
+        if frame.is_empty():
+            self._empty_rounds += 1
+            self._state.last_error = "quote_ticks returned no minute data"
+            return
+        latest_minute = str(frame["datetime"].max())
+        if latest_minute == self._last_quote_snapshot_minute:
+            self._state.last_round_at = time.time()
+            self._state.last_round_ms = (time.perf_counter() - started) * 1000
+            self._state.last_rows = 0
+            self._state.last_symbols = frame["symbol"].n_unique()
+            self._state.last_requests = 0
+            self._state.last_mode = "quote_snapshot"
+            self._state.last_error = None
+            return
+        write_started = time.perf_counter()
+        written = kline_sync._write_minute_partition(
+            frame,
+            self._repo.store.data_dir / "kline_minute",
+        )
+        self._empty_rounds = 0
+        self._state.rounds += 1
+        self._state.last_round_at = time.time()
+        self._state.last_round_ms = (time.perf_counter() - started) * 1000
+        self._state.last_rows = written
+        self._state.last_symbols = frame["symbol"].n_unique()
+        self._state.last_requests = 0
+        self._state.last_mode = "quote_snapshot"
+        self._state.last_error = None
+        self._last_quote_snapshot_minute = latest_minute
+        logger.info(
+            "全量分钟[quote_snapshot] 第 %d 轮: 聚合 %.0fms, 落盘 %d 行, %d 标的",
+            self._state.rounds,
+            (time.perf_counter() - write_started) * 1000,
+            written,
+            self._state.last_symbols,
+        )
+
     def _universe(self) -> list[str]:
         """全市场 A 股标的 (instruments 维表, 与盘后分钟同步同一来源)。"""
         inst = self._repo.get_instruments()
@@ -387,7 +464,7 @@ class MinuteRefreshService:
             "running": running,
             "healthy": self.is_healthy(),
             "provider": self.active_provider(),
-            "provider_effective": self._resolve_custom()[1],
+            "provider_effective": self.effective_provider(),
             "repair_only": self.repair_only(),
             "interval_seconds": preferences.get_minute_refresh_interval(),
             "capability_ok": self.capability_ok(),

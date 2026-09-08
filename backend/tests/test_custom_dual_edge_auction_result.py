@@ -28,7 +28,7 @@ def _load_strategy_module(strategy_id: str):
             sys.path.remove(str(strategy_dir))
 
 
-def _panel(include_auction_result: bool) -> pl.DataFrame:
+def _panel(include_auction_result: bool, last_open: float = 9.8) -> pl.DataFrame:
     start = date(2024, 1, 1)
     rows = []
     for offset in range(45):
@@ -36,7 +36,7 @@ def _panel(include_auction_result: bool) -> pl.DataFrame:
         is_last = offset == 44
         prev_close = 10.0
         close = 10.5 if is_last else 10.0 + offset * 0.002
-        open_price = 9.8 if is_last else close
+        open_price = last_open if is_last else close
         volume = 3_000.0 if is_last else 1_000.0
         row = {
             "symbol": "000001.SZ",
@@ -77,12 +77,26 @@ def test_dual_edge_strategies_use_0925_auction_result_price_for_gap():
 
     for module in modules:
         params = {item["id"]: item.get("default") for item in module.META["params"]}
+        # 该测试验证严格真实竞价口径; 代理行为由单独参数控制.
+        params["use_open_fallback"] = False
         fallback_signals = module.MATRIX_STRATEGY.compute_signals(without_auction, params)
         auction_signals = module.MATRIX_STRATEGY.compute_signals(with_auction, params)
 
         assert int(fallback_signals.entry[-1, 0]) == 0
         assert int(auction_signals.entry[-1, 0]) == 1
         assert auction_signals.entry_signal_ids[0] == "signal_auction"
+
+
+def test_focus_can_explicitly_use_open_as_auction_proxy():
+    module = _load_strategy_module("custom_dual_edge_focus")
+    panel = _panel(False, last_open=10.35)
+    market = build_market_data_matrix(panel, field_columns={"amount", "raw_close", "raw_high"})
+    params = {item["id"]: item.get("default") for item in module.META["params"]}
+    params["use_open_fallback"] = True
+
+    signals = module.MATRIX_STRATEGY.compute_signals(market, params)
+
+    assert int(signals.entry[-1, 0]) == 1
 
 
 def test_dual_edge_strategies_default_to_main_board_only():

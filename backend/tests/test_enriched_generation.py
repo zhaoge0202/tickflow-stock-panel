@@ -40,6 +40,35 @@ def test_repository_enriched_noop_does_not_bump_generation(tmp_path) -> None:
     assert repo.get_matrix_data_generation("stock") == first
 
 
+def test_repository_warm_cache_preserves_auction_result_fields(tmp_path) -> None:
+    repo = KlineRepository(DataStore(tmp_path))
+    frame = pl.DataFrame({
+        "symbol": ["600177.SH"],
+        "date": [date(2026, 8, 14)],
+        "open": [8.20],
+        "high": [8.30],
+        "low": [8.10],
+        "close": [8.25],
+        "volume": [100_000.0],
+        "amount": [825_000.0],
+        "auction_result_price": [8.18],
+        "auction_result_volume": [637.0],
+        "auction_result_amount": [521066.0],
+    })
+
+    repo.append_enriched(frame)
+    repo.rebuild_views()
+    repo.refresh_cache(background=False)
+
+    cached, cached_date = repo.get_enriched_latest()
+    assert cached_date == date(2026, 8, 14)
+    assert cached["auction_result_price"].item() == pytest.approx(8.18)
+    queried = repo.get_daily(
+        "600177.SH", date(2026, 8, 14), date(2026, 8, 14)
+    )
+    assert queried["auction_result_price"].item() == pytest.approx(8.18)
+
+
 def test_failed_multi_partition_publication_remains_fail_closed(
     tmp_path,
     monkeypatch,

@@ -370,6 +370,81 @@ def test_auction_replay_updates_as_soon_as_trade_snapshot_arrives(tmp_path):
     assert result_092503["rows"][0]["open_confirm_time"] == "09:25:03"
 
 
+def test_auction_replay_keeps_last_reference_before_display_window(tmp_path):
+    cached = _cached()
+    cached["results"]["strategy_a"]["rows"].append(
+        {"symbol": "000003.SZ", "name": "早盘参考", "score": 60.0}
+    )
+    quote_tick_store.append_many(
+        tmp_path,
+        [{
+            "symbol": "000003.SZ",
+            "name": "早盘参考",
+            "last_price": 8.2,
+            "auction_price": 8.2,
+            "auction_matched_volume": 500,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "timestamp": _ms(9, 20, 0),
+        }],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    frame = auction_replay.replay_cached_strategy_results(
+        tmp_path,
+        cached,
+        as_of=SIGNAL_DATE,
+        trade_date=TRADE_DATE,
+        strategy_ids=["strategy_a"],
+        as_of_ts=_ms(9, 25, 0),
+        include_candidates=True,
+    )["frame"]
+    row = next(
+        item for item in _strategy_result(frame)["candidates"]
+        if item["symbol"] == "000003.SZ"
+    )
+
+    assert row["auction_price"] == 8.2
+    assert row["auction_event_time"] == "09:20:00"
+    assert row["auction_stale_seconds"] == 300
+
+
+def test_preopen_trade_shaped_snapshot_is_inferred_as_auction():
+    rows = [{
+        "symbol": "000003.SZ",
+        "event_ts": _ms(9, 24, 40),
+        "ingest_ts": _ms(9, 24, 41),
+        "last_price": 8.2,
+        "volume": 500.0,
+        "amount": 410000.0,
+        "price_type": "trade",
+    }]
+
+    classified = auction_replay._classify_rows(rows, TRADE_DATE)
+
+    assert len(classified["auction_rows"]) == 1
+    assert classified["auction_rows"][0]["_auction_inferred"] is True
+    assert classified["trade_rows"] == []
+
+
+def test_preopen_trade_before_match_window_is_not_inferred_as_auction():
+    rows = [{
+        "symbol": "000004.SZ",
+        "event_ts": _ms(9, 19, 59),
+        "ingest_ts": _ms(9, 20, 0),
+        "last_price": 8.2,
+        "volume": 500.0,
+        "amount": 410000.0,
+        "price_type": "trade",
+    }]
+
+    classified = auction_replay._classify_rows(rows, TRADE_DATE)
+
+    assert classified["auction_rows"] == []
+    assert classified["trade_rows"] == []
+
+
 def test_auction_replay_api_reads_strategy_cache(tmp_path):
     _append_replay_ticks(tmp_path)
     strategy_cache.write_cache(tmp_path, SIGNAL_DATE.isoformat(), _cached()["results"])

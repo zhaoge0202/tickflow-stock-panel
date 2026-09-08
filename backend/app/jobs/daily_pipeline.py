@@ -48,11 +48,29 @@ def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> l
 
     import pyarrow.parquet as pq
 
-    def _rows(part_dir: Path) -> int:
+    def _rows(part_dir: Path, *, active_only: bool = False) -> int:
         total = 0
         for f in part_dir.glob("*.parquet"):
             try:
-                total += pq.ParquetFile(f).metadata.num_rows
+                if active_only:
+                    schema_names = set(pq.ParquetFile(f).schema_arrow.names)
+                    required = {"open", "high", "volume", "amount"}
+                    # 旧测试样本/旧分区可能只有 symbol+close，无法按成交
+                    # 过滤时退回元数据行数，避免把可比较的分区误判为不可读。
+                    if not required.issubset(schema_names):
+                        total += pq.ParquetFile(f).metadata.num_rows
+                        continue
+                    frame = pl.read_parquet(
+                        f,
+                        columns=["open", "high", "volume", "amount"],
+                    )
+                    total += frame.filter(
+                        (pl.col("open") > 0)
+                        & (pl.col("high") > 0)
+                        & ((pl.col("volume") > 0) | (pl.col("amount") > 0))
+                    ).height
+                else:
+                    total += pq.ParquetFile(f).metadata.num_rows
             except Exception:  # noqa: BLE001
                 return -1  # 不可读 → 不动, 交给既有完整性检查兜底
         return total
@@ -62,11 +80,38 @@ def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> l
         daily_part = daily_dir / part.stem
         if not daily_part.exists():
             continue
-        e_rows, d_rows = _rows(part), _rows(daily_part)
+        # 日K允许保留停牌/零成交事实，但 enriched 会过滤这些行，比较时
+        # 只能拿有效成交行计数；否则每次盘后都会误判分区不完整并重复重算。
+        e_rows, d_rows = _rows(part, active_only=True), _rows(daily_part, active_only=True)
         if e_rows >= 0 and d_rows > 0 and e_rows < d_rows:
             shutil.rmtree(part, ignore_errors=True)
             pruned.append(part.stem.split("=")[1])
     return pruned
+
+
+def _missing_active_enriched_symbols(data_dir: Path, target: _date) -> list[str]:
+    """返回目标日有真实成交日K但 enriched 缺失的股票。"""
+    daily_path = data_dir / "kline_daily" / f"date={target.isoformat()}" / "part.parquet"
+    enriched_path = data_dir / "kline_daily_enriched" / f"date={target.isoformat()}" / "part.parquet"
+    if not daily_path.exists() or not enriched_path.exists():
+        return []
+    try:
+        daily = pl.read_parquet(
+            daily_path,
+            columns=["symbol", "open", "high", "volume", "amount"],
+        )
+        enriched = pl.read_parquet(enriched_path, columns=["symbol"])
+        active = daily.filter(
+            (pl.col("open") > 0)
+            & (pl.col("high") > 0)
+            & ((pl.col("volume") > 0) | (pl.col("amount") > 0))
+        )
+        daily_symbols = set(active["symbol"].cast(pl.Utf8).to_list())
+        enriched_symbols = set(enriched["symbol"].cast(pl.Utf8).to_list())
+        return sorted(daily_symbols - enriched_symbols)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("enriched 覆盖检查失败(%s): %s", target, exc)
+        return []
 
 
 class PipelineStageError(RuntimeError):
@@ -484,6 +529,56 @@ def run_now(
     else:
         written_enriched = 0
         logger.info("compute_enriched: skip (no new daily, no adj_factor changes)")
+
+    # 覆盖修复只针对有真实成交的日K。停牌/零成交记录保留在 daily 事实层，
+    # 但不进入 enriched，避免它们污染均线和策略截面。
+    coverage_repaired: list[str] = []
+    coverage_remaining: list[str] = []
+    latest_data_date = repo.latest_daily_date()
+    if latest_data_date is not None:
+        missing_active = _missing_active_enriched_symbols(
+            repo.store.data_dir,
+            latest_data_date,
+        )
+        if missing_active:
+            logger.warning(
+                "enriched 最新日覆盖缺口: %d 只有效成交标的, 尝试局部重算 (样例: %s)",
+                len(missing_active), missing_active[:10],
+            )
+            run_pipeline(
+                data_dir=repo.store.data_dir,
+                symbols=missing_active,
+                on_batch_done=_enriched_batch_progress,
+            )
+            coverage_repaired = missing_active
+            coverage_remaining = _missing_active_enriched_symbols(
+                repo.store.data_dir,
+                latest_data_date,
+            )
+            if coverage_remaining:
+                stage_errors.append(
+                    f"enriched coverage missing: {coverage_remaining[:10]}"
+                )
+
+    auction_result_summary: dict = {}
+    if latest_data_date is not None and latest_data_date.weekday() < 5:
+        try:
+            from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+
+            applied = apply_auction_result_fields_to_enriched(
+                repo.store.data_dir,
+                latest_data_date,
+            )
+            auction_result_summary.update({
+                "enriched_rows": int(applied.get("rows", 0)),
+                "enriched_populated": int(applied.get("populated", 0)),
+            })
+            logger.info(
+                "auction_result: enriched %s/%s 行已附着",
+                applied.get("populated", 0), applied.get("rows", 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("竞价结果附着 enriched 失败(不阻塞日线管道): %s", e)
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
@@ -706,6 +801,10 @@ def run_now(
         "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
+        "auction_result_symbols": int(auction_result_summary.get("enriched_populated", 0)),
+        "auction_result_missing": int(auction_result_summary.get("enriched_rows", 0)) - int(auction_result_summary.get("enriched_populated", 0)),
+        "enriched_coverage_repaired": len(coverage_repaired),
+        "enriched_coverage_remaining": len(coverage_remaining),
     }
 
     # 有阶段软失败: 进度协议已走完(done/100, 前端进度条正常收尾), 但数据可能陈旧,

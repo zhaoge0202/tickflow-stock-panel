@@ -400,6 +400,25 @@ def test_get_realtime_retries_batch_without_missing_code(monkeypatch):
     assert [row["symbol"] for row in rows] == ["159881.SZ", "510660.SH"]
 
 
+def test_get_realtime_retries_transient_batch_without_recursive_split(monkeypatch):
+    provider = TDXAPIProvider()
+    calls = 0
+
+    def fake_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("tdx-api 请求超时")
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+    monkeypatch.setattr(tp, "_REALTIME_RETRY_DELAY", 0)
+
+    rows = provider._fetch_realtime_chunk(["000001.SZ", "600000.SH"], {})
+
+    assert rows == []
+    # 一次批次只做有界重试,超时后不再递归二分放大请求数。
+    assert calls == tp._REALTIME_FETCH_ATTEMPTS
+
+
 def test_get_realtime_caches_missing_quote_code(monkeypatch):
     quote_calls = []
 

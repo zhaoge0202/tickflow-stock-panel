@@ -574,7 +574,9 @@ class KlineRepository:
                 from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
                 start_full = latest - timedelta(days=150)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "auction_result_price",
+                                         "auction_result_volume", "auction_result_amount",
+                                         "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
                 lf = scan_enriched_parquet(self._enriched_glob).filter(
                     pl.col("date") >= start_full

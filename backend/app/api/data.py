@@ -123,11 +123,27 @@ def _safe_aggregate(repo, view: str) -> dict | None:
     }
 
 
-def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
-    """日K轻量统计 — 零数据扫描。
+def _latest_partition_stats(root: Path, latest: str) -> tuple[int, int]:
+    """读取最新分区的实际行数和标的数，不扫描全历史。"""
+    import polars as pl
+    import pyarrow.parquet as pq
 
-    从分区目录名获取日期范围和交易日数，不读任何 parquet。
-    标的数从 instruments 小表获取（~5000行，毫秒级）。
+    files = sorted((root / f"date={latest}").glob("*.parquet"))
+    if not files:
+        return 0, 0
+    try:
+        rows = sum(int(pq.ParquetFile(path).metadata.num_rows) for path in files)
+        symbols = int(pl.read_parquet(files, columns=["symbol"])["symbol"].n_unique())
+        return rows, symbols
+    except Exception as e:  # noqa: BLE001
+        logger.debug("latest partition stats failed(%s): %s", root, e)
+        return 0, 0
+
+
+def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
+    """日K轻量统计 — 只读取最新分区的 symbol 列。
+
+    symbols_covered 必须表示实际数据覆盖，不能用 instruments 总数冒充。
     """
     daily_dir = repo.store.data_dir / "kline_daily"
     if not daily_dir.exists():
@@ -140,10 +156,11 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
         return None
     dates.sort()
 
-    symbols = _count_instruments_symbols(repo)
+    latest_rows, symbols = _latest_partition_stats(daily_dir, dates[-1])
 
     return {
         "rows": 0,
+        "latest_rows": latest_rows,
         "earliest_date": dates[0],
         "latest_date": dates[-1],
         "symbols_covered": symbols,
@@ -152,11 +169,11 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
 
 
 def _safe_aggregate_enriched(repo) -> dict | None:
-    """Enriched 轻量统计 — 零数据扫描。
+    """Enriched 轻量统计 — 只读取最新分区的 symbol 列。
 
     字段数从 DESCRIBE 读 schema（不碰数据），毫秒级。
     日期范围从分区目录名获取（同 minute 策略），不读任何 parquet。
-    标的数从 instruments 小表取。
+    symbols_covered 表示最新分区实际覆盖。
     """
     # 字段数：读 schema，不碰数据
     fields = 0
@@ -178,10 +195,11 @@ def _safe_aggregate_enriched(repo) -> dict | None:
         return None
     dates.sort()
 
-    symbols = _count_instruments_symbols(repo)
+    latest_rows, symbols = _latest_partition_stats(enriched_dir, dates[-1])
 
     return {
         "rows": 0,
+        "latest_rows": latest_rows,
         "fields": fields,
         "earliest_date": dates[0],
         "latest_date": dates[-1],
@@ -379,10 +397,9 @@ def _safe_aggregate_adj_factor(repo) -> dict | None:
 
 
 def _safe_aggregate_minute(repo) -> dict | None:
-    """kline_minute 统计 — 从分区目录名获取交易日数，跳过全表扫描。
+    """kline_minute 统计 — 日期范围加最新分区覆盖。
 
-    分钟 K 按 date=YYYY-MM-DD 分区存储，直接数目录即可，
-    无需 count(*) / count(DISTINCT ...) 等昂贵查询。
+    只读取最新分区的 symbol 列，避免扫描全部分钟历史。
     """
     minute_dir = repo.store.data_dir / "kline_minute"
     if not minute_dir.exists():
@@ -398,11 +415,13 @@ def _safe_aggregate_minute(repo) -> dict | None:
         return None
 
     dates.sort()
+    latest_rows, symbols = _latest_partition_stats(minute_dir, dates[-1])
     return {
         "rows": 0,  # 不再查询行数
+        "latest_rows": latest_rows,
         "earliest_date": dates[0],
         "latest_date": dates[-1],
-        "symbols_covered": 0,  # 不再查询标的数
+        "symbols_covered": symbols,
         "trading_days": len(dates),
     }
 

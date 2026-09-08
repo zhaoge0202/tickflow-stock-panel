@@ -167,7 +167,9 @@ class ScreenerService:
         # turnover_rate 是 enriched 存储列, 必须随行透传: 否则即时计算后该列
         # 丢失, 自定义 SQL 用它做条件会 Binder Error 被吞成空结果 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "auction_result_price", "auction_result_volume",
+                     "auction_result_amount", "raw_close", "raw_high", "raw_low",
+                     "turnover_rate"]
 
         try:
             lf = (
@@ -288,7 +290,9 @@ class ScreenerService:
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "auction_result_price", "auction_result_volume",
+                     "auction_result_amount", "raw_close", "raw_high", "raw_low",
+                     "turnover_rate"]
 
         try:
             lf = (
@@ -487,6 +491,31 @@ class ScreenerService:
         if not symbols:
             return pl.DataFrame()
         df = self.repo.get_minute_by_dates(symbols, [as_of])
+        # tdxapi 全市场实时行情同时落入 quote_ticks。分钟策略优先消费已落盘
+        # minute parquet；当日分区尚未由分钟同步任务生成时，从 quote_ticks
+        # 按累计量额差值聚合出可重启复用的 1m K，不依赖另一个全量分钟权限。
+        try:
+            from app.market_time import cn_today
+            from app.services import quote_tick_store
+
+            if as_of == cn_today() or df.is_empty():
+                quote_bars = quote_tick_store.minute_bars_from_ticks(
+                    self.repo.store.data_dir,
+                    target_date=as_of,
+                    symbols=symbols,
+                    full=True,
+                )
+                if not quote_bars.is_empty():
+                    if df.is_empty():
+                        df = quote_bars
+                    else:
+                        df = (
+                            pl.concat([df, quote_bars], how="vertical_relaxed")
+                            .unique(subset=["symbol", "datetime"], keep="last")
+                            .sort(["symbol", "datetime"])
+                        )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("quote_ticks minute fallback skipped(%s): %s", as_of, exc)
         if df.is_empty():
             fallback = self.repo.latest_minute_date_global()
             if fallback is None:
