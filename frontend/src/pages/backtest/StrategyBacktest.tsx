@@ -208,6 +208,31 @@ const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
   { id: 'range', label: '回测范围' },
 ]
 const toSignalId = (sig: string) => (sig.startsWith('signal_') || sig.startsWith('csg_')) ? sig : `signal_${sig}`
+
+/** 环境数据缺口的一键补算入口: 补算区间后自动重跑回测 */
+function RegimeRecomputeButton({ from, to, pending, onClick }: {
+  from: string
+  to?: string
+  pending: boolean
+  onClick: () => void
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <button
+        onClick={onClick}
+        disabled={pending}
+        className="inline-flex items-center gap-1.5 rounded-btn border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+        {pending ? '补算环境数据中…' : '补算环境数据并重跑'}
+      </button>
+      <span className="text-[10px] text-secondary">
+        将补算 {from} ~ {to || '今天'} 的市场环境数据，完成后自动重跑本次回测
+      </span>
+    </div>
+  )
+}
+
 const numOrNull = (v: string) => v === '' || Number.isNaN(Number(v)) ? null : Number(v)
 const clamp = (v: number, min?: number, max?: number) => {
   let next = v
@@ -1204,6 +1229,27 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     })
   }
 
+  // 环境数据缺口识别: fail-closed 报错文案中提取缺失首日, 供"一键补算并重跑"。
+  // 「数据为空」变体无日期, 用回测起点兜底; 预热区间不足的变体不在此处理(文案已自说明)。
+  const regimeGapStart = useMemo(() => {
+    const msg = backtestTask?.error ?? result?.error ?? ''
+    if (msg.includes('市场环境数据覆盖不完整') && msg.includes('请先补算')) {
+      const m = msg.match(/缺少前一交易日环境[：:\s]*(\d{4}-\d{2}-\d{2})/)
+      return m?.[1] ?? start
+    }
+    if (msg.includes('市场环境数据为空')) return start
+    return null
+  }, [backtestTask?.error, result?.error, start])
+
+  const regimeRecompute = useMutation({
+    mutationFn: () => api.regimeRecompute(regimeGapStart ?? undefined, end || undefined),
+    onSuccess: data => {
+      toast(`环境数据补算完成 (新增 ${data.computed} 天)，自动重新回测`, 'success')
+      handleRun()
+    },
+    onError: e => toast(`环境数据补算失败 · ${String((e as Error)?.message || e)}`, 'error'),
+  })
+
   // 提取统计
   const s = result?.stats
   const pick = (...keys: string[]) => {
@@ -2022,6 +2068,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         {result?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             {result.error}
+            {regimeGapStart && (
+              <RegimeRecomputeButton
+                from={regimeGapStart}
+                to={end}
+                pending={regimeRecompute.isPending || isPending}
+                onClick={() => regimeRecompute.mutate()}
+              />
+            )}
           </div>
         )}
 
@@ -2030,6 +2084,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             <div>{backtestTask.error}</div>
             {result && (
               <div className="mt-1 text-xs text-secondary">本次回测未生成新结果，下方仍展示上一次成功结果。</div>
+            )}
+            {regimeGapStart && (
+              <RegimeRecomputeButton
+                from={regimeGapStart}
+                to={end}
+                pending={regimeRecompute.isPending || isPending}
+                onClick={() => regimeRecompute.mutate()}
+              />
             )}
           </div>
         )}
