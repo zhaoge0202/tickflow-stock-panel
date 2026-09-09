@@ -326,18 +326,25 @@ def attach_ext_columns(
     return df
 
 
-def invalidate_ext_caches(data_dir: Path | None = None) -> None:
+def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: bool = False) -> None:
     """扩展数据/配置变更后的失效入口 (写入端自动调用)。
 
     清扩展帧缓存与注册同步状态 (下次读取重新加载), 并清策略结果缓存 ——
     策略历史窗口磁盘缓存里已含旧扩展列。repo 内存 enriched 缓存由
     API 层 (repo.clear_cache) 补充清理。
+
+    keep_strategy_cache=True: 例行数据刷新 (定时拉取) 只失效帧缓存 —— 下次
+    策略运行自然读到新值, 但不销毁已算好的结果。周期性清空会让策略页在两次
+    重算之间整页空白 (小服务器上全量重算需分钟级), 例行刷新的取舍是保留旧
+    结果 (页面秒加载) 而非黑屏; 手动上传/配置变更仍走全清。
     """
     global _sync_state
     root_key = str(_resolve_dir(data_dir))
     for key in [k for k in _frame_cache if k[0] == root_key]:
         _frame_cache.pop(key, None)
     _sync_state = None
+    if keep_strategy_cache:
+        return
     from app.config import settings as _settings
     from app.services import strategy_cache
 

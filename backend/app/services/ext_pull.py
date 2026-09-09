@@ -257,10 +257,13 @@ async def fetch_and_ingest(
     config: ExtConfig,
     data_dir,
     target_date: date | None = None,
+    *,
+    keep_strategy_cache: bool = False,
 ) -> tuple[int, str]:
     """执行一次拉取: 请求外部 API → 解析响应 → 写入 Parquet。
 
     target_date 默认当日; 历史回补传入目标日期 (写入对应分区)。
+    keep_strategy_cache=True 由定时拉取循环传入: 例行刷新不清策略结果缓存。
     Returns:
         (rows_written, date_str)
     """
@@ -269,7 +272,10 @@ async def fetch_and_ingest(
     rows = await fetch_rows_for_date(config, day)
     if not rows:
         raise ValueError("提取到的行数为 0")
-    n = rows_to_parquet(rows, config, data_dir, snapshot_date=day)
+    n = rows_to_parquet(
+        rows, config, data_dir, snapshot_date=day,
+        keep_strategy_cache=keep_strategy_cache,
+    )
     return n, day.isoformat()
 
 
@@ -498,7 +504,11 @@ class PullScheduler:
 
                 # 先执行一次 (启用即拉取, 让用户立刻看到生效)
                 try:
-                    n, d = await fetch_and_ingest(fresh, self._data_dir)
+                    # 例行定时刷新: 不清策略结果缓存 (见 invalidate_ext_caches),
+                    # 否则策略页每轮拉取后整页空白, 直到下次全量重算完成。
+                    n, d = await fetch_and_ingest(
+                        fresh, self._data_dir, keep_strategy_cache=True
+                    )
                     fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
                     fresh.pull.last_status = "success"
                     fresh.pull.last_message = f"{n} rows @ {d}"

@@ -241,6 +241,40 @@ def test_write_invalidates_frame_cache(data_dir):
     assert out2[COL].to_list() == [0.8]
 
 
+def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir):
+    """定时拉取 (keep_strategy_cache=True) 只失效扩展帧缓存, 不销毁策略结果。
+
+    策略页依赖 strategy_cache 秒加载; 周期性拉取每轮全清会让页面在两次
+    全量重算之间整页空白。手动上传/配置变更 (默认路径) 保持全清旧行为。
+    """
+    from app.services import strategy_cache
+
+    cfg = _mk_config(data_dir, mode="timeseries")
+    strategy_cache.write_cache(
+        data_dir, "2026-01-05",
+        {"s1": {"total": 1, "as_of": "2026-01-05", "rows": []}},
+    )
+
+    write_ext_parquet(
+        pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.8]}),
+        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        keep_strategy_cache=True,
+    )
+    # 策略结果保留; 扩展帧缓存仍失效 → 新值立即可见
+    cached = strategy_cache.read_cache(data_dir) or {}
+    assert cached.get("results", {}).get("s1", {}).get("total") == 1
+    frame = _frame([("600000.SH", "2026-01-05", 10.0)])
+    out = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
+    assert out[COL].to_list() == [0.8]
+
+    # 默认路径 (手动写入): 全清
+    write_ext_parquet(
+        pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.9]}),
+        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+    )
+    assert strategy_cache.read_cache(data_dir) is None
+
+
 def test_config_field_change_invalidates_sync(data_dir):
     _mk_config(data_dir)
     ext_factors.ensure_synced(data_dir)

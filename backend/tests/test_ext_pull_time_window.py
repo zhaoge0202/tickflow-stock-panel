@@ -70,7 +70,7 @@ async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch)
         seen["fetched"] = target_date
         return [{"symbol": "000001.SZ", "v": 1}]
 
-    def fake_write(rows, config, data_dir, snapshot_date):
+    def fake_write(rows, config, data_dir, snapshot_date, **kwargs):
         seen["written"] = snapshot_date
         return len(rows)
 
