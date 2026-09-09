@@ -75,6 +75,15 @@ def read_cache(data_dir: Path) -> dict | None:
 
 def clear_cache(data_dir: Path) -> None:
     """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。"""
+    import traceback
+
+    # 运维可见性: 策略页依赖本缓存秒加载, 被清空即整页回退到全量重算。
+    # 记录调用链 (最近 5 帧), 排查"缓存莫名消失"类问题不需要复现现场。
+    frames = traceback.extract_stack()[:-1]
+    chain = " <- ".join(
+        f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}:{f.name}" for f in frames[-5:]
+    )
+    logger.warning("策略缓存被清除, 调用链: %s", chain)
     path = _cache_path(data_dir)
     with _file_lock:
         path.unlink(missing_ok=True)
