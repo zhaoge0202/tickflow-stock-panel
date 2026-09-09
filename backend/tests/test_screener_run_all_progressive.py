@@ -234,3 +234,60 @@ def test_run_all_full_detail_stays_blocking(monkeypatch, tmp_path, fast_first_re
     # 非 summary 请求: 保持整段阻塞并返回明细
     assert resp["results"]["d1"]["rows"][0]["symbol"] == "000001.SZ"
     assert "pending" not in resp
+
+
+def test_run_all_progressive_builds_matrix_once_and_shares_it(
+    monkeypatch, tmp_path, fast_first_return
+):
+    """渐进式逐策略执行前, 并集矩阵只建一次并放进 context.market 复用。
+
+    旧行为: 每个策略单独 run_all, context.market 不回写 → 每个矩阵策略都
+    重建全市场矩阵 (小服务器上单次数秒到十余秒)。
+    """
+
+    @dataclass
+    class _Context:
+        market: object = None
+
+    class _MatrixEngine(_FakeEngine):
+        def __init__(self, delays):
+            super().__init__(delays)
+            self.matrix_builds = 0
+            self.seen_markets: list[object] = []
+
+        def build_shared_matrix(self, context, selected, params_map=None, overrides_map=None):
+            self.matrix_builds += 1
+            return {"fields": len(selected)}
+
+        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+            self.seen_markets.append(context.market)
+            return super().run_all(
+                context, params_map=params_map, overrides_map=overrides_map,
+                strategy_ids=strategy_ids, parallel=parallel,
+            )
+
+    class _CtxService(_FakeService):
+        def build_strategy_context(self, *args, **kwargs):
+            return _Context()
+
+    engine = _MatrixEngine({"s1": 0.01, "s2": 0.01, "s3": 0.01})
+    monkeypatch.setattr(screener_api, "ScreenerService", _CtxService)
+
+    resp = screener_api.run_all(
+        _request(tmp_path, engine),
+        {
+            "as_of": AS_OF,
+            "strategy_ids": ["s1", "s2", "s3"],
+            "asset_type": "stock",
+            "timeframe": "1d",
+            "summary_only": True,
+        },
+    )
+    results = _wait_cache_results(tmp_path, ["s1", "s2", "s3"])
+    assert set(results) == {"s1", "s2", "s3"}
+    assert resp["complete"] is True or resp["pending"] == []
+
+    # 矩阵只构建一次; 每个策略拿到的都是同一个 market 对象
+    assert engine.matrix_builds == 1
+    assert engine.seen_markets and all(m == {"fields": 3} for m in engine.seen_markets)
+    assert len(engine.seen_markets) == 3

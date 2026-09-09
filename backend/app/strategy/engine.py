@@ -1151,37 +1151,9 @@ class StrategyEngine:
             raise ValueError("selected strategies require history data")
 
         shared_matrix = context.market
-        matrix_strats = [
-            (sid, strategy)
-            for sid, strategy in selected
-            if strategy.execution_backend == "matrix_native"
-        ]
-        if (
-            shared_matrix is None
-            and matrix_strats
-            and shared_history is not None
-            and not shared_history.is_empty()
-        ):
-            from app.backtest.matrix import build_market_data_matrix
-
-            field_columns: set[str] = set()
-            for sid, strategy in matrix_strats:
-                field_columns.update(
-                    self._matrix_field_columns(
-                        strategy,
-                        overrides_map.get(sid),
-                        params_map.get(sid),
-                    )
-                )
-            matrix_t0 = time.perf_counter()
-            shared_matrix = build_market_data_matrix(
-                shared_history,
-                field_columns=field_columns,
-            )
-            logger.info(
-                "run_all: shared matrix built in %.0fms (fields=%d)",
-                (time.perf_counter() - matrix_t0) * 1000,
-                len(field_columns),
+        if shared_matrix is None:
+            shared_matrix = self.build_shared_matrix(
+                context, selected, params_map, overrides_map
             )
 
         results: dict[str, StrategyResult] = {}
@@ -1226,6 +1198,49 @@ class StrategyEngine:
                 results[sid] = result
 
         return results
+
+    def build_shared_matrix(
+        self,
+        context: StrategyDataContext,
+        selected: list[tuple[str, StrategyDef]],
+        params_map: dict | None = None,
+        overrides_map: dict | None = None,
+    ):
+        """按所选策略的字段并集构建市场数据矩阵; 无矩阵策略或无历史时返回 None。
+
+        渐进式 run_all (逐策略执行) 也用它一次建好并集矩阵后放入 context.market,
+        避免每个 matrix_native 策略重复构建同一份大矩阵 (全市场历史, 秒级)。
+        """
+        params_map = params_map or {}
+        overrides_map = overrides_map or {}
+        matrix_strats = [
+            (sid, strategy)
+            for sid, strategy in selected
+            if strategy.execution_backend == "matrix_native"
+        ]
+        history = context.history
+        if not matrix_strats or history is None or history.is_empty():
+            return None
+
+        from app.backtest.matrix import build_market_data_matrix
+
+        field_columns: set[str] = set()
+        for sid, strategy in matrix_strats:
+            field_columns.update(
+                self._matrix_field_columns(
+                    strategy,
+                    overrides_map.get(sid),
+                    params_map.get(sid),
+                )
+            )
+        matrix_t0 = time.perf_counter()
+        matrix = build_market_data_matrix(history, field_columns=field_columns)
+        logger.info(
+            "run_all: shared matrix built in %.0fms (fields=%d)",
+            (time.perf_counter() - matrix_t0) * 1000,
+            len(field_columns),
+        )
+        return matrix
 
     @staticmethod
     def _matrix_field_columns(
