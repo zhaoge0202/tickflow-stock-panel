@@ -88,13 +88,12 @@ def get_realtime_quote_interval() -> float:
 
 
 def set_realtime_quote_interval(interval: float) -> float:
-    """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
-    current = load()
-    current["realtime_quote_interval"] = interval
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    _invalidate_cache()
+    """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。
+
+    走 save() 而不是自己 load + write_text: 锁外的 read-modify-write 会用旧快照
+    整体覆盖文件, 把并发写入的另一个偏好丢掉 (见 save 的 docstring)。
+    """
+    save({"realtime_quote_interval": interval})
     return interval
 
 
