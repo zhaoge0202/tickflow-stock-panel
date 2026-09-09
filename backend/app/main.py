@@ -288,7 +288,7 @@ async def _application_lifespan(app: FastAPI):
                     return
 
                 with shared_heavy_job_limiter.slot(
-                    "normal",
+                    "exclusive",
                     cancel_event=matrix_prewarm_owner.cancel_event,
                 ):
                     result = prewarm_matrix_cache(

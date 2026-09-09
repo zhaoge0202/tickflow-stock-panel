@@ -1130,7 +1130,7 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
@@ -1167,7 +1167,6 @@ async def sync_minute(request: Request):
             job_store.progress(job_id, stage, pct, msg)
 
         try:
-            job_store.start(job_id)
             progress("sync_minute", 5, "解析标的池…")
             universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
             # 补充 instruments 全量标的，覆盖北交所、新股等
@@ -1200,7 +1199,7 @@ async def sync_minute(request: Request):
                     on_chunk_done=_on_chunk,
                 )
 
-            written = await loop.run_in_executor(_long_task_executor, _run)
+            written = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
 
             # 刷新视图
             from app.jobs.daily_pipeline import _refresh_single_view
@@ -1336,7 +1335,7 @@ async def extend_history(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1355,9 +1354,8 @@ async def extend_history(request: Request):
                                    stage_pct=stage_pct, skip_log=skip_log)
 
             try:
-                job_store.start(job_id)
                 result = await loop.run_in_executor(
-                    _long_task_executor,
+                    _long_task_executor, run_with_capacity, job_id,
                     lambda: run_extend_history(repo, capset, value, unit, on_progress=progress),
                 )
                 if "error" in result:
@@ -1418,7 +1416,7 @@ async def repair_daily(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.repair_daily import run_repair_daily
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1445,8 +1443,7 @@ async def repair_daily(request: Request):
                 return run_repair_daily(repo, capset, start_date, on_progress=progress)
 
             try:
-                job_store.start(job_id)
-                result = await loop.run_in_executor(_long_task_executor, _run)
+                result = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
                 if "error" in result:
                     job_store.fail(job_id, result["error"])
                 else:
@@ -1481,7 +1478,7 @@ async def rebuild_enriched(request: Request):
     try:
         repo = request.app.state.repo
 
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1500,7 +1497,6 @@ async def rebuild_enriched(request: Request):
                                    stage_pct=stage_pct, skip_log=skip_log)
 
             try:
-                job_store.start(job_id)
                 progress("rebuild_enriched", 10, "全量计算 enriched…")
                 from app.indicators.pipeline import run_pipeline
 
@@ -1511,7 +1507,7 @@ async def rebuild_enriched(request: Request):
                              stage_pct=int(100 * cur / tot), skip_log=True)
 
                 written = await loop.run_in_executor(
-                    _long_task_executor,
+                    _long_task_executor, run_with_capacity, job_id,
                     lambda: run_pipeline(on_batch_done=_batch_progress),
                 )
 

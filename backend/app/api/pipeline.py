@@ -12,6 +12,7 @@ from app.services.pipeline_jobs import (
     JobCancelledError,
     job_store,
     release_run_slot,
+    run_with_capacity,
     try_acquire_run_slot,
 )
 from app.api.data import invalidate_storage_cache
@@ -52,7 +53,6 @@ async def run_now(request: Request) -> dict:
         # 管道运行期间暂停实时行情取数, 防止覆写同一批 parquet 竞态
         qs = getattr(request.app.state, "quote_service", None)
         try:
-            job_store.start(job_id)
             loop = asyncio.get_event_loop()
 
             def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
@@ -60,15 +60,17 @@ async def run_now(request: Request) -> dict:
                 job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
             def _run() -> dict:
-                if qs:
-                    with qs.paused():
-                        return daily_pipeline.run_now(repo, capset, on_progress=progress)
-                return daily_pipeline.run_now(repo, capset, on_progress=progress)
+                try:
+                    if qs:
+                        with qs.paused():
+                            return daily_pipeline.run_now(repo, capset, on_progress=progress)
+                    return daily_pipeline.run_now(repo, capset, on_progress=progress)
+                finally:
+                    repo.refresh_cache()
 
-            result = await loop.run_in_executor(_long_task_executor, _run)
+            result = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
             job_store.succeed(job_id, result)
             invalidate_storage_cache()
-            repo.refresh_cache()  # 刷新 Polars 缓存
         except JobCancelledError:
             # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
             # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。

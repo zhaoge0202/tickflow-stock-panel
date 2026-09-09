@@ -846,7 +846,7 @@ def _run_tracked(fn, job_label: str) -> bool:
     重任务执行槽: 再挡一层僵尸并发(reap 后线程仍活时不得并行写 parquet)。
     返回 True 仅表示任务已成功并且执行槽已释放。
     """
-    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
 
     job_id, is_new = job_store.create()
     if not is_new:
@@ -863,8 +863,7 @@ def _run_tracked(fn, job_label: str) -> bool:
 
     succeeded = False
     try:
-        job_store.start(job_id)
-        result = fn(on_progress=progress)
+        result = run_with_capacity(job_id, lambda: fn(on_progress=progress))
         job_store.succeed(job_id, result)
         succeeded = True
         logger.info("scheduled %s completed: job_id=%s", job_label, job_id)
