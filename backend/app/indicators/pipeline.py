@@ -467,16 +467,21 @@ def compute_indicators(
 
     # Pass 3: KDJ
     if "kdj_k" in want:
-        _kdj_rsv = (
-            100 * (pl.col("close") - pl.col("_kdj_ln"))
-            / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
+        # 9 日内最高价=最低价 (场内货币 ETF、长期无成交标的) 时分母是 0 而不是空值,
+        # fill_null 拦不住: 0/0 得到 NaN, 再被 ewm 递推永久传染。与矩阵路径口径一致 ——
+        # 该日 RSV 置空, EWM 跳过空值后继续递推。
+        _kdj_range = pl.col("_kdj_hn") - pl.col("_kdj_ln")
+        _kdj_rsv = pl.when(_kdj_range > 0).then(
+            100 * (pl.col("close") - pl.col("_kdj_ln")) / _kdj_range
         )
         df = df.with_columns([
-            _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
+            _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False, ignore_nulls=True)
+            .over("symbol").alias("kdj_k"),
         ])
     if "kdj_d" in want:
         df = df.with_columns([
-            pl.col("kdj_k").ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_d"),
+            pl.col("kdj_k").ewm_mean(alpha=1.0 / 3, adjust=False, ignore_nulls=True)
+            .over("symbol").alias("kdj_d"),
         ])
     if "kdj_j" in want:
         df = df.with_columns([
