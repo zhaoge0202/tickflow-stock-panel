@@ -5,7 +5,7 @@ import random
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.services import alert_store
 
@@ -19,8 +19,10 @@ def _data_dir(request: Request) -> Path:
 @router.get("")
 def list_alerts(
     request: Request,
-    days: int = 7,
-    limit: int = 5000,
+    # 上限取存储侧保留策略 (alert_store.MAX_DAYS / MAX_RECORDS): 超出也没有可返回的记录。
+    # 无下限时 days=-1 会把 cutoff 推到未来直接返回空, limit=-1 会走负数切片静默丢掉最旧一条。
+    days: int = Query(alert_store.MAX_DAYS, ge=1, le=alert_store.MAX_DAYS),
+    limit: int = Query(alert_store.MAX_RECORDS, ge=1, le=alert_store.MAX_RECORDS),
     source: str | None = None,
     type: str | None = None,
     ext_columns: str | None = None,
