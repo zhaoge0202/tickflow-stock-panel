@@ -140,6 +140,36 @@ def test_matrix_field_matches_polars_attach_across_two_announcements():
             np.testing.assert_allclose(actual, value, rtol=1e-6)
 
 
+def test_matrix_field_clears_value_when_newer_report_lacks_metric():
+    """新一期财报缺该指标时不得继续沿用上一期值, 否则同一行混用两期报告。
+
+    矩阵路径逐列前向填充, 若跳过空值写入, 4-16 起 pb 已换到新期 bps=6,
+    roe 却仍停在上一期的 20 —— polars 侧 join_asof 只认最新一期整行 (roe 为
+    null), 两条路径给出不同的因子值。
+    """
+    panel = _daily_panel(date(2026, 4, 1), 20, ("600000.SH",))
+    snapshot = _snapshot_frame([
+        {"symbol": "600000.SH", "announce": "2026-04-05", "roe": 20.0, "bps": 4.0},
+        {"symbol": "600000.SH", "announce": "2026-04-15", "roe": None, "bps": 6.0},
+    ])
+    attached = attach_fundamental_factors(panel, snapshot, ["roe_latest", "pb_latest"]).sort("date")
+    market = build_market_data_matrix(panel)
+    matrices = build_fundamental_matrices(market, snapshot, ["roe_latest", "pb_latest"])
+    column = market.symbols.index("600000.SH")
+
+    # polars 口径: 新公告生效 (4-16) 后 roe 无值, pb 走新一期 bps
+    assert attached["roe_latest"].to_list()[15:] == [None] * 5
+    assert all(value is not None for value in attached["pb_latest"].to_list()[15:])
+
+    for name in ("roe_latest", "pb_latest"):
+        for row_index, value in enumerate(attached[name].to_list()):
+            actual = matrices[name][row_index, column]
+            if value is None:
+                assert np.isnan(actual), (name, row_index, actual)
+            else:
+                np.testing.assert_allclose(actual, value, rtol=1e-6)
+
+
 def test_bps_nonpositive_gives_null_pb():
     panel = _daily_panel(date(2026, 4, 1), 8, ("000001.SZ",))
     snapshot = _snapshot_frame([

@@ -181,9 +181,11 @@ def build_fundamental_matrices(
             continue
         for column, target in raw_columns.items():
             value = snapshot[column][row_index]
-            if value is None or not np.isfinite(float(value)):
-                continue
-            target[start:, column_index] = float(value)
+            numeric = float("nan") if value is None else float(value)
+            # 新一期该指标为空时必须覆盖旧值为 NaN: 跳过写入会让同一行混用两期
+            # 报告 (bps 取新期、roe 停在上一期), 与 polars 侧 join_asof 只认
+            # 最新一期整行的口径不一致。
+            target[start:, column_index] = numeric if np.isfinite(numeric) else np.nan
 
     for name in requested:
         spec = FUNDAMENTAL_FACTORS[name]
