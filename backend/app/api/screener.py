@@ -613,7 +613,15 @@ def run_all(request: Request, body: Optional[dict] = None):
     # 解析日期
     raw_date = body.get("as_of")
     if raw_date:
-        as_of = date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
+        # 与 /custom、/preset 的 `as_of: date` 同口径: 只收 ISO 日期字符串。
+        # 非字符串原样透传会让 str(as_of) 把 "20260904" 之类写进 strategy_cache.json,
+        # 与其它入口写的 "2026-09-04" 不是同一格式, 后续按 as_of 比对缓存永远失配。
+        if not isinstance(raw_date, str):
+            raise HTTPException(status_code=400, detail="as_of 必须是 YYYY-MM-DD 日期字符串")
+        try:
+            as_of = date_type.fromisoformat(raw_date)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
     else:
         as_of = svc.latest_date()
     if not as_of:
