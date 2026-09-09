@@ -125,13 +125,11 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     dates_asc = list(reversed(dates))
 
     # 收集每个概念在各日期的 (排名, 涨幅)。排名 = 该日在列中的索引 + 1。
-    concept_data: dict[str, list[tuple[int, float]]] = {}
+    concept_data: dict[str, dict[str, tuple[int, float]]] = {}
     for d in dates_asc:
         col = columns.get(d) or []
         for idx, (name, pct) in enumerate(col):
-            concept_data.setdefault(name, []).append((idx + 1, pct))
-
-    n_dates = len(dates_asc)
+            concept_data.setdefault(name, {})[d] = (idx + 1, pct)
 
     def _stats(ranks_pcts: list[tuple[int, float]]) -> dict:
         ranks = [r for r, _ in ranks_pcts]
@@ -151,10 +149,10 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     institutional: list[dict] = []
     hot_money: list[dict] = []
 
-    for concept, rp in concept_data.items():
-        # 缺失日补 (大排名, 0 涨幅) 保持时间轴对齐
-        if len(rp) < n_dates:
-            rp = rp + [(999, 0.0)] * (n_dates - len(rp))
+    for concept, by_date in concept_data.items():
+        # 缺失日按日期归位补 (大排名, 0 涨幅) —— 补位必须落在缺席的那一天,
+        # 一律追加到末尾会把"只在最近几日上榜"的新晋概念读成退潮。
+        rp = [by_date.get(d, (999, 0.0)) for d in dates_asc]
         s = _stats(rp)
         s["concept"] = concept
 
