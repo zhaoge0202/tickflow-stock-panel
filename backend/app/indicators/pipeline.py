@@ -803,9 +803,13 @@ def compute_limit_signals(
     else:
         authoritative_date = pl.col("date") == pl.col("date").max()
     if "limit_up" in df.columns:
+        # >0 与实时路径 (_compute_limit_signals_today) 同守卫: 维表 limit_up 为 0
+        # (数据源未提供该字段的占位值) 不是权威价, 直接采用会让 raw_close >= -0.005
+        # 恒成立, 全部标的被判涨停。
         effective_limit_up = pl.when(
             authoritative_date
             & pl.col("limit_up").is_not_null()
+            & (pl.col("limit_up") > 0)
             & (pl.col("limit_up") < _SENTINEL)
         ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
     else:
@@ -814,6 +818,7 @@ def compute_limit_signals(
         effective_limit_down = pl.when(
             authoritative_date
             & pl.col("limit_down").is_not_null()
+            & (pl.col("limit_down") > 0)
             & (pl.col("limit_down") < _SENTINEL)
         ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
     else:
