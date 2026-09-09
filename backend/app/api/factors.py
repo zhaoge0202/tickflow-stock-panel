@@ -381,14 +381,16 @@ def delete_custom_factor(factor_id: str, request: Request, force: bool = Query(d
     data_dir = _data_dir(request)
     from app.factors.registry import get_factor
 
-    if get_factor(factor_id) is None and not store.delete_one(data_dir, factor_id):
-        raise HTTPException(status_code=404, detail=f"因子不存在: {factor_id}")
+    # 引用检查必须排在存在性判定之前: 下面用来探测「盘上是否有定义」的
+    # store.delete_one 本身就会删文件, 反过来会出现「拒绝删除」但定义已被删掉。
     references = _find_references(data_dir, factor_id)
     if references and not force:
         raise HTTPException(
             status_code=409,
             detail={"message": "该因子仍有引用, 拒绝删除 (可带 force=true 强制)", "references": references},
         )
+    if get_factor(factor_id) is None and not store.delete_one(data_dir, factor_id):
+        raise HTTPException(status_code=404, detail=f"因子不存在: {factor_id}")
     try:
         unregister_factor(factor_id)
     except ValueError as exc:
