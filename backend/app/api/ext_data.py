@@ -16,6 +16,7 @@ import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from app.market_time import CN_TZ
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -255,10 +256,14 @@ def _with_instrument_name(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
 
 
 def _latest_sync_date(config: ExtConfig, data_dir: Path) -> str | None:
-    """扫描数据文件，返回该扩展配置的最新同步时间（含时分秒）。
+    """扫描数据文件，返回该扩展配置的最新同步时间（北京墙钟, 含时分秒）。
 
     - snapshot: 直接取 ext_data/{id}/part.parquet 的 mtime
     - timeseries: 扫描 ext_data/{id}/timeseries/date=xxx 分区目录
+
+    用北京时间而非宿主机时钟: 前端 ExtDataStatCard 原样展示这串裸时间,
+    容器默认 UTC 时会比同一页拉取面板里的 pull.last_run(带时区 ISO,
+    浏览器按本地时区渲染)整整差一个时区。
     """
     from datetime import datetime
 
@@ -266,7 +271,7 @@ def _latest_sync_date(config: ExtConfig, data_dir: Path) -> str | None:
         # 快照: part.parquet 与 config.json 同级
         p = data_dir / "ext_data" / config.id / "part.parquet"
         if p.exists():
-            ts = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            ts = datetime.fromtimestamp(p.stat().st_mtime, tz=CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
             return ts
         # 兼容旧路径
         old = data_dir / "instruments_ext"
@@ -285,7 +290,7 @@ def _latest_sync_date(config: ExtConfig, data_dir: Path) -> str | None:
 
 
 def _latest_sync_from_partitions(base: Path) -> str | None:
-    """从 date=xxx 分区目录中找到最新分区的修改时间。"""
+    """从 date=xxx 分区目录中找到最新分区的修改时间 (北京墙钟)。"""
     from datetime import datetime
     latest_ts: float = 0
     latest_date: str | None = None
@@ -297,7 +302,7 @@ def _latest_sync_from_partitions(base: Path) -> str | None:
                     latest_ts = mtime
                     latest_date = d.name[5:]
     if latest_date and latest_ts > 0:
-        ts = datetime.fromtimestamp(latest_ts).strftime("%H:%M:%S")
+        ts = datetime.fromtimestamp(latest_ts, tz=CN_TZ).strftime("%H:%M:%S")
         return f"{latest_date} {ts}"
     return latest_date
 
