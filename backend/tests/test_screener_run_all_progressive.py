@@ -177,17 +177,23 @@ def test_run_all_same_key_piggybacks_running_execution(
     assert engine.executed.count("fast_a") == 1
 
 
-def test_run_all_background_error_without_results_is_500(
+def test_run_all_job_level_error_without_results_is_500(
     monkeypatch, tmp_path, fast_first_return
 ):
-    class _BoomEngine(_FakeEngine):
-        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+    """job 级失败 (如 context 构建崩溃) 且无任何结果 → 500, 语义不变。
+
+    策略级失败 (engine.run_all 对单个 sid 抛错) 已改为逐策略隔离, 见
+    test_run_all_isolates_single_strategy_failure。
+    """
+
+    class _BoomCtxService(_FakeService):
+        def build_strategy_context(self, *args, **kwargs):
             raise ValueError("缺少列: volume")
 
-    monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
+    monkeypatch.setattr(screener_api, "ScreenerService", _BoomCtxService)
     with pytest.raises(HTTPException) as excinfo:
         screener_api.run_all(
-            _request(tmp_path, _BoomEngine({"bad_a": 0.01})),
+            _request(tmp_path, _FakeEngine({"bad_a": 0.01})),
             {
                 "as_of": AS_OF,
                 "strategy_ids": ["bad_a"],
@@ -291,3 +297,38 @@ def test_run_all_progressive_builds_matrix_once_and_shares_it(
     assert engine.matrix_builds == 1
     assert engine.seen_markets and all(m == {"fields": 3} for m in engine.seen_markets)
     assert len(engine.seen_markets) == 3
+
+
+def test_run_all_isolates_single_strategy_failure(
+    monkeypatch, tmp_path, fast_first_return
+):
+    """单个策略执行崩溃只跳过它自己: 其余策略照常算完落缓存, 整批不失败。"""
+
+    class _FlakyEngine(_FakeEngine):
+        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+            for sid in strategy_ids or []:
+                if sid == "broken":
+                    raise ValueError("boom: schema mismatch")
+            return super().run_all(
+                context, params_map=params_map, overrides_map=overrides_map,
+                strategy_ids=strategy_ids, parallel=parallel,
+            )
+
+    engine = _FlakyEngine({"ok_a": 0.01, "broken": 0.01, "ok_b": 0.5})
+    monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
+
+    resp = screener_api.run_all(
+        _request(tmp_path, engine),
+        {
+            "as_of": AS_OF,
+            "strategy_ids": ["ok_a", "broken", "ok_b"],
+            "asset_type": "stock",
+            "timeframe": "1d",
+            "summary_only": True,
+        },
+    )
+    # 后台继续: 好策略都落缓存; broken 不在结果也不在 pending, 而是进 errors
+    results = _wait_cache_results(tmp_path, ["ok_a", "ok_b"])
+    assert set(results) == {"ok_a", "ok_b"}
+    assert "broken" not in results
+    assert "boom: schema mismatch" in (resp["errors"] or {}).get("broken", "")

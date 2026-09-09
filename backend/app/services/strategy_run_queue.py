@@ -83,12 +83,20 @@ class StrategyRunHandle:
         self._lock = threading.Lock()
         self._results: dict[str, dict] = {}
         self._remaining: list[str] = list(ordered_ids)
+        self._errors: dict[str, str] = {}
         self._error: str | None = None
         self._done = False
 
     def complete(self, sid: str, payload: dict) -> None:
         with self._lock:
             self._results[sid] = payload
+            if sid in self._remaining:
+                self._remaining.remove(sid)
+
+    def fail_one(self, sid: str, message: str) -> None:
+        """单个策略失败: 记错误并移出待算队列, 不影响其余策略继续。"""
+        with self._lock:
+            self._errors[sid] = message
             if sid in self._remaining:
                 self._remaining.remove(sid)
 
@@ -102,11 +110,12 @@ class StrategyRunHandle:
             self._done = True
 
     def snapshot(self) -> dict:
-        """线程安全快照: 结果拷贝 + 剩余/错误/完成状态。"""
+        """线程安全快照: 结果拷贝 + 剩余/逐策略错误/整体错误/完成状态。"""
         with self._lock:
             return {
                 "results": dict(self._results),
                 "pending": list(self._remaining),
+                "errors": dict(self._errors),
                 "error": self._error,
                 "done": self._done,
                 "started_at_ms": self.started_at_ms,
