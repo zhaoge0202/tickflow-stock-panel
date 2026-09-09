@@ -210,3 +210,41 @@ def test_financial_sync_merges_history(tmp_path: Path):
     assert row.height == 1
     assert row["roe"].item() == 9.5
     assert merged2.height == 2  # 修正不增加行数
+
+
+def test_financial_sync_merge_unknown_announce_date_does_not_win():
+    """公告日未知的旧行不得压过带公告日的新行。
+
+    多源并存时旧行可能没有 announce_date (provider 不提供 / 上游缺该字段)。
+    这类"公告日未知"的行若排在真实公告日之后, 逐列取最后一个非空值时反而胜出,
+    合并结果会出现「announce_date 是新公告、数值仍是旧值」的自相矛盾行,
+    点时因子据此在公告日之后放出的是修正前的数。
+    """
+    from app.services import financial_sync as fs
+
+    revised = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "announce_date": ["2026-02-01"],
+        "roe": [9.5],
+    })
+    # 旧行有 announce_date 列但取值为空
+    old_null = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "announce_date": [None],
+        "roe": [9.0],
+    })
+    row = fs._merge_report_history(old_null, revised).to_dicts()[0]
+    assert row["announce_date"] == "2026-02-01"
+    assert row["roe"] == 9.5
+
+    # 旧帧整列缺失 (另一数据源不提供该字段) — 文档承诺"后写优先"
+    old_missing = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "roe": [9.0],
+    })
+    row = fs._merge_report_history(old_missing, revised).to_dicts()[0]
+    assert row["announce_date"] == "2026-02-01"
+    assert row["roe"] == 9.5

@@ -160,7 +160,8 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     语义(区分"覆盖"与"填空"): 每列独立取 announce_date 最新的非空值 —
     新同步行有值则覆盖旧值, 新行缺的列(如 fuyao 不提供的字段)由旧行补齐,
     实现多数据源并集共存。历史报告期不可变, 合并不会引入过期数据。
-    无 announce_date 的帧按输入顺序, 后写优先(与旧行为 keep="last" 一致)。
+    无 announce_date 的帧按输入顺序, 后写优先(与旧行为 keep="last" 一致);
+    公告日为空视为最旧, 不得压过带公告日的行。
     """
     valid = [
         frame
@@ -176,7 +177,10 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     sort_keys = ["symbol", "period_end"] + (
         ["announce_date"] if "announce_date" in merged.columns else []
     )
-    merged = merged.sort(sort_keys, nulls_last=True)
+    # 公告日为空排在最前: 排到最后会让"公告日未知"的旧行在逐列 last() 时胜出,
+    # 产出 announce_date 是新公告、数值却是旧值的自相矛盾行。symbol/period_end
+    # 已在上面过滤掉空值, 不受该参数影响。
+    merged = merged.sort(sort_keys, nulls_last=False)
     value_cols = [c for c in merged.columns if c not in ("symbol", "period_end")]
     return (
         merged.group_by("symbol", "period_end")
