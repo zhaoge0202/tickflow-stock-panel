@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
 
+# load_prior_consecutive 最多回看多少个已存在的日分区 (缺列时继续往前找的上限)
+_PRIOR_PARTITION_SCAN = 10
+
 
 @dataclass
 class ScreenerResult:
@@ -109,15 +112,14 @@ class ScreenerService:
         可直接从 parquet 读取, 无需 _load_enriched_for_date 的全量指标重算
         (历史日期该慢路径最坏会触发 9 次全市场 compute_enriched_full)。
 
-        选取逻辑与旧循环等价: 在 as_of 前 1~9 天内找到第一个存在的日分区
-        (即前一交易日), 读取其 symbol + consec_col。存储列的值与重算值逐位一致
-        (连板计数为 run-length, 150 天 warmup 完全覆盖 A 股最长连板, 二者相等)。
+        由近到远取 as_of 之前已存在的日分区 (即前一交易日), 读取其
+        symbol + consec_col。存储列的值与重算值逐位一致 (连板计数为 run-length,
+        150 天 warmup 完全覆盖 A 股最长连板, 二者相等)。
 
         返回列: symbol, prev_consec。找不到前一交易日时返回空 DataFrame。
         """
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        for delta in range(1, 10):
-            candidate = as_of - timedelta(days=delta)
+        for candidate in self._prior_partition_dates(as_of, _PRIOR_PARTITION_SCAN):
             target_parquet = enriched_dir / f"date={candidate.isoformat()}" / "part.parquet"
             if not target_parquet.exists():
                 continue
@@ -139,6 +141,32 @@ class ScreenerService:
                 logger.warning("load_prior_consecutive read failed for %s: %s", candidate, e)
                 return pl.DataFrame()
         return pl.DataFrame()
+
+    def _prior_partition_dates(self, as_of: date, limit: int) -> list[date]:
+        """enriched 目录里早于 as_of 的分区日期, 由近到远最多 limit 个。
+
+        枚举分区目录而不是按自然日回看固定天数: 春节长假连着调休周末,
+        相邻两个交易日能隔 10~11 个自然日 (如 2024-02-08 → 2024-02-19),
+        固定窗口会整段落空。与 auction_benchmark._prev_trading_day
+        「本地日K分区日期 = 已知交易日集合」同口径。
+        """
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        days: list[date] = []
+        try:
+            entries = list(enriched_dir.iterdir())
+        except OSError:
+            return []
+        for part in entries:
+            if not part.name.startswith("date="):
+                continue
+            try:
+                day = date.fromisoformat(part.name[5:])
+            except ValueError:
+                continue
+            if day < as_of:
+                days.append(day)
+        days.sort(reverse=True)
+        return days[:limit]
 
     def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
         """从 14 列基础数据即时计算完整 enriched (含全部指标和信号)。
