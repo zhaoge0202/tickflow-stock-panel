@@ -35,12 +35,16 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL = 120.0
 _cache: dict[str, dict] = {}
 _cache_ts: dict[str, float] = {}
+# 该条目实际覆盖的天数: enriched 只读 days 换算出的日历窗口, 缓存的"全量"因此
+# 以写入时的 days 为上限, 请求更长窗口时不能复用 (见 build_rps_rotation)。
+_cache_days: dict[str, int] = {}
 
 
 def invalidate_cache() -> None:
     """清空轮动矩阵结果缓存(数据管道完成后调用, 避免返回旧数据)。"""
     _cache.clear()
     _cache_ts.clear()
+    _cache_days.clear()
 
 
 def _latest_enriched_date(repo) -> date | None:
@@ -138,7 +142,11 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     cache_key = f"{kind}|{level}|{latest.isoformat()}"
     now = time.time()
     cached = _cache.get(cache_key)
-    if cached and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
+    if (
+        cached
+        and _cache_days.get(cache_key, 0) >= days
+        and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL
+    ):
         return _slice_cached(cached, days)
 
     # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 (map_df, count) 元组 (#186)。
@@ -201,9 +209,10 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
         "concept_count": member_count,
     }
 
-    # 写缓存(存全量, 按需 slice)
+    # 写缓存(存本次窗口的全量, 按需 slice; 覆盖天数一并记下)
     _cache[cache_key] = full
     _cache_ts[cache_key] = now
+    _cache_days[cache_key] = days
 
     return _slice_cached(full, days)
 
