@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import ClassVar, Literal
 
-HeavyJobKind = Literal["normal", "mining"]
+HeavyJobKind = Literal["normal", "mining", "exclusive"]
 
 
 class HeavyJobLimitTimeoutError(TimeoutError):
@@ -20,7 +21,7 @@ class HeavyJobCancelledError(RuntimeError):
 
 
 class HeavyJobLimiter:
-    """A weighted limiter where normal jobs cost one slot and mining costs two."""
+    """FIFO weighted capacity; exclusive jobs reserve the entire process budget."""
 
     _WEIGHTS: ClassVar[dict[HeavyJobKind, int]] = {"normal": 1, "mining": 2}
 
@@ -32,8 +33,10 @@ class HeavyJobLimiter:
         self.capacity = capacity
         self._cancel_poll_interval = cancel_poll_interval
         self._used = 0
-        self._acquired = {"normal": 0, "mining": 0}
+        self._acquired = {"normal": 0, "mining": 0, "exclusive": 0}
         self._condition = threading.Condition()
+        self._waiters: deque[object] = deque()
+        self._local = threading.local()
 
     @property
     def in_use(self) -> int:
@@ -61,23 +64,29 @@ class HeavyJobLimiter:
 
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
-            while True:
-                if cancel_event is not None and cancel_event.is_set():
-                    return False
-                if self._used + weight <= self.capacity:
-                    self._used += weight
-                    self._acquired[kind] += 1
-                    return True
+            ticket = object()
+            self._waiters.append(ticket)
+            try:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return False
+                    if self._waiters[0] is ticket and self._used + weight <= self.capacity:
+                        self._used += weight
+                        self._acquired[kind] += 1
+                        return True
 
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    return False
-                wait_for = remaining
-                if cancel_event is not None:
-                    wait_for = self._cancel_poll_interval
-                    if remaining is not None:
-                        wait_for = min(wait_for, remaining)
-                self._condition.wait(wait_for)
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        return False
+                    wait_for = remaining
+                    if cancel_event is not None:
+                        wait_for = self._cancel_poll_interval
+                        if remaining is not None:
+                            wait_for = min(wait_for, remaining)
+                    self._condition.wait(wait_for)
+            finally:
+                self._waiters.remove(ticket)
+                self._condition.notify_all()
 
     def release(self, kind: HeavyJobKind = "normal") -> None:
         """Return capacity previously acquired for ``kind``."""
@@ -97,21 +106,33 @@ class HeavyJobLimiter:
         timeout: float | None = None,
         cancel_event: threading.Event | None = None,
     ) -> Iterator[HeavyJobLimiter]:
-        """Acquire weighted capacity for the duration of a ``with`` block."""
+        """Reserve capacity in the executing thread, reusing an outer reservation."""
+        weight = self._weight(kind)
+        held = getattr(self._local, "weight", 0)
+        if held:
+            if weight > held:
+                raise RuntimeError("cannot upgrade a held heavy-job reservation")
+            if cancel_event is not None and cancel_event.is_set():
+                raise HeavyJobCancelledError(f"{kind} job was cancelled")
+            yield self
+            return
         acquired = self.acquire(kind, timeout=timeout, cancel_event=cancel_event)
         if not acquired:
             if cancel_event is not None and cancel_event.is_set():
                 raise HeavyJobCancelledError(f"{kind} job was cancelled while waiting")
             raise HeavyJobLimitTimeoutError(f"timed out waiting for {kind} job capacity")
         try:
+            self._local.weight = weight
             yield self
         finally:
+            self._local.weight = 0
             self.release(kind)
 
-    @classmethod
-    def _weight(cls, kind: HeavyJobKind) -> int:
+    def _weight(self, kind: HeavyJobKind) -> int:
+        if kind == "exclusive":
+            return self.capacity
         try:
-            return cls._WEIGHTS[kind]
+            return self._WEIGHTS[kind]
         except KeyError as exc:
             raise ValueError(f"unsupported heavy job kind: {kind!r}") from exc
 

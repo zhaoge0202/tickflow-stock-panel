@@ -94,3 +94,67 @@ def test_invalid_release_does_not_overfill_capacity() -> None:
 def test_module_aliases_share_the_capacity_two_singleton() -> None:
     assert heavy_job_limiter is shared_heavy_job_limiter
     assert shared_heavy_job_limiter.capacity == 2
+
+
+def test_exclusive_job_waits_for_all_normal_jobs() -> None:
+    limiter = HeavyJobLimiter(capacity=2)
+    assert limiter.acquire("normal", timeout=0)
+    assert not limiter.acquire("exclusive", timeout=0)
+    limiter.release("normal")
+    with limiter.slot("exclusive", timeout=0):
+        assert limiter.in_use == 2
+        assert not limiter.acquire("normal", timeout=0)
+    assert limiter.in_use == 0
+
+
+def test_nested_cache_refresh_reuses_exclusive_reservation() -> None:
+    limiter = HeavyJobLimiter(capacity=2)
+    with limiter.slot("exclusive", timeout=0):
+        with limiter.slot("exclusive", timeout=0), limiter.slot("normal", timeout=0):
+            assert limiter.in_use == 2
+        assert limiter.in_use == 2
+    assert limiter.in_use == 0
+
+
+def test_nested_upgrade_fails_instead_of_deadlocking() -> None:
+    limiter = HeavyJobLimiter(capacity=2)
+    with (
+        limiter.slot("normal", timeout=0),
+        pytest.raises(RuntimeError, match="upgrade"),
+        limiter.slot("exclusive", timeout=0),
+    ):
+        pytest.fail("unreachable")
+    assert limiter.in_use == 0
+
+
+def test_waiting_exclusive_job_cannot_be_overtaken() -> None:
+    limiter = HeavyJobLimiter(capacity=2)
+    assert limiter.acquire("normal", timeout=0)
+    entered = threading.Event()
+    finish = threading.Event()
+
+    def exclusive():
+        with limiter.slot("exclusive", timeout=2):
+            entered.set()
+            assert finish.wait(2)
+
+    waiter = threading.Thread(target=exclusive)
+    waiter.start()
+    try:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with limiter._condition:
+                if limiter._waiters:
+                    break
+            time.sleep(0.005)
+        else:
+            pytest.fail("exclusive job did not queue")
+        # One normal slot is free, but belongs to the exclusive job ahead.
+        assert not limiter.acquire("normal", timeout=0)
+        limiter.release("normal")
+        assert entered.wait(1)
+    finally:
+        finish.set()
+        waiter.join(2)
+    assert not waiter.is_alive()
+    assert limiter.in_use == 0

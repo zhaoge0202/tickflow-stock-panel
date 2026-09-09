@@ -167,6 +167,17 @@ class FactorBacktestService:
         *,
         regime_by_date: Mapping[object, Any] | None = None,
     ) -> FactorResult:
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+        with shared_heavy_job_limiter.slot("exclusive"):
+            return self._run(config, regime_by_date=regime_by_date)
+
+    def _run(
+        self,
+        config: FactorConfig,
+        *,
+        regime_by_date: Mapping[object, Any] | None = None,
+    ) -> FactorResult:
         t0 = time.perf_counter()
         run_id = uuid.uuid4().hex[:10]
         generation = self._data_generation(config.asset_type)
@@ -206,6 +217,17 @@ class FactorBacktestService:
         )
 
     def run_batch(
+        self,
+        config: FactorBatchConfig,
+        *,
+        regime_by_date: Mapping[object, Any] | None = None,
+    ) -> FactorBatchResult:
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+        with shared_heavy_job_limiter.slot("exclusive"):
+            return self._run_batch(config, regime_by_date=regime_by_date)
+
+    def _run_batch(
         self,
         config: FactorBatchConfig,
         *,

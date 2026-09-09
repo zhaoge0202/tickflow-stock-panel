@@ -1391,12 +1391,13 @@ def compute_enriched_history_window(
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
     sym_batch: int | None = None,
+    *,
+    include_instrument_metadata: bool = False,
 ) -> pl.DataFrame:
     """按 symbol 分批执行历史窗口计算: 指标 → 偏离列 → 信号 → 涨跌停。
 
-    与整帧顺序执行完全等价 (各步骤均 over("symbol") 分组), 分批只约束
-    峰值内存: repository._refresh_enriched 的 300 天窗口在 5500 只、
-    210 交易日下整帧宽表 ~1.2GB, 小内存机器启动即 OOM (#208)。
+    分批约束计算中间表, 最终完整历史仍常驻内存。排序和可选元数据关联
+    均在单批完成, 避免合并后再复制整张宽表。
     sym_batch 显式传入时跳过自适应 (测试用)。
     """
     if df_hist.is_empty() or "symbol" not in df_hist.columns:
@@ -1420,9 +1421,52 @@ def compute_enriched_history_window(
                 else historical_shares
             )
             part = compute_limit_signals(part, inst_batch, historical_shares=shares_batch)
-        parts.append(part)
-    out = parts[0] if len(parts) == 1 else pl.concat(parts, how="diagonal_relaxed")
-    return out.sort(["symbol", "date"])
+            if include_instrument_metadata:
+                inst_cols = [c for c in ("name", "total_shares", "float_shares")
+                             if c in inst_batch.columns and c not in part.columns]
+                if inst_cols:
+                    part = part.join(
+                        inst_batch.select("symbol", *inst_cols).unique(subset=["symbol"]),
+                        on="symbol", how="left",
+                    )
+        # 连续、互不重叠的已排序 symbol 批次, 拼接后天然有序。
+        parts.append(part.sort(["symbol", "date"]))
+    return parts[0] if len(parts) == 1 else pl.concat(parts, how="diagonal_relaxed", rechunk=False)
+
+
+def _compute_storage_batches(
+    raw: pl.DataFrame,
+    *,
+    factors: pl.DataFrame,
+    instruments: pl.DataFrame,
+    historical_shares: pl.DataFrame,
+) -> pl.DataFrame:
+    """保留完整标的历史输入, 单批计算宽表后仅累积落盘窄表。"""
+    from app.services import preferences
+
+    if raw.is_empty():
+        return _select_storage_cols(raw)
+    symbols = raw["symbol"].unique().sort().to_list()
+    rows_per_sym = max(1, -(-raw.height // len(symbols)))
+    batch_size = _adaptive_sym_batch(preferences.get_enriched_batch_size(), rows_per_sym)
+    parts = []
+    for start in range(0, len(symbols), batch_size):
+        batch = symbols[start:start + batch_size]
+        part = compute_enriched(
+            raw.filter(pl.col("symbol").is_in(batch)),
+            factors=factors.filter(pl.col("symbol").is_in(batch)) if not factors.is_empty() else factors,
+            instruments=(instruments.filter(pl.col("symbol").is_in(batch))
+                         if not instruments.is_empty() else instruments),
+            historical_shares=(historical_shares.filter(pl.col("symbol").is_in(batch))
+                               if not historical_shares.is_empty() else historical_shares),
+        )
+        # 下一批开始前释放宽表; 分区发布仍在所有计算批次成功之后。
+        if not part.is_empty():
+            parts.append(_select_storage_cols(part))
+        del part
+    if not parts:
+        return _select_storage_cols(raw.head(0))
+    return pl.concat(parts, how="diagonal_relaxed", rechunk=False)
 
 
 def run_pipeline(data_dir: Path | None = None,
@@ -1518,7 +1562,7 @@ def run_pipeline(data_dir: Path | None = None,
             else:
                 raw_full = raw_new
 
-            enriched_new = compute_enriched(
+            enriched_new = _compute_storage_batches(
                 raw_full,
                 factors=factors,
                 instruments=instruments,
@@ -1549,6 +1593,7 @@ def run_pipeline(data_dir: Path | None = None,
                     written += date_df.height
                 t_write_new = _t.perf_counter()
                 logger.info("增量写入: %.2fs, %d 行", t_write_new - t_new, written)
+            del raw_new, hist_df, raw_full, enriched_new
 
         # 3. 受除权因子影响的个股: 重算全部已有日期 (累积因子链变了)
         if symbols:
@@ -1560,7 +1605,7 @@ def run_pipeline(data_dir: Path | None = None,
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
                 shares_sym = historical_shares.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_shares.is_empty() else historical_shares
-                enriched_sym = compute_enriched(
+                enriched_sym = _compute_storage_batches(
                     raw_sym,
                     factors=factors_sym,
                     instruments=inst_sym,
@@ -1680,7 +1725,7 @@ def run_pipeline(data_dir: Path | None = None,
             if not enriched.is_empty():
                 if symbols:
                     # 局部模式: 直接按日期合并写入
-                    for date_df in enriched.partition_by("date"):
+                    for date_df in _select_storage_cols(enriched).partition_by("date"):
                         dt = date_df["date"][0]
                         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
                         out = base / f"date={ds}" / "part.parquet"

@@ -539,6 +539,12 @@ class KlineRepository:
         self._index_enriched_cache_date = None
 
     def _refresh_enriched(self) -> None:
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+        with shared_heavy_job_limiter.slot("exclusive"):
+            self._refresh_enriched_impl()
+
+    def _refresh_enriched_impl(self) -> None:
         """从 parquet 加载 enriched 最新日到内存 + 构建聚合表。
 
         enriched parquet 仅存 14 列基础数据。启动时读入历史数据并即时计算完整指标，
@@ -601,8 +607,7 @@ class KlineRepository:
                 if not df_hist.is_empty():
                     instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
 
-                    # 分批执行 指标→偏离→信号→涨跌停 (与整帧顺序等价, 各步骤均
-                    # over("symbol") 分组), 峰值内存与标的总量解耦 (#208)
+                    # 分批计算并关联元数据, 保留完整历史, 限制宽表临时副本。
                     step = time.perf_counter()
                     logger.info("enriched refresh step start: compute window (batched)")
                     df_full = compute_enriched_history_window(
@@ -614,23 +619,11 @@ class KlineRepository:
                             if instruments is not None and not instruments.is_empty()
                             else None
                         ),
+                        include_instrument_metadata=True,
                     )
+                    del df_hist
                     logger.info("enriched refresh step done: compute window rows=%d (%.2fs)",
                                 len(df_full), time.perf_counter() - step)
-
-                    # JOIN instruments 到完整历史 (filter_history/basic_filter 需要 name/股本等列)
-                    if instruments is not None and not instruments.is_empty():
-                        inst_cols = [c for c in ["name", "total_shares", "float_shares"]
-                                     if c in instruments.columns and c not in df_full.columns]
-                        if inst_cols:
-                            step = time.perf_counter()
-                            logger.info("enriched refresh step start: join instruments")
-                            df_full = df_full.join(
-                                instruments.select(["symbol", *inst_cols]).unique(subset=["symbol"]),
-                                on="symbol",
-                                how="left",
-                            )
-                            logger.info("enriched refresh step done: join instruments (%.2fs)", time.perf_counter() - step)
 
                     # 缓存完整历史 (含指标+必要基础信息) 供 filter_history/backtest 直接复用
                     if self.get_matrix_data_generation("stock") != refresh_generation:
@@ -772,9 +765,9 @@ class KlineRepository:
                 needed = [c for c in base_cols if c in hist_all.columns]
                 step = time.perf_counter()
                 logger.info("live agg step start: slice history cache")
-                df_hist = hist_all.filter(
+                df_hist = hist_all.select(needed).filter(
                     (pl.col("date") >= start_60d) & (pl.col("date") <= latest)
-                ).select(needed).sort(["symbol", "date"])
+                ).sort(["symbol", "date"])
                 logger.info("live agg step done: slice history cache rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
 
                 state_cols = [
@@ -1236,16 +1229,20 @@ class KlineRepository:
         if cache_min > start or cache_max < end:
             return None
 
-        df = cache.filter((pl.col("date") >= start) & (pl.col("date") <= end))
-        if symbols is not None:
-            df = df.filter(pl.col("symbol").is_in(symbols))
-        if columns and not df.is_empty():
+        df = cache
+        if columns:
             existing = [c for c in columns if c in df.columns]
             if "symbol" not in existing and "symbol" in df.columns:
                 existing.insert(0, "symbol")
             if "date" not in existing and "date" in df.columns:
                 existing.insert(1, "date")
-            df = df.select(existing)
+            df = df.select(list(dict.fromkeys(existing)))
+        df = df.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+        if symbols is not None:
+            df = df.filter(pl.col("symbol").is_in(symbols))
+        if columns:
+            # 保持旧接口空结果的完整 schema, 非空时沿用请求列校验。
+            df = cache.clear() if df.is_empty() else df.select(existing)
         return df.sort(["symbol", "date"])
 
     def get_live_agg(self) -> pl.DataFrame:
