@@ -20,9 +20,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.indicators.pipeline import filter_halt_days, run_pipeline
+from app.services import index_sync, instrument_sync, kline_sync
+from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -37,31 +38,35 @@ def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> l
 
     自选实时路径会在全市场 enriched 生成前提前创建当日分区 (只有几只自选),
     仅按日期目录计数比较会把它误判为完整分区而跳过计算, 造成日K缺失与
-    均线错误。同日 enriched 行数 < daily 行数即判定为部分分区: 删除后
-    run_pipeline(new_dates_only=True) 会把它们当"新日期"全市场补齐, 与
-    data_integrity.prune_enriched_partitions 的修复语义一致。
+    均线错误。按与加工相同的停牌过滤口径检查 symbol 覆盖, 不能直接比较
+    行数: 正常剔除停牌记录会让 enriched 少行, 导致每次管道都删除重算。
+    删除后 run_pipeline(new_dates_only=True) 会把它们当"新日期"全市场补齐。
     daily 同日分区不存在 (今日日K尚未同步) 时不处理, 留给当日正常流程。
     """
     import shutil
-
-    import pyarrow.parquet as pq
-
-    def _rows(part_dir: Path) -> int:
-        total = 0
-        for f in part_dir.glob("*.parquet"):
-            try:
-                total += pq.ParquetFile(f).metadata.num_rows
-            except Exception:  # noqa: BLE001
-                return -1  # 不可读 → 不动, 交给既有完整性检查兜底
-        return total
 
     pruned: list[str] = []
     for part in enriched_dir.glob("date=*"):
         daily_part = daily_dir / part.stem
         if not daily_part.exists():
             continue
-        e_rows, d_rows = _rows(part), _rows(daily_part)
-        if e_rows >= 0 and d_rows > 0 and e_rows < d_rows:
+        try:
+            expected: set[str] = set()
+            # 每次只读单文件的停牌判定列, 不加载全历史或指标宽表。
+            for path in daily_part.glob("*.parquet"):
+                schema = pl.read_parquet_schema(path)
+                if not {"symbol", "open", "high"}.issubset(schema):
+                    raise ValueError("daily 缺少 symbol/open/high, 无法判断有效标的覆盖")
+                columns = [c for c in ("symbol", "open", "high", "volume", "amount") if c in schema]
+                daily = pl.read_parquet(path, columns=columns)
+                expected.update(filter_halt_days(daily)["symbol"].drop_nulls().to_list())
+            actual: set[str] = set()
+            for path in part.glob("*.parquet"):
+                actual.update(pl.read_parquet(path, columns=["symbol"])["symbol"].drop_nulls().to_list())
+        except Exception as e:
+            logger.warning("enriched 覆盖检查跳过 %s, 保留分区: %s", part.name, e)
+            continue
+        if expected - actual:
             shutil.rmtree(part, ignore_errors=True)
             pruned.append(part.stem.split("=")[1])
     return pruned
@@ -421,7 +426,7 @@ def run_now(
     #     - 首次 (enriched 目录不存在) → 全量
     #     - 往前扩展历史 (新日期 < enriched 已有最早日期) → 全量
     #       前面的除权因子会改变累积因子链,影响后面所有日期的复权价格
-    #     - 往后新增日期 (新日期 > enriched 已有最晚日期)
+    #     - 往后新增日期或已有历史区间内的缺口
     #       → 增量补新区块(所有标的) + 受除权影响个股全日期重算
     #     - 无新日期 + 有新除权因子 → 增量: 只重算受影响个股的全部日期
     #     - 无新日期 + 无变化 → 跳过
@@ -456,15 +461,14 @@ def run_now(
         daily_dates = sorted(d.stem.split("=")[1] for d in daily_dir.glob("date=*"))
         enriched_dates = sorted(d.stem.split("=")[1] for d in enriched_dir.glob("date=*"))
         earliest_enriched = enriched_dates[0]
-        latest_enriched = enriched_dates[-1]
         new_dates = set(daily_dates) - set(enriched_dates)
         if new_dates:
             # 有新日期早于 enriched 最早日期 → 往前扩展
             if any(d < earliest_enriched for d in new_dates):
                 backward_extension = True
-            # 有新日期晚于 enriched 最晚日期 → 往后新增
-            if any(d > latest_enriched for d in new_dates):
-                forward_incremental = True
+            # 包含中间被删的异常分区; 没有新增末日也必须补算。
+            # 往前扩展仍由下方优先走全量分支。
+            forward_incremental = True
 
     def _enriched_batch_progress(cur: int, tot: int) -> None:
         emit("compute_enriched", 65 + int(23 * cur / tot),
