@@ -275,6 +275,33 @@ def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir):
     assert strategy_cache.read_cache(data_dir) is None
 
 
+def test_scheduler_status_upsert_keeps_strategy_cache(data_dir):
+    """定时拉取循环的 last_run/next_run 例行回写 (keep_strategy_cache=True)
+    不清策略结果缓存; UI 保存配置 (默认) 仍全清。
+
+    线上事故: 每轮拉取成功后 store.upsert(fresh) 状态回写触发全清, 数据
+    写入链路放行后 12ms 缓存仍被清空 —— 拉取循环内所有回写都须放行。
+    """
+    from app.services import strategy_cache
+    from app.services.ext_data import ExtConfigStore
+
+    cfg = _mk_config(data_dir, mode="timeseries")
+    store = ExtConfigStore(data_dir)
+    strategy_cache.write_cache(
+        data_dir, "2026-01-05",
+        {"s1": {"total": 1, "as_of": "2026-01-05", "rows": []}},
+    )
+
+    # 调度器例行回写 (last_run/next_run): 保留策略结果
+    store.upsert(cfg, keep_strategy_cache=True)
+    cached = strategy_cache.read_cache(data_dir) or {}
+    assert cached.get("results", {}).get("s1", {}).get("total") == 1
+
+    # UI 保存配置 (字段集可能变化): 默认全清
+    store.upsert(cfg)
+    assert strategy_cache.read_cache(data_dir) is None
+
+
 def test_config_field_change_invalidates_sync(data_dir):
     _mk_config(data_dir)
     ext_factors.ensure_synced(data_dir)

@@ -293,7 +293,7 @@ class ExtConfigStore:
         except Exception:
             return None
 
-    def upsert(self, config: ExtConfig) -> None:
+    def upsert(self, config: ExtConfig, *, keep_strategy_cache: bool = False) -> None:
         config.updated_at = datetime.now().isoformat()
         cp = self._config_path(config.id)
         cp.parent.mkdir(parents=True, exist_ok=True)
@@ -301,8 +301,10 @@ class ExtConfigStore:
             json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        # 字段集/模式变化会改变扩展列集合: 失效扩展帧缓存与策略结果缓存
-        _invalidate_ext_derived(self._base.parent)
+        # 字段集/模式变化会改变扩展列集合: 失效扩展帧缓存与策略结果缓存。
+        # 定时拉取循环的 last_run/next_run 例行回写传 keep_strategy_cache=True,
+        # 否则每轮拉取后策略页缓存被状态回写清空 (数据写入链路已另行放行)。
+        _invalidate_ext_derived(self._base.parent, keep_strategy_cache=keep_strategy_cache)
 
     def delete(self, config_id: str) -> bool:
         import shutil
