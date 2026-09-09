@@ -527,10 +527,12 @@ async def strategy_stream(
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
-    end_date = date.fromisoformat(end) if end else date.today()
-    if start:
-        start_date = date.fromisoformat(start)
-    else:
+    try:
+        end_date = date.fromisoformat(end) if end else date.today()
+        start_date = date.fromisoformat(start) if start else None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
+    if start_date is None:
         # 空 start = 全部历史: 用本地最早日K日期, 查不到再回退到默认窗口
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
@@ -830,10 +832,12 @@ async def optimize_stream(
     from app.backtest.optimizer import OptimizeConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
-    end_date = date.fromisoformat(end) if end else date.today()
-    if start:
-        start_date = date.fromisoformat(start)
-    else:
+    try:
+        end_date = date.fromisoformat(end) if end else date.today()
+        start_date = date.fromisoformat(start) if start else None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
+    if start_date is None:
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
 
@@ -1052,10 +1056,12 @@ async def walkforward_stream(
 
     direction = direction or None
 
-    end_date = date.fromisoformat(end) if end else date.today()
-    if start:
-        start_date = date.fromisoformat(start)
-    else:
+    try:
+        end_date = date.fromisoformat(end) if end else date.today()
+        start_date = date.fromisoformat(start) if start else None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
+    if start_date is None:
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=STRATEGY_DEFAULT_DAYS))
 
