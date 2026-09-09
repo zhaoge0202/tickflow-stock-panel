@@ -21,6 +21,8 @@ import threading
 import time
 from pathlib import Path
 
+from app.market_time import cn_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,6 +123,9 @@ class JsonReportStore:
 
     @staticmethod
     def _now_iso() -> str:
-        """当前本地时间 ISO 字符串(带秒精度,前端 toLocaleString 友好)。"""
-        from datetime import datetime
-        return datetime.now().isoformat(timespec="seconds")
+        """当前北京时间 ISO 字符串(带秒精度,前端 toLocaleString 友好)。
+
+        用北京墙钟而非宿主机时钟: 容器默认 UTC 时, 前端把这串 naive 时间按浏览器
+        本地时区解析, 刚生成的报告会显示成「8 小时前」。
+        """
+        return cn_now().replace(tzinfo=None).isoformat(timespec="seconds")
