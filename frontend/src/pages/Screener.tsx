@@ -1000,17 +1000,24 @@ export function Screener() {
   // 策略候选生命周期: 即使今日动态结果归零,仍展示此前候选的竞价确认/淘汰节点。
   const strategyHistoryQuery = useQuery({
     queryKey: QK.strategyHistory(activeStrategy ?? '', 180),
-    queryFn: async () => {
-      await api.strategyHistoryBackfill(activeStrategy ? [activeStrategy] : undefined)
-      return api.strategyHistory({
-        strategyId: activeStrategy ?? undefined,
-        days: 180,
-        limit: 1000,
-      })
-    },
+    queryFn: () => api.strategyHistory({
+      strategyId: activeStrategy ?? undefined,
+      days: 180,
+      limit: 1000,
+    }),
     enabled: assetType === 'stock' && !!activeStrategy,
-    staleTime: 10_000,
+    staleTime: 60_000,
   })
+
+  // 后台静默预热历史淘汰节点，不阻塞前台策略渲染
+  const backfilledRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeStrategy || backfilledRef.current.has(activeStrategy)) return
+    backfilledRef.current.add(activeStrategy)
+    api.strategyHistoryBackfill([activeStrategy]).then(() => {
+      qc.invalidateQueries({ queryKey: QK.strategyHistory(activeStrategy, 180) })
+    }).catch(() => {})
+  }, [activeStrategy, qc])
   const strategyHistoryEvents = strategyHistoryQuery.data?.events ?? []
   const recommendationHistoryEvents = useMemo(() => {
     const recommendationTypes = new Set<StrategyHistoryEvent['event_type']>([
