@@ -329,7 +329,7 @@ export function Screener() {
       assetType,
     ),
     enabled: isLatestStockDate && visiblePool.length > 0,
-    staleTime: 60_000,
+    staleTime: 300_000,
   })
   const auctionConfirmationQuery = useQuery({
     queryKey: QK.screenerAuctionConfirmation(asOf, auctionTradeDate, auctionStrategyIdsKey, extColumnsParam || undefined),
