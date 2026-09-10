@@ -206,9 +206,22 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
 # ================================================================
 
 def _fmt_pct(v) -> str:
+    """概念/行业涨幅: 小数口径 (0.0522 = +5.22%), 展示前乘 100。"""
     if v is None:
         return "—"
     return f"{v*100:+.2f}%"
+
+
+def _fmt_index_pct(v) -> str:
+    """指数涨跌幅: 百分数口径 (CONTRIBUTING §3.1), 直接展示, 不能再乘一次 100。
+
+    build_market_overview 的 indices[].change_pct 在数据边界已转成百分数
+    (quote_service._build_index_quotes 与 _index_quotes 的 DB 兜底都已乘过 100),
+    与 market_recap._build_indices_block 的展示口径一致。
+    """
+    if v is None:
+        return "—"
+    return f"{v:+.2f}%"
 
 
 def _build_market_block(overview: dict) -> str:
@@ -222,7 +235,7 @@ def _build_market_block(overview: dict) -> str:
     for idx in indices[:4]:
         name = idx.get("name") or idx.get("symbol") or "?"
         chg = idx.get("change_pct")
-        idx_lines.append(f"{name} {_fmt_pct(chg)}")
+        idx_lines.append(f"{name} {_fmt_index_pct(chg)}")
     idx_str = " / ".join(idx_lines) or "指数缺失"
 
     total_amount = (amt.get("total") or 0) / 1e8  # 元 → 亿
