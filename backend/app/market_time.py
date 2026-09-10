@@ -44,6 +44,8 @@ def trading_minutes_elapsed_from_dt(dt: datetime) -> float:
     - 开盘前 = 0; 午休(11:30-13:00) = 120(保持上午累计); 收盘后 = 240。
     - 非交易日(周末) = 240 (视作全天, 避免量比被折算成 0)。
     """
+    if dt.weekday() >= 5:
+        return float(_TRADING_TOTAL_MINUTES)
     t = dt.time()
     if t < _MORNING_START:
         return 0.0
