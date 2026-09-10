@@ -266,15 +266,16 @@ function BreadthBar({ data }: { data: OverviewMarket['breadth'] }) {
   const flatW = Math.max(0, 100 - upW - downW)
   return (
     <div className="space-y-2">
+      {/* 与上方涨跌分布同向: 左跌(绿) 右涨(红) */}
       <div className="flex h-2.5 overflow-hidden rounded-full bg-elevated">
-        <div className="bg-bull/85" style={{ width: `${upW}%` }} />
-        <div className="bg-muted/45" style={{ width: `${flatW}%` }} />
         <div className="bg-bear/85" style={{ width: `${downW}%` }} />
+        <div className="bg-muted/45" style={{ width: `${flatW}%` }} />
+        <div className="bg-bull/85" style={{ width: `${upW}%` }} />
       </div>
       <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-        <div className="rounded bg-bull/8 px-2 py-1 text-bull">涨 <span className="font-mono">{data.up}</span></div>
-        <div className="rounded bg-elevated/70 px-2 py-1 text-muted">平 <span className="font-mono">{data.flat}</span></div>
         <div className="rounded bg-bear/8 px-2 py-1 text-bear">跌 <span className="font-mono">{data.down}</span></div>
+        <div className="rounded bg-elevated/70 px-2 py-1 text-muted">平 <span className="font-mono">{data.flat}</span></div>
+        <div className="rounded bg-bull/8 px-2 py-1 text-bull">涨 <span className="font-mono">{data.up}</span></div>
       </div>
     </div>
   )
