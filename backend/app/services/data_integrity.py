@@ -313,6 +313,7 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
         JobCancelledError,
         job_store,
         release_run_slot,
+        run_with_capacity,
         try_acquire_run_slot,
     )
     from app.services.repair_daily import run_repair_daily
@@ -339,8 +340,7 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
             if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
-            job_store.start(job_id)
-            result = _run()
+            result = run_with_capacity(job_id, _run)
             if isinstance(result, dict) and "error" in result:
                 job_store.fail(job_id, str(result["error"]))
             else:

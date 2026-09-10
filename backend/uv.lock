@@ -1531,14 +1531,14 @@ wheels = [
 
 [[package]]
 name = "polars"
-version = "1.40.1"
+version = "1.44.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "polars-runtime-32" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b3/8c/bc9bc948058348ed43117cecc3007cd608f395915dae8a00974579a5dab1/polars-1.40.1.tar.gz", hash = "sha256:ab2694134b137596b5a59bfd7b4c54ebbc9b59f9403127f18e32d363777552e8", size = 733574, upload-time = "2026-04-22T19:15:55.507Z" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/26/73/258a1fe17bb2744a507199566ed712663144fdd0811b615b59a47dfa38d2/polars-1.44.1.tar.gz", hash = "sha256:ef3c89e9ebbbe8eb343c06873f1945683f8b6f97a1bdf001c60551c6c5e3cda1", size = 765660, upload-time = "2026-08-26T07:09:12.704Z" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ea/91/74fc60d94488685a92ac9d49d7ec55f3e91fe9b77942a6235a5fa7f249c3/polars-1.40.1-py3-none-any.whl", hash = "sha256:c0f861219d1319cdea45c4ce4d30355a47176b8f98dcedf95ea8269f131b8abd", size = 828723, upload-time = "2026-04-22T19:14:25.452Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3a/f1/59154659081930fbde291ea6225607956b500a71b0ce45d88217b7d32da2/polars-1.44.1-py3-none-any.whl", hash = "sha256:1fa62fc1c88fba77a68b28291b5aabdd69e5f38b34e59721a064ae3169b59bb5", size = 865208, upload-time = "2026-08-26T07:07:44.646Z" },
 ]
 
 [package.optional-dependencies]
@@ -1548,34 +1548,34 @@ rtcompat = [
 
 [[package]]
 name = "polars-runtime-32"
-version = "1.40.1"
+version = "1.44.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/54/ba/26d40f039be9f552b5fd7365a621bdfc0f8e912ef77094ae4693491b0bae/polars_runtime_32-1.40.1.tar.gz", hash = "sha256:37f3065615d1bf90d03b5326222df4c5c1f8a5d33e50470aa588e3465e6eb814", size = 2935843, upload-time = "2026-04-22T19:15:57.26Z" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fd/b2/2a76415d047a45df05489f2334c91ff120a274cf655d4ca030c7f54a8743/polars_runtime_32-1.44.1.tar.gz", hash = "sha256:abd10a54ed1caff42228610fcba0f93251f9870bd7cffb0c78bc26f5e0718ce4", size = 3171156, upload-time = "2026-08-26T07:09:14.243Z" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/7d/46/22c8af5eed68ac2eeb556e0fa3ca8a7b798e984ceff4450888f3b5ac61fd/polars_runtime_32-1.40.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:b748ef652270cc49e9e69f99a035e0eb4d5f856d42bcd6ac4d9d80a40142aa1e", size = 52098755, upload-time = "2026-04-22T19:14:28.555Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c6/3e/48599a38009ca60ff82a6f38c8a621ce3c0286aa7397c7d79e741bd9060e/polars_runtime_32-1.40.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:d249b3743e05986060cec0a7aaa542d020df6c6b876e556023a310efd581f9be", size = 46367542, upload-time = "2026-04-22T19:14:32.433Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/43/e9/384bc069367a1a36ee31c13782c178dbd039b2b873b772d4a0fc23a2373d/polars_runtime_32-1.40.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:5987b30e7aa1059d069498496e8dda35afd592b0ac3d46ed87e3ff8df1ad652c", size = 50252104, upload-time = "2026-04-22T19:14:35.945Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/15/ef/7d57ceb0651af74194e97ed6583e148d352f03d696090221b8059cdfc90b/polars_runtime_32-1.40.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8d7f42a8b3f16fc66002cc0f6516f7dd7653396886ae0ed362ab95c0b3408b59", size = 56250788, upload-time = "2026-04-22T19:14:39.743Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/10/0f/e4b3ffc748827a14a474ec9c42e45c066050e440fec57e914091d9adda75/polars_runtime_32-1.40.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:e5f7becc237a7ec9d9a10878dc8e54b73bbf4e2d94a2991c37d7a0b38590d8f9", size = 50432590, upload-time = "2026-04-22T19:14:43.388Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d9/0b/b8d95fbed869fa4caabe9c400e4210374913b376e925e96fdcfa9be6416b/polars_runtime_32-1.40.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:992d14cf191dde043d36fbdbc98a65e43fbc7e9a5024cecd45f838ac4988c1ee", size = 54155564, upload-time = "2026-04-22T19:14:47.239Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/06/d9/d091d8fb5cbed5e9536adfed955c4c89987a4cc3b8e73ae4532402b91c74/polars_runtime_32-1.40.1-cp310-abi3-win_amd64.whl", hash = "sha256:f78bb2abd00101cbb23cc0cb068f7e36e081057a15d2ec2dde3dda280709f030", size = 51829755, upload-time = "2026-04-22T19:14:50.85Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/65/ad/b33c3022a394f3eb55c3310597cec615412a8a33880055eee191d154a628/polars_runtime_32-1.40.1-cp310-abi3-win_arm64.whl", hash = "sha256:b5cbfaf6b085b420b4bfcbe24e8f665076d1cccfdb80c0484c02a023ce205537", size = 45822104, upload-time = "2026-04-22T19:14:54.192Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f1/93/ef9344dcec16757cf21027dc907ef989197e50742cfe4407f2e87edb0a7f/polars_runtime_32-1.44.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:1dfccb2b52aa50468a7d28e3e61c8338a13fb5bffc8646e388a649f5bdc6b463", size = 53962370, upload-time = "2026-08-26T07:07:47.21Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/10/da/38b32b7901af33f1fee2172ceaa39e9159825657920064298917392d78fa/polars_runtime_32-1.44.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:0580807dc3eed258f0db70bb65d905dd43f0135392119ec25308033ae24258fb", size = 48620468, upload-time = "2026-08-26T07:07:50.436Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/49/51/185af877d1d2236671493cf72bd3327a6046240eeea69c0696d1af2a5acb/polars_runtime_32-1.44.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0627f9aa82cb869725235e5188f698862fd9ada0c8c1cf65c3dc5a49a4a0ec26", size = 52455947, upload-time = "2026-08-26T07:07:53.776Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fc/0a/0858f60cb5a6f8f73ec4cdd73eccd9f748d66bfc23304c5c23fa3468094a/polars_runtime_32-1.44.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:eea4283be8e60822d890dbda20588fe59b4172b508bd5ebf3471e531ca9f50d7", size = 58561262, upload-time = "2026-08-26T07:07:57.508Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/73/08/de4774b5612d7c8739f89ac01b601486b4f057b1da35a5b876bf9276fd95/polars_runtime_32-1.44.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:04e2c0f46e7a9906fffb1897f18f23b079b74f83c56b50060bace9e7b9b49b1a", size = 52636064, upload-time = "2026-08-26T07:08:06.337Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/98/ac/769c598dd106e2a6647798da3ed25ddeee67f2d12c04f5da316cb3da6360/polars_runtime_32-1.44.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:0956f0cae632d8fad3a04b4315bf2bb69b56d10c83c79a75c2c4c5a13b9ce5cc", size = 56447612, upload-time = "2026-08-26T07:08:12.36Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b2/ee/98408296e15388020b6183323fdbe78ccab4f72c20d8e0d7092c062d3ad2/polars_runtime_32-1.44.1-cp310-abi3-win_amd64.whl", hash = "sha256:159334184e6fbb074c9f4692221ea19970a5e2bed2a479f9d7bdb00b7f3eedb9", size = 53702970, upload-time = "2026-08-26T07:08:15.398Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e9/9d/8b17e075aac73c881a50b6c1f690d20df46db2f3bcabc99f600ecdee1290/polars_runtime_32-1.44.1-cp310-abi3-win_arm64.whl", hash = "sha256:3ba28d638d0513e0b4afbcdab5c0059a85021e5f81d62b5f793e7e23badb2cf7", size = 47281050, upload-time = "2026-08-26T07:08:18.43Z" },
 ]
 
 [[package]]
 name = "polars-runtime-compat"
-version = "1.40.1"
+version = "1.44.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/4c/60/f8340030f94a45231ad02abff171c8c10f45df0984e5a4fd0f39a48500f4/polars_runtime_compat-1.40.1.tar.gz", hash = "sha256:6149aa764439cec26a5f883fb9921a50f61a0f6c4549df51c735626701a73a18", size = 2935443, upload-time = "2026-04-22T19:16:00.906Z" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ea/eb/014a395e15ab0e773be1dc723d42c70745fbecc3d60a583582a59d6171e1/polars_runtime_compat-1.44.1.tar.gz", hash = "sha256:e697fc01cdbe133b1cd928809258dfcdf99beb58c94f9a9b1e1c73451df307d4", size = 3171975, upload-time = "2026-08-26T07:09:17.338Z" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/07/c7/978481a2a2f5b50636d485bc176e16084fa1bb3b1d7e7e34f580cef240dc/polars_runtime_compat-1.40.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:a683d287237f1dcc3dee95b5b2b6408cec318abbbb412ca49206492513be862f", size = 52016973, upload-time = "2026-04-22T19:15:25.228Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/8b/c9/e308b0bbb331330a762f5f495597d34e9933c965ca6d4026a2eb481ef4ad/polars_runtime_compat-1.40.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:c83750f5593cec088134614fbf783fd10c5a92030d71b35f3dea0fff682d92c6", size = 46246682, upload-time = "2026-04-22T19:15:28.666Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1d/54/eaecb4747695e2e200ed6d13ce40dd7b0cdc7499d0b9af1e64e83af0e46d/polars_runtime_compat-1.40.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ffa15c4a8b7f67911412c849dc3d3aac313f682d834eb3f374d0f6cb7e080efc", size = 50123217, upload-time = "2026-04-22T19:15:32.321Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/20/87/0a881905d94341111d38e6a7ae94674511e6797cf3be2500998f06963edf/polars_runtime_compat-1.40.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e0373dabf942135d13b453d50be7a84b14420b495bd1242570545f58866396e7", size = 55869626, upload-time = "2026-04-22T19:15:37.15Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/be/6e/ac57e39bb94ebd63d6714895881ee0461e39039daa208916e5cad93174f9/polars_runtime_compat-1.40.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:bcdc488472d2c57dd3315a897456b47cdac222a1520fcf3d8d38410a5bf47ec1", size = 50287716, upload-time = "2026-04-22T19:15:40.829Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e1/f3/b75afc9f79cd4cadff52bdc4566119892b378f739a295573bf6bd0190a6c/polars_runtime_compat-1.40.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:34d03962169fc7c0ef6f6efd324d0a51350e7b5abf3b0cd118eb7a32e4d947ec", size = 53796312, upload-time = "2026-04-22T19:15:44.68Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/67/68/0df61011d894d1c94c915b39423c9aab79b3f7b18b836031ed32987227e0/polars_runtime_compat-1.40.1-cp310-abi3-win_amd64.whl", hash = "sha256:d9ccfe58eeb776567cf9556a83b980b9face9f0b1bb629bf2cd2334f4d9daf57", size = 51696665, upload-time = "2026-04-22T19:15:48.65Z" },
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/45/01/1bc7e868d3e4055b1ae756ad8ccc2a5d2bce57d7c88c3b4427babd43450b/polars_runtime_compat-1.40.1-cp310-abi3-win_arm64.whl", hash = "sha256:0c662e6acf5d4e3784eee8e8a1ec6eb185132ac90689cb84034132b5787903b1", size = 45701223, upload-time = "2026-04-22T19:15:52.189Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c6/98/3cf9abdc7690a3edcf3dd196b5bb1ca6d23ff16186d02ad509bd6879306c/polars_runtime_compat-1.44.1-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:52a5d848a7849ff2e56229143b2d947bedb222cf75b9eefc5293c8a969ffc61f", size = 54097881, upload-time = "2026-08-26T07:08:46.78Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b8/13/507a8e8067ed2ab72980de88c6cd92b3f27266f07930dd574a73cafb6046/polars_runtime_compat-1.44.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:72a4858931cc1aeff7d1273fb10b968568acc823163ea2a82ad4f25cd1e7d95b", size = 48468295, upload-time = "2026-08-26T07:08:49.823Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3e/60/2617d27fba9625443037387d40711f87f78fdba2c4ee31ac0d635bcf2f73/polars_runtime_compat-1.44.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2aa6c76bf01ca738da393bb9d42bbb1bb8de1aabfa74f158ac5dfa4ae183711c", size = 52315643, upload-time = "2026-08-26T07:08:53.487Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a5/6e/2a27122bb50b9eb7efab575cac8f8bf87a4e7eb71e6b71ac2f25d2e09fe4/polars_runtime_compat-1.44.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:24d08f87e450b539f866237c5817687c428ba6fb5598698c09448f30b869711c", size = 58138913, upload-time = "2026-08-26T07:08:57.036Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/85/8c/6b6e5d4fc5e05a9128a1994e278e5bf1b552fdc3e5a4758bf82f8af01289/polars_runtime_compat-1.44.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:4e6c822a180197dbaa36749c158660c7489e91e3ea77b9a53d845bb3b127449f", size = 52472804, upload-time = "2026-08-26T07:09:00.067Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/9b/d5/8586749338b86351f519d11e6eb2e4ab9cca4c0d9ad8fc14a3ecda579c81/polars_runtime_compat-1.44.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:4dfd82eb7093beec1534eebd83e7ee5964362042c8106f488189531930874173", size = 56054368, upload-time = "2026-08-26T07:09:03.161Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d2/3f/4d44a299df1fc52b09686f1143359e2719ae2ccbb8b2ef8c2c262fb7ae8b/polars_runtime_compat-1.44.1-cp310-abi3-win_amd64.whl", hash = "sha256:ff0c676297151f357f999f42942ea716de96230bf4191677aadf88bb56a274fb", size = 53482786, upload-time = "2026-08-26T07:09:06.351Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/39/54/cb20b74fb0753d6429f4f01059fffc415bbadbc854ce61eb18c057bc3554/polars_runtime_compat-1.44.1-cp310-abi3-win_arm64.whl", hash = "sha256:b7ad6cbcd1738498218555ecced0b75e212d5af49e6a1fac51be58d1137999a8", size = 47152033, upload-time = "2026-08-26T07:09:09.916Z" },
 ]
 
 [[package]]
@@ -2522,7 +2522,7 @@ all = [
 
 [[package]]
 name = "tickflow-stock-panel-backend"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -2584,8 +2584,8 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "platformdirs", specifier = ">=4.0" },
     { name = "plyer", specifier = ">=2.1" },
-    { name = "polars", specifier = ">=1.0" },
-    { name = "polars", extras = ["rtcompat"], marker = "extra == 'legacy-cpu'", specifier = ">=1.0" },
+    { name = "polars", specifier = ">=1.44,<1.45" },
+    { name = "polars", extras = ["rtcompat"], marker = "extra == 'legacy-cpu'", specifier = ">=1.44,<1.45" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pyarrow", specifier = ">=16.0" },
     { name = "pydantic", specifier = ">=2.7" },

@@ -72,8 +72,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 # ----------------------------------------------------------------
-# 用户 focus 输入净化 — 防止通过"特别关注"绕过红线诱导 AI 给出买卖建议
-# 命中任一敏感词时,整个 focus 被丢弃(返回空串),由各 analyzer 据此跳过注入。
+# 用户 focus 输入规范化。交易建议类表达不会被静默丢弃,而是由统一提示词
+# 转换成客观价位、风险和情景分析,避免历史报告显示了 focus、模型却没有收到。
 # ----------------------------------------------------------------
 _FOCUS_BLOCKLIST = re.compile(
     r"买入|卖出|加仓|减仓|轻仓|重仓|半仓|全仓|仓位|止损|止盈|"
@@ -87,19 +87,36 @@ _FOCUS_BLOCKLIST = re.compile(
 
 
 def sanitize_focus(focus: str) -> str:
-    """净化用户输入的 focus 文本。
-
-    命中交易指令/投资建议类敏感词时返回空串,阻止其注入 AI 提示词。
-    这是对系统提示词红线的兜底:即便用户试图通过 focus 绕过,也不会生效。
-    """
+    """规范化 focus 中的首尾空白与连续换行。"""
     if not focus:
         return ""
-    text = focus.strip()
+    text = re.sub(r"\s+", " ", focus).strip()
+    return text
+
+
+def build_focus_instruction(focus: str, *, report_name: str = "分析报告") -> str:
+    """构建所有报告共用的关注重点指令。
+
+    有关注点时要求模型在固定报告结构之前先直接回应。若原问题涉及交易
+    建议,保留问题语义但要求转换成中立的数据分析,不再无提示地整段丢弃。
+    """
+    text = sanitize_focus(focus)
     if not text:
         return ""
+
+    lines = [
+        "## 用户关注重点(必须优先回应)",
+        f"用户关注: {text}",
+        f"请在完整{report_name}最前面先输出 `### 0. 🔎 关注重点回应`,"
+        "用 2-4 条带具体数据的结论直接回应;随后继续完成既定报告结构,"
+        "并在相关章节加深分析。不要只复述问题。",
+    ]
     if _FOCUS_BLOCKLIST.search(text):
-        return ""
-    return text
+        lines.append(
+            "该关注点含有买卖、仓位、目标价或预测类表达。不得给出相应操作结论;"
+            "请将其转换为客观的技术/财务状态、关键价位、风险因素和条件情景后回应。"
+        )
+    return "\n".join(lines)
 
 
 def current_ai_provider() -> str:
@@ -309,11 +326,13 @@ async def stream_ai_text(
     temperature: float | None = 0.5,
     max_tokens: int | None = 4000,
     timeout: float = 180.0,
+    prefer_final_answer: bool = False,
 ) -> AsyncIterator[str]:
     """Yield text deltas from the configured provider.
 
     Codex CLI only exposes the final assistant message for this use case, so it
-    yields one complete chunk after the command exits.
+    yields one complete chunk after the command exits. ``prefer_final_answer``
+    lets compatible providers prioritize visible content over hidden reasoning.
 
     max_tokens=None 表示不限制输出(同 generate_ai_text 的说明)。
     """
@@ -328,6 +347,7 @@ async def stream_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        prefer_final_answer=prefer_final_answer,
     ):
         yield chunk
 
@@ -374,6 +394,7 @@ async def _stream_openai(
     temperature: float | None,
     max_tokens: int | None,
     timeout: float,
+    prefer_final_answer: bool,
 ) -> AsyncIterator[str]:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
@@ -381,15 +402,16 @@ async def _stream_openai(
 
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
+    base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
 
-    async def _iter(stream):
-        async for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
-                yield delta.content
-
-    kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
+    kwargs = _openai_kwargs(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=model,
+        base_url=base_url,
+        prefer_final_answer=prefer_final_answer,
+    )
     while True:
         try:
             stream = await client.chat.completions.create(
@@ -410,12 +432,59 @@ async def _stream_openai(
             raise
 
     try:
-        async for piece in _iter(stream):
+        async for piece in _iter_openai_text(stream):
             yield piece
     except Exception as exc:
         if _is_openai_transport_error(exc):
             raise RuntimeError(_format_openai_error(exc)) from exc
         raise
+
+
+_LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
+
+
+async def _iter_openai_text(stream) -> AsyncIterator[str]:
+    """Normalize an OpenAI-compatible stream into complete text deltas.
+
+    Reasoning models may spend the entire completion budget on
+    ``reasoning_content`` and finish with HTTP 200 but no user-visible text.
+    Treat that response, and any length-truncated partial response, as a
+    terminal generation error instead of silently reporting success.
+    """
+    content_seen = False
+    reasoning_seen = False
+    finish_reason = ""
+
+    async for chunk in stream:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        choice = choices[0]
+        reason = getattr(choice, "finish_reason", None)
+        if reason:
+            finish_reason = str(reason)
+
+        delta = getattr(choice, "delta", None)
+        if delta is None:
+            continue
+        if getattr(delta, "reasoning_content", None):
+            reasoning_seen = True
+        content = getattr(delta, "content", None)
+        if content:
+            content_seen = True
+            yield content
+
+    if finish_reason in _LENGTH_FINISH_REASONS:
+        if reasoning_seen and not content_seen:
+            raise RuntimeError(
+                "AI 推理达到输出长度上限, 未生成正文; 请提高输出 Token 上限或改用非推理模型"
+            )
+        raise RuntimeError("AI 输出达到长度上限, 内容不完整; 请提高输出 Token 上限后重试")
+
+    if not content_seen:
+        if reasoning_seen:
+            raise RuntimeError("AI 仅返回推理内容, 未生成正文; 请检查模型配置或改用非推理模型")
+        raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
 
 
 def _openai_client(api_key: str, timeout: float):
@@ -435,6 +504,7 @@ def _openai_client(api_key: str, timeout: float):
 # 只在 400 明确指出对应参数时移除该参数并重试; 每个参数最多移除一次。
 _TEMP_REJECT_HINTS = ("temperature", "only 1 is allowed")
 _REASONING_EFFORT_REJECT_HINTS = ("reasoning_effort", "reasoning effort")
+_THINKING_BODY_REJECT_HINTS = ("thinking",)
 
 
 def _is_temperature_rejected(exc: Exception) -> bool:
@@ -457,6 +527,16 @@ def _is_reasoning_effort_rejected(exc: Exception) -> bool:
     )
 
 
+def _is_thinking_body_rejected(exc: Exception) -> bool:
+    """True if the upstream 400 specifically rejects the thinking extra_body."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = _openai_error_detail(exc) or str(exc)
+    return _openai_error_param(exc) == "thinking" or any(
+        h in text.lower() for h in _THINKING_BODY_REJECT_HINTS
+    )
+
+
 def _openai_error_param(exc: Exception) -> str:
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
@@ -476,11 +556,26 @@ def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
     if "reasoning_effort" in retry_kwargs and _is_reasoning_effort_rejected(exc):
         retry_kwargs.pop("reasoning_effort")
         return retry_kwargs
+    if "extra_body" in retry_kwargs and _is_thinking_body_rejected(exc):
+        # DeepSeek thinking 禁用参数被拒 (模型/API 版本差异): 回退默认思考模式
+        # 重试; 报告若因此被推理挤占正文, 由 _iter_openai_text 显式报错。
+        retry_kwargs.pop("extra_body")
+        return retry_kwargs
     return None
 
 
-def _openai_kwargs(*, temperature: float | None, max_tokens: int | None) -> dict:
-    """Build OpenAI create() kwargs; optional parameters are omitted when empty.
+_DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+
+
+def _openai_kwargs(
+    *,
+    temperature: float | None,
+    max_tokens: int | None,
+    model: str = "",
+    base_url: str = "",
+    prefer_final_answer: bool = False,
+) -> dict:
+    """Build OpenAI create() kwargs and map supported provider capabilities.
 
     max_tokens=None 时不传 — 由服务端默认上限管理(推理模型的思考 token 也
     计入该参数预算, 限制会挤占正文, 见 stream_ai_text 文档)。
@@ -494,6 +589,15 @@ def _openai_kwargs(*, temperature: float | None, max_tokens: int | None) -> dict
         reasoning_effort = current_openai_reasoning_effort()
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
+    if (
+        prefer_final_answer
+        and model.strip().lower() in _DEEPSEEK_V4_MODELS
+        and urlsplit(base_url.strip()).hostname == "api.deepseek.com"
+    ):
+        # DeepSeek V4 defaults to thinking mode. For report-style tasks the
+        # hidden reasoning shares max_tokens with the final answer and can
+        # exhaust the budget before any visible content is emitted.
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     return kwargs
 
 

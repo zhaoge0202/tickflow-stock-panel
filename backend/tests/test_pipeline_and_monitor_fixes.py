@@ -115,6 +115,10 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/test")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "wecom-key")
+    monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: {})
+    monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "")
+    monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "")
 
     engine = type("Engine", (), {
         "rules": {"r_ladder": {"webhook_channels": ["feishu", "wecom"]}},
@@ -133,6 +137,45 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
 
     assert [args[1] for _, args in calls] == ["连板梯队", "连板梯队"]
     assert all("TickFlow" not in args[1] for _, args in calls)
+
+
+def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
+    calls = []
+
+    class CaptureExecutor:
+        def submit(self, fn, *args):
+            calls.append((fn.__name__, args))
+
+    email_config = {
+        "host": "smtp.example.com",
+        "username": "bot@example.com",
+        "from_address": "bot@example.com",
+        "to_addresses": ["alerts@example.com"],
+    }
+    monkeypatch.setattr(quote_service, "_WEBHOOK_EXECUTOR", CaptureExecutor())
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook")
+    monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: email_config)
+    monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "hook-secret")
+    monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "smtp-password")
+
+    engine = type("Engine", (), {
+        "rules": {"r_ladder": {"webhook_channels": ["custom", "email"]}},
+    })()
+    event = {
+        "rule_id": "r_ladder",
+        "source": "ladder",
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "message": "炸板预警",
+    }
+    QuoteService._maybe_send_webhook(object.__new__(QuoteService), [event], engine)
+
+    assert [name for name, _ in calls] == ["send_custom", "send_email"]
+    assert calls[0][1][3:] == ("monitor_alert", event, "hook-secret")
+    assert calls[1][1][:2] == (email_config, "smtp-password")
 
 
 def test_review_webhooks_use_title_without_brand(monkeypatch):
@@ -154,3 +197,32 @@ def test_review_webhooks_use_title_without_brand(monkeypatch):
 
     assert [args[1] for _, args in calls] == ["每日复盘", "每日复盘"]
     assert all("TickFlow" not in args[1] for _, args in calls)
+
+
+def test_review_pushes_custom_webhook_and_email(monkeypatch):
+    calls = []
+    email_config = {
+        "host": "smtp.example.com",
+        "username": "bot@example.com",
+        "from_address": "bot@example.com",
+        "to_addresses": ["alerts@example.com"],
+    }
+    monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["custom", "email"])
+    monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook")
+    monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: email_config)
+    monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "hook-secret")
+    monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "smtp-password")
+    monkeypatch.setattr(
+        "app.services.webhook_adapter.send_custom",
+        lambda *args: calls.append(("custom", args)) or True,
+    )
+    monkeypatch.setattr(
+        "app.services.email_adapter.send_email",
+        lambda *args: calls.append(("email", args)) or True,
+    )
+
+    daily_pipeline._maybe_push_review("复盘正文", {"as_of": "2026-07-18"})
+
+    assert [channel for channel, _ in calls] == ["custom", "email"]
+    assert calls[0][1][3] == "market_review"
+    assert calls[1][1][2] == "每日复盘"

@@ -28,7 +28,7 @@ display_name: "我的数据源"                 # 设置页显示名
 runtime: none                            # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
-datasets: [realtime]                     # 支持的数据集: daily/adj_factor/minute/realtime/financial
+datasets: [realtime]                     # 支持: daily/adj_factor/minute/realtime/depth5/financial
 api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
 description: "数据源描述"
@@ -99,7 +99,7 @@ def availability() -> tuple[bool, str]:
 | --- | --- | --- |
 | `change_pct` | **小数制**, `0.0366` = 3.66% | 接口给百分数(3.66)时必须在 provider 内显式 /100 |
 | `turnover_rate`(realtime 入口) | **小数制**, `0.05` = 5% | 下游 enriched 管道统一转百分数值存储 |
-| `volume` | 股 | |
+| `volume` | **手**, `436231` = 43,623,100 股 | 日K 与实时快照均以手计(1手=100股), 股票/ETF/指数一致(与上游 TickFlow 口径一致, 可用 amount÷volume÷100≈当日均价自验); 接口给股时必须在 provider 内显式 /100(参考 fuyao) |
 | `amount` / `turnover` | 元 | |
 | 日K OHLC | **不复权原始价** | 复权由 adj_factor + enriched 管道处理, provider 不得自行复权 |
 
@@ -141,13 +141,17 @@ class MyProvider:
                   on_chunk_done=None) -> pl.DataFrame:
         """日K: [symbol, date, open, high, low, close, volume, amount]; 不复权"""
 
+    def iter_daily(self, symbols, start_time, end_time, asset_type="stock",
+                   on_chunk_done=None) -> Iterator[pl.DataFrame]:
+        """(可选)有界分批返回与 get_daily 同形的日K; 全市场历史同步优先消费。"""
+
     def get_adj_factors(self, symbols, start_time, end_time, asset_type="stock",
                         on_chunk_done=None) -> pl.DataFrame:
         """除权因子: [symbol, trade_date, ex_factor]"""
 
     def get_minute(self, symbols, start_time, end_time, asset_type="stock",
                    on_chunk_done=None, freq="1m") -> pl.DataFrame:
-        """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount]"""
+        """分钟K: [symbol, datetime(北京墙钟), open, high, low, close, volume, amount(元, 可空)]"""
 
     def get_intraday_batch(self, symbols, count=300, asset_type="stock") -> pl.DataFrame:
         """(声明 full_minute 数据集时实现) 全量分钟修复轮: 给定标的当日 1 分钟K,
@@ -160,10 +164,14 @@ class MyProvider:
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
 
-    def get_realtime_indices(self, symbols: list[str]) -> list[dict]:
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
         """(可选)指数实时快照 → list[dict], 行字段与 get_realtime 一致。
         A 股快照普遍不含指数(fuyao 的指数在独立端点); 声明 realtime 的源
-        强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败软返回 []。"""
+        强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败返回 None,
+        成功但无数据返回 []。"""
+
+    def get_depth_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """(声明 depth5 时实现)五档盘口, 返回以 symbol 为键的标准盘口字典。"""
 
     def get_financials(self, table, symbols, latest_only=False) -> pl.DataFrame:
         """财务数据(声明 financial 数据集时实现, table 见 financial_sync 调用)。"""
@@ -177,12 +185,31 @@ class MyProvider:
         返回 error 字段说明会回退 TickFlow。"""
 ```
 
+`get_depth_batch` 返回结构如下。价格和数量数组均按一档到五档排列;数量单位为“手”,
+`timestamp` 为毫秒 Unix 时间戳。服务层按 capability 的 `batch` / `rpm` 统一分片限速,
+provider 不应自行切换或回退到其他数据源。
+
+```python
+{
+    "600519.SH": {
+        "bid_prices": [1500.0, 1499.9, 1499.8, 1499.7, 1499.6],
+        "bid_volumes": [10, 20, 30, 40, 50],
+        "ask_prices": [1500.1, 1500.2, 1500.3, 1500.4, 1500.5],
+        "ask_volumes": [12, 22, 32, 42, 52],
+        "timestamp": 1788505200000,
+    },
+}
+```
+
 ### get_minute 的 datetime 时区契约
 
 `datetime` 必须是**北京时间墙钟**（naive，如 `2026-08-28 09:35:00`），与日K的
 `date` 语义对齐；不要返回 UTC 或带时区的时间。前端分时图按交易时段时轴
 （09:30–11:30 / 13:00–15:00）映射每根K线，UTC 口径的帧会导致全部点位落在时轴外、
 分时图空白。
+
+`amount` 单位为元；数据源无法提供可靠的分钟成交额时应返回 `null`，不得伪造。
+成交额缺失后无法继续计算累计成交均价，前端会停止绘制后续均价线并显示 `—`。
 
 入口守卫（`kline_sync._enforce_minute_beijing_wallclock`）对所有分钟源强制归一：
 带时区 → 自动换算成北京墙钟；naive 但整体呈 UTC 特征（如 01:30）→ 自动 +8 纠偏并
@@ -217,9 +244,16 @@ class MyProvider:
 | 方法 | 失败行为 |
 | --- | --- |
 | `get_realtime` | **软失败**: 返回 `[]` + warning 日志, 保证轮询线程不中断 |
-| `get_realtime_indices` | **软失败**: 返回 `[]` + warning 日志; 指数缓存为空走日K兜底 |
+| `get_realtime_indices` | **软失败**: 返回 `None` + warning 日志, 保留上轮有效缓存; 成功无数据返回 `[]` |
+| `get_depth_batch` | 单批异常由服务隔离并保留其他批次; 不跨数据源回退 |
 | `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
+| `iter_daily` | 可选; 每批必须符合 `get_daily` 契约。流正常结束后才提交 staging; 未捕获异常会丢弃 staging。provider 内已定义的单标的软失败语义保持不变 |
+
+`iter_daily` 用于避免大范围日K同步在 provider 内累积完整 DataFrame。实现该方法后,
+`kline_sync` 会优先消费它; 未实现的 provider 继续调用 `get_daily`,保持兼容。批次大小应有
+明确上界,不得先把全部结果放入列表再 `concat`。`on_chunk_done(cur, total)` 必须覆盖空批次,
+确保最终 `cur == total`。
 
 ### get_realtime 行字段
 
@@ -229,7 +263,7 @@ class MyProvider:
 | `last_price` | ✅ | 最新价 |
 | `prev_close` | ✅ | 昨收, 涨跌幅推导基准 |
 | `open` / `high` / `low` | ✅ | 当日 OHLC |
-| `volume` | ✅ | 股 |
+| `volume` | ✅ | **手**(1手=100股) |
 | `amount` | 建议 | 成交额(元) |
 | `change_pct` | 建议 | **小数制**; 缺失时下游按 change_amount/prev_close 推导 |
 | `change_amount` | 建议 | 涨跌额(元) |

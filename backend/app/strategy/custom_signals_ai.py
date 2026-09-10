@@ -32,8 +32,12 @@ _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 
 
 def _format_fields() -> str:
-    """按类别格式化白名单字段（key(中文标签)），供 LLM 参考。"""
-    allowed = custom_signals.ALLOWED_FIELDS
+    """按类别格式化白名单字段(key(中文标签)), 供 LLM 参考.
+
+    行情/指标类物理列之后追加注册表因子, 分组与 /api/custom-signals/options
+    的 factor 分组一致: 因子是预计算因子值, 同样可作为条件字段比较.
+    """
+    allowed = custom_signals.allowed_fields()
     lines: list[str] = []
     quote = sorted(f for f in _QUOTE_FIELDS if f in allowed)
     lines.append(
@@ -46,6 +50,27 @@ def _format_fields() -> str:
                 f"{label}: "
                 + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in fields)
             )
+    from app.factors.registry import all_factors
+
+    factor_groups: dict[str, list[str]] = {}
+    for spec in all_factors():
+        if spec.id in custom_signals.ALLOWED_FIELDS:
+            continue  # 已作为物理列出现在清单里
+        label = spec.label
+        if spec.asset_types == frozenset({"stock"}):
+            label += "·仅股票"
+        factor_groups.setdefault(spec.group, []).append(f"{spec.id}({label})")
+    for group, items in sorted(factor_groups.items()):
+        lines.append(f"因子·{group}: " + ", ".join(sorted(items)))
+    # string 扩展字段 (概念/行业归属): 只支持 contains/==/!=, 右值为字符串字面量
+    from app.factors.ext_factors import ext_string_field_entries
+
+    str_entries = ext_string_field_entries()
+    if str_entries:
+        lines.append(
+            "字符串字段(仅 contains/==/!=): "
+            + ", ".join(f"{e['key']}({e['label']})" for e in str_entries)
+        )
     return "\n".join(lines)
 
 
@@ -53,12 +78,15 @@ _SYSTEM_TEMPLATE = """你是A股量化信号设计专家。用户会描述一个
 
 可用字段（白名单，只能使用以下字段，禁止自造或使用白名单之外的字段）：
 {fields}
+其中「因子·」开头的行是平台预计算的因子值（动量/波动/量价等衍生特征），可直接比较数值构造条件。
 
 运算符（op）：>  >=  <  <=  ==  !=
+字符串字段额外支持 contains(包含子串, 如概念/行业归属判断), 右值为字符串字面量, 如 "AI"、"半导体".
 
 右值（right）：
 - 数字：写字符串形式，如 "2"、"3000"、"0.05"
 - 另一字段：必须带 "field:" 前缀，如 "field:ma20"；严禁裸写字段名，如 "macd_dea" 应写成 "field:macd_dea"
+- 字符串字面量: 仅当左字段是「字符串字段」时使用(配合 contains/==/!=), 如所属概念包含AI写成 {{"left": "字符串字段", "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}}
 
 日期偏移（leftDays / rightDays）：取 N 个交易日前的值，0 = 当日最新；范围 0~{max_days}。只有明确需要「前N日」时才使用偏移。
 
@@ -132,8 +160,8 @@ def _normalize_condition(c: object) -> dict:
     if not isinstance(right, str) or not right.strip():
         raise ValueError(f"右值非法: {right!r}")
     right = right.strip()
-    # 兜底: AI 偶尔漏写 field: 前缀的裸字段名, 补全为规范形式
-    if not right.startswith("field:") and right in custom_signals.ALLOWED_FIELDS:
+    # 兜底: AI 偶尔漏写 field: 前缀的裸字段名, 补全为规范形式 (含因子字段)
+    if not right.startswith("field:") and right in custom_signals.allowed_fields():
         right = f"field:{right}"
     return {
         "left": str(left),

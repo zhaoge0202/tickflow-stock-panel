@@ -99,6 +99,36 @@ def get_ai_config_int(key: str, default: int) -> int:
     return int(getattr(settings, key, default) or default)
 
 
+def get_custom_webhook_secret() -> str:
+    """Return the optional HMAC secret for the generic outbound webhook."""
+    return str(load().get("custom_webhook_secret") or "")
+
+
+def set_custom_webhook_secret(secret: str) -> str:
+    """Persist or clear the generic outbound webhook HMAC secret."""
+    value = (secret or "").strip()
+    if value:
+        save({"custom_webhook_secret": value})
+    else:
+        clear("custom_webhook_secret")
+    return value
+
+
+def get_email_smtp_password() -> str:
+    """Return the SMTP password used by the email notification channel."""
+    return str(load().get("email_smtp_password") or "")
+
+
+def set_email_smtp_password(password: str) -> str:
+    """Persist or clear the SMTP password used by email notifications."""
+    value = password or ""
+    if value:
+        save({"email_smtp_password": value})
+    else:
+        clear("email_smtp_password")
+    return value
+
+
 def get_env_backed_secret(field: str, env_name: str) -> str:
     """取环境变量后备的密钥(插件 API Key 等):secrets.json 优先,否则环境变量。
 

@@ -32,7 +32,7 @@
 >
 > **明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
 
-有任何项目问题或商务合作 / 广告投放等合作意向,可邮件联系 415333856@qq.com。
+有任何项目问题可邮件联系 415333856@qq.com。
 
 觉得有用可以点个 Star
 
@@ -40,19 +40,77 @@
 
 ## ✨ 核心功能
 
-| 模块&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 一句话 | 详见&nbsp;&nbsp;&nbsp; |
-| :--------------- | :--------------------------------------------------------------------- | :-------------------------------- |
-| 🔀 **能力路由**   | 多数据集(日K/除权/实时/分钟/盘口/财务,持续扩展)按源能力独立路由,任选组合 | [custom-data-source.md](./docs/custom-data-source.md) |
-| 🔍 **选股引擎**   | 25 个内置策略 + 分钟策略 + 自定义信号 + AI 生成,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
-| 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等 68 列指标与信号,一次扫表落盘 enriched Parquet    | [features.md](./docs/features.md) |
-| 🧪 **回测研究**   | 因子/策略/分钟回测 + 财务快照因子(点时口径),T+1/费用/滑点约束,结果可导出 | [features.md](./docs/features.md) |
-| ⛏️ **因子挖掘**   | 嵌套样本外搜索多因子排名组合,与自有策略对照,候选库显式发布、永不自动上线 | [mining.md](./docs/mining.md) |
-| 🌡️ **市场环境**   | 情绪周期 6 阶段(连板梯队驱动)+ 概念/行业主线排名,与 5 档环境分并存    | [market-phase.md](./docs/market-phase.md) |
-| 🚨 **异动监控**   | 竞价/盘中/偏移三类异动一页覆盖:同花顺风向标 + 当日信号聚合 + 交易所偏离值口径 | — |
-| 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
-| 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
-| 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘(龙虎榜/盘前风向标注入) + 炸板/翘板预警 | [features.md](./docs/features.md) |
-| 🧰 **数据扩展**   | 数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析 | [custom-data-source.md](./docs/custom-data-source.md) |
+<table>
+  <thead>
+    <tr>
+      <th nowrap align="left">模块</th>
+      <th align="left">一句话</th>
+      <th nowrap align="left">详见</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap>🔀 <b>能力路由</b></td>
+      <td>多数据集(日K/除权/实时/分钟/盘口/财务,持续扩展)按源能力独立路由,任选组合</td>
+      <td nowrap><a href="./docs/custom-data-source.md">custom-data-source.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🔍 <b>选股引擎</b></td>
+      <td>25 个内置策略 + 分钟策略 + 自定义信号 + AI 生成,Polars 毫秒级扫全 A 股</td>
+      <td nowrap><a href="./docs/strategy.md">strategy.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>📊 <b>指标流水线</b></td>
+      <td>MA/EMA/MACD/RSI/KDJ/布林/量比等 68 列指标与信号,一次扫表落盘 enriched Parquet</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🧪 <b>回测研究</b></td>
+      <td>因子/策略/分钟回测 + 财务快照因子(点时口径),T+1/费用/滑点约束,评分策略附带因子归因</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🔬 <b>因子平台</b></td>
+      <td>DSL 自定义因子(编辑器 25 算子点选/试算/版本) + 检验/组合,与策略双向联动(一键生成策略/触发器引用因子/回测归因)</td>
+      <td nowrap><a href="./docs/factor-platform-plan.md">factor-platform-plan.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>⛏️ <b>因子挖掘</b></td>
+      <td>嵌套样本外搜索多因子排名组合,与自有策略对照,候选库显式发布、永不自动上线</td>
+      <td nowrap><a href="./docs/mining.md">mining.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🌡️ <b>市场环境</b></td>
+      <td>情绪周期 6 阶段(连板梯队驱动)+ 概念/行业主线排名,与 5 档环境分并存</td>
+      <td nowrap><a href="./docs/market-phase.md">market-phase.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🚨 <b>异动监控</b></td>
+      <td>竞价/盘中/偏移三类异动一页覆盖:同花顺风向标 + 当日信号聚合 + 交易所偏离值口径</td>
+      <td nowrap>—</td>
+    </tr>
+    <tr>
+      <td nowrap>📡 <b>监控中心</b></td>
+      <td>四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>📈 <b>个股分析</b></td>
+      <td>9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🏆 <b>连板梯队</b></td>
+      <td>连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘(龙虎榜/盘前风向标注入) + 炸板/翘板预警</td>
+      <td nowrap><a href="./docs/features.md">features.md</a></td>
+    </tr>
+    <tr>
+      <td nowrap>🧰 <b>数据扩展</b></td>
+      <td>数据源插件化(TickFlow/fuyao/stock-sdk + YAML 自定义源),扩展字段配成一级页面同台分析;时序表(如人气排行)支持按日历史回补,接口配日期参数即可逐日补齐</td>
+      <td nowrap><a href="./docs/custom-data-source.md">custom-data-source.md</a></td>
+    </tr>
+  </tbody>
+</table>
 
 <details>
 <summary><b>📦 主要页面与功能</b></summary>
@@ -66,10 +124,11 @@
 - **策略** Screener — Polars 毫秒级扫描全 A 股,日线/分钟策略统一单池,按策略声明周期自动路由执行
 - **回测** Backtest — 四种研究视图:
   - **因子回测** — IC/IR、分层收益、多空组合,62+ 因子目录先筛掉无效指标
-  - **策略回测** — 净值曲线、回撤、夏普、胜率,T+1/手续费/滑点/止损,SSE 流式进度
+  - **策略回测** — 净值曲线、回撤、夏普、胜率、盈亏比、蒙卡回撤,T+1/手续费/滑点/止损,SSE 流式进度;评分因子策略附带「因子归因」(胜/败单入场信号日因子对比)
   - **分钟策略回测** — 逐交易日回放信号、分钟收盘入场,分钟级成交明细
   - **验证** — 参数敏感性与滚动样本外
   - 研究闭环:结果导出 CSV(概要/净值/交易明细/分标的统计) → 保存候选 → **一键载入复测**
+- **因子** Factors — 检验/因子库/编辑器/组合四 tab:IC·分层·Newey-West 检验、自定义 DSL 因子(25 算子点选、双语字段、我的因子模板)、版本与生命周期管理;因子库可**一键生成排名策略**,策略触发器可直接引用因子条件
 - **挖掘** Mining — 嵌套样本外因子与策略挖掘:训练区间因子方向重估 + 相关性去重 + 多因子排名组合搜索,自有策略作对照轨;候选入库,显式确认后才发布,永不自动上线
 
 **📈 个股与板块分析**
@@ -81,6 +140,8 @@
 
 **🔔 监控与复盘**
 - **监控中心** Monitor — 策略/个股信号/价格/异动四类规则,支持自选分组作用域,盘中实时弹窗 + 语音播报(播报个股名称与信号) + 触发记录持久化
+- **持仓提醒** Lots — 记录个股/ETF 买入批次,自动生成止盈止损/到期监控规则
+- **信号库** Signals — 内置预计算信号 + 自定义条件信号(含因子条件与 AI 生成),供策略触发器/回测/监控统一取用
 - **异动监控** Abnormal Moves — 按交易时间线三 tab:
   - **竞价异动** — 同花顺盘前风向标(含当日/次日真实收益对照、追高风险标记)+ 全市场竞价扫描(待采集任务)
   - **盘中异动** — 涨停/炸板/翘板/跌停/新高/新低/放量当日信号聚合,零新增采集
@@ -90,7 +151,7 @@
 **🗄️ 数据与扩展**
 - **数据** Data — 本地数据画像与同步状态(维表/日K/除权/Enriched/指数/ETF/分钟K/财务),盘后管道与历史扩展
 - **扩展分析** (动态菜单) — 把任意第三方/扩展数据字段配成一级菜单,与内置数据同台分析
-- **设置** Settings — 数据源与能力检测(能力路由矩阵、档位徽章)、AI 接口、实时监控、扩展页面、信号库、菜单与系统设置
+- **设置** Settings — 数据源与能力检测(能力路由矩阵、档位徽章)、AI 接口、实时监控、扩展页面、菜单与系统设置
 
 </details>
 
@@ -252,18 +313,25 @@ flowchart TB
 
 ## 🚀 快速开始
 
-> 前置依赖:Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`(`npm i -g pnpm`)
+> 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`(`npm i -g pnpm`)
+>
+> 有 Docker 直接看 **方式 A**,一条命令拉现成镜像;完全不想碰命令行:看 **方式 C**,让本机 AI 帮你部署
 
-### 方式 A:Dev 模式(二次开发推荐)
+### 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
+
+本项目每次推送都由 GitHub Actions 自动构建多架构镜像(linux/amd64 · arm64)并发布到 GHCR,拿来即用,本地无需装 Python / Node,也不用现场 build:
 
 ```bash
-cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
-./dev.sh                   # Windows: .\dev.ps1
+docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/tick-stock-panel:latest
+# 打开 http://localhost:3018
 ```
 
-自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+- 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`。
+- 跑自己改过的代码:fork 后到仓库 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
+- 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
+- 现成镜像默认不含 stock-sdk 插件与老 CPU 兼容内核(合规与体积考虑),有此需求请用方式 B 自构建,详见 [docs/deployment.md](./docs/deployment.md)。
 
-### 方式 B:Docker(部署最省心)
+### 方式 B:Docker Compose(本地构建,全套挂载)
 
 ```bash
 cp .env.example .env
@@ -285,12 +353,34 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 > Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
 
-镜像已内置 **stock-sdk** 数据源插件(Node 运行时 + 依赖),开箱即用。
+镜像默认**不含** stock-sdk 插件(合规考虑);确需启用执行 `docker compose build --build-arg INCLUDE_STOCKSDK=1` 后再 `docker compose up -d`,详见 [docs/deployment.md](./docs/deployment.md)。
 如需使用 `tdx-api` 通达信代理池数据源,把 SOCKS5 配置写入
 `docs/zhihu/tdx-api/.env`,启动后在 **设置 → 数据源** 选择
 `tdx-api(通达信代理池)`。
 
-> 📖 Docker 进阶、GitHub Actions 自构建、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
+> 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
+
+### 方式 C:本机 AI 代部署(AI玩家首选)
+
+装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),新建一个空文件夹用助手打开,把下面这段话原样发给它:
+
+```text
+帮我部署开源项目 https://github.com/shy3130/tick-stock-panel 到本机:
+克隆到当前文件夹;有 Docker 优先拉 ghcr.io/shy3130/tick-stock-panel:latest 现成镜像,没有就走 Dev 模式;
+缺少的依赖(Docker / Python / Node)帮我一起装好;
+最后告诉我浏览器打开哪个地址、需要填哪些 Key。
+```
+
+AI 会自动完成克隆、装依赖、启动服务,完成后浏览器打开 <http://localhost:3018> 即可;`TICKFLOW_API_KEY` 等配置按 AI 提示填,详见 [配置](#️-配置)。
+
+### 方式 D:Dev 模式(二次开发推荐)
+
+```bash
+cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
+./dev.sh                   # Windows: .\dev.ps1
+```
+
+自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
 
 ### 跑起来后的第一次使用
 
@@ -339,6 +429,7 @@ PORT=3018                      # 服务端口
 | [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
 | [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、能力路由契约、YAML 配置与 mock 联调示例            |
 | [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(25 内置策略 + 三种扩展方式 + 文件结构)                      |
+| [docs/strategy-iteration.md](./docs/strategy-iteration.md)                                     | AI 策略迭代协议:台账 / 证据包 / 门槛判定 / 提示词卡片                |
 | [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk / fuyao 为参考实现)                 |
@@ -349,37 +440,32 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ---
 
-## 💬 交流群
-
-欢迎加入交流群,一起讨论交流。作者个人维护的部分个性化接口,统一公布在群公告中,供大家免费使用。
-
-<img src="./community-qr-code.jpg" alt="交流群二维码" width="240" />
-
----
-
-## ❤️ 支持项目
+## ❤️ 支持项目 / 💬 交流群
 
 <div align="center">
 
-如果这个项目对你有帮助,欢迎请作者喝杯咖啡 ☕
-
 <table>
   <tr>
-    <td width="50%" align="center"><b>微信赞赏</b></td>
-    <td width="50%" align="center"><b>支付宝</b></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="./assets/support/wechat-appreciation.jpg" alt="微信赞赏码 · 感谢道友支持 愿一路长红" height="280" /></td>
-    <td width="50%" align="center"><img src="./assets/support/alipay.jpg" alt="支付宝收款码 · 打开支付宝扫一扫" height="280" /></td>
+    <td width="50%" align="center">
+      <b>❤️ 支持项目</b><br/>
+      <sub>如果这个项目对你有帮助,欢迎请作者喝杯咖啡 ☕</sub>
+      <table>
+        <tr><td align="center"><img src="./assets/support/wechat-appreciation.jpg" alt="微信赞赏码 · 感谢道友支持 愿一路长红" height="280" /></td></tr>
+        <tr><td align="center"><sub>愿道友一路长红 📈</sub></td></tr>
+      </table>
+    </td>
+    <td width="50%" align="center">
+      <b>💬 交流群</b><br/>
+      <sub>欢迎加入交流群,一起讨论交流<br/>个性化接口统一公布在群公告,免费使用</sub>
+      <table>
+        <tr><td align="center"><img src="./community-qr-code.jpg" alt="交流群二维码 · 个人维护的个性化接口见群公告" height="280" /></td></tr>
+      </table>
+    </td>
   </tr>
 </table>
 
-愿道友一路长红 📈
-
 </div>
 
-> 打赏完全自愿,金额不限;不用于购买任何功能、数据权限、投资建议
->
 > 作者精力有限,优先响应赞助回馈,希望理解
 
 ---

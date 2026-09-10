@@ -19,9 +19,10 @@ import logging
 import os
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +479,28 @@ def _duration_s(j: dict[str, Any]) -> float | None:
 
 # 进程内单例
 job_store = JobStore()
+
+_Result = TypeVar("_Result")
+
+
+def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
+    """Wait in the worker, keeping the reservation until its real execution ends."""
+    from app.services.heavy_job_limiter import (
+        HeavyJobCancelledError,
+        shared_heavy_job_limiter,
+    )
+
+    job_store.progress(job_id, "init", 0, "等待其他计算任务完成…")
+    with _CANCEL_FLAGS_LOCK:
+        cancel_event = _CANCEL_FLAGS.get(job_id)
+    try:
+        with shared_heavy_job_limiter.slot("exclusive", cancel_event=cancel_event):
+            if is_cancelled(job_id):
+                raise JobCancelledError(job_id)
+            job_store.start(job_id)
+            return fn()
+    except HeavyJobCancelledError as exc:
+        raise JobCancelledError(job_id) from exc
 
 
 # ================================================================

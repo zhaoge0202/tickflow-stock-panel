@@ -1,7 +1,14 @@
-import { useState } from 'react'
-import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar } from 'lucide-react'
-import { api, type ExtDataConfig } from '@/lib/api'
+import { useEffect, useState } from 'react'
+import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History, KeyRound } from 'lucide-react'
+import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth } from '@/lib/api'
 import { toast } from '@/components/Toast'
+
+const AUTH_TYPE_LABELS: Record<ExtPullAuth['type'], string> = {
+  none: '无',
+  bearer: 'Bearer Token',
+  header: '自定义请求头',
+  query: 'URL 查询参数',
+}
 
 export function ExtDataPullPanel({ config, onSaved }: {
   config: ExtDataConfig
@@ -21,13 +28,35 @@ export function ExtDataPullPanel({ config, onSaved }: {
   const [schedule, setSchedule] = useState(pull?.schedule_minutes ?? 1440)
   const [timeWindowStart, setTimeWindowStart] = useState(pull?.time_window_start ?? '')
   const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
+  const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
+
+  // 接口鉴权: 方式入 pull 配置; Key 本体只存后端 secrets.json
+  const [authType, setAuthType] = useState<ExtPullAuth['type']>(pull?.auth?.type ?? 'none')
+  const [authHeader, setAuthHeader] = useState(pull?.auth?.header ?? 'Authorization')
+  const [authParam, setAuthParam] = useState(pull?.auth?.param ?? 'token')
+  const [apiKey, setApiKey] = useState('')
+  const [keyDirty, setKeyDirty] = useState(false)
+  const [keyInfo, setKeyInfo] = useState<{ key_set: boolean; masked_key: string } | null>(null)
+
+  useEffect(() => {
+    api.extDataApiKey(config.id).then(setKeyInfo).catch(() => {})
+  }, [config.id])
+
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [running, setRunning] = useState(false)
   const [runResult, setRunResult] = useState<{ rows: number; date: string } | null>(null)
   const [testResult, setTestResult] = useState<{ total_rows: number; preview: Record<string, unknown>[]; has_symbol: boolean } | null>(null)
   const [error, setError] = useState('')
+
+  // 历史回补 (仅 timeseries + 接口支持按日查询)
+  const today = new Date().toISOString().slice(0, 10)
+  const monthAgo = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10)
+  const [bfStart, setBfStart] = useState(monthAgo)
+  const [bfEnd, setBfEnd] = useState(today)
+  const [bfRunning, setBfRunning] = useState(false)
+  const [bfResult, setBfResult] = useState<ExtDataBackfillResult | null>(null)
 
   // 解析 JSON 输入, 失败时设置 error 并返回 null
   const parseJson = (str: string, label: string): Record<string, string> | undefined | null => {
@@ -42,20 +71,37 @@ export function ExtDataPullPanel({ config, onSaved }: {
     if (headers === null) return null
     const field_map = parseJson(fieldMapStr, '字段映射')
     if (field_map === null) return null
+    const auth: ExtPullAuth = {
+      type: authType,
+      header: authHeader.trim() || 'Authorization',
+      param: authParam.trim() || 'token',
+    }
     return {
       url, method, headers, body: body || undefined,
-      response_path: responsePath, field_map,
+      response_path: responsePath, field_map, auth,
       schedule_minutes: schedule, enabled: enabledOverride ?? enabled,
       time_window_start: timeWindowStart || null,
       time_window_end: timeWindowEnd || null,
+      date_param: dateParam.trim() || null,
     }
   }
+
+  // Key 输入有改动时随配置一起保存 (空输入=清除); 未改动则跳过
+  const saveKeyIfNeeded = () =>
+    keyDirty
+      ? api.extDataApiKeySet(config.id, apiKey).then(r => {
+        setKeyInfo({ key_set: r.key_set, masked_key: r.masked_key })
+        setKeyDirty(false)
+        setApiKey('')
+      })
+      : Promise.resolve()
 
   const handleSave = (silent = false) => {
     const payload = buildPayload()
     if (!payload) return
     setSaving(true); setError('')
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => {
         onSaved()
         if (!silent) toast('配置已保存', 'success')
@@ -68,7 +114,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
     setTesting(true); setError(''); setTestResult(null)
     const payload = buildPayload()
     if (!payload) { setTesting(false); return }
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => api.extDataPullTest(config.id))
       .then(r => { setTestResult(r); onSaved() })
       .catch(e => setError(e.message || '测试失败'))
@@ -87,6 +134,19 @@ export function ExtDataPullPanel({ config, onSaved }: {
       .finally(() => setRunning(false))
   }
 
+  const handleBackfill = () => {
+    setBfRunning(true); setError(''); setBfResult(null)
+    api.extDataBackfill(config.id, bfStart, bfEnd)
+      .then(r => {
+        setBfResult(r)
+        onSaved()
+        if (r.failed.length === 0) toast(`回补完成 · 写入 ${r.fetched} 日 ${r.rows_written} 行`, 'success')
+        else toast(`回补完成 · ${r.failed.length} 日失败 (见详情)`, 'error')
+      })
+      .catch(e => setError(e.message || '回补失败'))
+      .finally(() => setBfRunning(false))
+  }
+
   // 开关 toggle: 自动保存全量配置 (切换 enabled), 后端 refresh 后立即首次拉取
   const [toggling, setToggling] = useState(false)
   const handleToggle = (next: boolean) => {
@@ -98,7 +158,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
     const payload = buildPayload(next)
     if (!payload) return
     setToggling(true); setError(''); setEnabled(next)
-    api.extDataPullConfig(config.id, payload)
+    saveKeyIfNeeded()
+      .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => {
         onSaved()
         toast(next ? '定时拉取已启用 · 立即执行首次拉取' : '定时拉取已关闭', 'success')
@@ -150,10 +211,74 @@ export function ExtDataPullPanel({ config, onSaved }: {
           <div className="text-[10px] text-muted mb-1">Headers (JSON，可选)</div>
           <textarea
             value={headerStr} onChange={e => setHeaderStr(e.target.value)}
-            placeholder='{"Authorization": "Bearer xxx"}'
+            placeholder='{"X-Custom": "value"}'
             rows={2}
             className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40 resize-none"
           />
+        </div>
+
+        {/* ===== 接口鉴权 (API Key) ===== */}
+        <div className="rounded-card border border-border/60 bg-elevated/30 p-2.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-secondary">
+              <KeyRound className="h-3 w-3 text-muted" />
+              <span>接口鉴权 (API Key)</span>
+            </div>
+            {authType !== 'none' && keyInfo && (
+              <span className={`text-[9px] ${keyInfo.key_set ? 'text-emerald-500' : 'text-amber-500'}`}>
+                {keyInfo.key_set ? `已设置 ${keyInfo.masked_key}` : '未设置 Key'}
+              </span>
+            )}
+          </div>
+          <div className={`grid gap-2 ${authType === 'none' ? '' : 'grid-cols-2'}`}>
+            <div>
+              <div className="text-[10px] text-muted mb-1">鉴权方式</div>
+              <select
+                value={authType}
+                onChange={e => setAuthType(e.target.value as ExtPullAuth['type'])}
+                className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground"
+              >
+                {Object.entries(AUTH_TYPE_LABELS).map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+            </div>
+            {authType === 'query' && (
+              <div>
+                <div className="text-[10px] text-muted mb-1">参数名</div>
+                <input
+                  value={authParam} onChange={e => setAuthParam(e.target.value)}
+                  placeholder="token"
+                  className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+                />
+              </div>
+            )}
+            {(authType === 'bearer' || authType === 'header') && (
+              <div>
+                <div className="text-[10px] text-muted mb-1">请求头名称</div>
+                <input
+                  value={authHeader} onChange={e => setAuthHeader(e.target.value)}
+                  placeholder="Authorization"
+                  className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+                />
+              </div>
+            )}
+          </div>
+          {authType !== 'none' && (
+            <>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => { setApiKey(e.target.value); setKeyDirty(true) }}
+                autoComplete="new-password"
+                placeholder={keyInfo?.key_set ? '输入新 Key 覆盖 · 清空后保存 = 删除' : '输入 API Key'}
+                className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[11px] font-mono text-foreground placeholder:text-muted/40"
+              />
+              <div className="text-[9px] text-muted/70">
+                Key 仅存本机 secrets.json (不写入配置文件、不随配置导出)；随"保存配置 / 测试"一起生效。
+              </div>
+            </>
+          )}
         </div>
 
         {method === 'POST' && (
@@ -201,6 +326,15 @@ export function ExtDataPullPanel({ config, onSaved }: {
               className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
             />
           </div>
+        </div>
+
+        <div>
+          <div className="text-[10px] text-muted mb-1">日期参数名 (接口支持按日查询时填, 如 date)</div>
+          <input
+            value={dateParam} onChange={e => setDateParam(e.target.value)}
+            placeholder="date · 留空=接口只有当日快照"
+            className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+          />
         </div>
 
         <div>
@@ -309,6 +443,60 @@ export function ExtDataPullPanel({ config, onSaved }: {
           保存配置
         </button>
       </div>
+
+      {/* ===== 分区 ④: 历史回补 (仅 timeseries + 接口支持按日查询) ===== */}
+      {config.mode === 'timeseries' && (
+        <div className="rounded-card border border-border/60 bg-elevated/30 p-2.5 space-y-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-secondary">
+            <History className="h-3 w-3 text-muted" />
+            <span>历史回补</span>
+            {!dateParam.trim() && <span className="text-[9px] text-muted/70">· 需先填日期参数名并保存</span>}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="date" value={bfStart} onChange={e => setBfStart(e.target.value)}
+              className="flex-1 min-w-0 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
+            />
+            <span className="text-[10px] text-muted shrink-0">至</span>
+            <input
+              type="date" value={bfEnd} onChange={e => setBfEnd(e.target.value)}
+              className="flex-1 min-w-0 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
+            />
+            <button
+              onClick={handleBackfill}
+              disabled={bfRunning || !dateParam.trim() || !bfStart || !bfEnd}
+              title="按本地交易日逐日拉取写入历史分区; 已有分区自动跳过, 可重复执行"
+              className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-btn bg-accent/90 text-base text-[10px] font-medium hover:bg-accent disabled:opacity-40 transition-colors"
+            >
+              {bfRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : <History className="h-3 w-3" />}
+              回补
+            </button>
+          </div>
+          <div className="text-[9px] text-muted/70">
+            单次上限 120 天 (约数秒至数分钟, 取决于接口); 接口无该日数据自动记为空, 不覆盖已有分区。
+          </div>
+          {bfResult && (
+            <div className="pt-1.5 border-t border-border/40 space-y-1">
+              <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-secondary">
+                <span>交易日 {bfResult.total_days}</span>
+                <span className="text-emerald-500">写入 {bfResult.fetched} 日 / {bfResult.rows_written} 行</span>
+                <span>跳过已有 {bfResult.skipped_existing}</span>
+                <span>无数据 {bfResult.empty}</span>
+                {bfResult.failed.length > 0 && <span className="text-danger">失败 {bfResult.failed.length}</span>}
+              </div>
+              {bfResult.failed.length > 0 && (
+                <div className="max-h-28 overflow-y-auto rounded-btn bg-base px-2 py-1.5 space-y-0.5">
+                  {bfResult.failed.map(f => (
+                    <div key={f.date} className="text-[9px] text-danger/90 font-mono">
+                      {f.date} · {f.reason}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ===== 结果展示 ===== */}
       {runResult && (

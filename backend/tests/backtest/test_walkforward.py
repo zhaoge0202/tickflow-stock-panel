@@ -239,6 +239,58 @@ def test_walkforward_reports_degradation():
     assert abs(out["summary"]["degradation"] - 1.0) < 1e-9
 
 
+# ---------------------------------------------------------------
+# 非矩阵后端的闸门: filter_history/内置走通用路径, 其余 fail-closed
+# ---------------------------------------------------------------
+
+class _FakeStrategyDef:
+    def __init__(self, backend):
+        self.execution_backend = backend
+
+
+class _FakeStrategyEngine:
+    def get(self, strategy_id):
+        return _FakeStrategyDef(self._backend)
+
+    def __init__(self, backend):
+        self._backend = backend
+
+
+def test_walkforward_supports_filter_history_strategy():
+    """python_history_legacy (filter_history) 策略走通用路径:
+    不建共享矩阵, 每折在训练区间独立优化、测试区间独立 OOS。"""
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=_FakeStrategyEngine("python_history_legacy"))
+    out = wf.run(_wf_cfg())
+
+    assert out["n_folds"] > 0
+    assert out["shared_market_data"] is False
+    assert len(opt.train_ranges) == out["n_folds"]
+    assert len(svc.calls) == out["n_folds"]
+    first_fold = out["folds"][0]
+    assert svc.calls[0]["params"] == first_fold["best_params"]
+    assert svc.calls[0]["start"] >= opt.train_ranges[0][1]
+
+
+def test_walkforward_supports_polars_expr_strategy():
+    """内置 polars_expr 策略同样走通用路径 (与矩阵策略共用同一套折编排)。"""
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=_FakeStrategyEngine("polars_expr"))
+    out = wf.run(_wf_cfg())
+    assert out["n_folds"] > 0
+    assert out["shared_market_data"] is False
+
+
+def test_walkforward_rejects_minute_filter_strategy():
+    """minute_filter / composite 无法用日线折编排评估: 保持 fail-closed。"""
+    wf = WalkForwardService(
+        _FakeOptimizer(), _FakeService(),
+        strategy_engine=_FakeStrategyEngine("minute_filter"),
+    )
+    with pytest.raises(ValueError, match=r"步进优化暂仅支持|minute_filter"):
+        wf.run(_wf_cfg())
+
+
 class _NoParamsOptimizer(_FakeOptimizer):
     """模拟训练区间全组失败: best_params=None。"""
     def optimize(self, cfg, progress_cb=None, cancel_event=None):

@@ -1,7 +1,7 @@
 """Webhook 推送适配器 — 把告警事件推送到外部 IM。
 
-职责: 把后端产生的告警事件, 通过用户配置的 Webhook 地址推送到外部通知渠道。
-     目前支持飞书群推送 Webhook 和企业微信群推送 Webhook; 本项目不接券商委托。
+职责: 把后端产生的告警事件, 通过用户配置的 Webhook 地址推送到外部。
+     目前支持飞书、企业微信和通用第三方 JSON Webhook; 本项目不接券商委托。
 
 飞书自定义机器人接入:
   1. 飞书群 → 群设置 → 群推送 Webhook → 添加「自定义机器人」
@@ -17,8 +17,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import time
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +141,10 @@ def _post_feishu(webhook_url: str, payload: dict, secret: str, max_attempts: int
         except Exception as e:  # noqa: BLE001 — 网络/超时, 可重试
             last_err = str(e)
 
-        if attempt < _FEISHU_MAX_ATTEMPTS:
+        if attempt < max_attempts:
             time.sleep(min(2 ** (attempt - 1), 3))  # 退避: 1s, 2s
 
-    logger.warning("飞书 Webhook 推送最终失败(已重试 %d 次): %s", _FEISHU_MAX_ATTEMPTS, last_err)
+    logger.warning("飞书 Webhook 推送最终失败(已重试 %d 次): %s", max_attempts, last_err)
     return False
 
 
@@ -343,3 +345,75 @@ def send_wecom_markdown(webhook_url: str, title: str, body_md: str) -> bool:
 
     payload: dict = {"msgtype": "markdown", "markdown": {"content": content}}
     return _post_wecom(webhook_url, payload)
+# ================================================================
+# 通用第三方 JSON Webhook
+# ================================================================
+
+_CUSTOM_MAX_ATTEMPTS = 3
+
+
+def is_valid_custom_url(url: str) -> bool:
+    """Accept absolute HTTP(S) URLs, including LAN endpoints used by local deployments."""
+    try:
+        parsed = urlparse((url or "").strip())
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not parsed.username
+
+
+def send_custom(
+    webhook_url: str,
+    title: str,
+    body: str,
+    event_type: str,
+    data: dict | None = None,
+    secret: str = "",
+    max_attempts: int = _CUSTOM_MAX_ATTEMPTS,
+) -> bool:
+    """POST a stable JSON envelope to a user-configured third-party system.
+
+    When ``secret`` is configured the raw request body is signed with HMAC-SHA256.
+    The receiver can validate ``X-TickFlow-Timestamp`` and
+    ``X-TickFlow-Signature: sha256=<hex>`` before accepting the event.
+    """
+    if not is_valid_custom_url(webhook_url):
+        return False
+
+    timestamp = str(int(time.time()))
+    payload = {
+        "event": str(event_type or "notification"),
+        "timestamp": int(timestamp),
+        "title": str(title or ""),
+        "body": str(body or ""),
+        "data": data or {},
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str,
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "TickFlow-Webhook/1.0"}
+    if secret:
+        digest = hmac.new(secret.encode("utf-8"), encoded, hashlib.sha256).hexdigest()
+        headers["X-TickFlow-Timestamp"] = timestamp
+        headers["X-TickFlow-Signature"] = f"sha256={digest}"
+
+    import httpx
+
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = httpx.post(
+                webhook_url, content=encoded, headers=headers, timeout=5.0,
+            )
+            if 200 <= response.status_code < 300:
+                return True
+            last_err = f"HTTP {response.status_code}: {response.text[:200]}"
+            if response.status_code < 500:
+                logger.warning("第三方 Webhook 推送失败(不重试): %s", last_err)
+                return False
+        except Exception as exc:  # Network failures are retryable and must not escape.
+            last_err = str(exc)
+        if attempt < max_attempts:
+            time.sleep(min(2 ** (attempt - 1), 3))
+
+    logger.warning("第三方 Webhook 推送最终失败(已重试 %d 次): %s", max_attempts, last_err)
+    return False

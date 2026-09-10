@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from types import SimpleNamespace
 
 import httpx
 import openai
@@ -46,6 +47,41 @@ def test_normalize_openai_base_url_preserves_other_version_segments():
 
 def test_normalize_openai_base_url_strips_trailing_slash():
     assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/") == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_openai_kwargs_prefers_final_answer_for_official_deepseek_v4():
+    kwargs = ai_provider._openai_kwargs(
+        temperature=0.5,
+        max_tokens=8192,
+        model="deepseek-v4-pro",
+        base_url="https://api.deepseek.com/v1",
+        prefer_final_answer=True,
+    )
+
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_openai_kwargs_does_not_send_deepseek_option_to_other_providers():
+    kwargs = ai_provider._openai_kwargs(
+        temperature=0.5,
+        max_tokens=8192,
+        model="gpt-5.5",
+        base_url="https://api.openai.com/v1",
+        prefer_final_answer=True,
+    )
+
+    assert "extra_body" not in kwargs
+
+
+def test_openai_kwargs_keeps_deepseek_default_without_final_answer_preference():
+    kwargs = ai_provider._openai_kwargs(
+        temperature=0.5,
+        max_tokens=8192,
+        model="deepseek-v4-pro",
+        base_url="https://api.deepseek.com/v1",
+    )
+
+    assert "extra_body" not in kwargs
 
 
 def test_format_openai_error_hides_html_gateway_body():
@@ -160,6 +196,36 @@ def test_is_temperature_rejected_false_for_other_400():
         body={"error": {"message": "model not found"}},
     )
     assert _is_temperature_rejected(exc) is False
+
+
+def test_thinking_body_rejected_falls_back_to_default_mode():
+    """DeepSeek thinking 禁用参数被 400 拒绝时, 去参重试而非直接失败。"""
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "unknown parameter: thinking"}},
+        request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
+    )
+    exc = openai.BadRequestError(
+        "bad request", response=response,
+        body={"error": {"message": "unknown parameter: thinking"}},
+    )
+    kwargs = {"max_tokens": None, "extra_body": {"thinking": {"type": "disabled"}}}
+    retry = ai_provider._openai_retry_kwargs(exc, kwargs)
+    assert retry == {"max_tokens": None}
+    # 原 kwargs 不被修改
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    # 与 thinking 无关的 400 不触发该回退
+    response_other = httpx.Response(
+        400,
+        json={"error": {"message": "model not found"}},
+        request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
+    )
+    exc_other = openai.BadRequestError(
+        "bad request", response=response_other,
+        body={"error": {"message": "model not found"}},
+    )
+    assert ai_provider._openai_retry_kwargs(exc_other, kwargs) is None
 
 
 def test_is_temperature_rejected_false_for_non_400():
@@ -398,6 +464,67 @@ def test_save_ai_settings_rejects_non_positive(monkeypatch):
     req2 = settings_api.AiSettingsIn(provider="openai_compat", context_window=0)
     with pytest.raises(HTTPException):
         settings_api.save_ai_settings(req2)
+
+
+async def _fake_openai_stream(*chunks):
+    for chunk in chunks:
+        yield chunk
+
+
+def _stream_chunk(*, content=None, reasoning_content=None, finish_reason=None):
+    delta = SimpleNamespace(content=content, reasoning_content=reasoning_content)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice])
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_text_rejects_reasoning_only_length_exhaustion():
+    stream = _fake_openai_stream(
+        _stream_chunk(reasoning_content="内部推理"),
+        _stream_chunk(finish_reason="length"),
+    )
+
+    with pytest.raises(RuntimeError, match="推理达到输出长度上限"):
+        async for _ in ai_provider._iter_openai_text(stream):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_text_rejects_truncated_partial_content():
+    stream = _fake_openai_stream(
+        _stream_chunk(content="未完成正文"),
+        _stream_chunk(finish_reason="length"),
+    )
+    pieces = []
+
+    with pytest.raises(RuntimeError, match="输出达到长度上限"):
+        async for piece in ai_provider._iter_openai_text(stream):
+            pieces.append(piece)
+
+    assert pieces == ["未完成正文"]
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_text_yields_complete_content_and_ignores_reasoning():
+    stream = _fake_openai_stream(
+        _stream_chunk(reasoning_content="内部推理"),
+        _stream_chunk(content="完整"),
+        _stream_chunk(content="正文"),
+        _stream_chunk(finish_reason="stop"),
+    )
+
+    pieces = [piece async for piece in ai_provider._iter_openai_text(stream)]
+
+    assert pieces == ["完整", "正文"]
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_text_rejects_stream_without_content():
+    stream = _fake_openai_stream(_stream_chunk(finish_reason="stop"))
+
+    with pytest.raises(RuntimeError, match="未返回正文内容"):
+        async for _ in ai_provider._iter_openai_text(stream):
+            pass
 
 
 def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):

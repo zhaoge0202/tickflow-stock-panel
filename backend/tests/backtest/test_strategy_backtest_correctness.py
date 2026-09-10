@@ -636,3 +636,57 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
         assert cached.stats[name] == uncached.stats[name]
         assert cached_again.stats[name] == uncached.stats[name]
     assert cached_again.stats["matrix_compute_cache"]["hits"] > 0
+
+
+def test_apply_score_captures_factor_snapshot_for_candidates():
+    panel = pl.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "date": [date(2024, 1, 1)] * 3,
+        "factor": [10.0, 20.0, 1000.0],
+    })
+    universe = pl.Series([True, True, False], dtype=pl.Boolean)
+    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True})
+
+    snapshot: dict = {}
+    StrategyBacktestService._apply_score(panel, strategy, None, universe_mask=universe, factor_snapshot=snapshot)
+    frame = snapshot["frame"]
+    assert frame.columns == ["symbol", "date", "factor"]
+    assert frame["symbol"].to_list() == ["A", "B"]  # 非候选行不入快照
+
+
+def test_full_mode_reports_factor_attribution():
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame([
+        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
+        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1, "amount": 0.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
+        {"symbol": "A", "name": "A", "date": start + timedelta(days=2), "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
+    ]).sort(["symbol", "date"])
+
+    engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
+    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock": panel  # type: ignore[method-assign]
+    strategy = _strategy(
+        filter_fn=lambda df, params: pl.col("date") == start,
+        max_hold_days=1,
+    )
+    strategy.meta["scoring"] = {"factor": 1.0}
+    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start,
+        mode="full",
+        matching="open_t+1",
+        fees_pct=0,
+        slippage_bps=0,
+        holding_days=1,
+    ))
+
+    assert result.error is None
+    assert result.stats["n_trades"] == 1
+    attribution = result.factor_attribution
+    assert attribution is not None
+    assert attribution["n_win"] == 1 and attribution["n_lose"] == 0
+    assert attribution["factors"][0]["factor"] == "factor"
+    assert attribution["factors"][0]["win_mean"] == 5.0

@@ -109,6 +109,12 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
         monitor_rules.validate(_rule("pool_entry", score_min=90, score_max=70))
     monitor_rules.validate(_rule("buy_signal", "pool_exit"))
 
+    normalized = monitor_rules.normalize(_rule(
+        "pool_entry",
+        webhook_channels=["feishu", "custom", "email", "unsupported"],
+    ))
+    assert normalized["webhook_channels"] == ["feishu", "custom", "email"]
+
 
 def test_strategy_monitor_migration_creates_buy_and_sell_events(tmp_path):
     touched = monitor_rules.migrate_strategy_monitors(

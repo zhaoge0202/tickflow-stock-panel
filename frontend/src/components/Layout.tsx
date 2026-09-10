@@ -25,7 +25,7 @@ import {
   Star,
   ScanSearch,
   History,
-  Pickaxe,
+  Sigma,
   FileText,
   Settings,
   DatabaseZap,
@@ -40,6 +40,7 @@ import {
   Sparkles,
   Layers2,
   Layers3,
+  Zap,
   Landmark,
   RadioTower,
   CheckCircle2,
@@ -65,6 +66,7 @@ import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { fmtPct } from '@/lib/format'
+import { findDataSource } from '@/lib/dataSources'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
@@ -72,14 +74,6 @@ import { getFrontendExtensionNavigation } from '@/extensions/registry'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
-
-function sourceDisplayName(
-  dataSources: Awaited<ReturnType<typeof api.dataSources>> | undefined,
-  name: string,
-) {
-  if (name === 'tickflow') return 'TickFlow'
-  return dataSources?.custom?.find(s => s.name === name)?.display_name || name
-}
 
 const CORE_INDEXES = [
   { symbol: '000001.SH', name: '上证指数' },
@@ -95,9 +89,8 @@ const nav = [
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/decision', label: '决策台', icon: Target },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
+  { to: '/factors',    label: '因子', icon: Sigma },
   { to: '/backtest',   label: '回测', icon: History },
-  { to: '/mining',     label: '挖掘', icon: Pickaxe },
-  { to: '/lots',       label: '持仓提醒', icon: Layers2 },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/sector-flow', label: '板块强度', icon: LineChart },
@@ -107,6 +100,8 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/regime', label: '市场环境', icon: Gauge },
   { to: '/abnormal', label: '异动监控', icon: Siren },
+  { to: '/lots',       label: '持仓提醒', icon: Layers2 },
+  { to: '/signals',    label: '信号库',   icon: Zap },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },
@@ -503,10 +498,10 @@ export function Layout() {
   const realtimeUnavailable = quoteMode === 'none'
   const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeModeLabel = isWatchlistMode ? '自选股' : '全市场'
-  // 当前实时行情数据源名称 (custom 时显示源名, tickflow 时不显示)
+  // 当前实时行情数据源名称 (插件/自定义源显示源名, tickflow 不显示)
   const realtimeProvider = prefs?.realtime_data_provider
   const realtimeProviderName = realtimeProvider && realtimeProvider !== 'tickflow'
-    ? sourceDisplayName(dataSources, realtimeProvider)
+    ? (findDataSource(dataSources, realtimeProvider)?.display_name || realtimeProvider)
     : null
   const realtimeToggleDisabled = toggleQuote.isPending || isPaused
   const realtimeActive = realtimeEnabled && isRunning && isTrading

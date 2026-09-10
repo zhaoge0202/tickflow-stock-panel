@@ -35,12 +35,16 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL = 120.0
 _cache: dict[str, dict] = {}
 _cache_ts: dict[str, float] = {}
+# 该条目实际覆盖的天数: enriched 只读 days 换算出的日历窗口, 缓存的"全量"因此
+# 以写入时的 days 为上限, 请求更长窗口时不能复用 (见 build_rps_rotation)。
+_cache_days: dict[str, int] = {}
 
 
 def invalidate_cache() -> None:
     """清空轮动矩阵结果缓存(数据管道完成后调用, 避免返回旧数据)。"""
     _cache.clear()
     _cache_ts.clear()
+    _cache_days.clear()
 
 
 def _latest_enriched_date(repo) -> date | None:
@@ -102,13 +106,16 @@ def _load_concept_map_df(repo, kind: str = "concept") -> tuple[pl.DataFrame, int
         ).unique()
     else:
         map_df = pl.DataFrame(schema={"_sym_up": pl.Utf8, kind: pl.Utf8})
-    _map_cache[kind] = map_df
+    # 缓存与返回值同构 ((map_df, count) 元组): 旧版只缓存裸 map_df, 命中路径
+    # 返回 DataFrame 被调用方当元组解包, 600s 内二次访问必报错 (#186)
+    payload = (map_df, len(members_seen))
+    _map_cache[kind] = payload
     _map_ts[kind] = now
-    return map_df, len(members_seen)
+    return payload
 
 
 # 维度映射缓存: {kind: (map_df, count)}。按 kind 隔离(概念/行业分别缓存)。
-_map_cache: dict[str, pl.DataFrame] = {}
+_map_cache: dict[str, tuple[pl.DataFrame, int]] = {}
 _map_ts: dict[str, float] = {}
 
 
@@ -142,18 +149,15 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     cache_key = f"{kind}|{level}|{latest.isoformat()}"
     now = time.time()
     cached = _cache.get(cache_key)
-    if cached and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
+    if (
+        cached
+        and _cache_days.get(cache_key, 0) >= days
+        and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL
+    ):
         return _slice_cached(cached, days)
 
-    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 polars DataFrame。
-    #    兼容返回裸 DataFrame 的实现: 元组解包会把两列拆成 Series(见
-    #    market_mainline.compute_mainline_range 同类处理)。
-    loaded = _load_concept_map_df(repo, kind)
-    if isinstance(loaded, tuple):
-        map_df, member_count = loaded
-    else:
-        map_df = loaded
-        member_count = loaded[kind].n_unique() if kind in loaded.columns else 0
+    # 1. 维度映射(symbol → 维度成员), 已按 kind 缓存为 (map_df, count) 元组 (#186)。
+    map_df, member_count = _load_concept_map_df(repo, kind)
     if map_df.is_empty():
         logger.info("rps_rotation: no %s data (ext dimension not fetched yet)", kind)
         return {"dates": [], "columns": {}, "concept_count": 0}
@@ -217,9 +221,10 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
         "concept_count": member_count,
     }
 
-    # 写缓存(存全量, 按需 slice)
+    # 写缓存(存本次窗口的全量, 按需 slice; 覆盖天数一并记下)
     _cache[cache_key] = full
     _cache_ts[cache_key] = now
+    _cache_days[cache_key] = days
 
     return _slice_cached(full, days)
 

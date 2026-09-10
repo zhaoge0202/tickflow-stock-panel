@@ -87,7 +87,7 @@ export function EditExtDialog({ config, onClose }: { config: ExtDataConfig; onCl
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.97, y: 8 }}
         transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-        className="relative rounded-2xl border border-border bg-surface shadow-2xl mx-4 w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden"
+        className="relative rounded-2xl border border-border bg-surface shadow-2xl mx-4 w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden"
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-border">
           <h3 className="text-sm font-medium text-foreground">编辑扩展数据</h3>

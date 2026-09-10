@@ -108,9 +108,18 @@ export function Review() {
   const reviewSched = prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }
   const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
   const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
+  const customConfigured = !!(prefs.data?.custom_webhook_url)
+  const emailConfigured = !!(
+    prefs.data?.email_smtp_config?.host
+    && prefs.data.email_smtp_config.from_address
+    && prefs.data.email_smtp_config.to_addresses.length
+    && (!prefs.data.email_smtp_config.username || prefs.data.email_smtp_password_set)
+  )
   // 推送渠道是独立的顶层偏好(多选), 与定时 / 实时行情无关, 常驻可单独设置
-  // []=不推送, ['feishu']=飞书, ['wecom']=企业微信
+  // []=不推送; 可多选飞书、企微、第三方 Webhook 和邮件。
   const reviewPushChannels = prefs.data?.review_push_channels ?? []
+  // 推送触发方式: auto=归档即推; manual=仅归档不自动外发。默认 manual。
+  const reviewPushMode = prefs.data?.review_push_mode ?? 'manual'
   // 弹窗内的本地草稿: 开关和时间都在本地改, 点「保存」才真正提交(避免开关一拨就关弹窗)
   const [draft, setDraft] = useState(reviewSched)
   const openSchedule = useCallback(() => {
@@ -142,6 +151,15 @@ export function Review() {
       : [...reviewPushChannels, ch]
     pushMut.mutate(next)
   }, [reviewPushChannels, pushMut])
+  // 推送触发方式(独立常驻): auto/manual 即时生效, 与渠道切换一致
+  const pushModeMut = useMutation({
+    mutationFn: (mode: 'auto' | 'manual') => api.updateReviewPush(reviewPushChannels, mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      toast('已更新推送触发方式', 'success')
+    },
+    onError: () => { /* request() 已 toast */ },
+  })
 
   // 自动滚动到报告底部(streaming 时)
   useEffect(() => {
@@ -475,10 +493,88 @@ export function Review() {
                       {wecomConfigured ? '已配置' : '未配置'}
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    disabled={pushMut.isPending}
+                    onClick={() => togglePushChannel('custom')}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                      reviewPushChannels.includes('custom')
+                        ? 'border-accent/40 bg-accent/10'
+                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                    )}
+                  >
+                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('custom') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                      {reviewPushChannels.includes('custom') && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    <span className="text-[11px] text-foreground">第三方系统</span>
+                    <span className="text-[9px] text-muted">JSON Webhook</span>
+                    <span className={cn('ml-auto text-[9px]', customConfigured ? 'text-emerald-500' : 'text-warning')}>
+                      {customConfigured ? '已配置' : '未配置'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pushMut.isPending}
+                    onClick={() => togglePushChannel('email')}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                      reviewPushChannels.includes('email')
+                        ? 'border-accent/40 bg-accent/10'
+                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                    )}
+                  >
+                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('email') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                      {reviewPushChannels.includes('email') && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    <span className="text-[11px] text-foreground">邮件</span>
+                    <span className="text-[9px] text-muted">SMTP</span>
+                    <span className={cn('ml-auto text-[9px]', emailConfigured ? 'text-emerald-500' : 'text-warning')}>
+                      {emailConfigured ? '已配置' : '未配置'}
+                    </span>
+                  </button>
                 </div>
+
+                {/* 推送触发方式: auto=归档即推 / manual=仅归档不自动外发 */}
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="text-[11px] text-foreground">推送触发方式</span>
+                  <div className="flex items-center gap-0.5 rounded-btn bg-base p-0.5">
+                    <button
+                      type="button"
+                      disabled={pushModeMut.isPending}
+                      onClick={() => pushModeMut.mutate('auto')}
+                      className={cn(
+                        'rounded-btn px-2 py-0.5 text-[10px] transition-colors disabled:opacity-50',
+                        reviewPushMode === 'auto' ? 'bg-accent text-white' : 'text-muted hover:text-secondary',
+                      )}
+                    >
+                      自动
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pushModeMut.isPending}
+                      onClick={() => pushModeMut.mutate('manual')}
+                      className={cn(
+                        'rounded-btn px-2 py-0.5 text-[10px] transition-colors disabled:opacity-50',
+                        reviewPushMode === 'manual' ? 'bg-accent text-white' : 'text-muted hover:text-secondary',
+                      )}
+                    >
+                      手动确认
+                    </button>
+                  </div>
+                </div>
+
                 <p className="mt-1.5 text-[10px] leading-relaxed text-muted/70">
-                  手动或定时生成的复盘都会推送完整报告。复用「设置 → 实时监控」的 Webhook 配置。
-                  {((reviewPushChannels.includes('feishu') && !feishuConfigured) || (reviewPushChannels.includes('wecom') && !wecomConfigured)) && (
+                  {reviewPushMode === 'auto'
+                    ? '定时与手动生成的复盘归档后都会自动推送完整报告。'
+                    : '复盘仅归档保存，不自动外发。'}
+                  复用「设置 → 实时监控」的渠道配置。
+                  {(
+                    (reviewPushChannels.includes('feishu') && !feishuConfigured)
+                    || (reviewPushChannels.includes('wecom') && !wecomConfigured)
+                    || (reviewPushChannels.includes('custom') && !customConfigured)
+                    || (reviewPushChannels.includes('email') && !emailConfigured)
+                  ) && (
                     <Link to="/settings?tab=monitoring&highlight=webhooks" className="ml-1 text-accent hover:underline" onClick={() => setShowSchedule(false)}>
                       前往配置 →
                     </Link>

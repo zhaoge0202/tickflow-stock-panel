@@ -339,15 +339,33 @@ class DepthService:
             self._persist(enriched_date)
 
     def _call_depth_batch(self, symbols: list[str]) -> dict:
-        """按当前可用来源拉五档盘口。返回 {symbol: MarketDepth-like}。"""
+        """按独立五档路由取数; 支持 tdxapi 与所有 provider 共用分片限速且失败不跨源回退。"""
         if self._can_use_tdx_depth():
             return self._call_tdx_depth_batch(symbols)
-        return self._call_tickflow_depth_batch(symbols)
 
-    def _call_tickflow_depth_batch(self, symbols: list[str]) -> dict:
-        """调 tf.depth.batch, 按 capset 的 batch 切片 + 节流。返回 {symbol: MarketDepth}。"""
-        from app.tickflow.client import get_client
-        tf = get_client()
+        from app.services import preferences
+
+        provider_name = preferences.get_depth5_data_provider()
+        if provider_name == "tickflow":
+            from app.data_providers.registry import get_provider
+
+            provider = get_provider("tickflow")
+        else:
+            from app.data_providers import custom as custom_sources
+
+            try:
+                if not custom_sources.provider_has_dataset(provider_name, "depth5"):
+                    logger.warning("depth provider %s 未声明 depth5, 跳过本轮", provider_name)
+                    return {}
+                provider = custom_sources.get_provider(provider_name)
+            except Exception as e:
+                logger.warning("depth provider %s 解析失败, 跳过本轮: %s", provider_name, e)
+                return {}
+
+        fetch_depth = getattr(provider, "get_depth_batch", None)
+        if not callable(fetch_depth):
+            logger.warning("depth provider %s 未实现 get_depth_batch, 跳过本轮", provider_name)
+            return {}
 
         capset = self._get_capset()
         limit = resolve_limit(capset, Cap.DEPTH5_BATCH, default_batch=100, default_rpm=30)
@@ -357,12 +375,23 @@ class DepthService:
         for i, chunk in enumerate(chunks):
             sleep_between_batches(i, limit.rpm, default_interval=2.0)
             try:
-                # SDK 的 batch 内部已按 batch_size 切, 这里再切一层防单请求过大
-                data = tf.depth.batch(chunk)
+                data = fetch_depth(chunk)
                 if isinstance(data, dict):
                     result.update(data)
+                else:
+                    logger.warning(
+                        "depth provider %s 第 %d 批返回非 dict, 已跳过",
+                        provider_name,
+                        i + 1,
+                    )
             except Exception as e:  # noqa: BLE001
-                logger.warning("depth.batch 第 %d 批失败(%d 只): %s", i + 1, len(chunk), e)
+                logger.warning(
+                    "depth provider %s 第 %d 批失败(%d 只): %s",
+                    provider_name,
+                    i + 1,
+                    len(chunk),
+                    e,
+                )
                 # 单批失败不影响其他批
         return result
 
