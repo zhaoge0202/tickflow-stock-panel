@@ -21,10 +21,10 @@ from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
-# ── 进程级有界历史数据缓存 (避免 run_all 短时间内重复计算) ──
+# ── 进程级有界历史数据缓存 (避免 run_all/preselect 短时间内重复计算) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
-_HISTORY_CACHE_TTL = 120.0  # 秒
-_HISTORY_CACHE_MAX_ENTRIES = 1
+_HISTORY_CACHE_TTL = 300.0  # 秒 (5分钟)
+_HISTORY_CACHE_MAX_ENTRIES = 4
 _HISTORY_SYMBOL_BATCH_SIZE = 256
 _history_compute_lock = threading.Lock()
 
@@ -374,7 +374,8 @@ class ScreenerService:
         for k in expired:
             del _history_cache[k]
         if cache_key not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
-            _history_cache.clear()
+            oldest_key = min(_history_cache, key=lambda k: _history_cache[k][0])
+            del _history_cache[oldest_key]
         _history_cache[cache_key] = (now, df_full)
 
         return df_full
