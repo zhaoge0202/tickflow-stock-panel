@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { klineMinuteQueryOptions } from '@/lib/kline'
+import { klineMinuteQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 
 interface Props {
@@ -20,14 +20,6 @@ interface Props {
   refetchIntervalMs?: number
 }
 
-function todayLocalISO() {
-  const now = new Date()
-  const y = now.getFullYear()
-  const m = String(now.getMonth() + 1).padStart(2, '0')
-  const d = String(now.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
-
 export function StockIntradayChart({
   symbol,
   date,
@@ -42,7 +34,6 @@ export function StockIntradayChart({
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
-  const isToday = date === todayLocalISO()
 
   const minute = useQuery({
     // 轮询上下文 (个股详情) 传 live: 当日盘中后端直接实时拉取最新K,
@@ -55,10 +46,7 @@ export function StockIntradayChart({
     enabled: !!symbol && !!date,
     staleTime: 0,
     retry: false,
-    // 仅今天且外部显式传入正数间隔时轮询；undefined/0 表示关闭刷新。
-    refetchInterval: isToday && refetchIntervalMs && refetchIntervalMs > 0
-      ? refetchIntervalMs
-      : false,
+    refetchInterval: minuteRefetchInterval(refetchIntervalMs),
     refetchIntervalInBackground: true,
   })
 

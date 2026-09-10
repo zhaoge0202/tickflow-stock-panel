@@ -36,6 +36,7 @@ import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
+import { findDataSource } from '@/lib/dataSources'
 
 // 拆分出的子组件
 import { StatCard, type FieldTab, type CapLimitValue } from '@/components/data/StatCard'
@@ -193,7 +194,7 @@ export function Data() {
   const activeProvider = prefs.data?.daily_data_provider || 'tickflow'
   const activeDataSourceName = activeProvider === 'tickflow'
     ? 'TickFlow'
-    : (dataSources.data?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
+    : (findDataSource(dataSources.data, activeProvider)?.display_name || activeProvider)
 
   // —— 能力路由门控 (全项目统一判定) ——
   // usable = 生效源当前能否提供该能力 (含插件/自定义源; TickFlow 档位不足则不可用),

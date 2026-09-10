@@ -60,7 +60,9 @@ def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
             raise ValueError(f"参数 '{param_id}' 的 max < min")
         step = float(step)
         # 整数计数生成候选, 避免浮点累加误差丢端点 (如 0.1/0.1 步长)。
-        n_steps = round((hi - lo) / step)
+        # 步数向下取整: (hi-lo) 不是 step 整数倍时, 四舍五入会多造一个越过 hi 的候选
+        # (1~20 步长 7 → 22), 用户填的上限反而被越界校验拒绝。1e-9 容差保住整除端点。
+        n_steps = int((hi - lo) / step + 1e-9)
         raw = [round(lo + i * step, 10) for i in range(n_steps + 1)]
     else:
         raise ValueError(f"参数 '{param_id}' 的网格 spec 必须是列表或 {{min,max,step}} 字典")

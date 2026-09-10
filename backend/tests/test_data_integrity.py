@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.market_time import CN_TZ
+from app.market_time import CN_TZ, cn_today
 from app.services.data_integrity import (
     AUTO_REPAIR_MAX_LAG_DAYS,
     IntegrityIssue,
@@ -189,17 +189,59 @@ def test_realtime_daily_builder_drops_halted_rows_before_zero_fill():
             "symbol": "600001.SH", "last_price": 10.0,
             "open": 9.9, "high": 10.1, "low": 9.8,
             "volume": 1000.0, "amount": 10000.0,
-            "timestamp": _ts_ms(TODAY, time(10, 0)),
+            "timestamp": _ts_ms(cn_today(), time(10, 0)),
         },
         {
             "symbol": "600002.SH", "last_price": 20.0,
             "open": 0.0, "high": 0.0, "low": 0.0,
             "volume": 0.0, "amount": 0.0,
-            "timestamp": _ts_ms(TODAY, time(9, 15)),
+            "timestamp": _ts_ms(cn_today(), time(9, 15)),
         },
     ])
 
     assert result["symbol"].to_list() == ["600001.SH"]
+
+
+def test_realtime_daily_builder_drops_stale_snapshot_rows():
+    """回归: 停牌股快照停留旧日, 不得复制成当日假蜡烛 (301266.SZ 2026-09-04)。
+
+    实时源对停牌标的返回停牌前最后一份快照 — OHLCV 全为旧日真实值, 仅
+    timestamp 停在旧日。这种记录不属于当日, 必须在落盘前按 quote_ts 过滤。
+    """
+    from app.services.quote_service import QuoteService
+
+    halted_since = cn_today() - timedelta(days=7)
+    result = QuoteService._build_daily([
+        {
+            "symbol": "600001.SH", "last_price": 10.0,
+            "open": 9.9, "high": 10.1, "low": 9.8,
+            "volume": 1000.0, "amount": 10000.0,
+            "timestamp": _ts_ms(cn_today(), time(15, 0)),
+        },
+        {
+            "symbol": "301266.SZ", "last_price": 24.97,
+            "open": 23.10, "high": 24.99, "low": 23.01,
+            "volume": 65038.0, "amount": 157796300.0,
+            "timestamp": _ts_ms(halted_since, time(15, 30)),
+        },
+    ])
+
+    assert result["symbol"].to_list() == ["600001.SH"]
+
+
+def test_realtime_daily_builder_keeps_rows_without_timestamp():
+    """无时间戳的源无法判断快照新旧, 维持原行为保留 (不因缺列误删)。"""
+    from app.services.quote_service import QuoteService
+
+    result = QuoteService._build_daily([
+        {
+            "symbol": "600003.SH", "last_price": 8.0,
+            "open": 7.9, "high": 8.1, "low": 7.8,
+            "volume": 500.0, "amount": 4000.0,
+        },
+    ])
+
+    assert result["symbol"].to_list() == ["600003.SH"]
 
 
 def test_halt_filter_drops_legacy_zero_volume_row_after_ohlc_fill():
@@ -582,3 +624,40 @@ def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch):
     )
     assert enriched_left == [f"date={yesterday.isoformat()}", f"date={today.isoformat()}"]
     assert result["enriched_days"] > 0
+
+
+def test_quotes_flush_partition_keeps_quote_ts_for_integrity_scan(tmp_path, monkeypatch):
+    """实时行情覆写当日分区必须写 quote_ts, 否则停机后自检漏判盘中快照。
+
+    盘中手动触发盘后管道时, "今天已有数据 → 实时行情覆写"分支会用
+    tf.quotes.get_by_universes 整分区覆写。若覆写不带 quote_ts, 停机后次日
+    启动自检把这份半日数据当成 batch 权威历史, 停机时刻的 close/volume 永久
+    留存并污染 lookback 指标 —— 正是本模块要拦的场景。
+    """
+    from app.services import kline_sync
+    from app.tickflow import client as tf_client
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    snapshot_ms = _ts_ms(FRIDAY, time(11, 58))
+
+    class _FakeQuotes:
+        @staticmethod
+        def get_by_universes(universes):
+            return [{
+                "symbol": "600001.SH",
+                "open": 10.0, "high": 10.2, "low": 9.8, "last_price": 10.1,
+                "volume": 1000.0, "amount": 10100.0,
+                "timestamp": snapshot_ms,
+            }]
+
+    monkeypatch.setattr(tf_client, "get_client", lambda: SimpleNamespace(quotes=_FakeQuotes))
+    monkeypatch.setattr(kline_sync, "cn_today", lambda: FRIDAY)
+
+    repo = KlineRepository(DataStore(tmp_path))
+    assert kline_sync.sync_daily_by_quotes(repo) == 1
+
+    issues = scan_recent_integrity(tmp_path, today=TODAY)
+    assert [(i.day, i.table, i.kind) for i in issues] == [(FRIDAY, "kline_daily", "snapshot")]
+
+    part_dir = tmp_path / "kline_daily" / f"date={FRIDAY.isoformat()}"
+    assert _quote_ts_max_ms(part_dir) == snapshot_ms

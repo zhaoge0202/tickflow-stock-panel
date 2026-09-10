@@ -40,6 +40,18 @@ def _mock_minute_df(symbol: str = "600519.SH") -> pl.DataFrame:
     })
 
 
+def _empty_capset():
+    from app.tickflow.capabilities import CapabilitySet
+
+    return CapabilitySet()
+
+
+def _tickflow_minute_capset():
+    from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
+
+    return CapabilitySet({Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()})
+
+
 def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = True) -> None:
     """统一 mock 自定义分钟源路由前置: preferences + provider_has_dataset + get_provider。
 
@@ -131,6 +143,7 @@ def test_custom_provider_exception_no_500(monkeypatch):
     # fetch_minute_single: 自定义源异常 → fall through → TickFlow 异常 → 返回空
     df_single = kline_sync.fetch_minute_single(
         "600519.SH", date(2026, 1, 15), asset_type="stock",
+        capset=_tickflow_minute_capset(),
     )
     assert isinstance(df_single, pl.DataFrame)
     assert df_single.is_empty()
@@ -173,9 +186,15 @@ def test_asset_type_threaded_to_provider(monkeypatch):
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
     # 三次调用不同 asset_type
-    kline_sync.fetch_minute_single("600519.SH", date(2026, 1, 15), asset_type="stock")
-    kline_sync.fetch_minute_single("510300.SH", date(2026, 1, 15), asset_type="etf")
-    kline_sync.fetch_minute_single("000001.SH", date(2026, 1, 15), asset_type="index")
+    kline_sync.fetch_minute_single(
+        "600519.SH", date(2026, 1, 15), asset_type="stock", capset=_empty_capset(),
+    )
+    kline_sync.fetch_minute_single(
+        "510300.SH", date(2026, 1, 15), asset_type="etf", capset=_empty_capset(),
+    )
+    kline_sync.fetch_minute_single(
+        "000001.SH", date(2026, 1, 15), asset_type="index", capset=_empty_capset(),
+    )
 
     # spy 被调 3 次, 每次收到对应 asset_type
     assert spy.call_count == 3
@@ -197,7 +216,7 @@ def test_custom_success_skips_tickflow(monkeypatch):
     monkeypatch.setattr(kline_sync, "get_client", get_client_spy)
 
     df = kline_sync.fetch_minute_single(
-        "600519.SH", date(2026, 1, 15), asset_type="stock",
+        "600519.SH", date(2026, 1, 15), asset_type="stock", capset=_empty_capset(),
     )
 
     # 返回的是 mock provider 的 df
@@ -980,6 +999,124 @@ def test_get_minute_batch_no_flag_unaffected_even_if_healthy(monkeypatch):
 
     assert sync_spy.call_count == 1
     assert result["full_minute_local"] is False
+
+
+# ---------- 测试: 前部洞 (盘中重启/停机跨开盘的残留) ----------
+
+
+def _mock_tail_rows(symbol: str, n: int, first: datetime) -> pl.DataFrame:
+    """n 根从 first 开始的连续分钟K — 模拟重启后实时写入的尾部序列。"""
+    return pl.DataFrame({
+        "symbol": [symbol] * n,
+        "datetime": [first + timedelta(minutes=i) for i in range(n)],
+        "open": [100.0] * n, "high": [101.0] * n, "low": [99.5] * n, "close": [100.5] * n,
+        "volume": [1000.0] * n, "amount": [100500.0] * n,
+    })
+
+
+def test_get_minute_batch_leading_hole_triggers_full_day_refetch(monkeypatch):
+    """前部洞: 首根显著晚于开盘的连续尾部K → 全天重拉, 而非"最后一根+1min"增量。
+
+    场景: 盘中重启/停机跨开盘后, 本地只剩 11:20 起的连续尾巴 (11 根)。
+    旧逻辑判"仅尾部落后"走增量, 上午的洞永远不会被回看; 新逻辑判洞 → 全天拉。
+    """
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_rows("600519.SH", 121))
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = _mock_tail_rows(
+        "600519.SH", 11, datetime(2026, 1, 15, 11, 20)
+    )
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, False)
+
+    body = {"symbols": ["600519.SH"], "date": "2026-01-15", "prefer_local": True}
+    result = kline_api.get_minute_batch(mock_request, body)
+
+    # 全天拉: start_time = 当日开盘窗口 (09:25), 不是"最后一根 + 1min" (11:31)
+    assert sync_spy.call_count == 1
+    assert sync_spy.call_args.kwargs.get("start_time") == datetime(2026, 1, 15, 9, 25)
+    # 合并结果包含上午: 首根回到开盘附近, 根数覆盖全天
+    rows = result["data"]["600519.SH"]
+    assert rows[0]["datetime"] == datetime(2026, 1, 15, 9, 31)
+    assert len(rows) >= 121
+
+
+def test_get_minute_batch_healthy_does_not_suppress_leading_hole_refetch(monkeypatch):
+    """服务健康 + prefer_local: 前部洞的股票仍全天补拉 (服务增量锚定本地最新,
+    补不了洞); 纯尾部落后的股票维持不补拉 (服务下一轮会补尾巴)。"""
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_rows("600519.SH", 121))
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    hole_local = _mock_tail_rows("600519.SH", 11, datetime(2026, 1, 15, 11, 20))
+    stale_local = _mock_minute_rows("000001.SZ", 100)  # 09:31 开头的连续序列, 仅根数不足
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = pl.concat([hole_local, stale_local])
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, True)
+
+    body = {"symbols": ["600519.SH", "000001.SZ"], "date": "2026-01-15", "prefer_local": True}
+    result = kline_api.get_minute_batch(mock_request, body)
+
+    # 洞票被全天补拉; 尾部票未被拉 (只调了一次, 只为 600519)
+    assert sync_spy.call_count == 1
+    assert sync_spy.call_args.args[0] == ["600519.SH"]
+    assert sync_spy.call_args.kwargs.get("start_time") == datetime(2026, 1, 15, 9, 25)
+    # 尾部票返回本地 100 根 (健康压制原样生效)
+    assert len(result["data"]["000001.SZ"]) == 100
+    # 洞票拿到全天
+    assert result["data"]["600519.SH"][0]["datetime"] == datetime(2026, 1, 15, 9, 31)
+    assert result["full_minute_local"] is True
+
+
+def test_get_minute_batch_normal_open_not_treated_as_leading_hole(monkeypatch):
+    """无集合竞价K的源首根 09:31/09:35 → 不算前部洞, 维持增量语义 (不全天重拉)。"""
+    from app.api import kline as kline_api
+
+    sync_spy = MagicMock(return_value=_mock_minute_df())
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync_spy)
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    # 首根 09:31, 仅 5 根 (历史日 expected=240, 根数不足但非洞)
+    mock_repo.get_minute_batch.return_value = _mock_minute_rows("600519.SH", 5)
+
+    mock_capset = MagicMock()
+    mock_capset.has.return_value = True
+    mock_capset.limits.return_value = None
+
+    mock_request = MagicMock()
+    mock_request.app.state.repo = mock_repo
+    mock_request.app.state.capabilities = mock_capset
+    mock_request.app.state.minute_refresh = _healthy_svc(monkeypatch, False)
+
+    body = {"symbols": ["600519.SH"], "date": "2026-01-15", "prefer_local": True}
+    kline_api.get_minute_batch(mock_request, body)
+
+    # 增量拉: start_time = 最后一根本身 (09:35), 不是 09:25 全天窗口
+    assert sync_spy.call_count == 1
+    assert sync_spy.call_args.kwargs.get("start_time") == datetime(2026, 1, 15, 9, 35)
 
 
 def test_minute_refresh_is_healthy_requires_recent_round(monkeypatch):

@@ -210,6 +210,9 @@ export function Screener() {
   const [expiredCounts, setExpiredCounts] = useState<Record<string, number>>({})
   // 各策略显示上限 (null = 全部)
   const [strategyLimits, setStrategyLimits] = useState<Record<string, number | null>>({})
+  // run_all 渐进式返回后仍在后台计算的策略 (startedAt 为后端时钟, 用于判断缓存新旧)
+  const [pendingRun, setPendingRun] = useState<{ ids: string[]; startedAt: number } | null>(null)
+  const pendingRunIds = useMemo(() => new Set(pendingRun?.ids ?? []), [pendingRun])
 
   // 筛选条件变化时同步到 map（供切换策略时读取最新值）
   useEffect(() => {
@@ -248,10 +251,12 @@ export function Screener() {
 
   // 卡片首屏只读取轻量摘要；明细在点击策略或“全部”时按需加载。
   // 摘要只覆盖日线缓存; 分钟策略命中数来自手动单跑。
+  // run_all 渐进式返回后后台仍在算 → 轮询摘要, 算完的策略逐个点亮。
   const summaryQuery = useQuery({
     queryKey: QK.screenerCachedSummary,
     queryFn: api.screenerCachedSummary,
     enabled: assetType === 'stock',
+    refetchInterval: pendingRun ? 2000 : false,
   })
 
   const fullCachedQuery = useQuery({
@@ -460,6 +465,13 @@ export function Screener() {
         counts[id] = item.total
       }
       setHitCounts(prev => ({ ...prev, ...counts }))
+      // 渐进式返回: 慢策略后台继续算, 开启摘要轮询逐个点亮
+      setPendingRun(
+        data.pending?.length
+          ? { ids: [...data.pending], startedAt: data.started_at ?? 0 }
+          : null,
+      )
+      if (data.error) toast(`策略计算失败：${data.error}`, 'error')
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
       qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
@@ -505,7 +517,27 @@ export function Screener() {
     }
     setHitCounts(counts)
     setExpiredCounts(expired)
-  }, [summaryQuery.data, asOf])
+    // 渐进式: computed_at 晚于本轮起点的策略已算完, 从 pending 中移除;
+    // 无 computed_at (监控实时叠加/旧缓存) 视为新鲜。容差吸收前后端时钟差。
+    if (pendingRun) {
+      const arrived = (id: string) => {
+        const r = summaryQuery.data!.results[id]
+        if (!r || r.as_of !== asOf) return false
+        return r.computed_at == null || r.computed_at >= pendingRun.startedAt - 2000
+      }
+      const rest = pendingRun.ids.filter(id => !arrived(id))
+      if (rest.length !== pendingRun.ids.length) {
+        setPendingRun(rest.length ? { ...pendingRun, ids: rest } : null)
+      }
+    }
+  }, [summaryQuery.data, asOf, pendingRun])
+
+  // 渐进式兜底: 后台计算最长等 8 分钟, 防止异常时无限轮询
+  useEffect(() => {
+    if (!pendingRun) return
+    const t = setTimeout(() => setPendingRun(null), 8 * 60 * 1000)
+    return () => clearTimeout(t)
+  }, [pendingRun])
 
   // 当前单策略缓存更新后同步明细；参数保存的强制重算结果仍由 run 直接覆盖。
   useEffect(() => {
@@ -1325,6 +1357,7 @@ export function Screener() {
                   countLabel={displayMode === 'preselect' ? '预选' : undefined}
                   expiredCount={displayMode !== 'cached' ? 0 : (expiredCounts[id] ?? 0)}
                   loading={runAll.isPending}
+                  computing={pendingRunIds.has(id)}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
                   disabled={run.isPending && activeStrategy === s.id}
@@ -1716,6 +1749,14 @@ export function Screener() {
         <StrategyPoolDialog
           pool={pool}
           onConfirm={(newPool) => {
+            // 新增的日线策略立即自动扫描, 免去手动点刷新; 纯排序/删除不重跑
+            if (assetType === 'stock') {
+              const prev = new Set(pool)
+              const addedDaily = newPool.filter(
+                id => !prev.has(id) && !(strategyMap.get(id)?.timeframes?.includes('1m') ?? false),
+              )
+              if (addedDaily.length > 0) requestRunAll({ date: asOf || undefined, strategyIds: addedDaily })
+            }
             reorderPool(newPool)
           }}
           onClose={() => setShowPoolDialog(false)}
@@ -1726,12 +1767,22 @@ export function Screener() {
         onClose={() => setShowBuilder(false)}
         mode={builderMode}
         existingStrategyIds={allStrategyIds}
-        onSavedId={async id => {
+        onSavedId={async (id, researchOnly) => {
+          if (researchOnly) {
+            // AI 策略保存为 research_only 草稿, 不进入策略池, 提示用户去策略池发布
+            toast('AI 策略已保存为草稿，请在策略池「AI」标签发布后使用', 'success')
+            return
+          }
           const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }
           addToPool(id)
+          // 新建策略为日线时立即扫描, 免去手动点刷新 (分钟策略仍手动单跑)
+          const preset = data.presets.find(s => s.id === id)
+          if (assetType === 'stock' && preset && !preset.timeframes?.includes('1m')) {
+            requestRunAll({ date: asOf || undefined, strategyIds: [id] })
+          }
         }}
       />
 
@@ -1739,8 +1790,13 @@ export function Screener() {
         open={showComposite}
         onClose={() => setShowComposite(false)}
         onSavedId={async id => {
-          await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
+          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
           addToPool(id)
+          // 新建叠加策略为日线时立即扫描, 免去手动点刷新 (分钟策略仍手动单跑)
+          const preset = data.presets.find(s => s.id === id)
+          if (assetType === 'stock' && preset && !preset.timeframes?.includes('1m')) {
+            requestRunAll({ date: asOf || undefined, strategyIds: [id] })
+          }
         }}
       />
 

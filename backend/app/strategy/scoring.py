@@ -6,61 +6,22 @@ from typing import Any
 
 import polars as pl
 
+from app.factors.registry import (
+    factor_dependencies as _registry_factor_dependencies,
+)
+from app.factors.registry import get_factor as _registry_get_factor
+from app.factors.registry import scoring_warmups as _registry_scoring_warmups
+from app.factors.registry import virtual_dependencies as _registry_virtual_dependencies
+
 SCORING_DIRECTION_HIGH = "high"
 SCORING_DIRECTION_LOW = "low"
 SCORING_DIRECTIONS = frozenset({SCORING_DIRECTION_HIGH, SCORING_DIRECTION_LOW})
 
-VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
-    **{
-        f"ma{period}_bias": frozenset({"close", f"ma{period}"})
-        for period in (5, 10, 20, 30, 60)
-    },
-    **{
-        f"ema{period}_bias": frozenset({"close", f"ema{period}"})
-        for period in (5, 10, 20, 30, 60)
-    },
-    "macd_dif_pct": frozenset({"close", "macd_dif"}),
-    "macd_dea_pct": frozenset({"close", "macd_dea"}),
-    "macd_hist_pct": frozenset({"close", "macd_hist"}),
-    "boll_position": frozenset({"close", "boll_upper", "boll_lower"}),
-    "atr_pct": frozenset({"close", "atr_14"}),
-    "boll_width": frozenset({"ma20", "boll_upper", "boll_lower"}),
-    "vol_ratio_10d": frozenset({"volume"}),
-    "vol_trend_5_10": frozenset({"vol_ma5", "vol_ma10"}),
-    "turnover_ratio_5d": frozenset({"turnover_rate"}),
-    "log_amount": frozenset({"amount"}),
-    "amount_ratio_5d": frozenset({"amount"}),
-    "gap_return": frozenset({"open", "prev_close"}),
-    "intraday_return": frozenset({"open", "close"}),
-    "close_position": frozenset({"high", "low", "close"}),
-    "distance_to_high_60d": frozenset({"close", "high_60d"}),
-    "distance_from_low_60d": frozenset({"close", "low_60d"}),
-    "max_ret_20d": frozenset({"close"}),
-    "ret_skew_20d": frozenset({"close"}),
-    "up_days_20d": frozenset({"close"}),
-    "amihud_20d": frozenset({"close", "amount"}),
-    "turnover_z_60d": frozenset({"turnover_rate"}),
-    "vol_price_corr_20d": frozenset({"close", "volume"}),
-    "vwap_bias": frozenset({"close", "volume", "amount"}),
-    "vol_trend_5_60": frozenset({"volume"}),
-    "limit_up_count_20d": frozenset({"consecutive_limit_ups"}),
-    "limit_up_count_60d": frozenset({"consecutive_limit_ups"}),
-}
+# P1 起依赖声明与预热窗口的单一权威来源为 app/factors/registry.py;
+# 本常量为兼容别名, 键集合与历史版本逐项一致 (见 tests/test_factor_registry.py 快照测试)。
+VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = dict(_registry_virtual_dependencies())
 
-_ROLLING_SCORING_WARMUP: dict[str, int] = {
-    "vol_ratio_10d": 11,
-    "turnover_ratio_5d": 6,
-    "amount_ratio_5d": 6,
-    "max_ret_20d": 21,
-    "ret_skew_20d": 21,
-    "up_days_20d": 21,
-    "amihud_20d": 21,
-    "turnover_z_60d": 61,
-    "vol_price_corr_20d": 21,
-    "vol_trend_5_60": 60,
-    "limit_up_count_20d": 21,
-    "limit_up_count_60d": 61,
-}
+_ROLLING_SCORING_WARMUP: dict[str, int] = dict(_registry_scoring_warmups())
 
 
 def effective_scoring(
@@ -89,20 +50,50 @@ def effective_scoring_directions(overrides: Mapping[str, Any] | None) -> dict[st
 
 
 def scoring_warmup_bars(scoring: Mapping[str, Any]) -> int:
-    return max(
-        (_ROLLING_SCORING_WARMUP.get(str(name), 1) for name, weight in scoring.items() if weight),
-        default=1,
-    )
+    warmups: list[int] = [
+        _ROLLING_SCORING_WARMUP.get(str(name), 1)
+        for name, weight in scoring.items()
+        if weight
+    ]
+    # composite/custom 因子的预热来自注册表 (P3)
+    for name, weight in scoring.items():
+        if not weight:
+            continue
+        spec = _registry_get_factor(str(name))
+        if spec is not None and spec.kind in ("custom", "composite"):
+            warmups.append(spec.warmup_bars)
+    return max(warmups, default=1)
 
 
 def scoring_dependencies(scoring: Mapping[str, Any]) -> set[str]:
-    """把受控虚拟评分字段展开为实际数据依赖。"""
+    """把受控虚拟评分字段展开为实际数据依赖 (含 composite/custom 递归展开)。"""
     dependencies: set[str] = set()
     for name, weight in scoring.items():
         if not weight:
             continue
-        dependencies.update(VIRTUAL_SCORING_DEPENDENCIES.get(str(name), {str(name)}))
+        dependencies.update(_registry_factor_dependencies([str(name)]))
     return dependencies
+
+
+def _composite_value_expr(available: set[str], name: str) -> pl.Expr | None:
+    """复合因子值 = Σ w_i * 截面 zscore(成员值); 成员可为已物化列或虚拟因子。"""
+    spec = _registry_get_factor(name)
+    if spec is None or not spec.components:
+        return None
+    total: pl.Expr | None = None
+    for member_id, weight in spec.components:
+        member_expr = (
+            pl.col(member_id)
+            if member_id in available
+            else scoring_value_expr(available, member_id)
+        )
+        if member_expr is None:
+            return None
+        mean = member_expr.mean().over("date")
+        std = member_expr.std().over("date")
+        piece = pl.when(std > 0).then((member_expr - mean) / std).otherwise(None) * weight
+        total = piece if total is None else total + piece
+    return total
 
 
 def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
@@ -110,6 +101,10 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     available = set(columns)
     if name in available:
         return pl.col(name)
+    # composite 在 VIRTUAL 字典门控之前分派 (依赖经注册表递归展开) —— P3
+    spec = _registry_get_factor(name)
+    if spec is not None and spec.kind == "composite":
+        return _composite_value_expr(available, name)
     dependencies = VIRTUAL_SCORING_DEPENDENCIES.get(name)
     if dependencies is None or not dependencies.issubset(available):
         return None
@@ -202,6 +197,66 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         window = 20 if name == "limit_up_count_20d" else 60
         hit = (pl.col("consecutive_limit_ups").fill_null(0) > 0).cast(pl.Float64)
         return hit.rolling_sum(window, min_samples=window).over("symbol")
+    # ── 扩充批次 (2026-09-05): 全部滚动窗口默认 min_samples=窗口长 (fail-closed) ──
+    if name == "log_float_mv":
+        # 换手率 = 成交量/流通股本 → 股本 = volume/turnover_rate, 市值 = close x 股本
+        return (
+            pl.when((pl.col("turnover_rate") > 0) & (pl.col("volume") > 0))
+            .then((pl.col("close") * pl.col("volume") / pl.col("turnover_rate")).log())
+            .otherwise(None)
+        )
+    if name == "momentum_120d":
+        return _relative(
+            pl.col("close"),
+            pl.col("close").shift(120),
+        ).over("symbol")
+    if name == "mom_accel_20_60":
+        return pl.col("momentum_20d") - pl.col("momentum_60d")
+    if name == "rsi_14_delta_5d":
+        return pl.col("rsi_14") - pl.col("rsi_14").shift(5).over("symbol")
+    if name == "overnight_ret_20d":
+        overnight = _relative(pl.col("open"), pl.col("prev_close"))
+        return overnight.rolling_sum(20, min_samples=20).over("symbol")
+    if name == "intraday_ret_20d":
+        intraday = _relative(pl.col("close"), pl.col("open"))
+        return intraday.rolling_sum(20, min_samples=20).over("symbol")
+    if name == "downside_vol_20d":
+        downside = (_daily_change_expr().clip(upper_bound=0.0) ** 2)
+        return downside.rolling_mean(20, min_samples=20).sqrt().over("symbol")
+    if name == "vol_regime_5_60":
+        change = _daily_change_expr()
+        fast = change.rolling_std(5, min_samples=5)
+        slow = change.rolling_std(60, min_samples=60)
+        return _ratio(fast, slow).over("symbol")
+    if name == "amplitude_trend_20_60":
+        fast = pl.col("amplitude").rolling_mean(20, min_samples=20)
+        slow = pl.col("amplitude").rolling_mean(60, min_samples=60)
+        return _relative(fast, slow).over("symbol")
+    if name == "obv_trend_20d":
+        change = _daily_change_expr()
+        signed = change.sign() * pl.col("volume")
+        total = signed.rolling_sum(20, min_samples=20)
+        scale = pl.col("volume").rolling_mean(20, min_samples=20) * 20.0
+        return _ratio(total, scale).over("symbol")
+    if name == "amount_mean_20d":
+        return (pl.col("amount") / 1e8).rolling_mean(20, min_samples=20).over("symbol")
+    if name == "turnover_mean_20d":
+        return pl.col("turnover_rate").rolling_mean(20, min_samples=20).over("symbol")
+    if name == "turnover_std_20d":
+        mean = pl.col("turnover_rate").rolling_mean(20, min_samples=20)
+        std = pl.col("turnover_rate").rolling_std(20, min_samples=20)
+        return _ratio(std, mean).over("symbol")
+    if name == "position_240d":
+        high = pl.col("close").rolling_max(240, min_samples=240)
+        low = pl.col("close").rolling_min(240, min_samples=240)
+        return _ratio(pl.col("close") - low, high - low).over("symbol")
+    if name == "distance_to_high_240d":
+        return _relative(
+            pl.col("close"),
+            pl.col("close").rolling_max(240, min_samples=240),
+        ).over("symbol")
+    if name == "kdj_kd_diff":
+        return pl.col("kdj_k") - pl.col("kdj_d")
     return None
 
 
@@ -233,6 +288,21 @@ def materialize_scoring_columns(
     frame: pl.DataFrame,
     names: Collection[str],
 ) -> pl.DataFrame:
+    # custom (DSL) 因子先物化: frame_transform 可能需要多阶段临时列 (嵌套窗口规避),
+    # 与单表达式路径不同, 必须整体走帧变换 —— 与检验/试算共用同一条计算路径 (P3)。
+    from app.factors.dsl import FACTOR_COLUMN, compile_formula_cached
+
+    for name in names:
+        spec = _registry_get_factor(str(name))
+        if spec is None or spec.kind != "custom" or name in frame.columns:
+            continue
+        compiled = compile_formula_cached(spec.formula_text)
+        if compiled.frame_transform is None:
+            continue
+        transformed = compiled.frame_transform(frame)
+        if transformed is None:
+            continue
+        frame = transformed.with_columns(pl.col(FACTOR_COLUMN).alias(str(name))).drop(FACTOR_COLUMN)
     expressions = [
         expression.alias(name)
         for name in names

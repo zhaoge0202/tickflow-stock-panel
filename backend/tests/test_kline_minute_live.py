@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.api.kline import router
 from app.market_time import CN_TZ, in_continuous_session
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 # 2026-08-26 是周三; 10:00 处于上午连续竞价, expected(已交易分钟) = 30
 _NOW = datetime(2026, 8, 26, 10, 0, tzinfo=CN_TZ)
@@ -48,6 +49,9 @@ def _client() -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.state.repo = _FakeRepo()
+    app.state.capabilities = CapabilitySet({
+        Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits(),
+    })
     return TestClient(app)
 
 
@@ -62,7 +66,7 @@ def _patch_market(monkeypatch, *, in_session: bool) -> None:
 def _patch_live_fetch(monkeypatch) -> None:
     import app.api.kline as kline_api
 
-    def _fake_fetch(symbol, trade_date, asset_type="stock"):
+    def _fake_fetch(symbol, trade_date, asset_type="stock", *, capset):
         return pl.DataFrame({
             "datetime": [datetime(2026, 8, 26, 9, 59)],
             "close": [11.11],

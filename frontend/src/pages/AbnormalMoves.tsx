@@ -28,7 +28,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
  * 偏移异动计算量可控: 主开关默认关闭, 开启后才发起轮询 (每 60s 一次); 关闭后
  * 保留展示上次计算结果 (含计算时间, 取自 localStorage)。规则口径通过工具栏「?」
  * 展开查看。告警走系统监控体系: 在「监控中心」创建异动监控规则后由后端持续评估,
- * 统一触发记录/站内通知/飞书·企微推送。
+ * 统一触发记录/站内通知/外部渠道推送。
  */
 
 const WINDOW_KEYS = ['3d', '10d', '30d'] as const
@@ -86,7 +86,7 @@ export function AbnormalMoves() {
             <Link
               to="/monitor"
               className="inline-flex h-7 items-center gap-1 rounded border border-border bg-base px-2 text-[11px] text-secondary transition-colors hover:text-foreground"
-              title="在监控中心创建「异动监控」规则: 后台持续评估, 触发时统一走触发记录/站内通知/飞书·企微推送, 无需保持本页打开"
+              title="在监控中心创建「异动监控」规则: 后台持续评估, 触发时统一走触发记录/站内通知/外部渠道推送, 无需保持本页打开"
             >
               <Settings2 className="h-3 w-3" />
               告警规则
@@ -659,8 +659,9 @@ function DeviationView({ onPreview }: {
             {ruleChips()}
           </div>
           <p className="mt-2.5 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted">
-            口径说明: 偏离值 = 个股 N 日累计涨跌幅 − 对应指数同期涨跌幅 (沪: 上证A指/上证指数,
-            深: 深证A指/深证成指, 北: 北证50)。阈值为交易所异常波动披露标准的近似值, 仅供风险提示,
+            口径说明: 偏离值 = 个股 N 日累计涨跌幅 − 对应指数同期涨跌幅 (沪主板: 上证A指/上证指数,
+            科创板: 科创50, 深主板: 深证A指/深证成指, 创业板: 创业板综指, 北: 北证50)。
+            阈值为交易所异常波动披露标准的近似值, 仅供风险提示,
             不构成监管认定。每只股票在 3日/10日/30日 三档各算一个接近度 (|偏离值| ÷ 该档阈值,
             阈值随板块不同; 2026-07-06 起主板风险警示股票与普通股票同口径), 表格「接近度」列与状态取三档中的最高值,
             来源窗口的偏离值颜色加重显示、其余窗口淡化; ≥100% 已触发、≥70% 边缘、≥50% 观察。
@@ -682,7 +683,7 @@ function DeviationView({ onPreview }: {
             </p>
             <p className="mx-auto mt-2 max-w-lg text-[11px] leading-relaxed text-muted/80">
               需要告警推送时, 在<Link to="/monitor?new=abnormal" className="text-accent hover:underline">监控中心</Link>
-              新建「异动监控」规则 —— 后台持续评估, 触发时统一走触发记录 / 站内通知 / 飞书·企微推送,
+              新建「异动监控」规则 —— 后台持续评估, 触发时统一走触发记录 / 站内通知 / 外部渠道推送,
               与本页开关互不影响。
             </p>
             <button

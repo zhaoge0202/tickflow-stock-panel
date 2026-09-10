@@ -80,7 +80,12 @@ def merge_results(
             ordered = sorted(symbols, key=lambda s: res.scores[s], reverse=True)
             count = len(ordered)
             for rank, sym in enumerate(ordered, start=1):
-                norm[sym] = 1 - (rank - 1) / max(count - 1, 1)
+                # 单候选无法排名, 必须用中性分: 当成"最优=1"会凭空抬高融合分,
+                # 而回测合并 (merge_signal_matrices 的 n <= 1 分支) 用的是中性分,
+                # 两条路径同一天同一标的会给出不同评分与排序。
+                norm[sym] = (
+                    _NEUTRAL_NORM if count <= 1 else 1 - (rank - 1) / (count - 1)
+                )
         else:
             # 子策略未产出 score: 命中即中性分, 不奖励也不惩罚。
             for row in res.rows:

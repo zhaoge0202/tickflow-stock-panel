@@ -1,7 +1,9 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Layers, Plus, Loader2, Search } from 'lucide-react'
+import { X, Layers, Plus, Loader2, Search, Settings2 } from 'lucide-react'
 import { api, type ScreenerStrategy } from '@/lib/api'
+import { toPercentages, normalizeWeights } from '@/lib/weights'
+import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDialog'
 
 interface Props {
   open: boolean
@@ -26,10 +28,12 @@ const BADGE_CLS: Record<string, string> = {
 export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategyId }: Props) {
   const isEdit = !!editStrategyId
   const [name, setName] = useState('')
+  // 用户手动编辑过名称后停止自动生成(子策略名用 + 连接)
+  const [nameDirty, setNameDirty] = useState(false)
   const [description, setDescription] = useState('')
   const [strategyId, setStrategyId] = useState('')
   const [children, setChildren] = useState<ChildItem[]>([])
-  const [mergeMode, setMergeMode] = useState<'union' | 'intersect'>('union')
+  const [mergeMode, setMergeMode] = useState<'union' | 'intersect'>('intersect')
   const [minConfirm, setMinConfirm] = useState(0)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -40,6 +44,19 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
   // 拉取所有可用子策略(排除 composite 自身)
   const [available, setAvailable] = useState<ScreenerStrategy[]>([])
   const [loadingList, setLoadingList] = useState(false)
+  // 点击子策略名打开其配置编辑
+  const [editingChildId, setEditingChildId] = useState<string | null>(null)
+
+  const loadAvailable = useCallback(() => {
+    setLoadingList(true)
+    api.screenerStrategies()
+      .then(data => {
+        // 排除 composite 策略(不能嵌套)
+        setAvailable((data.presets ?? []).filter(s => s.source !== 'composite'))
+      })
+      .catch(() => setAvailable([]))
+      .finally(() => setLoadingList(false))
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -49,18 +66,13 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
     // 创建模式自动生成 ID(composite_ + 时间戳), 编辑模式用现有 ID
     setStrategyId(isEdit ? (editStrategyId ?? '') : `composite_${Date.now().toString(36)}`)
     setChildren([])
-    setMergeMode('union')
+    setMergeMode('intersect')
     setMinConfirm(0)
     setError('')
     setSearch('')
-    setLoadingList(true)
-    api.screenerStrategies()
-      .then(data => {
-        // 排除 composite 策略(不能嵌套)
-        setAvailable((data.presets ?? []).filter(s => s.source !== 'composite'))
-      })
-      .catch(() => setAvailable([]))
-      .finally(() => setLoadingList(false))
+    setNameDirty(isEdit)
+    setEditingChildId(null)
+    loadAvailable()
     // 编辑模式: 加载现有配置回显
     if (isEdit && editStrategyId) {
       api.strategyGet(editStrategyId)
@@ -70,12 +82,14 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
           setMergeMode((detail.params_defaults?.merge_mode as 'union' | 'intersect') ?? 'union')
           setMinConfirm(detail.params_defaults?.min_confirm ?? 0)
           if (detail.composite_children) {
-            setChildren(detail.composite_children.map(c => ({ strategy_id: c.id, weight: c.weight })))
+            // 存储的小数权重 → 滑块百分比口径
+            const pcts = toPercentages(detail.composite_children.map(c => c.weight))
+            setChildren(detail.composite_children.map((c, i) => ({ strategy_id: c.id, weight: pcts[i] })))
           }
         })
         .catch(() => {})
     }
-  }, [open, isEdit, editStrategyId])
+  }, [open, isEdit, editStrategyId, loadAvailable])
 
   const filteredAvailable = useMemo(() => {
     const keyword = search.trim().toLowerCase()
@@ -88,24 +102,32 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
   }, [available, children, search])
 
   const addChild = (s: ScreenerStrategy) => {
-    setChildren(prev => [...prev, { strategy_id: s.id, weight: 1.0 }])
+    // 首个子策略独占 100%, 后续默认 10% (与因子编辑口径一致); 保存时自动按比例归一
+    setChildren(prev => [...prev, { strategy_id: s.id, weight: prev.length === 0 ? 100 : 10 }])
   }
   const removeChild = (id: string) => {
     setChildren(prev => prev.filter(c => c.strategy_id !== id))
   }
+
+  // 未手动命名时, 默认名称跟随子策略: 多个策略名用 + 连接
+  useEffect(() => {
+    if (nameDirty) return
+    if (children.length === 0) {
+      setName('')
+      return
+    }
+    const names = children.map(c => available.find(a => a.id === c.strategy_id)?.name ?? c.strategy_id)
+    setName(names.join('+'))
+  }, [children, nameDirty, available])
   const updateWeight = (id: string, weight: number) => {
     setChildren(prev => prev.map(c => c.strategy_id === id ? { ...c, weight } : c))
   }
 
-  const totalWeight = useMemo(
+  // 滑块百分比总和; 允许 ≠100 (黄色提示), 保存时自动按比例归一, 无需手动操作
+  const totalPct = useMemo(
     () => children.reduce((sum, c) => sum + (c.weight || 0), 0),
     [children],
   )
-
-  const normalizeWeights = () => {
-    if (totalWeight <= 0) return
-    setChildren(prev => prev.map(c => ({ ...c, weight: Math.round((c.weight / totalWeight) * 1000) / 1000 })))
-  }
 
   const handleSave = async () => {
     setError('')
@@ -119,11 +141,12 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
     }
     setSaving(true)
     try {
+      const normalized = normalizeWeights(children.map(c => c.weight))
       const result = await api.strategySaveComposite({
         strategy_id: isEdit ? (editStrategyId ?? '') : strategyId.trim(),
         name: name.trim(),
         description: description.trim(),
-        children: children.map(c => ({ strategy_id: c.strategy_id, weight: c.weight })),
+        children: children.map((c, i) => ({ strategy_id: c.strategy_id, weight: normalized[i] })),
         merge_mode: mergeMode,
         min_confirm: minConfirm,
         mode: isEdit ? 'update' : 'create',
@@ -137,7 +160,8 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
   }
 
   return (
-    <AnimatePresence>
+    <>
+      <AnimatePresence>
       {open && (
         <motion.div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -191,7 +215,7 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                   <label className="mb-1 block text-xs text-muted">策略名称</label>
                   <input
                     value={name}
-                    onChange={e => setName(e.target.value)}
+                    onChange={e => { setName(e.target.value); setNameDirty(true) }}
                     placeholder="我的叠加策略"
                     className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-xs text-foreground placeholder:text-muted/40"
                   />
@@ -216,8 +240,8 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                     onChange={e => setMergeMode(e.target.value as 'union' | 'intersect')}
                     className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-xs text-foreground"
                   >
-                    <option value="union">并集（任一子策略命中即入选）</option>
                     <option value="intersect">交集（至少 N 个子策略同时命中）</option>
+                    <option value="union">并集（任一子策略命中即入选）</option>
                   </select>
                 </div>
                 <div>
@@ -240,9 +264,12 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                     子策略（{children.length}）
                   </label>
                   <span className="text-[10px] text-muted flex items-center gap-1.5">
-                    权重总和: {totalWeight.toFixed(2)}
-                    {totalWeight > 0 && Math.abs(totalWeight - 1) > 0.001 && (
-                      <button onClick={normalizeWeights} className="text-teal-400 hover:text-teal-300 underline underline-offset-2">归一</button>
+                    权重
+                    <span className={`font-mono ${children.length > 0 && totalPct !== 100 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      {totalPct}%
+                    </span>
+                    {children.length > 0 && totalPct !== 100 && (
+                      <span className="text-amber-400/60">(保存时自动按比例归一)</span>
                     )}
                   </span>
                 </div>
@@ -256,20 +283,31 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                     const s = available.find(a => a.id === c.strategy_id)
                     return (
                       <div key={c.strategy_id} className="flex items-center gap-2 rounded-btn border border-border bg-elevated px-2 py-1.5">
-                        <span className="flex-1 truncate text-xs text-foreground">{s?.name ?? c.strategy_id}</span>
+                        <button
+                          type="button"
+                          onClick={() => setEditingChildId(c.strategy_id)}
+                          title="点击编辑该子策略的配置"
+                          className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs text-foreground transition-colors hover:text-accent cursor-pointer"
+                        >
+                          <span className="truncate">{s?.name ?? c.strategy_id}</span>
+                          <Settings2 className="h-3 w-3 shrink-0 text-muted/50" />
+                        </button>
                         {s?.source && (
                           <span className={`rounded border px-1 text-[8px] ${BADGE_CLS[s.source] ?? ''}`}>
                             {SRC_MAP[s.source] ?? s.source}
                           </span>
                         )}
                         <input
-                          type="number"
-                          step={0.05}
+                          type="range"
                           min={0}
+                          max={100}
+                          step={1}
                           value={c.weight}
-                          onChange={e => updateWeight(c.strategy_id, parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-border bg-base px-1.5 py-0.5 text-[11px] text-foreground"
+                          onChange={e => updateWeight(c.strategy_id, parseInt(e.target.value) || 0)}
+                          className="h-1 w-24 cursor-pointer accent-teal-400"
+                          aria-label={`${s?.name ?? c.strategy_id}权重`}
                         />
+                        <span className="w-9 shrink-0 text-right font-mono text-[10px] text-muted">{Math.round(c.weight)}%</span>
                         <button onClick={() => removeChild(c.strategy_id)} className="text-danger/60 hover:text-danger">
                           <X className="h-3 w-3" />
                         </button>
@@ -291,7 +329,7 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
                     className="w-full rounded-btn border border-border bg-elevated py-1.5 pl-7 pr-2 text-xs text-foreground placeholder:text-muted/40"
                   />
                 </div>
-                <div className="max-h-48 space-y-1 overflow-y-auto rounded-btn border border-border bg-elevated p-1.5">
+                <div className="max-h-72 space-y-1 overflow-y-auto rounded-btn border border-border bg-elevated p-1.5">
                   {loadingList && (
                     <div className="flex items-center justify-center gap-1.5 py-3 text-xs text-muted">
                       <Loader2 className="h-3 w-3 animate-spin" /> 加载中
@@ -346,6 +384,20 @@ export function CompositeStrategyDialog({ open, onClose, onSavedId, editStrategy
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+      </AnimatePresence>
+
+      {/* 子策略配置编辑: 点击已选子策略名打开, 渲染在后覆盖于叠加对话框之上 */}
+      <StrategySettingsDialog
+        strategyId={editingChildId}
+        onClose={() => setEditingChildId(null)}
+        onSaved={() => loadAvailable()}
+        onDeleted={() => {
+          // 子策略被删除: 从已选列表移除并刷新可选列表
+          setChildren(prev => prev.filter(c => c.strategy_id !== editingChildId))
+          setEditingChildId(null)
+          loadAvailable()
+        }}
+      />
+    </>
   )
 }

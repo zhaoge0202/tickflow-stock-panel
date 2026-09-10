@@ -272,6 +272,67 @@ export async function startMining(payload: Parameters<typeof api.miningStart>[0]
   }
 }
 
+/** 自动挖掘: L1 全量筛选在后端同步跑 (数十秒到几分钟)。
+ *  模块级提交即返回, 弹窗可立刻关闭; 筛选期间用 progress 呈现, run 创建后走 SSE/轮询。
+ */
+export async function startAutoMining(payload: Parameters<typeof api.miningAutoStart>[0]) {
+  closeEvents()
+  localStorage.removeItem(ACTIVE_RUN_KEY)
+  const token = connectionToken
+  update({
+    runId: null,
+    isPending: true,
+    cancelling: false,
+    reconnecting: false,
+    run: null,
+    progress: { phase: 'screening', label: '正在全量筛选因子（约 1-3 分钟）' },
+    result: null,
+    previousResult: current.result ?? current.previousResult,
+    error: null,
+  })
+  try {
+    const data = await api.miningAutoStart(payload)
+    if (connectionToken !== token || current.runId !== null) return
+    if (data.started && data.run) {
+      const run = data.run
+      localStorage.setItem(ACTIVE_RUN_KEY, run.run_id)
+      update({
+        runId: run.run_id,
+        run,
+        progress: run.progress ?? current.progress,
+        isPending: !TERMINAL_STATES.has(run.status),
+      })
+      if (TERMINAL_STATES.has(run.status)) {
+        await refreshTerminalRun(run.run_id, run.status, run, token)
+      } else {
+        connect(run.run_id)
+      }
+      return
+    }
+    // 无达标因子: 不创建任务, 以 task.error 呈现原因分布 (挖掘页红字展示)
+    const screening = data.screening
+    const topReasons = Object.entries(screening?.reason_counts ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([reason, count]) => `${reason} ${count} 个`)
+      .join('；')
+    update({
+      isPending: false,
+      progress: null,
+      error: `${screening?.n_total ?? 0} 个因子里 0 个达标，未启动挖掘。`
+        + (topReasons ? `主要失败原因：${topReasons}。` : '')
+        + '可改选「探索」档（门槛更低）或拉长日期区间后重试。',
+    })
+  } catch (error) {
+    if (connectionToken !== token || current.runId !== null) return
+    update({
+      isPending: false,
+      progress: null,
+      error: String((error as Error).message || error),
+    })
+  }
+}
+
 export async function cancelMining() {
   if (!current.runId || !current.isPending || current.cancelling) return
   const runId = current.runId

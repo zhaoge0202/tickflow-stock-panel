@@ -189,6 +189,68 @@ def test_daily_limit_prices_require_matching_instrument_date(instrument_as_of, e
     assert "_instrument_as_of" not in result.columns
 
 
+def test_daily_limit_prices_ignore_zero_placeholder_and_match_realtime():
+    """维表涨跌停价为 0 (数据源未提供该字段的占位值) 时必须回退理论价。
+
+    直接采用 0 会让「raw_close >= 0 - 0.005」恒成立, 当日所有标的被判涨停,
+    连板数一路累加; 跌停侧反过来永远判不出跌停。实时路径
+    (_compute_limit_signals_today) 已有 >0 守卫, 冷路径必须同口径。
+    """
+    instruments = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "name": ["普通股"],
+        "limit_up": [0.0],
+        "limit_down": [0.0],
+        "as_of": [date(2026, 7, 20)],
+    })
+
+    # 只涨 0.5%: 不是涨停
+    mild = pipeline.compute_limit_signals(
+        _daily_limit_rows(10.05),
+        instruments,
+        needed={"signal_limit_up", "consecutive_limit_ups"},
+    )
+    assert mild["signal_limit_up"][-1] is False
+    assert mild["consecutive_limit_ups"][-1] == 0
+
+    # 真涨停 11.00 = 10.00 x 1.1: 理论价兜底后仍须判出
+    sealed = pipeline.compute_limit_signals(
+        _daily_limit_rows(11.00),
+        instruments,
+        needed={"signal_limit_up", "consecutive_limit_ups"},
+    )
+    assert sealed["signal_limit_up"][-1] is True
+    assert sealed["consecutive_limit_ups"][-1] == 1
+
+    # 真跌停 9.00 = 10.00 x 0.9: 占位 0 不得让跌停漏判
+    floored = pipeline.compute_limit_signals(
+        _daily_limit_rows(9.00),
+        instruments,
+        needed={"signal_limit_down"},
+    )
+    assert floored["signal_limit_down"][-1] is True
+
+    # 与实时路径同一份维表同一结论
+    realtime = pipeline._compute_limit_signals_today(
+        pl.DataFrame({
+            "symbol": ["600001.SH"],
+            "date": [date(2026, 7, 20)],
+            "open": [10.05],
+            "high": [10.05],
+            "low": [10.05],
+            "close": [10.05],
+            "raw_close": [10.05],
+            "raw_high": [10.05],
+            "raw_low": [10.05],
+            "_prev_close_raw": [10.0],
+            "volume": [1000.0],
+        }),
+        instruments,
+    )
+    assert realtime["signal_limit_up"][0] is False
+    assert mild["signal_limit_up"][-1] is realtime["signal_limit_up"][0]
+
+
 def test_realtime_limit_prices_ignore_stale_instrument_date():
     today = date(2026, 7, 20)
     rows = pl.DataFrame({

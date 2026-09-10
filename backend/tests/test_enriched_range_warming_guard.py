@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.tickflow.repository import KlineRepository
 
@@ -54,3 +55,39 @@ def test_get_enriched_range_rebuilds_when_cold_and_not_warming():
     assert result is not None
     assert result.height == 2
     assert result["symbol"].unique().to_list() == ["600000.SH"]
+
+
+@pytest.mark.parametrize("symbols", [None, ["600000.SH"], ["missing"], []])
+def test_range_projects_before_filter_and_preserves_empty_schema(monkeypatch, symbols):
+    repo = _bare_repo()
+    cache = pl.DataFrame({
+        "symbol": ["600000.SH", "600001.SH"],
+        "date": [date(2026, 1, 1), date(2026, 1, 2)],
+        "close": [10.0, 11.0], "unused": [100.0, 200.0],
+    })
+    repo._enriched_history_cache = cache
+    original_filter = pl.DataFrame.filter
+
+    def narrow_filter(frame, *args, **kwargs):
+        assert "unused" not in frame.columns
+        return original_filter(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "filter", narrow_filter)
+    result = repo.get_enriched_range(date(2026, 1, 1), date(2026, 1, 2), symbols, ["close", "absent"])
+    assert result is not None
+    if symbols is not None and "600000.SH" not in symbols:
+        assert result.is_empty()
+        assert result.schema == cache.schema
+    else:
+        assert result.columns == ["symbol", "date", "close"]
+        assert result.height == (2 if symbols is None else 1)
+
+
+def test_range_duplicate_columns_keep_legacy_empty_behavior():
+    repo = _bare_repo()
+    cache = pl.DataFrame({"symbol": ["600000.SH"], "date": [date(2026, 1, 1)], "close": [10.0]})
+    repo._enriched_history_cache = cache
+    empty = repo.get_enriched_range(date(2026, 1, 1), date(2026, 1, 1), [], ["close", "close"])
+    assert empty.schema == cache.schema
+    with pytest.raises(pl.exceptions.DuplicateError):
+        repo.get_enriched_range(date(2026, 1, 1), date(2026, 1, 1), None, ["close", "close"])

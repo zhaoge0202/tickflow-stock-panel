@@ -149,14 +149,21 @@ class WalkForwardService:
         self.strategy_engine = strategy_engine
 
     def _prepare_shared_matrix(self, cfg: WalkForwardConfig, folds: list[Fold]):
-        """Build one immutable superset matrix for every matrix-native fold."""
+        """Build one immutable superset matrix for every matrix-native fold.
+
+        返回 None 时 run() 走通用路径: 每折独立优化 + OOS 回测, 正确但无共享矩阵加速。
+        python_history_legacy (filter_history) 与 polars_expr (内置) 策略无法装入
+        共享矩阵, 走通用路径; composite / minute_filter 仍不支持, 保持 fail-closed。
+        """
         if self.strategy_engine is None or not folds:
             return None
         strategy = self.strategy_engine.get(cfg.strategy_id)
         if strategy.execution_backend != "matrix_native":
+            if strategy.execution_backend in ("python_history_legacy", "polars_expr"):
+                return None
             raise ValueError(
-                f"步进优化暂仅支持矩阵(matrix_native)策略; "
-                f"{cfg.strategy_id} 是 {strategy.execution_backend}"
+                f"步进优化暂仅支持矩阵(matrix_native)/日线历史(python_history_legacy/"
+                f"polars_expr)策略; {cfg.strategy_id} 是 {strategy.execution_backend}"
             )
 
         from app.backtest.optimizer import expand_param_grid

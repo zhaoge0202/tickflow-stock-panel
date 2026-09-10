@@ -241,6 +241,12 @@ class BacktestService:
         return result if result is not None else pd.DataFrame()
 
     def run(self, config: BacktestConfig) -> BacktestResult:
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+        with shared_heavy_job_limiter.slot("exclusive"):
+            return self._run(config)
+
+    def _run(self, config: BacktestConfig) -> BacktestResult:
         vbt = _get_vbt()
         run_id = uuid.uuid4().hex[:10]
 

@@ -125,13 +125,11 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     dates_asc = list(reversed(dates))
 
     # 收集每个概念在各日期的 (排名, 涨幅)。排名 = 该日在列中的索引 + 1。
-    concept_data: dict[str, list[tuple[int, float]]] = {}
+    concept_data: dict[str, dict[str, tuple[int, float]]] = {}
     for d in dates_asc:
         col = columns.get(d) or []
         for idx, (name, pct) in enumerate(col):
-            concept_data.setdefault(name, []).append((idx + 1, pct))
-
-    n_dates = len(dates_asc)
+            concept_data.setdefault(name, {})[d] = (idx + 1, pct)
 
     def _stats(ranks_pcts: list[tuple[int, float]]) -> dict:
         ranks = [r for r, _ in ranks_pcts]
@@ -151,10 +149,10 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     institutional: list[dict] = []
     hot_money: list[dict] = []
 
-    for concept, rp in concept_data.items():
-        # 缺失日补 (大排名, 0 涨幅) 保持时间轴对齐
-        if len(rp) < n_dates:
-            rp = rp + [(999, 0.0)] * (n_dates - len(rp))
+    for concept, by_date in concept_data.items():
+        # 缺失日按日期归位补 (大排名, 0 涨幅) —— 补位必须落在缺席的那一天,
+        # 一律追加到末尾会把"只在最近几日上榜"的新晋概念读成退潮。
+        rp = [by_date.get(d, (999, 0.0)) for d in dates_asc]
         s = _stats(rp)
         s["concept"] = concept
 
@@ -208,9 +206,22 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
 # ================================================================
 
 def _fmt_pct(v) -> str:
+    """概念/行业涨幅: 小数口径 (0.0522 = +5.22%), 展示前乘 100。"""
     if v is None:
         return "—"
     return f"{v*100:+.2f}%"
+
+
+def _fmt_index_pct(v) -> str:
+    """指数涨跌幅: 百分数口径 (CONTRIBUTING §3.1), 直接展示, 不能再乘一次 100。
+
+    build_market_overview 的 indices[].change_pct 在数据边界已转成百分数
+    (quote_service._build_index_quotes 与 _index_quotes 的 DB 兜底都已乘过 100),
+    与 market_recap._build_indices_block 的展示口径一致。
+    """
+    if v is None:
+        return "—"
+    return f"{v:+.2f}%"
 
 
 def _build_market_block(overview: dict) -> str:
@@ -224,7 +235,7 @@ def _build_market_block(overview: dict) -> str:
     for idx in indices[:4]:
         name = idx.get("name") or idx.get("symbol") or "?"
         chg = idx.get("change_pct")
-        idx_lines.append(f"{name} {_fmt_pct(chg)}")
+        idx_lines.append(f"{name} {_fmt_index_pct(chg)}")
     idx_str = " / ".join(idx_lines) or "指数缺失"
 
     total_amount = (amt.get("total") or 0) / 1e8  # 元 → 亿
@@ -278,10 +289,10 @@ def _build_user_prompt(signals: dict, overview: dict, days: int, dates: list[str
         _build_signal_block("🎰 游资特征 (排名波动大)", signals.get("hot_money", [])),
     ]
 
-    from app.services.ai_provider import sanitize_focus
-    safe_focus = sanitize_focus(focus)
-    if safe_focus:
-        parts.extend(["", f"本次分析请特别关注: {safe_focus}"])
+    from app.services.ai_provider import build_focus_instruction
+    focus_instruction = build_focus_instruction(focus, report_name=f"{dim}轮动分析报告")
+    if focus_instruction:
+        parts.extend(["", focus_instruction])
 
     return "\n".join(parts)
 
@@ -374,6 +385,7 @@ async def analyze_rotation_stream(
             temperature=0.5,
             # 不限制输出(推理模型思考 token 计入预算, 见 ai_provider.stream_ai_text)
             max_tokens=None,
+            prefer_final_answer=True,
         ):
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)

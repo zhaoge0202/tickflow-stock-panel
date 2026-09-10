@@ -41,14 +41,13 @@ interface Props {
   showKeyLevelToggle?: boolean
   showMA?: boolean
   showInfoBar?: boolean
-  visibleBars?: number
+  /** 初始可见蜡烛根数; 'all' = 适配显示全部数据 */
+  visibleBars?: number | 'all'
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   /** 扩展数据列参数（逗号分隔 config_id.field_name），透传给 klineDaily 接口 */
   extColumns?: string
-  /** 日K自动刷新间隔(ms)。undefined = 不轮询(默认)。个股对话框实时刷新时传入, 盘中今日蜡烛随之更新 */
-  refetchIntervalMs?: number
 }
 
 function isValidRow(r: any): boolean {
@@ -167,7 +166,6 @@ export function StockDailyKChart({
   onDateClick,
   onPriceDoubleClick,
   extColumns,
-  refetchIntervalMs,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -178,7 +176,7 @@ export function StockDailyKChart({
   const dateRange = externalDateRange ?? getDefaultRange()
 
   // 查询配置统一来自 klineDailyQueryOptions, 与 StockPanel 信息条/邻近预取共享同一 cache key (只发一次请求)
-  const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol, refetchInterval: refetchIntervalMs })
+  const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol })
 
   // 复用个股分析页的关键价位 API，普通日K只显示当前价附近的压力/支撑。
   const levelsQ = useQuery({

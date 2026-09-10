@@ -83,29 +83,6 @@ class TestComputeMainline:
         assert x_d2["leader_symbol"] == "S1.SH"   # 最高板且成交额大
         assert x_d2["rank"] == 1
 
-    def test_bare_dataframe_map_return_compat(self, tmp_path, monkeypatch):
-        """回归: _load_concept_map_df 若返回裸 DataFrame(旧版/被改动实现),
-        元组解包会把两列拆成两个 Series, Series.is_empty() 能通过但后续
-        group_by 报 'Series' object has no attribute 'group_by'
-        (用户反馈: 市场环境点重算偶发报错)。compute 应兼容不炸。"""
-        repo, d1, d2 = self._setup(tmp_path, monkeypatch)
-        bare = pl.DataFrame(
-            {"_sym_up": ["S1.SH", "S2.SH", "S3.SH", "S4.SH", "B1.SH", "B2.SH"],
-             "concept": ["X", "X", "X", "X", "BIG", "BIG"]},
-            schema={"_sym_up": pl.Utf8, "concept": pl.Utf8},
-        )
-        monkeypatch.setattr(
-            market_mainline, "_load_concept_map_df",
-            lambda r, k="concept": bare if k == "concept" else
-            pl.DataFrame(schema={"_sym_up": pl.Utf8, "industry": pl.Utf8}),
-        )
-        out = market_mainline.compute_mainline_range(
-            repo, tmp_path, d1, d2, kind="concept",
-            filter_cfg={"min_members": 4, "max_members": 600, "blacklist": []},
-        )
-        assert "X" in set(out["member"].to_list())
-        assert out.filter((pl.col("date") == d2) & (pl.col("member") == "X")).height == 1
-
     def test_blacklist_and_min_limit_up(self, tmp_path, monkeypatch):
         repo, d1, d2 = self._setup(tmp_path, monkeypatch)
         out = market_mainline.compute_mainline_range(

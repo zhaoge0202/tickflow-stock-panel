@@ -1,21 +1,15 @@
-import { useState } from 'react'
-import { Navigate, useSearchParams } from 'react-router-dom'
-import { BarChart3, BookmarkCheck, FlaskConical, ShieldCheck } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { BookmarkCheck, FlaskConical, ShieldCheck } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
-import { FactorDiscovery } from './backtest/FactorDiscovery'
 import { ResearchCandidatesDialog } from './backtest/ResearchCandidatesDialog'
 import { RobustnessValidation } from './backtest/RobustnessValidation'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
 import { type ResearchCandidate } from '@/lib/api'
 
-type Tab = 'factor' | 'strategy' | 'robustness'
+type Tab = 'strategy' | 'robustness'
 
-const MODES: Record<Tab, { title: string; subtitle: string; icon: typeof BarChart3 }> = {
-  factor: {
-    title: '因子',
-    subtitle: '批量筛选与单因子检验',
-    icon: BarChart3,
-  },
+const MODES: Record<Tab, { title: string; subtitle: string; icon: typeof FlaskConical }> = {
   strategy: {
     title: '策略',
     subtitle: '现有策略评估与候选沉淀',
@@ -30,17 +24,34 @@ const MODES: Record<Tab, { title: string; subtitle: string; icon: typeof BarChar
 
 export function Backtest() {
   const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
+  const navigate = useNavigate()
   const requestedTab = searchParams.get('tab')
   const [candidatesOpen, setCandidatesOpen] = useState(false)
   // 候选「载入复测」: 弹窗选定 → 关闭弹窗切到策略页 → StrategyBacktest 消费后清空
   const [pendingLoad, setPendingLoad] = useState<ResearchCandidate | null>(null)
 
-  // 旧链接兼容: 挖掘已升级为一级路由 /mining, 保留 run/candidate 参数重定向
-  if (requestedTab === 'mining') {
+  // 跨页「载入复测」: 因子页候选弹窗经 router state 传入 (location.state), 消费后清除防止刷新重复载入
+  const stateCandidate = (location.state as { loadCandidate?: ResearchCandidate } | null)?.loadCandidate ?? null
+  useEffect(() => {
+    if (!stateCandidate) return
+    setPendingLoad(stateCandidate)
+    navigate({ pathname: location.pathname, search: location.search }, { replace: true })
+  }, [stateCandidate, location.pathname, location.search, navigate])
+
+  // 旧链接兼容: 因子已升级为一级路由 /factors, 保留其余参数重定向
+  if (requestedTab === 'factor') {
     const next = new URLSearchParams(searchParams)
     next.delete('tab')
     const search = next.toString()
-    return <Navigate to={search ? `/mining?${search}` : '/mining'} replace />
+    return <Navigate to={search ? `/factors?${search}` : '/factors'} replace />
+  }
+
+  // 旧链接兼容: 挖掘已并入因子页 (/factors?tab=mining), 保留 run/candidate 参数重定向
+  if (requestedTab === 'mining') {
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', 'mining')
+    return <Navigate to={`/factors?${next.toString()}`} replace />
   }
 
   const activeTab: Tab = requestedTab && requestedTab in MODES
@@ -101,7 +112,6 @@ export function Backtest() {
       />
 
       <main className="min-h-0 flex-1 px-3 pb-3 pt-3 lg:px-4 lg:pb-4">
-        {activeTab === 'factor' && <FactorDiscovery />}
         {activeTab === 'strategy' && (
           <StrategyBacktest
             loadCandidate={pendingLoad}

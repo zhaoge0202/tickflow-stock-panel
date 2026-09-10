@@ -85,7 +85,7 @@ def test_attach_replaces_with_newer_announcement():
     assert roe[4] is None            # 4-5 公告日
     assert roe[5] == 20.0            # 4-6 起 20.0
     assert roe[13] == 20.0           # 4-14
-    assert roe[14] is None           # 4-15 二次公告日, 当天仍不可用 (严格大于)
+    assert roe[14] == 20.0           # 4-15 二次公告日: 新一期尚未生效, 仍保留上一期
     assert roe[15] == 33.0           # 4-16 起新公告生效
 
 
@@ -119,6 +119,55 @@ def test_matrix_field_matches_polars_attach():
                 assert np.isnan(actual), (name, row["date"], row["symbol"], actual)
             else:
                 np.testing.assert_allclose(actual, expected, rtol=1e-6)
+
+
+def test_matrix_field_matches_polars_attach_across_two_announcements():
+    """换报告期时两条路径仍须一致: 新公告当日应保留上一期值(前向填充不断档)。"""
+    panel = _daily_panel(date(2026, 4, 1), 20, ("600000.SH",))
+    snapshot = _snapshot_frame([
+        {"symbol": "600000.SH", "announce": "2026-04-05", "roe": 20.0},
+        {"symbol": "600000.SH", "announce": "2026-04-15", "roe": 33.0},
+    ])
+    attached = attach_fundamental_factors(panel, snapshot, ["roe_latest"]).sort("date")
+    market = build_market_data_matrix(panel)
+    matrix = build_fundamental_matrices(market, snapshot, ["roe_latest"])["roe_latest"]
+    column = market.symbols.index("600000.SH")
+    for row_index, value in enumerate(attached["roe_latest"].to_list()):
+        actual = matrix[row_index, column]
+        if value is None:
+            assert np.isnan(actual), (row_index, actual)
+        else:
+            np.testing.assert_allclose(actual, value, rtol=1e-6)
+
+
+def test_matrix_field_clears_value_when_newer_report_lacks_metric():
+    """新一期财报缺该指标时不得继续沿用上一期值, 否则同一行混用两期报告。
+
+    矩阵路径逐列前向填充, 若跳过空值写入, 4-16 起 pb 已换到新期 bps=6,
+    roe 却仍停在上一期的 20 —— polars 侧 join_asof 只认最新一期整行 (roe 为
+    null), 两条路径给出不同的因子值。
+    """
+    panel = _daily_panel(date(2026, 4, 1), 20, ("600000.SH",))
+    snapshot = _snapshot_frame([
+        {"symbol": "600000.SH", "announce": "2026-04-05", "roe": 20.0, "bps": 4.0},
+        {"symbol": "600000.SH", "announce": "2026-04-15", "roe": None, "bps": 6.0},
+    ])
+    attached = attach_fundamental_factors(panel, snapshot, ["roe_latest", "pb_latest"]).sort("date")
+    market = build_market_data_matrix(panel)
+    matrices = build_fundamental_matrices(market, snapshot, ["roe_latest", "pb_latest"])
+    column = market.symbols.index("600000.SH")
+
+    # polars 口径: 新公告生效 (4-16) 后 roe 无值, pb 走新一期 bps
+    assert attached["roe_latest"].to_list()[15:] == [None] * 5
+    assert all(value is not None for value in attached["pb_latest"].to_list()[15:])
+
+    for name in ("roe_latest", "pb_latest"):
+        for row_index, value in enumerate(attached[name].to_list()):
+            actual = matrices[name][row_index, column]
+            if value is None:
+                assert np.isnan(actual), (name, row_index, actual)
+            else:
+                np.testing.assert_allclose(actual, value, rtol=1e-6)
 
 
 def test_bps_nonpositive_gives_null_pb():
@@ -191,3 +240,41 @@ def test_financial_sync_merges_history(tmp_path: Path):
     assert row.height == 1
     assert row["roe"].item() == 9.5
     assert merged2.height == 2  # 修正不增加行数
+
+
+def test_financial_sync_merge_unknown_announce_date_does_not_win():
+    """公告日未知的旧行不得压过带公告日的新行。
+
+    多源并存时旧行可能没有 announce_date (provider 不提供 / 上游缺该字段)。
+    这类"公告日未知"的行若排在真实公告日之后, 逐列取最后一个非空值时反而胜出,
+    合并结果会出现「announce_date 是新公告、数值仍是旧值」的自相矛盾行,
+    点时因子据此在公告日之后放出的是修正前的数。
+    """
+    from app.services import financial_sync as fs
+
+    revised = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "announce_date": ["2026-02-01"],
+        "roe": [9.5],
+    })
+    # 旧行有 announce_date 列但取值为空
+    old_null = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "announce_date": [None],
+        "roe": [9.0],
+    })
+    row = fs._merge_report_history(old_null, revised).to_dicts()[0]
+    assert row["announce_date"] == "2026-02-01"
+    assert row["roe"] == 9.5
+
+    # 旧帧整列缺失 (另一数据源不提供该字段) — 文档承诺"后写优先"
+    old_missing = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "roe": [9.0],
+    })
+    row = fs._merge_report_history(old_missing, revised).to_dicts()[0]
+    assert row["announce_date"] == "2026-02-01"
+    assert row["roe"] == 9.5

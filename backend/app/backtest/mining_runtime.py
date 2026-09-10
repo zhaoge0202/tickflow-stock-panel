@@ -17,7 +17,6 @@ import numpy as np
 import polars as pl
 
 from app.backtest.factor import (
-    FACTOR_COLUMNS,
     FACTOR_METHODOLOGY_VERSION,
     FACTOR_WARMUP_DAYS,
     FactorBacktestService,
@@ -57,6 +56,7 @@ from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
     enriched_publication_incomplete,
 )
+from app.factors.registry import factor_columns_view
 from app.services.mining_jobs import MiningRunStore
 from app.services.mining_preflight import enriched_partition_dates
 from app.services.mining_schedule import MINING_ALGORITHM_VERSION
@@ -66,7 +66,6 @@ from app.strategy.engine import StrategyEngine
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancelCheck = Callable[[], bool] | Any
 _PROFILE_NAMES = frozenset({"exploratory", "balanced", "strict"})
-_FACTOR_IDS = frozenset(str(item["id"]) for item in FACTOR_COLUMNS)
 _MINING_MATRIX_CACHE_BYTES = 32 * 1024 * 1024
 _RESULT_POLICY = BacktestResultPolicy(
     required_stats=frozenset({"total_return", "sharpe", "max_drawdown", "n_trades"}),
@@ -807,7 +806,9 @@ def _decode_runtime_request(
     factor_names = tuple(str(value) for value in request.get("factor_names") or ())
     if not factor_names or len(set(factor_names)) != len(factor_names):
         raise ValueError("factor_names must be non-empty and unique")
-    unknown_factors = sorted(set(factor_names) - _FACTOR_IDS)
+    # 注册表动态读取: worker 子进程已在入口加载自定义/复合因子
+    known_ids = frozenset(str(item["id"]) for item in factor_columns_view())
+    unknown_factors = sorted(set(factor_names) - known_ids)
     if unknown_factors:
         raise ValueError(f"unknown mining factors: {unknown_factors}")
     if len(factor_names) > 48:
@@ -1037,7 +1038,7 @@ def _build_artifacts(
                 candidate.factor_names, candidate.directions, strict=True
             ):
                 direction_by_factor.setdefault(factor_name, int(direction))
-    metadata = {str(item["id"]): item for item in FACTOR_COLUMNS}
+    metadata = {str(item["id"]): item for item in factor_columns_view()}
     factor_rows = []
     for factor_name in request.factor_names:
         metric = latest_metrics[factor_name]

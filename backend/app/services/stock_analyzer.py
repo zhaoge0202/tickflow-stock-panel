@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import polars as pl
 
@@ -238,10 +238,10 @@ def _build_user_prompt(
             "请按系统提示词第 4 节的说明,在基本面/财务面维度给出\"接入中\"的友好提示,不要编造数据。)",
         ])
 
-    from app.services.ai_provider import sanitize_focus
-    safe_focus = sanitize_focus(focus)
-    if safe_focus:
-        parts.extend(["", f"本次分析请特别关注: {safe_focus}"])
+    from app.services.ai_provider import build_focus_instruction
+    focus_instruction = build_focus_instruction(focus, report_name="个股分析报告")
+    if focus_instruction:
+        parts.extend(["", focus_instruction])
     return "\n".join(parts)
 
 
@@ -325,11 +325,12 @@ async def analyze_stock_stream(
             # 不限制输出: 推理模型(deepseek reasoner 系)思考 token 计入 max_tokens
             # 预算, 固定上限会把正文挤光(实测 4500 全被推理吃掉 → 正文 0 字)。
             max_tokens=None,
+            prefer_final_answer=True,
         ):
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("AI stock analysis failed for %s: %s", symbol, e)
         yield json.dumps({"type": "error", "message": f"AI 分析失败: {e}"}, ensure_ascii=False)
         return

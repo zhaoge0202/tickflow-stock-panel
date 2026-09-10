@@ -2,42 +2,36 @@
 
 本项目的几种运行方式，按推荐程度排序。配置项详解见 [configuration.md](./configuration.md)。
 
-> 📌 前置依赖:Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
+> 📌 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
 
 ---
 
-## 方式 A:Dev 模式(二次开发推荐)
+## 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
 
-由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
+GitHub Actions 每次推送都会自动构建多架构镜像(linux/amd64 · arm64)并发布到 GHCR,直接拉取运行,本地无需 Python / Node,也不用现场 build:
 
 ```bash
-git clone https://github.com/shy3130/tick-stock-panel.git
-cd tick-stock-panel
-cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
-./dev.sh                   # Windows: .\dev.ps1
+docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/tick-stock-panel:latest
+# 打开 http://localhost:3018
 ```
 
-`dev.sh` 自动检查 / 下载依赖、释放端口、同时起前后端,Ctrl-C 一并关闭。默认:
+- 需要配置时:从 `.env.example` 复制出 `.env`,命令里加 `--env-file .env`。
+- 镜像默认**不含** stock-sdk 插件(合规考虑),也不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 B 通过 `BACKEND_EXTRAS` 自构建。
+- 跑自己改过的代码:fork 后到仓库 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
+- 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
 
-- 后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>
-- 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
-
-### 手动分别启动(不想用 dev.sh)
+更新到新版本:
 
 ```bash
-# 后端
-cd backend && uv sync --extra backtest   # 含回测依赖
-# 老 CPU: uv sync --extra legacy-cpu
-# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
-uv run uvicorn app.main:app --reload --port 3018
-
-# 前端
-cd frontend && pnpm install && pnpm dev   # http://localhost:3011
+docker pull ghcr.io/shy3130/tick-stock-panel:latest
+docker rm -f tsp
+# 重新执行上面的 docker run
 ```
 
 ---
 
-## 方式 B:Docker(部署最省心)
+
+## 方式 B:Docker Compose(本地构建,全套挂载)
 
 ```bash
 cp .env.example .env
@@ -69,6 +63,44 @@ docker compose up --build -d
 
 ---
 
+## 方式 C:本机 AI 代部署(小白推荐)
+
+装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),把 [README · 快速开始](../README.md#-快速开始) 里方式 C 的提示词原样发给它,AI 会自动完成克隆、装依赖、启动服务。适合完全不想碰命令行的用户;AI 最终执行的仍是方式 A / B / D 之一。
+
+---
+
+
+## 方式 D:Dev 模式(二次开发推荐)
+
+由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
+
+```bash
+git clone https://github.com/shy3130/tick-stock-panel.git
+cd tick-stock-panel
+cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
+./dev.sh                   # Windows: .\dev.ps1
+```
+
+`dev.sh` 自动检查 / 下载依赖、释放端口、同时起前后端,Ctrl-C 一并关闭。默认:
+
+- 后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>
+- 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
+
+### 手动分别启动(不想用 dev.sh)
+
+```bash
+# 后端
+cd backend && uv sync --extra backtest   # 含回测依赖
+# 老 CPU: uv sync --extra legacy-cpu
+# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
+uv run uvicorn app.main:app --reload --port 3018
+
+# 前端
+cd frontend && pnpm install && pnpm dev   # http://localhost:3011
+```
+
+---
+
 ## 老 CPU 兼容(avx2/fma 缺失)
 
 如果运行时报 `avx2`/`fma` 缺失,或进程 `exit 132`,说明 CPU 不支持 AVX2 指令集(常见于老 VPS)。解决:
@@ -91,11 +123,13 @@ vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)�
 
 ## 更新代码(已部署用户必读)
 
-拉取新版本只需一条命令:
+拉取新版本只需一条命令(Dev / Compose 本地构建用户):
 
 ```bash
 git pull
 ```
+
+> 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/shy3130/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
 
 **整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动时,概念/行业两份扩展数据会自动从远程接口拉取,无需任何手动操作。
 

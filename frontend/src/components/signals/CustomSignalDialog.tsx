@@ -15,6 +15,9 @@ interface Props {
   onSaved?: (signal: CustomSignal) => void
 }
 
+// 字符串运算符的中文标签 (数值运算符直接显示符号)
+const OP_LABELS: Record<string, string> = { contains: '包含' }
+
 const emptySignal = (kind: CustomSignal['kind'] = 'exit'): CustomSignal => ({
   id: '', name: '', kind, enabled: true,
   conditions: [{ left: 'close', op: '>', right: 'field:ma20', leftDays: 0, rightDays: 0 }],
@@ -40,6 +43,8 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   const groups = options.data?.groups
   const maxDays = options.data?.maxDays ?? 60
   const operators = options.data?.operators ?? ['>', '>=', '<', '<=', '==', '!=']
+  const stringFields = options.data?.stringFields ?? []
+  const stringOperators = options.data?.stringOperators ?? ['contains', '==', '!=']
   const editing = !!signal
 
   useEffect(() => {
@@ -99,6 +104,20 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
 
   const updateCond = (idx: number, patch: Partial<CustomSignalCondition>) =>
     setDraft(d => ({ ...d, conditions: d.conditions.map((c, i) => i === idx ? { ...c, ...patch } : c) }))
+  // 切换左字段时若跨越 数值↔字符串 类型, 运算符/右值语义不再成立, 一并复位
+  const changeLeft = (idx: number, left: string) =>
+    setDraft(d => ({
+      ...d,
+      conditions: d.conditions.map((c, i) => {
+        if (i !== idx) return c
+        const wasStr = stringFields.includes(c.left)
+        const isStr = stringFields.includes(left)
+        if (wasStr === isStr) return { ...c, left }
+        return isStr
+          ? { ...c, left, op: 'contains', right: '', rightDays: 0 }
+          : { ...c, left, op: '>', right: '0', rightDays: 0 }
+      }),
+    }))
   const addCond = () => setDraft(d => ({ ...d, conditions: [...d.conditions, { left: 'close', op: '>', right: '0', leftDays: 0, rightDays: 0 }] }))
   const removeCond = (idx: number) => setDraft(d => ({ ...d, conditions: d.conditions.filter((_, i) => i !== idx) }))
 
@@ -174,23 +193,32 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                   </div>
                 </div>
                 <div className="space-y-2 rounded-card border border-border/70 bg-base/50 p-3">
-                  {draft.conditions.map((c, i) => (
+                  {draft.conditions.map((c, i) => {
+                    const isStr = stringFields.includes(c.left)
+                    const condOps = isStr ? stringOperators : operators
+                    return (
                     <div key={i} className="flex flex-wrap items-center gap-1.5">
                       <span className="text-[10px] text-muted/60 w-5 text-right shrink-0">{i === 0 ? '当' : '且'}</span>
 
                       {/* 左操作数: 前N日 + 字段(弹出选择) */}
                       <DaysInput value={c.leftDays ?? 0} max={maxDays} onChange={v => updateCond(i, { leftDays: v })} />
-                      <FieldPicker value={c.left} fields={fields} groups={groups} onChange={v => updateCond(i, { left: v })} />
+                      <FieldPicker value={c.left} fields={fields} groups={groups} onChange={v => changeLeft(i, v)} />
 
-                      {/* 运算符 */}
+                      {/* 运算符: 字符串字段为 包含/等于/不等于 */}
                       <select value={c.op} onChange={e => updateCond(i, { op: e.target.value })} className="w-11 h-7 px-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50">
-                        {operators.map(op => <option key={op} value={op}>{op}</option>)}
+                        {condOps.map(op => <option key={op} value={op}>{OP_LABELS[op] ?? op}</option>)}
                       </select>
 
-                      {/* 右操作数: 前N日(仅字段) + 字段/常量(弹出选择) */}
-                      <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays}
-                        onChangeRight={v => updateCond(i, { right: v })}
-                        onChangeDays={v => updateCond(i, { rightDays: v })} />
+                      {/* 右操作数: 字符串字段为文本字面量; 其余为 前N日(仅字段) + 字段/常量(弹出选择) */}
+                      {isStr ? (
+                        <input type="text" value={c.right} onChange={e => updateCond(i, { right: e.target.value })}
+                          placeholder="概念/行业名, 如 AI" maxLength={64}
+                          className="flex-1 min-w-0 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50" />
+                      ) : (
+                        <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays}
+                          onChangeRight={v => updateCond(i, { right: v })}
+                          onChangeDays={v => updateCond(i, { rightDays: v })} />
+                      )}
 
                       {draft.conditions.length > 1 && (
                         <button onClick={() => removeCond(i)} className="p-1 rounded text-muted hover:text-danger hover:bg-danger/10 cursor-pointer">
@@ -198,7 +226,8 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                         </button>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
                 {aiOpen && (
                   <div className="rounded-card border border-amber-400/30 bg-amber-400/5 p-3 space-y-2">

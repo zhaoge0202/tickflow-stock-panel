@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.strategy import custom_signals
+from app.strategy.intraday_features import INTRADAY_FEATURES
 
 router = APIRouter(prefix="/api/custom-signals", tags=["custom-signals"])
 
@@ -24,7 +25,9 @@ def _invalidate(request: Request) -> None:
     信号增删会改变注入列集合: 只清表达式缓存不够, repo 内存缓存 /
     strategy 磁盘缓存里算好的历史窗口仍不含新 csg_ 列 (或仍含已删列),
     需要一并清除, 否则创建信号后立即运行策略仍会报缺列。
+    盘中信号定义缓存(intraday)一并失效, 下一分钟 bucket 即生效。
     """
+    custom_signals.invalidate_intraday_cache()
     from app.indicators.pipeline import invalidate_custom_signals
     invalidate_custom_signals()
     from app.services import strategy_cache
@@ -35,11 +38,11 @@ def _invalidate(request: Request) -> None:
 
 
 class ConditionModel(BaseModel):
-    left: str        # 字段名（须在白名单）
-    op: str          # > >= < <= == !=
+    left: str        # 字段名（日线在白名单 / 盘中在特征白名单）
+    op: str          # > >= < <= == != ; 盘中额外: cross_up cross_down
     right: str       # "field:xxx" 或数字字符串
-    leftDays: int = 0    # 左字段取几日前 (0=当日, 默认)
-    rightDays: int = 0   # 右字段取几日前 (仅 right 为字段时有意义)
+    leftDays: int = 0    # 左字段取几日前 (0=当日, 默认; 盘中信号必须为 0)
+    rightDays: int = 0   # 右字段取几日前 (仅 right 为字段时有意义; 盘中信号必须为 0)
 
 
 class SignalModel(BaseModel):
@@ -48,6 +51,17 @@ class SignalModel(BaseModel):
     kind: str        # entry | exit | both
     conditions: list[ConditionModel]
     enabled: bool = True
+    timeframe: str = "daily"   # daily | intraday(分钟K特征, 输出当日条件上升沿)
+    min_bars: int = 0          # 仅 intraday: 当日最少已完成 bar 数, 不足不触发
+
+
+class IntradayReplayRequest(BaseModel):
+    """盘中信号历史回放 — 用本地分钟K重放触发时点, 不消耗盘中数据能力。"""
+    signal_id: str
+    start_date: str   # YYYY-MM-DD
+    end_date: str     # YYYY-MM-DD
+    symbols: list[str]
+    asset_type: str = "stock"
 
 
 class AIGenerateRequest(BaseModel):
@@ -87,15 +101,58 @@ def get_options():
             groups.append({"key": cat, "label": label,
                            "fields": [{"key": f, "label": ENRICHED_COLUMNS.get(f, f)} for f in cat_fields]})
 
+    # 注册表因子 (虚拟/自定义/复合): 历史路径由 compute_signals 复用评分物化
+    # 管线补算; 已是物化列的基础因子 (rsi_14 等) 上面已分组, 此处跳过。
+    from app.factors.registry import all_factors
+
+    factor_groups: dict[str, list[dict[str, str]]] = {}
+    for spec in all_factors():
+        if spec.id in allowed:
+            continue
+        label = spec.label
+        if spec.warmup_bars > 1:
+            label = f"{label} · 预热{spec.warmup_bars}日"
+        if list(spec.asset_types) == ["stock"]:
+            label = f"{label} · 仅股票"
+        factor_groups.setdefault(spec.group or "因子", []).append({"key": spec.id, "label": label})
+    for group_label, group_fields in factor_groups.items():
+        groups.append({"key": f"factor:{group_label}", "label": f"因子 · {group_label}", "fields": group_fields})
+        fields.extend(group_fields)
+
+    # string 扩展字段 (概念/行业归属等): 只进信号条件, 不注册为因子。
+    # stringFields 标记 + 独立分组, 前端据此切换运算符 (包含/等于/不等于)
+    # 与右值输入 (字符串文本, 不支持字段引用)。
+    from app.factors.ext_factors import ext_string_field_entries
+
+    str_entries = ext_string_field_entries()
+    if str_entries:
+        str_group = {"key": "ext_string", "label": "扩展 · 字符串", "fields": str_entries}
+        groups.append(str_group)
+        fields.extend(str_entries)
+
     return {
         "fields": fields,
         "groups": groups,
         "maxDays": custom_signals.MAX_DAYS,
         "operators": [">", ">=", "<", "<=", "==", "!="],
+        "stringFields": [e["key"] for e in str_entries],
+        "stringOperators": ["contains", "==", "!="],
         "kinds": [
             {"key": "entry", "label": "入场"},
             {"key": "exit", "label": "出场"},
             {"key": "both", "label": "出入通用"},
+        ],
+        # 盘中信号(timeframe=intraday): 分钟K特征白名单 + 额外穿越算子
+        "intraday": {
+            "fields": [
+                {"key": f, "label": label}
+                for f, label in sorted(INTRADAY_FEATURES.items())
+            ],
+            "operators": [">", ">=", "<", "<=", "==", "!=", "cross_up", "cross_down"],
+        },
+        "timeframes": [
+            {"key": "daily", "label": "日线"},
+            {"key": "intraday", "label": "盘中(分钟K)"},
         ],
     }
 
@@ -171,3 +228,102 @@ def delete_signal(signal_id: str, request: Request):
         raise HTTPException(status_code=404, detail="信号不存在")
     _invalidate(request)
     return {"ok": True}
+
+
+# ── 盘中信号历史回放 ────────────────────────────────────
+
+
+@router.post("/intraday/replay")
+def intraday_replay(req: IntradayReplayRequest, request: Request):
+    """用本地历史分钟K回放盘中信号的触发时点。
+
+    只读本地分钟分区, 不消耗盘中数据能力 — 用户可先在历史区间验证信号,
+    再决定是否配置到监控/分钟策略。昨收取自本地日K(无昨日数据的日子该特征降级)。
+    """
+    from datetime import date, timedelta
+
+    import polars as pl
+
+    from app.strategy.intraday_features import build_feature_frame
+
+    try:
+        start = date.fromisoformat(req.start_date)
+        end = date.fromisoformat(req.end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+    if (end - start).days > 60:
+        raise HTTPException(status_code=400, detail="回放区间最长 60 天")
+    symbols = [s for s in dict.fromkeys(req.symbols) if s]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="symbols 不能为空")
+    if len(symbols) > 200:
+        raise HTTPException(status_code=400, detail="单次回放最多 200 只标的")
+
+    # 信号定义必须存在且为盘中类型
+    sig = next(
+        (s for s in custom_signals.load_all(_data_dir(request)) if s.get("id") == req.signal_id),
+        None,
+    )
+    if sig is None:
+        raise HTTPException(status_code=404, detail="信号不存在")
+    if sig.get("timeframe") != custom_signals.TIMEFRAME_INTRADAY:
+        raise HTTPException(status_code=400, detail="该信号不是盘中(timeframe=intraday)信号")
+    exprs = custom_signals.build_intraday_expressions([sig])
+    col = custom_signals.intraday_column_name(sig["id"])
+    if col not in exprs:
+        raise HTTPException(status_code=400, detail="信号编译失败, 请检查条件字段")
+    min_bars = int(sig.get("min_bars", 0) or 0)
+
+    repo = request.app.state.repo
+    # 昨收映射: 一次性取区间(含前置 15 天)日K, 按「严格早于当日」取最近收盘
+    daily = repo.get_daily_batch(symbols, start - timedelta(days=15), end, columns=["symbol", "date", "close"])
+    close_by_sym_date: dict[str, dict[date, float]] = {}
+    if not daily.is_empty():
+        for row in daily.sort(["symbol", "date"]).iter_rows(named=True):
+            close_by_sym_date.setdefault(str(row["symbol"]), {})[row["date"]] = float(row["close"])
+
+    triggers: list[dict] = []
+    days_scanned = 0
+    bars_scanned = 0
+    day = start
+    while day <= end:
+        minute_df = repo.get_minute_batch(symbols, day, asset_type=req.asset_type)
+        if minute_df is not None and not minute_df.is_empty():
+            days_scanned += 1
+            bars_scanned += minute_df.height
+            prev_close = {
+                sym: closes_map[max(d for d in closes_map if d < day)]
+                for sym, closes_map in close_by_sym_date.items()
+                if any(d < day for d in closes_map)
+            }
+            frame = build_feature_frame(minute_df, prev_close=prev_close)
+            if not frame.is_empty():
+                evaluated = custom_signals.apply_intraday_edges(frame, {col: exprs[col]}).with_columns(
+                    pl.int_range(pl.len()).over(["symbol", "date"]).alias("_bar_idx")
+                )
+                if min_bars > 0:
+                    evaluated = evaluated.with_columns(
+                        pl.when(pl.col("_bar_idx") + 1 >= min_bars)
+                        .then(pl.col(col))
+                        .otherwise(False)
+                        .alias(col)
+                    )
+                for row in evaluated.filter(pl.col(col)).sort(["datetime", "symbol"]).iter_rows(named=True):
+                    triggers.append({
+                        "date": day.isoformat(),
+                        "time": str(row["datetime"].time()),
+                        "symbol": row["symbol"],
+                    })
+        day += timedelta(days=1)
+
+    return {
+        "signal_id": req.signal_id,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "symbols": symbols,
+        "days_scanned": days_scanned,
+        "bars_scanned": bars_scanned,
+        "triggers": triggers,
+    }
