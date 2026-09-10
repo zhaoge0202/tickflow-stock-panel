@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -424,10 +425,16 @@ def _config_to_dict(c: BacktestConfig) -> dict:
 
 
 def _json_safe(v):
+    # 非有限浮点 (inf / NaN) 必须先于原生标量分支拦下: Starlette 的 JSONResponse 用
+    # json.dumps(allow_nan=False) 渲染, 漏一个就是整个响应 500。pf.stats() 经
+    # pandas Series.to_dict() 出来时 numpy 标量已被装箱成原生 float (全胜时
+    # Profit Factor = inf, 零波动时 Sharpe = NaN), 两条分支都要覆盖。
+    if isinstance(v, (float, np.floating)) and not math.isfinite(float(v)):
+        return None
     if isinstance(v, (int, float, str, bool)) or v is None:
         return v
     if isinstance(v, (np.floating, np.integer)):
-        return float(v) if not np.isnan(float(v)) else None
+        return float(v)
     if hasattr(v, "isoformat"):
         return v.isoformat()
     return str(v)
