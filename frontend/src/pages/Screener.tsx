@@ -369,7 +369,8 @@ export function Screener() {
     enabled: isLatestStockDate
       && visiblePool.length > 0
       && auctionIsToday
-      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES,
+      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES
+      && auctionNowMinutes < AUCTION_CONFIRM_GRACE_MINUTES,
     staleTime: 0,
     refetchInterval: () => {
       const nowMinutes = getCnNowMinutes()
