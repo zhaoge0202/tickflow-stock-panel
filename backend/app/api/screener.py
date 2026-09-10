@@ -933,32 +933,48 @@ def limit_ladder(
     if ext_specs:
         db = repo.store.db
         data_dir = repo.store.data_dir
+        from app.api.ext_data import _read_ext_dataframe
         from app.services.ext_data import ExtConfigStore
 
         ext_store = ExtConfigStore(data_dir)
         configs = {c.id: c for c in ext_store.load_all()}
 
+        def _dedup_ext(frame: pl.DataFrame, field: str, out_col: str) -> pl.DataFrame | None:
+            """(symbol, 字段) 两列并按 symbol 去重; 缺列时返回 None。"""
+            if frame.is_empty() or "symbol" not in frame.columns or field not in frame.columns:
+                return None
+            return (
+                frame
+                .select(["symbol", field])
+                .unique(subset=["symbol"], keep="last")
+                .rename({field: out_col})
+            )
+
         for config_id, field_name in ext_specs:
             view_name = f"ext_{config_id}"
             ext_col_name = f"{config_id}__{field_name}"
             try:
-                ext_df = pl.from_arrow(db.query(
-                    f"SELECT symbol, {quote_ident(field_name)} FROM {view_name}"
-                ).arrow())
-                if not ext_df.is_empty() and "symbol" in ext_df.columns:
-                    ext_df = ext_df.rename({field_name: ext_col_name})
-                    df = df.join(ext_df.select(["symbol", ext_col_name]), on="symbol", how="left")
+                # 扩展时序数据必须只取最新分区; 否则一个 symbol 会按历史分区数被 JOIN 放大
+                # (ext_{id} 视图覆盖 timeseries/**), 与自选股列表同口径。
+                cfg = configs.get(config_id)
+                if cfg:
+                    ext_df, _ = _read_ext_dataframe(cfg, data_dir)
+                else:
+                    ext_df = pl.from_arrow(db.query(
+                        f"SELECT symbol, {quote_ident(field_name)} FROM {view_name}"
+                    ).arrow())
+                joined = _dedup_ext(ext_df, field_name, ext_col_name)
+                if joined is not None:
+                    df = df.join(joined, on="symbol", how="left")
                     ext_col_names.append(ext_col_name)
             except Exception:
                 cfg = configs.get(config_id)
                 if cfg:
                     try:
-                        from app.api.ext_data import _parquet_glob
-                        glob = _parquet_glob(cfg, data_dir)
-                        ext_df = pl.read_parquet(glob)
-                        if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                            ext_df = ext_df.select(["symbol", field_name]).rename({field_name: ext_col_name})
-                            df = df.join(ext_df, on="symbol", how="left")
+                        ext_df, _ = _read_ext_dataframe(cfg, data_dir)
+                        joined = _dedup_ext(ext_df, field_name, ext_col_name)
+                        if joined is not None:
+                            df = df.join(joined, on="symbol", how="left")
                             ext_col_names.append(ext_col_name)
                     except Exception:
                         pass
