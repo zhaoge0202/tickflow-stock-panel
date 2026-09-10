@@ -3234,6 +3234,7 @@ export const api = {
   ) =>
     request<ScreenerAuctionConfirmationResponse>('/api/screener/auction-confirmation', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({
         as_of: asOf ?? null,
         trade_date: tradeDate ?? null,
@@ -3252,6 +3253,7 @@ export const api = {
   ) =>
     request<ScreenerPreselectResponse>('/api/screener/preselect', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({
         as_of: asOf ?? null,
         trade_date: tradeDate ?? null,
