@@ -237,6 +237,16 @@ def _symbol_keys(row: dict, config: ExtConfig) -> list[str]:
     return keys
 
 
+def _leader_sort_key(row: dict) -> float:
+    """领涨股排序键: 缺涨跌幅的成分股排最后。
+
+    0.00% 是有效涨跌幅, 不能与"无行情"合并成同一个哨兵值 —— 板块整体下跌时
+    平盘股就是领涨股。
+    """
+    value = _finite(row.get("change_pct"))
+    return value if value is not None else float("-inf")
+
+
 def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: int | None = None) -> dict:
     if not rows:
         return {"leading": [], "lagging": []}
@@ -281,7 +291,7 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
         changes = [v for v in changes if v is not None]
         if not changes:
             continue
-        leader = max(stocks, key=lambda s: _finite(s.get("change_pct")) or -999)
+        leader = max(stocks, key=_leader_sort_key)
         items.append({
             "name": name,
             "count": len(stocks),
