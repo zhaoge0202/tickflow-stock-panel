@@ -79,6 +79,30 @@ def test_message_resolves_custom_signal_cn_name(tmp_path):
     assert "csg_ma_dead_5_10" not in msg
 
 
+def test_message_and_logic_includes_comparison_conditions():
+    """AND 规则 truth+比较混合: 比较条件全部满足, 一并补进 message (信息完整)。"""
+    eng = MonitorRuleEngine()
+    rule = _rule(logic="and", conditions=[
+        {"field": "signal_macd_dead", "op": "truth"},
+        {"field": "close", "op": ">=", "value": 2500},
+    ])
+    msg = _fire(eng, rule, _df(signal_macd_dead=[True]))
+    assert msg.startswith("命中 MACD死叉 且 收盘价>=2500")
+    assert "现价 3000.0" in msg
+
+
+def test_message_or_logic_omits_comparison_conditions():
+    """OR 规则 truth+比较混合: 无法判定比较条件是否为真, 不补进 message。"""
+    eng = MonitorRuleEngine()
+    rule = _rule(logic="or", conditions=[
+        {"field": "signal_macd_dead", "op": "truth"},
+        {"field": "close", "op": ">=", "value": 2500},
+    ])
+    msg = _fire(eng, rule, _df(signal_macd_dead=[True]))
+    assert msg.startswith("命中 MACD死叉 · ")
+    assert "收盘价" not in msg
+
+
 def test_message_custom_signal_fallback_without_data_dir():
     """未注入 data_dir 时 csg_ 名称解析优雅回退为原始列名 (不报错)。"""
     eng = MonitorRuleEngine()

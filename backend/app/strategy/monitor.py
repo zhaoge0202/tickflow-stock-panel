@@ -1740,6 +1740,15 @@ class MonitorRuleEngine:
         tail = format_alert_quote(price, pct)
         if signals:
             hit_text = "命中 " + "、".join(self._signal_label(s) for s in signals)
+            # AND 规则: 比较条件同样全部满足, 补进 message 保持信息完整。
+            # OR 规则无法判定哪些比较条件为真 (hit_sigs 只收集 truth 信号), 不补。
+            if rule.get("logic", "and") == "and":
+                comp = [c for c in (conditions if conditions is not None else rule.get("conditions", []))
+                        if c.get("op") != "truth"]
+                if comp:
+                    comp_text = self._format_conditions_text(rule, comp, resolver=self._signal_label)
+                    if comp_text:
+                        hit_text = f"{hit_text} 且 {comp_text}"
             return f"{hit_text} · {tail}" if tail else hit_text
         # 无 truth 命中 (纯比较条件规则): 回退条件摘要
         # 条件摘要: 把 conditions (truth/比较) 拼成可读串, 如 "MA20金叉 且 量比>2"
