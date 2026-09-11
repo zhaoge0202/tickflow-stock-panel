@@ -204,6 +204,20 @@ def _safe_json_value(value):
     return value
 
 
+def _partition_date(raw: str) -> str:
+    """把 `date` 入参规范成 `YYYY-MM-DD` 分区名。
+
+    这个值直接拼进分区目录名 (`timeseries/date=<value>`), 所以非法值不只是格式问题:
+    `date=x/../../../../kline_daily` 会让读取路径离开 `ext_data/<id>/timeseries/`。
+    同一文件的 `/sync`、`/ingest`、`/backfill` 都先 `date.fromisoformat` 再用, 只有
+    `/rows` 和 `/dimension-members` 走的这条路把原始字符串直接拼进了路径。
+    """
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError as e:
+        raise HTTPException(400, f"日期格式错误: {raw}") from e
+
+
 def _read_ext_dataframe(
     config: ExtConfig,
     data_dir: Path,
@@ -222,10 +236,11 @@ def _read_ext_dataframe(
         return pl.DataFrame(), None
 
     if snapshot_date:
-        path = base / f"date={snapshot_date}" / "part.parquet"
+        day = _partition_date(snapshot_date)
+        path = base / f"date={day}" / "part.parquet"
         if not path.exists():
-            return pl.DataFrame(), snapshot_date
-        return pl.read_parquet(path), snapshot_date
+            return pl.DataFrame(), day
+        return pl.read_parquet(path), day
 
     partitions = sorted(
         d for d in base.iterdir()
