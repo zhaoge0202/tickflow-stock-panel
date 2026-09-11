@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight, Target } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
+import {
+  addOrUpdateMonitoredPosition,
+  removeMonitoredPosition,
+  togglePipOpen,
+  useIsPipOpen,
+  useMonitoredPositions,
+} from '@/lib/stopLossStore'
 import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
@@ -124,6 +131,8 @@ const HISTORY_EVENT_LABELS: Record<StrategyHistoryEvent['event_type'], string> =
 }
 
 export function Screener() {
+  const isPipOpen = useIsPipOpen()
+  const monitoredPositions = useMonitoredPositions()
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   // 周期显示筛选: 全部 / 日线 / 分钟 — 只过滤卡片显示, 不影响池和执行;
   // 执行按每个策略自己声明的 timeframes 路由 (日线走盘后缓存, 分钟走本地分钟K分区)
@@ -1101,7 +1110,21 @@ export function Screener() {
         }),
     onSuccess: (_, variables) => {
       qc.invalidateQueries({ queryKey: QK.strategyPurchaseMarks })
-      toast(variables.marked ? '已取消买入标记' : '已记录用户买入标记', 'success')
+      if (!variables.marked) {
+        addOrUpdateMonitoredPosition({
+          symbol: variables.symbol,
+          name: variables.symbol,
+          costPrice: variables.signalPrice || 0,
+          buyDate: variables.signalDate,
+          strategyId: variables.strategyId,
+          strategyName: strategyIdToName[variables.strategyId] ?? variables.strategyId,
+          currentPrice: variables.signalPrice || 0,
+        })
+        toast('已标记买入，并加入「动态止损置顶盯盘浮窗」', 'success')
+      } else {
+        removeMonitoredPosition(variables.symbol)
+        toast('已取消买入标记', 'success')
+      }
     },
   })
 
@@ -1268,6 +1291,25 @@ export function Screener() {
                 max={maxDate}
               />
             )}
+            {/* 动态止损盯盘悬浮窗快捷开关 */}
+            <button
+              type="button"
+              onClick={() => togglePipOpen()}
+              title="打开/关闭动态止损置顶悬浮盯盘窗"
+              className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-btn border transition-colors cursor-pointer text-xs font-medium ${
+                isPipOpen
+                  ? 'border-bull/50 bg-bull/15 text-bull'
+                  : 'border-border bg-surface text-muted hover:text-foreground hover:border-bull/40'
+              }`}
+            >
+              <Target className={`h-3.5 w-3.5 ${isPipOpen ? 'text-bull animate-pulse' : 'text-muted'}`} />
+              <span>动态盯盘</span>
+              {monitoredPositions.length > 0 && (
+                <span className="rounded-full bg-bull/20 px-1 py-0.2 text-[9px] font-mono font-bold text-bull">
+                  {monitoredPositions.length}
+                </span>
+              )}
+            </button>
             {/* 全部切换 */}
             <button
               onClick={() => setShowAll(v => { if (!v) setActiveStrategy(null); return !v })}

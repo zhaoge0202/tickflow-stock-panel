@@ -5,8 +5,13 @@
  * 策略页特有的单元格内容：symbol 列（含加自选按钮 + 失效行灰显）、strategies、
  * score、signals、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
  */
-import { useState, type CSSProperties, type ReactNode } from 'react'
-import { Check, CheckCircle2, Plus, Eye, EyeOff, RefreshCw, ListCollapse, ListTree } from 'lucide-react'
+import { useState, useMemo, type CSSProperties, type ReactNode } from 'react'
+import { Check, CheckCircle2, Plus, Eye, EyeOff, RefreshCw, ListCollapse, ListTree, Target } from 'lucide-react'
+import {
+  useMonitoredPositions,
+  addOrUpdateMonitoredPosition,
+  removeMonitoredPosition,
+} from '@/lib/stopLossStore'
 import type { KlineRow, MinuteKlineRow, StrategyPurchaseMark } from '@/lib/api'
 import { fmtPrice, formatExtNumber } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/screener-columns'
@@ -186,6 +191,11 @@ export function ScreenerTable({
 }: ScreenerTableProps) {
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
+  const monitoredPositions = useMonitoredPositions()
+  const monitoredSymbols = useMemo(
+    () => new Set(monitoredPositions.map((p) => p.symbol.toUpperCase())),
+    [monitoredPositions],
+  )
 
   // 日k列渲染尺寸（按眼睛开关取开启/收起尺寸）
   const candleCol = columns.find(c => c.source.type === 'builtin' && c.source.key === 'candle' && c.visible)
@@ -334,13 +344,42 @@ export function ScreenerTable({
                       ? 'border-bull/40 bg-bull/10 text-bull'
                       : 'border-border text-muted hover:border-bull/40 hover:text-bull'
                   }`}
-                  title={purchaseMark ? '取消已买入标记' : '标记为已买入'}
+                  title={purchaseMark ? '取消已买入标记' : '标记为已买入并同步加入动态止损盯盘浮窗'}
                   aria-label={purchaseMark ? `取消 ${r.symbol} 已买入标记` : `标记 ${r.symbol} 已买入`}
                 >
                   <CheckCircle2 className="h-3 w-3" />
                   {purchaseMark ? '已买' : '我已买'}
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  const isMonitored = monitoredSymbols.has(r.symbol.toUpperCase())
+                  if (isMonitored) {
+                    removeMonitoredPosition(r.symbol)
+                  } else {
+                    addOrUpdateMonitoredPosition({
+                      symbol: r.symbol,
+                      name: r.name || r.symbol,
+                      costPrice: Number.isFinite(Number(r.close)) ? Number(r.close) : 0,
+                      strategyId: activeStrategy || undefined,
+                      strategyName: activeStrategy ? (strategyIdToName[activeStrategy] || activeStrategy) : undefined,
+                      currentPrice: Number.isFinite(Number(r.close)) ? Number(r.close) : 0,
+                      todayHigh: Number.isFinite(Number(r.high)) ? Number(r.high) : undefined,
+                      ma5: Number.isFinite(Number(r.ma5)) ? Number(r.ma5) : undefined,
+                    })
+                  }
+                }}
+                className={`shrink-0 inline-flex h-5 items-center gap-1 rounded-full border px-1.5 text-[9px] font-medium transition-colors ${
+                  monitoredSymbols.has(r.symbol.toUpperCase())
+                    ? 'border-accent/40 bg-accent/15 text-accent shadow-sm'
+                    : 'border-border text-muted hover:border-accent/40 hover:text-accent'
+                }`}
+                title={monitoredSymbols.has(r.symbol.toUpperCase()) ? '从动态止损盯盘浮窗移出' : '加入动态止损置顶盯盘浮窗 (画中画/实时追踪)'}
+              >
+                <Target className="h-3 w-3" />
+                {monitoredSymbols.has(r.symbol.toUpperCase()) ? '盯盘中' : '盯盘'}
+              </button>
             </div>
           </td>
         )
