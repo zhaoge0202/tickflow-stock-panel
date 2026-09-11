@@ -12,6 +12,7 @@ import { fmtPrice, fmtPct } from '@/lib/format'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
+import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
@@ -342,6 +343,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
+  const customNames = useCustomSignalNames()
 
   const clearMut = useMutation({
     mutationFn: api.alertsClear,
@@ -481,7 +483,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                         {ev.signals && ev.signals.length > 0 && (
                           <div className="mt-1.5 flex flex-wrap gap-1">
                             {ev.signals.map((signal: string) => (
-                              <span key={signal} className="rounded bg-accent/8 px-1.5 py-0.5 text-[9px] text-accent/70">{cnSignal(signal)}</span>
+                              <span key={signal} className="rounded bg-accent/8 px-1.5 py-0.5 text-[9px] text-accent/70">{cnSignal(signal, customNames)}</span>
                             ))}
                           </div>
                         )}
@@ -550,17 +552,31 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           })()}
                         </span>
                       </div>
-                      {/* 详情行: 命中条件 (signal/price/market) + 当前价 / 或默认消息 */}
-                      {(ev.conditions && ev.conditions.length > 0) ? (
+                      {/* 详情行: 实际命中信号为主 (有 signals 时); 无 truth 命中则回退条件摘要 */}
+                      {ev.signals && ev.signals.length > 0 ? (
+                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px]">
+                          <span className="text-muted">命中</span>
+                          {ev.signals.map((s: string, j: number) => (
+                            <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">{cnSignal(s, customNames)}</span>
+                          ))}
+                          {ev.price != null && (
+                            <>
+                              <span className="text-muted">·</span>
+                              <span className="text-muted">现价</span>
+                              <span className="font-mono text-foreground/90">{fmtPrice(ev.price)}</span>
+                            </>
+                          )}
+                        </div>
+                      ) : (ev.conditions && ev.conditions.length > 0) ? (
                         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]">
                           <span className="text-muted">命中</span>
                           {ev.conditions.map((c: MonitorCondition, ci: number) => (
                             <span key={ci} className="inline-flex items-center gap-0.5">
                               {ci > 0 && <span className="text-secondary">{ev.logic === 'or' ? '或' : '且'}</span>}
                               {c.op === 'truth' ? (
-                                <span className="text-accent/80">{cnSignal(c.field)}</span>
+                                <span className="text-accent/80">{cnSignal(c.field, customNames)}</span>
                               ) : (
-                                <span className="text-foreground/80 font-mono">{cnSignal(c.field)}{c.op}{c.value}</span>
+                                <span className="text-foreground/80 font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
                               )}
                             </span>
                           ))}
@@ -577,10 +593,19 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           <span className="text-[11px]">{renderMessage(ev.source, ev.message)}</span>
                         </div>
                       )}
-                      {ev.signals && ev.signals.length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {ev.signals.map((s: string, j: number) => (
-                            <span key={j} className="rounded bg-accent/8 px-1.5 py-0.5 text-[9px] text-accent/70">{cnSignal(s)}</span>
+                      {/* 规则全量条件 (次要灰字): 已有命中信号主行时展示, 供回溯规则定义 */}
+                      {ev.signals && ev.signals.length > 0 && ev.conditions && ev.conditions.length > 0 && (
+                        <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[10px] text-muted/70">
+                          <span>规则</span>
+                          {ev.conditions.map((c: MonitorCondition, ci: number) => (
+                            <span key={ci} className="inline-flex items-center gap-0.5">
+                              {ci > 0 && <span>{ev.logic === 'or' ? '或' : '且'}</span>}
+                              {c.op === 'truth' ? (
+                                <span>{cnSignal(c.field, customNames)}</span>
+                              ) : (
+                                <span className="font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
+                              )}
+                            </span>
                           ))}
                         </div>
                       )}
@@ -672,6 +697,7 @@ function RulesList({ rulesQuery, onEdit }: {
   const [confirmId, setConfirmId] = useState<string | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const customNames = useCustomSignalNames()
 
   const rules: MonitorRule[] = (rulesQuery.data as any)?.rules ?? []
 
@@ -961,9 +987,9 @@ function RulesList({ rulesQuery, onEdit }: {
                       <span key={i} className="inline-flex items-center gap-0.5">
                         {i > 0 && <span className="text-secondary">{r.logic === 'and' ? '且' : '或'}</span>}
                         {c.op === 'truth' ? (
-                          <span className="text-accent/80">{cnSignal(c.field)}</span>
+                          <span className="text-accent/80">{cnSignal(c.field, customNames)}</span>
                         ) : (
-                          <span className="text-foreground/80 font-mono">{cnSignal(c.field)}{c.op}{c.value}</span>
+                          <span className="text-foreground/80 font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
                         )}
                       </span>
                     ))}

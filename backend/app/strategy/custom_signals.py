@@ -535,3 +535,27 @@ def load_intraday_all(data_dir: Path) -> list[dict]:
 
 def invalidate_intraday_cache() -> None:
     _intraday_cache.clear()
+
+
+# ── 信号命名映射 (告警文案把 csg_/csgi_ 列名翻译成用户命名) ──────────
+_names_cache: dict[Path, tuple[object, dict[str, str]]] = {}
+
+
+def signal_names(data_dir: Path) -> dict[str, str]:
+    """自定义信号列名 (csg_/csgi_) → 用户命名的映射, 带目录指纹缓存。
+
+    指纹含文件名 + mtime, 保存/删除信号后自动失效重载, 调用方无需配合失效。
+    """
+    d = _dir(data_dir)
+    fp = _dir_fingerprint(d)
+    cached = _names_cache.get(data_dir)
+    if cached is not None and cached[0] == fp:
+        return cached[1]
+    names: dict[str, str] = {}
+    for s in load_all(data_dir):
+        sid, name = s.get("id"), s.get("name")
+        if sid and name:
+            names[column_name(sid)] = name
+            names[intraday_column_name(sid)] = name
+    _names_cache[data_dir] = (fp, names)
+    return names
