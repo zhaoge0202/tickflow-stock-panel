@@ -266,3 +266,82 @@ def test_full_minute_routable_like_other_capabilities(monkeypatch):
     fm_default = caps_pro_default["full_minute"]
     assert [c["name"] for c in fm_default["candidates"]] == ["myfm"]
     assert fm_default["usable"] is False
+
+
+def test_api_endpoint_injects_all_routing_preferences(monkeypatch):
+    """回归 (#301): get_capability_matrix 组装 current 必须覆盖注册表全部路由字段。
+
+    full_minute_data_provider 曾漏传 → 矩阵 effective 恒回退默认 tickflow,
+    低档位用户即使已路由自定义源, 卡片仍恒显「不可用」(真实路由读 preferences
+    不受影响, 纯展示层)。此处捕获 API 层实际传给 build_capability_matrix 的
+    current, 断言它与注册表路由字段一一对应且取自对应 getter。
+    """
+    from app.api import settings as settings_api
+    from app.data_providers import capabilities as capabilities_mod
+    from app.services import preferences
+    from app.tickflow import policy
+
+    getter_values = {
+        "realtime_data_provider": "rt-src",
+        "daily_data_provider": "daily-src",
+        "minute_data_provider": "min-src",
+        "full_minute_data_provider": "fm-src",
+        "depth5_data_provider": "d5-src",
+        "adj_factor_provider": "adj-src",
+        "financial_data_provider": "fin-src",
+    }
+    getter_names = {
+        "realtime_data_provider": "get_realtime_data_provider",
+        "daily_data_provider": "get_daily_data_provider",
+        "minute_data_provider": "get_minute_data_provider",
+        "full_minute_data_provider": "get_full_minute_data_provider",
+        "depth5_data_provider": "get_depth5_data_provider",
+        "adj_factor_provider": "get_adj_factor_provider",
+        "financial_data_provider": "get_financial_provider",
+    }
+    for field, getter in getter_names.items():
+        monkeypatch.setattr(preferences, getter, lambda f=field: getter_values[f])
+    monkeypatch.setattr(policy, "base_tier_name", lambda: "pro")
+
+    captured: dict[str, dict] = {}
+
+    def _spy(current, tickflow_tier="none"):
+        captured["current"] = dict(current)
+        return build_capability_matrix(current, tickflow_tier=tickflow_tier)
+
+    monkeypatch.setattr(capabilities_mod, "build_capability_matrix", _spy)
+    settings_api.get_capability_matrix()
+
+    routable_fields = {c["field"] for c in CAPABILITY_REGISTRY if c["field"] is not None}
+    assert routable_fields == set(getter_values)
+    # 注入完整: 每个路由字段都来自对应 getter, 不允许缺键 (缺键会在构建侧静默回退默认)
+    assert captured["current"] == getter_values
+
+
+def test_api_endpoint_full_minute_usable_follows_preference(monkeypatch):
+    """端到端回归 (#301 用户场景): 低档位 + 已路由自定义源 → 全量分钟卡片可用。
+
+    修复前: API 层漏传偏好, effective 恒 tickflow, 档位不足 → usable=False。
+    """
+    from app.api import settings as settings_api
+    from app.services import preferences
+    from app.tickflow import policy
+
+    _fake_sources(
+        monkeypatch,
+        [],
+        [{"name": "eltdx", "display_name": "ELTDX", "datasets": ["full_minute"]}],
+    )
+    for name in (
+        "get_realtime_data_provider", "get_daily_data_provider",
+        "get_minute_data_provider", "get_depth5_data_provider",
+        "get_adj_factor_provider", "get_financial_provider",
+    ):
+        monkeypatch.setattr(preferences, name, lambda: "tickflow")
+    monkeypatch.setattr(preferences, "get_full_minute_data_provider", lambda: "eltdx")
+    monkeypatch.setattr(policy, "base_tier_name", lambda: "pro")
+
+    fm = _by_id(settings_api.get_capability_matrix())["full_minute"]
+    assert fm["effective"] == "eltdx"
+    assert fm["usable"] is True
+    assert fm["tf_available"] is False
