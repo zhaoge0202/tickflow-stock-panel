@@ -4373,6 +4373,8 @@ export const api = {
     request<{ cycles: number; written: number }>('/api/strategy-history/backfill', {
       method: 'POST',
       body: JSON.stringify({ strategy_ids: strategyIds ?? null, max_cycles: maxCycles, asset_type: 'stock' }),
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      quiet: true,
     }),
 
   marketBreadthLatest: () =>
