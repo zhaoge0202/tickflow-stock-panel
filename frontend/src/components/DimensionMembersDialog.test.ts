@@ -8,8 +8,10 @@ const source = readFileSync(
 )
 
 test('股票名称在前，板块标签紧随名称且代码保持独立一行', () => {
+  // 只锚定结构（外层包裹 + 名称/徽标同行 flex 组 + 独立代码行），不锁定具体样式类，
+  // 避免纯样式微调误报；顺序断言仍是本测试的核心。
   const identity = source.match(
-    /<span className="min-w-0">\s*<span className="flex min-w-0 items-center gap-1\.5">([\s\S]*?)<\/span>\s*<span className="block font-mono text-\[10px\] text-muted">\{row\.symbol\}<\/span>/,
+    /<span className="min-w-0">\s*<span className="flex[^"]*">([\s\S]*?)<\/span>\s*<span className="block font-mono[^"]*">\{row\.symbol\}<\/span>/,
   )
 
   assert.ok(identity, '股票名称、板块标签和代码应使用统一的两行身份布局')
