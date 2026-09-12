@@ -24,7 +24,6 @@ def confirm_cached_strategy_results(
     as_of: date | None = None,
     trade_date: date | None = None,
     strategy_ids: list[str] | None = None,
-    params_map: dict[str, dict] | None = None,
 ) -> dict:
     """把盘后策略缓存与 09:23-09:25 / 09:25-09:30 快照拼成确认结果。"""
     now = datetime.now(tz=CN_TZ)
@@ -48,17 +47,6 @@ def confirm_cached_strategy_results(
             sid for sid, result in cache_results.items()
             if isinstance(result, dict)
         ]
-
-    if params_map is None:
-        try:
-            from app.strategy import config as strategy_config
-            all_overrides = strategy_config.list_overrides(data_dir)
-            params_map = {
-                sid: dict((all_overrides.get(sid) or {}).get("params") or {})
-                for sid in requested_ids
-            }
-        except Exception:
-            params_map = {}
 
     if cached_as_of is not None and cached_as_of != signal_date:
         return {
@@ -180,7 +168,6 @@ def confirm_cached_strategy_results(
         raw = cache_results.get(sid)
         rows = [row for row in (raw.get("rows") or []) if isinstance(row, dict)] if isinstance(raw, dict) else []
         confirmed_rows: list[dict] = []
-        rejected_rows: list[dict] = []
         auction_total = 0
         trade_total = 0
 
@@ -196,16 +183,6 @@ def confirm_cached_strategy_results(
                 trade_total += 1
             if auction_row is None or trade_row is None:
                 continue
-
-            # 校验策略确认条件，不满足者坚决淘汰，严禁误报确认买入
-            is_ok, reason = _evaluate_candidate_confirmation(
-                sid, row, auction_row, trade_row, params_map.get(sid) if params_map else None,
-            )
-            if not is_ok:
-                logger.info("竞价确认淘汰 [%s] %s: %s", sid, symbol, reason)
-                rejected_rows.append(_build_rejected_row(row, auction_row, trade_row, reason))
-                continue
-
             confirmed_rows.append(_build_confirmed_row(row, auction_row, trade_row))
 
         confirmed_rows.sort(key=_result_sort_key, reverse=True)
@@ -217,13 +194,11 @@ def confirm_cached_strategy_results(
             "base_total": len(rows),
             "total": len(confirmed_rows),
             "confirmed_total": len(confirmed_rows),
-            "rejected_total": len(rejected_rows),
             "auction_covered_total": auction_total,
             "trade_covered_total": trade_total,
             "pending_auction_total": max(len(rows) - auction_total, 0),
             "pending_trade_total": max(len(rows) - trade_total, 0),
             "rows": confirmed_rows,
-            "rejected_rows": rejected_rows,
         })
 
     if trade_rows_total <= 0:
@@ -353,91 +328,6 @@ def _build_confirmed_row(base_row: dict, auction_row: dict, trade_row: dict) -> 
         "auction_confirmation_status": "confirmed",
     })
     return row
-
-
-def _build_rejected_row(
-    base_row: dict,
-    auction_row: dict | None,
-    trade_row: dict | None,
-    reason: str,
-) -> dict:
-    row = dict(base_row)
-    if auction_row and trade_row:
-        row = _build_confirmed_row(base_row, auction_row, trade_row)
-    row.update({
-        "auction_confirmation_status": "rejected",
-        "auction_rejection_reason": reason,
-    })
-    return row
-
-
-def _evaluate_candidate_confirmation(
-    strategy_id: str,
-    base_row: dict,
-    auction_row: dict | None,
-    trade_row: dict | None,
-    params: dict | None = None,
-) -> tuple[bool, str]:
-    """校验候选标的是否真正满足该策略的竞价/开盘确认条件。
-
-    返回 (is_confirmed, reason)。
-    """
-    if auction_row is None:
-        return False, "未取得 09:25 前竞价快照，无法确认"
-    if trade_row is None:
-        return False, "未取得 09:25~09:30 开盘快照，无法确认"
-
-    base_price = (
-        _float_or_none(base_row.get("close"))
-        or _float_or_none(base_row.get("price"))
-        or _float_or_none(base_row.get("prev_close"))
-    )
-    auction_price = _float_or_none(auction_row.get("auction_price")) or _float_or_none(auction_row.get("last_price"))
-    trade_price = _float_or_none(trade_row.get("last_price"))
-    params = params or {}
-
-    # 双刃合家族策略: 严格校验高开幅度
-    if strategy_id in {
-        "custom_dual_edge",
-        "custom_dual_edge_focus",
-        "custom_dual_edge_prime",
-        "custom_dual_edge_v2",
-        "custom_dual_edge_v3",
-    }:
-        if base_price in (None, 0) or auction_price is None or trade_price is None:
-            return False, "竞价/开盘价格数据不完整，无法确认"
-        open_value = _float_or_none(trade_row.get("open")) or auction_price or trade_price
-        if open_value is None or open_value <= 0:
-            return False, "开盘价格数据无效"
-
-        open_gap = (open_value / base_price) - 1.0
-        default_gap_max = 4.0 if strategy_id == "custom_dual_edge_prime" else 3.5
-        gap_min = float(params.get("gap_min", 2.0)) / 100.0
-        gap_max = float(params.get("gap_max", default_gap_max)) / 100.0
-        if open_gap < gap_min:
-            return False, f"竞价开盘 {open_gap * 100:+.2f}%，低于最低高开 {gap_min * 100:.1f}%"
-        if open_gap > gap_max:
-            return False, f"竞价开盘 {open_gap * 100:+.2f}%，超过最高高开 {gap_max * 100:.1f}%"
-        return True, "竞价高开达标"
-
-    # 断板弱开反包: 要求弱开/平开 (高开不超过 2%)
-    if strategy_id == "custom_broken_board_weak_open":
-        if base_price in (None, 0) or auction_price is None or trade_price is None:
-            return False, "竞价/开盘价格数据不完整，无法确认"
-        open_value = _float_or_none(trade_row.get("open")) or auction_price or trade_price
-        if open_value is None or open_value <= 0:
-            return False, "开盘价格数据无效"
-
-        open_gap = (open_value / base_price) - 1.0
-        gap_max = float(params.get("gap_max", 2.0)) / 100.0
-        if open_gap > gap_max:
-            return False, f"开盘高开 {open_gap * 100:+.2f}%，超过弱开上限 {gap_max * 100:.1f}%"
-        if open_gap < -0.05:
-            return False, f"开盘低开 {open_gap * 100:+.2f}%，跌幅过大超过 -5.0%"
-        return True, "弱开达标"
-
-    # 默认/其他普通策略: 开盘数据齐全即通过
-    return True, "开盘数据就绪"
 
 
 def _result_sort_key(row: dict) -> tuple[float, float, float, float, str]:
