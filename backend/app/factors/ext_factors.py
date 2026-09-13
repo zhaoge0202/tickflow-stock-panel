@@ -51,7 +51,7 @@ _sync_state: tuple | None = None
 def ext_column_name(config_id: str, field_name: str) -> str:
     """扩展字段在帧/信号中的列名: ext_{config_id}_{field}。
 
-    保留中日韩文字 (\w 含 unicode 字母) —— 预设表的字段名多为中文
+    保留中日韩文字 (\\w 含 unicode 字母) —— 预设表的字段名多为中文
     (所属概念/股票简称), 全部折叠为 ASCII 会互相碰撞。非单词字符转下划线。
     """
     sanitized = re.sub(r"[^\w]+", "_", field_name, flags=re.UNICODE).strip("_") or "f"
