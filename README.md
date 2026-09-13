@@ -192,10 +192,7 @@
     <td width="50%"><img src="./screenshots/异动监控.png" alt="异动监控"></td>
     <td width="50%"><img src="./screenshots/市场环境分析.png" alt="市场环境分析"></td>
   </tr>
-  <tr>
-    <td width="50%" align="center"><b>连板梯队 Limit Ladder</b></td>
-    <td width="50%" align="center"><b>概念分析 Concept</b></td>
-  </tr>
+ 
  
 </table>
 
