@@ -3620,6 +3620,7 @@ export const api = {
   }) =>
     request<AiIterateResult>('/api/strategies/ai/iterate', {
       method: 'POST',
+      timeoutMs: null,
       body: JSON.stringify(payload),
     }),
 }

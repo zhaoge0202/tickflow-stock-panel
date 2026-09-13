@@ -209,6 +209,7 @@ def run_backtest(
     """
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
     end_date = date.fromisoformat(end) if end else date.today()
     start_date = (
@@ -224,8 +225,10 @@ def run_backtest(
         asset_type=asset_type,
         # 其余成本/撮合口径走默认 (与 api/backtest.py 的 /strategy/run 默认一致)
     )
-    task = make_worker_task("backtest", Path(data_dir), cfg)
-    result = run_worker_task(task)
+    # 与其它重回测端点一致: 走共享重任务限流 (容量 2), 防并发迭代/手动回测叠加挤爆内存
+    with shared_heavy_job_limiter.slot("normal"):
+        task = make_worker_task("backtest", Path(data_dir), cfg)
+        result = run_worker_task(task)
 
     error = result.get("error")
     if error:
@@ -269,6 +272,8 @@ async def execute_tool(
             strategy_id = str(args.get("strategy_id") or "").strip()
             if not strategy_id:
                 return {"ok": False, "error": "run_backtest 缺少 strategy_id"}
+            if engine is not None and not engine.has(strategy_id):
+                return {"ok": False, "error": f"策略 {strategy_id} 不存在"}
             result = await asyncio.to_thread(
                 run_backtest,
                 data_dir,

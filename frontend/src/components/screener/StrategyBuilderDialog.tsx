@@ -224,12 +224,15 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const [iterateRounds, setIterateRounds] = useState<AiIterateRound[]>([])
   const [iterateDraftId, setIterateDraftId] = useState('')
   const suppressPersistRef = useRef(false)
+  // 迭代落盘的代码基准 (检测用户在编辑器是否改过, 见 handleSave)
+  const iterateSavedCodeRef = useRef('')
 
   const resetDraftState = useCallback(() => {
     setStep(1); setTab('ai'); setName(''); setDescription(''); setDirection('long')
     setExecutionBackend('polars_expr'); setRules(''); setCode(''); setInstruction('')
     setPreviewTab('params'); setStrategyId(''); setSource('ai'); setValidated(false); setError('')
     setIterateEnabled(false); setIterateRounds([]); setIterateDraftId('')
+    iterateSavedCodeRef.current = ''
   }, [])
 
   // 打开时恢复草稿
@@ -316,6 +319,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
           execution_backend: executionBackend, rules: rules.trim(), max_rounds: 4,
         })
         setCode(result.final_code)
+        iterateSavedCodeRef.current = result.final_code
         setStrategyId(result.draft_strategy_id); setSource('ai')
         setIterateDraftId(result.draft_strategy_id); setIterateRounds(result.rounds ?? [])
         setStep(2); setValidated(true)
@@ -402,14 +406,27 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     if (!draftCode) return
     setSaving(true); setError('')
     try {
-      // 迭代模式: 后端已把草稿落盘到 data/strategies/ai/, 此处只刷新 + 入池, 不重复保存
+      // 迭代模式: 后端已把草稿落盘到 data/strategies/ai/
       if (iterateDraftId) {
+        // 用户若在编辑器改过代码, 先更新落盘草稿 (否则编辑会被静默丢弃)
+        let researchOnly = true
+        if (draftCode !== iterateSavedCodeRef.current) {
+          const savedResult = await api.strategySaveCodeV2({
+            strategy_id: iterateDraftId,
+            code: draftCode,
+            target_source: 'ai',
+            mode: 'update',
+            name: name.trim(),
+            description: description.trim(),
+          })
+          researchOnly = savedResult.research_only
+        }
         suppressPersistRef.current = true
         clearDraft()
         const genRules = parseRules(draftCode)
         const finalRules = (genRules || rules).trim()
         if (finalRules) { const saved = storage.strategyRules.get({}); saved[iterateDraftId] = finalRules; storage.strategyRules.set(saved) }
-        await onSavedId?.(iterateDraftId, true)
+        await onSavedId?.(iterateDraftId, researchOnly)
         setTimeout(() => onClose(), 1000)
         setSaving(false)
         return
@@ -588,6 +605,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                       <Terminal className="h-3.5 w-3.5" />
                       迭代证据（共 {iterateRounds.length} 轮，草稿已保存为 {iterateDraftId}）
                     </div>
+                    <div className="text-[10px] text-muted/50">每轮指标为该轮「改动前」基准回测；末行「最终版回测」为最终代码回测结果</div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-[10px]">
                         <thead>

@@ -976,8 +976,10 @@ async def ai_iterate(req: AIIterateRequest, request: Request):
         result = await iterator.iterate(prompt, engine=engine, data_dir=str(data_dir))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI迭代失败: {e}") from e
+    except Exception:
+        # 内部异常详情只进日志, 不透给客户端 (§8)
+        logger.exception("AI 迭代失败")
+        raise HTTPException(status_code=500, detail="AI 迭代失败, 请稍后重试")
     return result
 
 

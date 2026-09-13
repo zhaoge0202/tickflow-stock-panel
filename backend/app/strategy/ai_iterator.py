@@ -7,6 +7,7 @@ services.tool_catalog 做工具目录 + 回测桥。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -77,6 +78,7 @@ class AIStrategyIterator:
         current_code, current_meta = code, {**meta, "id": draft_id}
 
         rounds: list[dict[str, Any]] = []
+        final_backtested = False  # final 版(当前 current_code)是否已有回测证据
         for round_no in range(1, self._max_rounds + 1):
             full = await generate_ai_text_with_tools(
                 self._iteration_messages(generator, current_code, prompt, draft_id),
@@ -86,6 +88,7 @@ class AIStrategyIterator:
                 temperature=0.3,
                 max_tokens=None,
             )
+            # stats 是本轮「改动前」的 current_code 回测基准 (LLM 先回测再产出改进版)
             stats = _extract_backtest_stats(full)
             final_text = _last_assistant_content(full)
             improved = generator.validate_code(final_text)
@@ -95,6 +98,7 @@ class AIStrategyIterator:
                     "stats": stats,
                     "change_summary": f"改进版校验失败: {improved.get('error')}",
                 })
+                final_backtested = True  # final 仍是 current_code, 已被本轮回测
                 break
 
             new_code, new_meta = improved["code"], improved["meta"]
@@ -104,6 +108,7 @@ class AIStrategyIterator:
                     "stats": stats,
                     "change_summary": "无改动, 视为收敛",
                 })
+                final_backtested = True  # 收敛, final 仍是 current_code
                 break
 
             self._save_draft(engine, data_dir, draft_id, new_code, new_meta)
@@ -113,6 +118,16 @@ class AIStrategyIterator:
                 "stats": stats,
                 "change_summary": _extract_summary(final_text),
             })
+            final_backtested = False  # 本轮改进了 current_code, 新的 final 尚未回测
+
+        # 循环耗尽且末轮是改进版时, final 版从未被回测, 补一次作为末行证据
+        if not final_backtested:
+            final_stats = await self._backtest_final(data_dir, draft_id)
+            rounds.append({
+                "round": len(rounds) + 1,
+                "stats": final_stats,
+                "change_summary": "最终版回测",
+            })
 
         return {
             "draft_strategy_id": draft_id,
@@ -120,6 +135,16 @@ class AIStrategyIterator:
             "final_code": current_code,
             "final_meta": current_meta,
         }
+
+    async def _backtest_final(self, data_dir: str, draft_id: str) -> dict | None:
+        """对最终版草稿补一次回测, 返回精简 stats; 失败返回 None (末行证据尽力而为)。"""
+        try:
+            result = await asyncio.to_thread(
+                tool_catalog.run_backtest, data_dir, strategy_id=draft_id
+            )
+            return result.get("stats")
+        except Exception:  # noqa: BLE001 — 末行证据不强依赖回测成功
+            return None
 
     def _alloc_draft_id(self, engine) -> str:
         while True:
