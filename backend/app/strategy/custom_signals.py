@@ -22,6 +22,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.services.fs_utils import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
@@ -153,7 +155,7 @@ def load_all(data_dir: Path) -> list[dict]:
 def save_one(data_dir: Path, sig: dict) -> None:
     p = _path(data_dir, sig["id"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(sig, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(sig, ensure_ascii=False, indent=2))
 
 
 def delete_one(data_dir: Path, signal_id: str) -> bool:
