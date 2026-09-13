@@ -169,31 +169,29 @@
 
 <table>
   <tr>
+    <td width="50%" align="center"><b>看板 Dashboard</b></td>
     <td width="50%" align="center"><b>策略 Screener</b></td>
-    <td width="50%" align="center"><b>回测 Backtest</b></td>
   </tr>
   <tr>
+    <td width="50%"><img src="./screenshots/看板.png" alt="看板页面"></td>
     <td width="50%"><img src="./screenshots/策略.png" alt="策略页"></td>
-    <td width="50%"><img src="./screenshots/回测.png" alt="回测页"></td>
   </tr>
   <tr>
+    <td width="50%" align="center"><b>回测 Backtest</b></td>
     <td width="50%" align="center"><b>挖掘 Mining</b></td>
-    <td width="50%" align="center"><b>监控中心 Monitor</b></td>
   </tr>
   <tr>
+    <td width="50%"><img src="./screenshots/回测.png" alt="回测页"></td>
     <td width="50%"><img src="./screenshots/挖掘因子.png" alt="挖掘页"></td>
-    <td width="50%"><img src="./screenshots/监控中心.png" alt="监控中心"></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><b>异动监控 Abnormal Moves</b></td>
+    <td width="50%" align="center"><b>监控中心 Monitor</b></td>
     <td width="50%" align="center"><b>市场环境 Regime</b></td>
   </tr>
   <tr>
-    <td width="50%"><img src="./screenshots/异动监控.png" alt="异动监控"></td>
+    <td width="50%"><img src="./screenshots/监控中心.png" alt="监控中心"></td>
     <td width="50%"><img src="./screenshots/市场环境分析.png" alt="市场环境分析"></td>
   </tr>
- 
- 
 </table>
 
 <div align="center">
