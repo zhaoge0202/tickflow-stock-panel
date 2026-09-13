@@ -196,26 +196,7 @@
     <td width="50%" align="center"><b>连板梯队 Limit Ladder</b></td>
     <td width="50%" align="center"><b>概念分析 Concept</b></td>
   </tr>
-  <tr>
-    <td width="50%"><img src="./screenshots/连板梯队.png" alt="连板梯队页"></td>
-    <td width="50%"><img src="./screenshots/概念分析.png" alt="概念分析"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>个股分析 Stock Analysis</b></td>
-    <td width="50%" align="center"><b>AI 复盘 Review</b></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="./screenshots/个股分析.png" alt="个股分析"></td>
-    <td width="50%"><img src="./screenshots/AI复盘.png" alt="AI复盘"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>财务分析 Financials</b></td>
-    <td width="50%" align="center"><b>自选 Watchlist</b></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="./screenshots/财务分析.png" alt="财务分析"></td>
-    <td width="50%"><img src="./screenshots/自选.png" alt="自选页"></td>
-  </tr>
+ 
 </table>
 
 <div align="center">
