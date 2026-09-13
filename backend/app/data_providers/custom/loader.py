@@ -21,6 +21,7 @@ from app.data_providers.custom.config import (
     load_config,
 )
 from app.data_providers.custom.provider import GenericHTTPProvider
+from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +385,7 @@ def save_config(name: str, config: dict) -> Path:
     if not path.is_relative_to(base.resolve()):
         raise ValueError("invalid data source name: path escape detected")
     cleaned = _sanitize_for_yaml(config)
-    path.write_text(yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    atomic_write_text(path, yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False))
     return path
 
 

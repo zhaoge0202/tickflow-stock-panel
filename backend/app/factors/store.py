@@ -14,6 +14,7 @@ from pathlib import Path
 
 from app.factors.dsl import compile_formula
 from app.factors.registry import FactorSpec, factor_dependencies, get_factor, register_factor
+from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def load_all(data_dir: Path) -> list[dict]:
 def save_one(data_dir: Path, definition: dict) -> None:
     target = _path(data_dir, str(definition["id"]))
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(definition, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(target, json.dumps(definition, ensure_ascii=False, indent=2))
 
 
 def delete_one(data_dir: Path, factor_id: str) -> bool:
