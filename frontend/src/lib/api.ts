@@ -3060,7 +3060,8 @@ export const api = {
     response_path?: string; field_map?: Record<string, string>;
     schedule_minutes?: number; enabled?: boolean;
     time_window_start?: string | null; time_window_end?: string | null;
-    date_param?: string | null; date_format?: string;
+    date_param?: string | null;
+    time_field?: string | null;
     auth?: ExtPullAuth;
   }) =>
     request<{ status: string; pull: PullConfig }>(
@@ -3819,6 +3820,8 @@ export interface PullConfig {
   date_param?: string | null
   /** 日期参数值的格式: iso=YYYY-MM-DD / compact=YYYYMMDD / ts_s=unix秒 / ts_ms=unix毫秒 (该交易日北京 00:00) */
   date_format?: string
+  /** 日内序列表时间列名 (如 "ts"): 配置后同 symbol 允许多行 (按 symbol+时间列去重), 用于集合竞价等多盘数据 */
+  time_field?: string | null
   auth?: ExtPullAuth | null
 }
 

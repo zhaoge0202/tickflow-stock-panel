@@ -30,6 +30,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
   const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
   const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
   const [dateFormat, setDateFormat] = useState(pull?.date_format ?? 'iso')
+  const [timeField, setTimeField] = useState(pull?.time_field ?? '')
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
 
   // 接口鉴权: 方式入 pull 配置; Key 本体只存后端 secrets.json
@@ -85,6 +86,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       time_window_end: timeWindowEnd || null,
       date_param: dateParam.trim() || null,
       date_format: dateFormat,
+      time_field: timeField.trim() || null,
     }
   }
 
@@ -351,6 +353,16 @@ export function ExtDataPullPanel({ config, onSaved }: {
               <option value="ts_ms">毫秒时间戳</option>
             </select>
           </div>
+        </div>
+
+        <div>
+          <div className="text-[10px] text-muted mb-1">时间字段 (日内多行数据填, 如 ts · 竞价/分时快照)</div>
+          <input
+            value={timeField} onChange={e => setTimeField(e.target.value)}
+            placeholder="ts · 留空=每日快照表 (同代码一天一行)"
+            title="配置后同一代码允许一天多行, 按代码+时间列去重"
+            className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+          />
         </div>
 
         <div>

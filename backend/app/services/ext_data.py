@@ -50,7 +50,7 @@ class PullConfig:
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
         "next_run", "time_window_start", "time_window_end", "date_param",
-        "date_format", "auth",
+        "date_format", "time_field", "auth",
     )
 
     def __init__(
@@ -72,6 +72,7 @@ class PullConfig:
         time_window_end: str | None = None,
         date_param: str | None = None,
         date_format: str = "iso",
+        time_field: str | None = None,
         auth: dict | None = None,
     ) -> None:
         self.url = url
@@ -94,6 +95,10 @@ class PullConfig:
         self.date_param = date_param
         # 日期参数值的格式; config.json 被手改写入非法值时归一为 iso (fail-closed)
         self.date_format = date_format if date_format in PULL_DATE_FORMATS else "iso"
+        # 日内序列表: 响应行里的时间列名 (字段映射后的列名, 如 "ts")。配置后同一
+        # symbol 允许多行 (按 [symbol, time_field] 去重), 用于集合竞价等日内多盘
+        # 数据; None = 每日快照表 (按 symbol 去重, 默认)
+        self.time_field = (time_field or "").strip() or None
         # 拉取接口鉴权方式 {"type": "none|bearer|header|query", "header": ..., "param": ...},
         # 与自定义行情源 AuthConfig 同口径; Key 本体存 secrets_store, 不落 config.json
         self.auth = auth
@@ -117,6 +122,7 @@ class PullConfig:
             "time_window_end": self.time_window_end,
             "date_param": self.date_param,
             "date_format": self.date_format,
+            "time_field": self.time_field,
             "auth": self.auth,
         }
 
@@ -142,6 +148,7 @@ class PullConfig:
             time_window_end=d.get("time_window_end"),
             date_param=d.get("date_param"),
             date_format=d.get("date_format", "iso"),
+            time_field=d.get("time_field"),
             auth=d.get("auth"),
         )
 
@@ -651,8 +658,14 @@ def write_ext_parquet(
         if out_path.exists():
             try:
                 existing = pl.read_parquet(out_path)
-                key = "symbol" if "symbol" in df.columns else df.columns[0]
-                df = pl.concat([existing, df]).unique(subset=[key], keep="last")
+                key: str | list[str] = "symbol" if "symbol" in df.columns else df.columns[0]
+                # 日内序列表 (配置 time_field): 同 symbol 同时刻去重, 不同盘并存
+                tf = config.pull.time_field if config.pull else None
+                if tf and tf in df.columns:
+                    key = [key, tf]
+                df = pl.concat([existing, df]).unique(
+                    subset=[key] if isinstance(key, str) else key, keep="last"
+                )
             except Exception as e:
                 logger.warning("扩展表 %s 合并去重失败, 将覆盖写入: %s", config.id, e)
 
