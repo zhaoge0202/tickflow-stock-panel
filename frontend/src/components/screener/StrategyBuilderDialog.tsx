@@ -419,7 +419,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
             name: name.trim(),
             description: description.trim(),
           })
-          researchOnly = savedResult.research_only
+          researchOnly = savedResult.research_only ?? true
         }
         suppressPersistRef.current = true
         clearDraft()
