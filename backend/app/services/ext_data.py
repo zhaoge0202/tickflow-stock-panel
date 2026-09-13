@@ -670,6 +670,13 @@ def write_ext_parquet(
                 logger.warning("扩展表 %s 合并去重失败, 将覆盖写入: %s", config.id, e)
 
     df = cast_df_to_schema(df, config.fields)
+    if config.mode != "snapshot":
+        # 日内序列表: 分区内按 [symbol, 时间列] 升序落盘。读侧 (screener._load_ext_value_maps、
+        # ext_factors 因子帧、板块资金流) 按 symbol unique(keep="last") 收敛到一行, 只认行序;
+        # 上面的合并去重不保序, 上游返回顺序也不保证时间序, 不排序时取到的是随机一盘
+        tf = config.pull.time_field if config.pull else None
+        if tf and tf in df.columns:
+            df = df.sort(["symbol", tf] if "symbol" in df.columns else [tf], maintain_order=True)
     df.write_parquet(out_path)
     logger.info("扩展表写入: %s → %s (%d 行)", config.id, out_path, len(df))
     # 扩展列已接入 enriched 帧/因子注册表: 写入后必须失效相关缓存
