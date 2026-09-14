@@ -524,6 +524,50 @@ export interface ScreenerPreselectResponse {
   results: Record<string, ScreenerPreselectResult>
 }
 
+export interface FocusVersionTag {
+  type: 'confirmed' | 'late_entrant' | 'preselect' | 'dropped' | 'final_selected' | 'preview_seen'
+  label: string
+  color: 'green' | 'orange' | 'blue' | 'red' | 'purple'
+}
+
+export interface FocusVersionDetail {
+  label: string
+  time: string
+  status: 'ready' | 'pending' | 'unclosed'
+  total: number
+  rows: any[]
+}
+
+export interface FocusVersionsResponse {
+  as_of: string
+  strategy_id: string
+  strategy_name: string
+  current_stage: 'preview' | 'final' | 'waiting_preview'
+  is_unclosed: boolean
+  versions: {
+    preview: FocusVersionDetail
+    final: FocusVersionDetail
+    preselect: FocusVersionDetail
+  }
+  dropped_from_preview: Array<{
+    symbol: string
+    name: string
+    preview_close: number
+    preview_change_pct: number
+    preview_score: number
+    reason: string
+    version_tags: FocusVersionTag[]
+  }>
+  summary: {
+    preview_total: number
+    final_total: number
+    preselect_total: number
+    confirmed_count: number
+    dropped_count: number
+    late_entrant_count: number
+  }
+}
+
 /** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
 export interface ScreenerRunAllSummary {
   as_of: string | null
@@ -3263,6 +3307,21 @@ export const api = {
         asset_type: assetType,
       }),
     }),
+  screenerFocusVersions: (
+    strategyId = 'custom_dual_edge_focus',
+    asOf?: string,
+    preselectLimit = 5,
+    extColumns?: string,
+  ) => {
+    const params = new URLSearchParams()
+    if (strategyId) params.append('strategy_id', strategyId)
+    if (asOf) params.append('as_of', asOf)
+    if (preselectLimit) params.append('preselect_limit', String(preselectLimit))
+    if (extColumns) params.append('ext_columns', extColumns)
+    return request<FocusVersionsResponse>(`/api/screener/focus-versions?${params.toString()}`, {
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    })
+  },
   auctionReplay: (opts: {
     asOf?: string | null
     tradeDate?: string | null

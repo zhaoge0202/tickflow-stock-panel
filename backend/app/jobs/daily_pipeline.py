@@ -1042,6 +1042,20 @@ def _scheduled_pipeline_task(pipeline_fn) -> None:
     except Exception:
         logger.exception("scheduled mining enqueue failed; daily pipeline remains succeeded")
 
+    # 盘后自动预生成 Focus/双刃合策略三版本快照 (收盘正式版、14:50初选对比、次日预选池)
+    try:
+        from app.services.focus_versions import FOCUS_STRATEGY_IDS, build_focus_three_versions
+        app_state = _get_app_state()
+        engine = getattr(app_state, "strategy_engine", None)
+        active_repo = getattr(app_state, "repo", None)
+        if engine and active_repo:
+            for sid in FOCUS_STRATEGY_IDS:
+                if engine.has(sid):
+                    build_focus_three_versions(active_repo, engine, sid)
+            logger.info("scheduled focus three versions snapshot generated successfully")
+    except Exception as e:
+        logger.warning("scheduled focus three versions snapshot failed (soft): %s", e)
+
 
 # ================================================================
 # 定时复盘 (AI 大盘复盘报告)

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight, Target } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight, Target, AlertTriangle } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
 import {
   addOrUpdateMonitoredPosition,
@@ -194,6 +194,10 @@ export function Screener() {
   const filterMap = useRef<Map<string, ScreenerFilterType>>(new Map())
   const runAllDateRef = useRef<string | null>(null)
   const qc = useQueryClient()
+
+  // Focus 策略三版本专属视图状态: 'final' (收盘正式版) | 'preview' (14:50 尾盘初选) | 'preselect' (次日竞价预选)
+  const [focusActiveVersion, setFocusActiveVersion] = useState<'final' | 'preview' | 'preselect'>('final')
+  const [showDroppedList, setShowDroppedList] = useState(false)
 
   // 结果列配置 — 默认内置列，异步合并后端/localStorage 偏好
   const [columns, setColumns] = useState<ColumnConfig[]>([...SCREENER_BUILTIN_COLUMNS])
@@ -424,6 +428,15 @@ export function Screener() {
   const auctionDynamicHasResults = !!auctionDynamicDisplayResults
     && Object.values(auctionDynamicDisplayResults).some(item => item.total > 0)
   const auctionDynamicFinalReady = auctionDynamicActive && auctionDynamicPayload?.status === 'ready'
+
+  // Focus 策略三版本查询
+  const isFocusStrategy = activeStrategy === 'custom_dual_edge_focus'
+  const focusVersionsQuery = useQuery({
+    queryKey: ['screenerFocusVersions', activeStrategy, asOf, extColumnsParam],
+    queryFn: () => api.screenerFocusVersions(activeStrategy!, asOf, 5, extColumnsParam || undefined),
+    enabled: isFocusStrategy && !!asOf,
+    staleTime: 30_000,
+  })
 
   // 卡片显示: 按周期筛选 (all=全部, 1d=仅日线, 1m=仅分钟); 未声明 timeframes 视为日线
   const displayPool = useMemo(() => visiblePool.filter(id => {
@@ -682,6 +695,7 @@ export function Screener() {
   }, [activeStrategy, hitCounts, summaryQuery.data])
   const preselectActive = (
     assetType === 'stock'
+    && !isFocusStrategy
     && activeStrategySupportsPreselect
     && (showAll ? strictPoolTotal === 0 : activeStrategyStrictTotal === 0)
     && !auctionConfirmationActive
@@ -712,7 +726,7 @@ export function Screener() {
     const next = { ...hitCounts }
     if (preselectResults) {
       for (const [sid, item] of Object.entries(preselectResults)) {
-        if (item.as_of === asOf && (hitCounts[sid] ?? 0) === 0 && (item.total ?? 0) > 0) {
+        if (sid !== 'custom_dual_edge_focus' && item.as_of === asOf && (hitCounts[sid] ?? 0) === 0 && (item.total ?? 0) > 0) {
           next[sid] = item.total
         }
       }
@@ -754,6 +768,31 @@ export function Screener() {
       }
     })
   }, [showAll, activeStrategy, displayMode, preselectResults, asOf, singleCachedQuery.data?.result])
+
+  // Focus 策略三版本专属同步逻辑: 用户切换版本 Tab 时即时展示该版本结果
+  useEffect(() => {
+    if (!isFocusStrategy || !focusVersionsQuery.data || showAll) return
+    const vData = focusVersionsQuery.data
+    if (vData.as_of !== asOf) return
+    const curVerInfo = vData.versions[focusActiveVersion]
+    if (!curVerInfo) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      return {
+        ...(base ?? {
+          as_of: asOf,
+          strategy: activeStrategy,
+          elapsed_ms: 0,
+        }),
+        rows: curVerInfo.rows ?? [],
+        total: curVerInfo.total ?? curVerInfo.rows?.length ?? 0,
+        elapsed_ms: base?.elapsed_ms ?? 0,
+      }
+    })
+    setHitCounts(prev => ({ ...prev, [activeStrategy]: curVerInfo.total ?? 0 }))
+  }, [isFocusStrategy, focusVersionsQuery.data, focusActiveVersion, asOf, activeStrategy, showAll, singleCachedQuery.data?.result])
 
   // symbol → 所属策略列表。单策略接口同时返回轻量归属映射，保留策略列原有展示。
   const symbolStrategyMap = useMemo(() => {
@@ -931,6 +970,11 @@ export function Screener() {
     }
     // 未覆盖: 受系统开关控制
     if (!screenerAutoRun) return
+    const isTodayUnclosed = asOf === todayIso && (!dataStatus.data?.latest_strategy_date || asOf > dataStatus.data.latest_strategy_date)
+    if (isTodayUnclosed) {
+      runAllDateRef.current = runKey
+      return
+    }
     runAllDateRef.current = runKey
     requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
   }, [asOf, strategyPresets.length, summaryQuery.isSuccess, dailyPoolIds, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, tfFilter, runAll.isPending, requestRunAll])
@@ -965,6 +1009,11 @@ export function Screener() {
     }
     // 摘要命中时由 singleCachedQuery 按需加载明细；缺失时才单独计算。
     if (summaryQuery.data?.results[s.id]?.as_of === asOf || runAll.isPending) return
+    const isTodayUnclosed = asOf === todayIso && (!dataStatus.data?.latest_strategy_date || asOf > dataStatus.data.latest_strategy_date)
+    if (isTodayUnclosed && s.id !== 'custom_dual_edge_focus') {
+      toast('今日尚未收盘，正式日线策略将在 15:35 盘后管道完成后定版生成')
+      return
+    }
     run.mutate({ id: s.id, date: asOf, timeframe: tf })
   }
 
@@ -976,9 +1025,10 @@ export function Screener() {
   }
 
   const minDate = dataStatus.data?.enriched?.earliest_date ?? ''
-  const maxDate = dataStatus.data?.latest_strategy_date
-    ?? dataStatus.data?.enriched?.latest_date
-    ?? ''
+  const todayIso = getCnTodayIso()
+  const maxDate = isBusinessDateIso(todayIso)
+    ? todayIso
+    : (dataStatus.data?.latest_strategy_date ?? dataStatus.data?.enriched?.latest_date ?? '')
 
   const batchAdd = useWatchlistBatchAdd()
 
@@ -1451,13 +1501,24 @@ export function Screener() {
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="space-y-3"
             >
-              {displayMode === 'preselect' && preselectTotal > 0 && (
+              {displayMode === 'preselect' && preselectTotal > 0 && !isFocusStrategy && (
                 <div className="flex items-start gap-2 rounded-btn border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs text-amber-200">
                   <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
                   <div>
                     <div className="font-medium">当前显示的是盘后预选，不是正式双刃合命中</div>
                     <div className="mt-0.5 text-[11px] text-amber-200/70">
                       这些结果仅供次交易日 09:25 前观察，正式结果会在竞价确认后单独切换。
+                    </div>
+                  </div>
+                </div>
+              )}
+              {isFocusStrategy && focusActiveVersion === 'preselect' && (
+                <div className="flex items-start gap-2 rounded-btn border border-sky-500/25 bg-sky-500/8 px-3 py-2 text-xs text-sky-200">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-300" />
+                  <div>
+                    <div className="font-medium">当前查看的是【次日竞价前置预选池】（非正式收盘买入信号）</div>
+                    <div className="mt-0.5 text-[11px] text-sky-200/70">
+                      此列表为双刃合竞价前置放宽观察池，仅供次日 09:23~09:25 集合竞价盯盘与高开确认使用。若要看严格正式选股，请切换到【收盘正式版】。
                     </div>
                   </div>
                 </div>
@@ -1596,6 +1657,99 @@ export function Screener() {
                 </div>
               </div>
 
+              {/* Focus 策略专属: 三版本切换栏与尾盘变脸淘汰参考 */}
+              {isFocusStrategy && !showAll && (
+                <div className="mt-2.5 mb-2 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-1.5 bg-elevated/40 border border-border/80 rounded-lg">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs text-muted font-medium px-2">出票版本:</span>
+                      <button
+                        type="button"
+                        onClick={() => setFocusActiveVersion('final')}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'final'
+                            ? 'bg-bull/15 text-bull border border-bull/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-bull" />
+                        收盘正式版 ({focusVersionsQuery.data?.versions.final.total ?? (summaryQuery.data?.results[activeStrategy!]?.total ?? 0)})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFocusActiveVersion('preview')}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'preview'
+                            ? 'bg-amber-500/15 text-amber-400 border border-amber-500/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        14:50 尾盘初选 ({focusVersionsQuery.data?.versions.preview.total ?? 0})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFocusActiveVersion('preselect')}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'preselect'
+                            ? 'bg-sky-500/15 text-sky-400 border border-sky-500/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                        次日竞价预选 ({focusVersionsQuery.data?.versions.preselect.total ?? (preselectResults?.[activeStrategy!]?.total ?? 0)})
+                      </button>
+                    </div>
+                    {focusVersionsQuery.data && (
+                      <div className="flex items-center gap-2 text-[11px] text-muted pr-2">
+                        <span className="text-bull/90 font-medium">初选确认 {focusVersionsQuery.data.summary.confirmed_count}</span>
+                        <span>·</span>
+                        <span className="text-amber-400/90 font-medium">尾盘突击 {focusVersionsQuery.data.summary.late_entrant_count}</span>
+                        <span>·</span>
+                        <span className="text-red-400/90 font-medium">变脸淘汰 {focusVersionsQuery.data.summary.dropped_count}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 尾盘变脸淘汰折叠提示 */}
+                  {(focusVersionsQuery.data?.dropped_from_preview?.length ?? 0) > 0 && (
+                    <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs">
+                      <div
+                        className="flex items-center justify-between cursor-pointer text-warning/90 font-medium select-none"
+                        onClick={() => setShowDroppedList(v => !v)}
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0" />
+                          <span>尾盘变脸淘汰参考：共 {focusVersionsQuery.data?.dropped_from_preview.length} 只标的在 14:50 初选入选，但收盘被淘汰</span>
+                        </span>
+                        <span className="text-[11px] text-warning/70 hover:text-warning underline ml-2 shrink-0">
+                          {showDroppedList ? '收起明细' : '展开查看原因'}
+                        </span>
+                      </div>
+                      {showDroppedList && (
+                        <div className="mt-2 pt-2 border-t border-warning/20 space-y-1.5 text-muted">
+                          {focusVersionsQuery.data?.dropped_from_preview.map(item => (
+                            <div key={item.symbol} className="flex flex-wrap items-center justify-between gap-2 py-0.5 border-b border-warning/10 last:border-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-secondary font-medium">{item.symbol}</span>
+                                <span className="text-foreground">{item.name}</span>
+                                <span className="px-1.5 py-0.2 rounded text-[9px] bg-red-500/15 text-red-400 border border-red-500/30">
+                                  已淘汰
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 text-[11px]">
+                                <span className="text-warning/90">{item.reason}</span>
+                                <span className="font-mono text-muted">14:50现价 {item.preview_close}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 筛选面板: 只要原始结果有数据就显示 (哪怕筛完后为空, 用户才能改条件) */}
               {showFilter && (showAll ? allRows.length > 0 : !!result?.rows.length) && (
                 <FilterPanel
@@ -1613,29 +1767,33 @@ export function Screener() {
                 <EmptyState
                   icon={ScanSearch}
                   title={
-                    displayMode === 'preselect' && preselectTotal > 0
-                      ? auctionWaitingHint
-                      : displayMode === 'preselect'
-                        ? '今日无预选'
-                    : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
-                      ? `等待 ${auctionTradeDate} 09:25 竞价确认`
-                      : auctionDynamicActive
-                        ? '动态竞价暂无命中'
-                        : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
-                      ? `等待 ${auctionTradeDate} 09:25 竞价确认`
-                      : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                    isFocusStrategy && asOf === todayIso && focusVersionsQuery.data?.is_unclosed
+                      ? (focusActiveVersion === 'preview' ? '14:50 尾盘初选尚未就绪' : '今日盘后尚未定版')
+                      : displayMode === 'preselect' && preselectTotal > 0
+                        ? auctionWaitingHint
+                        : displayMode === 'preselect'
+                          ? '今日无预选'
+                      : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
                         ? `等待 ${auctionTradeDate} 09:25 竞价确认`
-                        : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
-                          ? '筛选后无命中'
-                          : auctionConfirmationActive
-                            ? '竞价确认后无命中'
-                            : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
+                        : auctionDynamicActive
+                          ? '动态竞价暂无命中'
+                          : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
+                        ? `等待 ${auctionTradeDate} 09:25 竞价确认`
+                        : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                          ? `等待 ${auctionTradeDate} 09:25 竞价确认`
+                          : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
+                            ? '筛选后无命中'
+                            : auctionConfirmationActive
+                              ? '竞价确认后无命中'
+                              : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
                   }
                   hint={
-                    displayMode === 'preselect' && preselectTotal > 0
-                      ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
-                      : displayMode === 'preselect'
-                        ? '严格策略和盘后放宽预选都没有候选，可等盘后管道完成后重载。'
+                    isFocusStrategy && asOf === todayIso && focusVersionsQuery.data?.is_unclosed
+                      ? (focusActiveVersion === 'preview' ? '系统将在 14:50 自动聚合生成尾盘初选候选池，请稍候…' : '收盘正式版与次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。')
+                      : displayMode === 'preselect' && preselectTotal > 0
+                        ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
+                        : displayMode === 'preselect'
+                          ? '严格策略和盘后放宽预选都没有候选，可等盘后管道完成后重载。'
                     : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
                       ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
                       : auctionDynamicActive
