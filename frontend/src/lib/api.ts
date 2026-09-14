@@ -3077,6 +3077,7 @@ export const api = {
     date_param?: string | null;
     time_field?: string | null;
     auth?: ExtPullAuth;
+    timeout_seconds?: number;
   }) =>
     request<{ status: string; pull: PullConfig }>(
       `/api/ext-data/${id}/pull`,
@@ -3852,6 +3853,8 @@ export interface PullConfig {
   /** 日内序列表时间列名 (如 "ts"): 配置后同 symbol 允许多行 (按 symbol+时间列去重), 用于集合竞价等多盘数据 */
   time_field?: string | null
   auth?: ExtPullAuth | null
+  /** 单次拉取请求超时 (秒), 默认 30 */
+  timeout_seconds?: number
 }
 
 export interface ExtDataBackfillResult {
@@ -3871,6 +3874,8 @@ export interface ExtDataDetectUrlRequest {
   body?: string
   response_path?: string
   field_map?: Record<string, string>
+  /** 探测超时 (秒), 默认 30 */
+  timeout_seconds?: number
 }
 
 export interface ExtDataDetectUrlResult {

@@ -51,6 +51,7 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
   const [responsePath, setResponsePath] = useState('')
   const [fieldMapStr, setFieldMapStr] = useState('')
   const [schedule, setSchedule] = useState(1440)
+  const [timeoutSec, setTimeoutSec] = useState(30)
   const [savePull, setSavePull] = useState(true)
   const [importNow, setImportNow] = useState(true)
   const [enablePull, setEnablePull] = useState(false)
@@ -135,6 +136,7 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
           field_map: finalFieldMap,
           schedule_minutes: schedule,
           enabled: enablePull,
+          timeout_seconds: Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : 30,
         })
 
         if (importNow) {
@@ -266,6 +268,7 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
       body: method === 'POST' && body.trim() ? body : undefined,
       response_path: responsePath.trim() || undefined,
       field_map: fieldMap,
+      timeout_seconds: Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : undefined,
     })
       .then((res) => {
         setUrlPreview(res)
@@ -475,6 +478,16 @@ export function CreateExtDialog({ onClose }: { onClose: () => void }) {
                     className="w-full h-8 rounded-lg border border-border bg-base px-2 text-[10px] font-mono text-foreground focus:outline-none focus:border-accent/50"
                   />
                 </div>
+              </div>
+              <div className="w-1/2">
+                <div className="text-[10px] text-muted mb-1">拉取超时（秒 · 大响应接口可调高）</div>
+                <input
+                  type="number" min={5} max={300} step={5}
+                  value={timeoutSec}
+                  onChange={(e) => setTimeoutSec(Number(e.target.value))}
+                  title="测试识别与正式拉取的单次请求超时, 默认 30 秒, 范围 5~300"
+                  className="w-full h-8 rounded-lg border border-border bg-base px-2 text-[10px] font-mono text-foreground focus:outline-none focus:border-accent/50"
+                />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>

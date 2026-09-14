@@ -50,7 +50,7 @@ class PullConfig:
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
         "next_run", "time_window_start", "time_window_end", "date_param",
-        "date_format", "time_field", "auth",
+        "date_format", "time_field", "auth", "timeout_seconds",
     )
 
     def __init__(
@@ -74,6 +74,7 @@ class PullConfig:
         date_format: str = "iso",
         time_field: str | None = None,
         auth: dict | None = None,
+        timeout_seconds: int = 30,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -102,6 +103,12 @@ class PullConfig:
         # 拉取接口鉴权方式 {"type": "none|bearer|header|query", "header": ..., "param": ...},
         # 与自定义行情源 AuthConfig 同口径; Key 本体存 secrets_store, 不落 config.json
         self.auth = auth
+        # 单次拉取请求超时 (秒)。默认 30 与历史硬编码一致; 大响应接口 (如全量
+        # 集合竞价 /day ~77s) 可调高。config.json 手改写入非法值时归一 30 (fail-closed)
+        self.timeout_seconds = (
+            int(timeout_seconds) if isinstance(timeout_seconds, (int, float))
+            and 5 <= timeout_seconds <= 300 else 30
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +131,7 @@ class PullConfig:
             "date_format": self.date_format,
             "time_field": self.time_field,
             "auth": self.auth,
+            "timeout_seconds": self.timeout_seconds,
         }
 
     @classmethod
@@ -150,6 +158,7 @@ class PullConfig:
             date_format=d.get("date_format", "iso"),
             time_field=d.get("time_field"),
             auth=d.get("auth"),
+            timeout_seconds=d.get("timeout_seconds", 30),
         )
 
 

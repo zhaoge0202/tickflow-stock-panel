@@ -212,7 +212,11 @@ async def _request_json(pull: PullConfig, config_id: str, day: date | None = Non
     保证 UA 标识头与 API Key 鉴权注入只有一套口径。
     """
     url = _with_date_param(pull.url, pull.date_param, day, pull.date_format) if day else pull.url
-    async with httpx.AsyncClient(timeout=30) as client:
+    # 每配置超时 (PullConfig.timeout_seconds, 默认 30 与历史行为一致);
+    # getattr 兜底测试用的简化 pull 对象
+    timeout = getattr(pull, "timeout_seconds", None)
+    timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else 30
+    async with httpx.AsyncClient(timeout=timeout) as client:
         headers = outbound_headers(pull.headers)
         url = _apply_auth(config_id, pull.auth, url, headers)
         kwargs: dict[str, Any] = {"headers": headers}
