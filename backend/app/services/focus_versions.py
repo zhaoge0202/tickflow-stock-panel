@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -192,7 +192,7 @@ def build_focus_three_versions(
 
     # 1. 缓存秒读: 如果已经完整生成且不是今天未收盘，直接从磁盘读取返回 (<5ms)
     full_cache_path = _full_snapshot_path(data_dir, strategy_id, d_str)
-    is_today_unclosed = (target_date == now.date() and now.time() < DAILY_STRATEGY_READY_TIME)
+    is_today_unclosed = bool(target_date == now.date() and now.weekday() < 5 and now.time() < dt_time(15, 0))
     if not force_refresh and not is_today_unclosed and full_cache_path.exists():
         try:
             cached_data = json.loads(full_cache_path.read_text(encoding="utf-8"))
@@ -252,14 +252,15 @@ def build_focus_three_versions(
 
     # 5. 运行 14:50 尾盘初选版 (Preview) — 复用同一个 base_ctx
     preview_data = load_preview_snapshot(data_dir, strategy_id, d_str)
+    preview_ready = bool(
+        target_date < now.date()
+        or (target_date == now.date() and now.time() >= INTRADAY_PREVIEW_READY_TIME)
+        or preview_data is not None
+    )
     if preview_data is not None:
         preview_rows = preview_data.get("rows") or []
     else:
-        can_generate_preview = (
-            target_date < now.date()
-            or (target_date == now.date() and now.time() >= INTRADAY_PREVIEW_READY_TIME)
-        )
-        if can_generate_preview and base_ctx is not None:
+        if preview_ready and base_ctx is not None:
             preview_rows = generate_preview_1450_from_context(
                 base_ctx, engine, strategy_id, target_date, data_dir, params, overrides
             )
@@ -348,7 +349,7 @@ def build_focus_three_versions(
 
     # 当前阶段判断
     if is_today_unclosed:
-        current_stage = "preview" if preview_rows else "waiting_preview"
+        current_stage = "preview" if preview_ready else "waiting_preview"
     else:
         current_stage = "final"
 
@@ -362,7 +363,7 @@ def build_focus_three_versions(
             "preview": {
                 "label": "14:50 尾盘初选",
                 "time": "14:50",
-                "status": "ready" if preview_rows else "pending",
+                "status": "ready" if preview_ready else "pending",
                 "total": len(enriched_preview_rows),
                 "rows": _sanitize_rows(enriched_preview_rows),
             },
