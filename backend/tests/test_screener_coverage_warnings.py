@@ -173,3 +173,26 @@ def test_pipeline_silent_when_coverage_sufficient(tmp_path, caplog):
 
     assert days >= MIN_INDICATOR_WARMUP_DAYS
     assert not any("指标暖机不足" in r.message for r in caplog.records)
+
+
+def test_update_cache_strategy_keeps_warnings(tmp_path):
+    """单跑刷新缓存不得丢掉数据不足提示 (#303 复审回归)。
+
+    _update_cache_strategy 重建缓存条目时曾只保留 total/as_of/rows 白名单,
+    run_preset 单跑会把 run_all 写入的 warnings 冲掉。
+    """
+    from app.services import strategy_cache
+
+    strategy_cache.write_cache(
+        tmp_path, "2026-09-10",
+        {"other": {"total": 1, "as_of": "2026-09-10", "rows": []}},
+    )
+
+    screener_api._update_cache_strategy(
+        tmp_path, "2026-09-10", "s1",
+        {"total": 0, "as_of": "2026-09-10", "rows": [], "warnings": ["数据不足"]},
+    )
+
+    cached = strategy_cache.read_cache(tmp_path)
+    assert cached["results"]["s1"]["warnings"] == ["数据不足"]
+    assert cached["results"]["other"]["total"] == 1  # 同日其余策略不受影响

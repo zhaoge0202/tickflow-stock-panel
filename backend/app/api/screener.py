@@ -246,6 +246,10 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             "as_of": as_of,
             "rows": safe_data.get("rows", []),
         }
+        if safe_data.get("warnings"):
+            # 数据不足提示 (#303) 随缓存下发 (get_cached 原样读出),
+            # 单跑刷新不得冲掉 run_all 写入的提示
+            results[strategy_id]["warnings"] = safe_data["warnings"]
         strategy_cache.write_cache(data_dir, as_of, results)
 
 
