@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.market_time import (
     DAILY_STRATEGY_READY_TIME,
+    INTRADAY_PREVIEW_READY_TIME,
     cn_now,
     latest_completed_strategy_date,
 )
@@ -46,17 +47,20 @@ def reject_intraday_strategy_date(
     requested: date,
     *,
     now: datetime | None = None,
+    allow_preview: bool = False,
 ) -> None:
-    """拒绝盘中显式请求当天日线策略，防止 API 绕过前端日期门控。"""
+    """拒绝盘中显式请求当天日线策略，防止 API 绕过前端日期门控。
+
+    若 allow_preview=True 且当前时间达到 14:50，则允许用于尾盘初选草稿版。
+    """
     now = now or cn_now()
-    if (
-        requested == now.date()
-        and now.weekday() < 5
-        and now.time() < DAILY_STRATEGY_READY_TIME
-    ):
-        raise ValueError(
-            f"盘中 {now.date()} 尚未收盘，正式日线策略请使用最近已完成交易日"
-        )
+    if requested == now.date() and now.weekday() < 5:
+        if allow_preview and now.time() >= INTRADAY_PREVIEW_READY_TIME:
+            return
+        if now.time() < DAILY_STRATEGY_READY_TIME:
+            raise ValueError(
+                f"盘中 {now.date()} 尚未收盘，正式日线策略请使用最近已完成交易日"
+            )
 
 
 def cache_generated_after_cutoff(

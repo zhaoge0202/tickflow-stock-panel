@@ -298,6 +298,25 @@ export function ScreenerTable({
                     {r.name}
                   </span>
                 )}
+                {Array.isArray(r.version_tags) && r.version_tags.map((tag: any, idx: number) => {
+                  const colorCls = tag.color === 'green'
+                    ? 'bg-bull/15 text-bull border-bull/30'
+                    : tag.color === 'orange'
+                      ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                      : tag.color === 'blue'
+                        ? 'bg-sky-500/15 text-sky-400 border-sky-500/30'
+                        : tag.color === 'red'
+                          ? 'bg-danger/15 text-danger border-danger/30'
+                          : 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                  return (
+                    <span
+                      key={idx}
+                      className={`shrink-0 inline-flex items-center px-1.5 py-px rounded text-[9px] font-medium leading-tight border ${colorCls}`}
+                    >
+                      {tag.label}
+                    </span>
+                  )
+                })}
               </button>
               {isExpired ? (
                 <span className="shrink-0 inline-flex items-center px-1.5 py-px rounded text-[9px] font-medium leading-tight bg-red-500/10 text-red-400/60 border border-red-500/15">

@@ -21,6 +21,9 @@ _AFTERNOON_END = dt_time(15, 0)
 # 只能作为监控快照，不能作为正式日线选股结果。
 DAILY_STRATEGY_READY_TIME = dt_time(15, 30)
 
+# 尾盘初选版的数据截止时间 (14:50，全天已交易 230 分钟，供尾盘初选草稿版使用)。
+INTRADAY_PREVIEW_READY_TIME = dt_time(14, 50)
+
 
 def cn_now() -> datetime:
     """当前北京时间 (带时区)。"""

@@ -19,6 +19,7 @@ from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache, strategy_run_queue
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
+from app.services.focus_versions import FOCUS_STRATEGY_IDS, build_focus_three_versions
 from app.services.screener import ScreenerService
 from app.services.strategy_date import (
     cache_generated_after_cutoff,
@@ -223,7 +224,10 @@ def _resolve_screener_date(
     if timeframe != "1d":
         return requested or svc.latest_date()
     if requested is not None:
-        reject_intraday_strategy_date(requested)
+        try:
+            reject_intraday_strategy_date(requested)
+        except ValueError:
+            return None
         return requested
     return svc.latest_strategy_date()
 
@@ -351,7 +355,15 @@ def run_preset(req: PresetRequest, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not as_of:
-        raise HTTPException(status_code=400, detail="无可用数据日期")
+        return {
+            "strategy": req.strategy_id,
+            "as_of": str(req.as_of) if req.as_of else None,
+            "total": 0,
+            "rows": [],
+            "elapsed_ms": 0,
+            "status": "unclosed",
+            "message": "今日尚未收盘，正式日线策略将在 15:35 盘后管道完成后定版呈现",
+        }
 
     # 加载用户保存的策略配置
     data_dir = request.app.state.repo.store.data_dir
@@ -466,6 +478,46 @@ def preselect(req: PreselectRequest, request: Request):
         results[sid] = {**item, "rows": rows}
 
     return {**preselect_payload, "results": results}
+
+
+@router.get("/focus-versions")
+@router.post("/focus-versions")
+def focus_versions(
+    request: Request,
+    strategy_id: str = Query("custom_dual_edge_focus"),
+    as_of: Optional[date] = Query(None),
+    preselect_limit: int = Query(5),
+    ext_columns: Optional[str] = Query(None),
+):
+    """获取 Focus 策略三版本出票（14:50 尾盘初选、收盘正式版、次日竞价预选版）及其状态标签。"""
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="策略引擎未初始化")
+    if not engine.has(strategy_id):
+        raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
+
+    repo = request.app.state.repo
+    if as_of is None:
+        svc = ScreenerService(repo, asset_type="stock")
+        resolver = getattr(svc, "latest_strategy_date", None)
+        as_of = resolver() if resolver is not None else svc.latest_date()
+
+    payload = build_focus_three_versions(
+        repo,
+        engine,
+        strategy_id=strategy_id,
+        as_of=as_of,
+        preselect_limit=preselect_limit,
+    )
+    ext_values = _load_ext_value_maps(repo, ext_columns)
+    if ext_values:
+        for v_name, v_info in payload.get("versions", {}).items():
+            if isinstance(v_info, dict) and "rows" in v_info:
+                v_info["rows"] = _rows_with_ext(v_info["rows"], ext_values)
+        if "dropped_from_preview" in payload:
+            payload["dropped_from_preview"] = _rows_with_ext(payload["dropped_from_preview"], ext_values)
+
+    return payload
 
 
 def _cached_with_realtime(request: Request) -> dict:
@@ -1321,8 +1373,13 @@ def run_all(request: Request, body: Optional[dict] = None):
     if timeframe == "1d" and as_of is not None:
         try:
             reject_intraday_strategy_date(as_of)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError:
+            return {
+                "as_of": str(as_of),
+                "results": {},
+                "status": "unclosed",
+                "message": "今日尚未收盘，正式日线策略将在 15:35 盘后管道完成后定版呈现",
+            }
     if not as_of:
         return {"as_of": None, "results": {}}
 
@@ -1364,7 +1421,7 @@ def run_all(request: Request, body: Optional[dict] = None):
     # 渐进式返回 (页面首屏路径): 按历史耗时升序执行, 首返时限内算完的随响应
     # 返回, 慢策略转后台继续算并逐个写入策略缓存, 前端轮询 cached-summary 点亮。
     # 仅日线 + summary_only (策略页卡片) 启用; 分钟/明细请求保持整段阻塞。
-    first_return_s = settings.strategy_run_all_first_return_s
+    first_return_s = float(getattr(settings, "strategy_run_all_first_return_s", 15.0))
     if body.get("summary_only") and timeframe == "1d" and first_return_s > 0:
         return _run_all_progressive(
             repo=repo,
