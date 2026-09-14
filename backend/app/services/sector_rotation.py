@@ -120,6 +120,9 @@ def _prev_daily_close(data_dir: Path, target_date: str) -> pl.DataFrame | None:
     return (
         df.with_columns(_bare().alias("_bare"))
         .select([pl.col("_bare"), pl.col("close").cast(pl.Float64).alias("prev_close")])
+        # 前收 <= 0 / 非有限视为缺失 (否则 close/ref 为 inf, 整个响应 JSON 渲染 500),
+        # 缺失时由调用方退化为当日首根有效分钟 close
+        .filter(pl.col("prev_close").is_finite() & (pl.col("prev_close") > 0))
         .unique(subset=["_bare"], keep="last")
     )
 
@@ -140,7 +143,10 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
         except Exception as exc:
             logger.warning("sector_rotation read minute partition failed: %s", exc)
             return None, "minute_schema", False
-    bars = bars.drop_nulls(subset=["datetime", "close"])
+    # close <= 0 / 非有限的分钟行无效: 作基准时 pct 为 inf, 作分子时是 -100% 假跌幅
+    bars = bars.drop_nulls(subset=["datetime", "close"]).filter(
+        pl.col("close").cast(pl.Float64).is_finite() & (pl.col("close") > 0)
+    )
     if bars.is_empty():
         return None, "minute_empty", has_amount
     bars = bars.with_columns(_bare().alias("_bare"))
