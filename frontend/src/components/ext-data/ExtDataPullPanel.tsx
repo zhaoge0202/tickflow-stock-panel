@@ -68,6 +68,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
     catch { setError(`${label} 不是有效 JSON`); return null }
   }
 
+  // 有效超时 (5~300 归一): 后端配置、前端 fetch 的 timeoutMs 共用同一口径
+  const effTimeoutSec = Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : 30
+
   // 构建保存 payload (复用当前编辑态), enabledOverride 用于开关自动保存
   const buildPayload = (enabledOverride?: boolean) => {
     const headers = parseJson(headerStr, 'Headers')
@@ -88,7 +91,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       date_param: dateParam.trim() || null,
       date_format: dateFormat,
       time_field: timeField.trim() || null,
-      timeout_seconds: Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : 30,
+      timeout_seconds: effTimeoutSec,
     }
   }
 
@@ -122,7 +125,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
     if (!payload) { setTesting(false); return }
     saveKeyIfNeeded()
       .then(() => api.extDataPullConfig(config.id, payload))
-      .then(() => api.extDataPullTest(config.id))
+      .then(() => api.extDataPullTest(config.id, effTimeoutSec))
       .then(r => { setTestResult(r); onSaved() })
       .catch(e => setError(e.message || '测试失败'))
       .finally(() => setTesting(false))
@@ -130,7 +133,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
   const handleRun = () => {
     setRunning(true); setError(''); setRunResult(null)
-    api.extDataPullRun(config.id)
+    api.extDataPullRun(config.id, effTimeoutSec)
       .then(r => {
         setRunResult({ rows: r.rows, date: r.date })
         onSaved()
@@ -142,7 +145,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
   const handleBackfill = () => {
     setBfRunning(true); setError(''); setBfResult(null)
-    api.extDataBackfill(config.id, bfStart, bfEnd)
+    // 服务端逐日串行拉取, 前端超时按 天数×单日超时 估算 (+30s 写盘缓冲)
+    const daySpan = Math.max(1, Math.round((Date.parse(bfEnd) - Date.parse(bfStart)) / 86400_000) + 1)
+    api.extDataBackfill(config.id, bfStart, bfEnd, daySpan * effTimeoutSec * 1000 + 30_000)
       .then(r => {
         setBfResult(r)
         onSaved()
