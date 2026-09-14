@@ -1099,7 +1099,7 @@ def get_minute(
 @router.post("/sync")
 def sync_symbol(
     request: Request,
-    symbol: str,
+    symbol: str = Query(...),
     days: int = Query(250, ge=10, le=2000),
 ):
     """手动触发单股同步(Free 用户在 K 线页用)。"""
