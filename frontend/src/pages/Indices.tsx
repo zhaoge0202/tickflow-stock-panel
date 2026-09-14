@@ -107,7 +107,6 @@ export function Indices() {
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
     queryFn: () => api.indexMinute(selectedSymbol, selectedDate ?? undefined),
     enabled: !!selectedSymbol && !!selectedDate && hasMinuteCap,
-    placeholderData: (prev) => prev,
   })
 
   const syncDaily = useMutation({
@@ -129,7 +128,9 @@ export function Indices() {
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
   const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
-  const minuteRows: MinuteKlineRow[] = minute.data?.rows ?? []
+  const minuteRows: MinuteKlineRow[] = minute.data?.symbol === selectedSymbol
+    && minute.data?.date === selectedDate && daily.data?.symbol === selectedSymbol
+    ? minute.data.rows : []
   const selectedIdx = selectedDate ? chartRows.findIndex(r => r.date === selectedDate) : -1
   const prevClose = selectedIdx > 0
     ? chartRows[selectedIdx - 1].close
@@ -250,7 +251,10 @@ export function Indices() {
                   showMarkers={false}
                   symbol={selectedSymbol}
                   linkedPrice={linkedPrice}
-                  onDateClick={setSelectedDate}
+                  onDateClick={(date) => {
+                    setSelectedDate(date)
+                    setLinkedPrice(null)
+                  }}
                   visibleBars={48}
                   activeIndicators={['vol', 'macd']}
                 />
@@ -272,6 +276,7 @@ export function Indices() {
                     )}
                     {minuteRows.length > 0 && (
                       <EChartsIntraday
+                        key={`${selectedSymbol}:${selectedDate}`}
                         data={minuteRows}
                         height={620}
                         prevClose={prevClose}
