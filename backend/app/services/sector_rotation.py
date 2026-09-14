@@ -217,7 +217,9 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         ])
         .drop_nulls(subset=["_flow", "_bare"])
         .filter(pl.col("_flow").is_finite() & (pl.col("_flow") != 0.0))
-        .unique(subset=["_bare"], keep="first")
+        # 与 screener._load_ext_value_maps / ext_factors 同口径取每标的最后一行:
+        # 日内序列表 (time_field) 分区按时间列升序落盘, 最后一行 = 最新一盘
+        .unique(subset=["_bare"], keep="last")
     )
     return out if not out.is_empty() else None
 
