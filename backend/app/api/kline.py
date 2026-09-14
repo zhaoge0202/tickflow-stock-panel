@@ -17,7 +17,7 @@ from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
-from app.services import kline_sync
+from app.services import kline_sync, trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -695,7 +695,9 @@ def get_minute_batch(request: Request, body: dict):
     #  节假日当日分区恒为空, 不影响该回退判据。)
     if not trade_date_str:
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        # 周六/周日必非交易日; 工作日休市 (国庆等) 以交易日探针的「确定休市」为准,
+        # 与 /api/index/minute 同口径 — 未知 (None) 维持下方收盘后判据
+        need_fallback = today.weekday() >= 5 or trading_day.is_trading_day() is False
         if not need_fallback:
             now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
@@ -979,7 +981,8 @@ def get_minute(
         # 默认看今天, 而不是本地落盘的最近日 (盘中后者是昨天)。
         # 非交易日(周末/节假日)才回退到本地最近有数据的交易日。
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        # 同 /minute-batch: 周末必回退, 工作日休市以交易日探针「确定休市」为准
+        need_fallback = today.weekday() >= 5 or trading_day.is_trading_day() is False
         if not need_fallback:
             now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
