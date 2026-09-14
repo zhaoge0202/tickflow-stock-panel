@@ -511,6 +511,10 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
+    # Step 2.1: 数据充足性可见化 (#303) — 空库首跑/仅当日实时覆写 1 天的库,
+    # 均线/动量/量比等指标暖机不足, 管道各 stage 都"成功"但选股会静默全 0。
+    enriched_total_days = warn_if_enriched_too_thin(repo.store.data_dir)
+
     # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0
     written_etf_daily = 0
@@ -746,6 +750,7 @@ def run_now(
         "regime_days": regime_days,
         "mainline_rows": mainline_rows,
         "lagging_symbols": len(lagging_symbols),
+        "enriched_total_days": enriched_total_days,
         "integrity_repair_from": repair_start.isoformat() if repair_start else None,
         "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
@@ -758,6 +763,23 @@ def run_now(
         raise PipelineStageError(stage_errors)
 
     return result
+
+
+def warn_if_enriched_too_thin(data_dir: Path) -> int:
+    """enriched 总覆盖天数; 低于常见指标暖机窗口时 WARN 引导全量回填 (#303)。
+
+    返回天数供管道 result 上报。目录列举 O(天数), 不在热路径。
+    """
+    from app.services.screener import MIN_INDICATOR_WARMUP_DAYS, enriched_history_days
+
+    days = enriched_history_days(data_dir)
+    if days < MIN_INDICATOR_WARMUP_DAYS:
+        logger.warning(
+            "enriched 仅覆盖 %d 个交易日 (<%d): 指标暖机不足, 选股可能全部 0 命中且无提示 — "
+            "建议全量回填 (同步标的维表 → 日K批量同步(带后缀符号) → 重算 enriched)",
+            days, MIN_INDICATOR_WARMUP_DAYS,
+        )
+    return days
 
 
 def _refresh_views(repo: KlineRepository) -> None:

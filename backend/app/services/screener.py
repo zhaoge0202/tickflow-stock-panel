@@ -11,6 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 
 import polars as pl
 
@@ -18,6 +19,30 @@ from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+# 常用指标 (MA5/10/20、BOLL(20)、量比等) 的近似最小暖机窗口。
+# 用于没有精确回看需求的场景 (自定义 SQL 选股、盘后管道) 的数据充足性提示 (#303);
+# 策略运行用 engine.required_history_bars 的精确值。
+MIN_INDICATOR_WARMUP_DAYS = 30
+
+
+def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | None = None) -> int:
+    """本地 enriched 在 as_of 及之前覆盖的交易日数 (#303)。
+
+    按 date=* 分区目录名计数 (目录列举 O(天数)), 不读 parquet 内容 —
+    只做数据充足性提示, 不进入指标计算路径。
+    """
+    from app.tickflow.repository import enriched_dirname
+
+    root = Path(data_dir) / enriched_dirname(asset_type)
+    if not root.exists():
+        return 0
+    days = [d.name[5:] for d in root.glob("date=*") if d.is_dir() and len(d.name) > 5]
+    if as_of is not None:
+        as_of_s = as_of.isoformat()
+        days = [d for d in days if d <= as_of_s]
+    return len(days)
+
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
@@ -503,3 +528,23 @@ class ScreenerService:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    def coverage_warnings(self, as_of: date, *, required_bars: int | None = None) -> list[str]:
+        """数据充足性提示 (#303): enriched 覆盖不足时返回用户可读警告, 充足返回 []。
+
+        空库首跑只拉到 1 个交易日时, 均线/动量/量比等指标暖机不足, 选股会静默
+        全 0 — 这里把"数据不够"显式说出来。required_bars 缺省用通用暖机窗口
+        (自定义 SQL 选股); 策略运行传 engine.required_history_bars 的精确值。
+        available 为 0 时 enriched 为空, 上层 latest_date 已 400, 不重复提示。
+        """
+        available = enriched_history_days(self.repo.store.data_dir, self.asset_type, as_of)
+        if available == 0:
+            return []
+        need = required_bars if required_bars and required_bars > 0 else MIN_INDICATOR_WARMUP_DAYS
+        if available >= need:
+            return []
+        return [
+            f"本地数据仅覆盖 {available} 个交易日, 低于本次计算所需约 {need} 天暖机窗口 — "
+            "指标可能失真或全部落空 (选股 0 命中)。建议先全量回填日K并重算指标 "
+            "(数据页「日K批量同步」, 符号需带交易所后缀)"
+        ]
