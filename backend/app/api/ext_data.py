@@ -104,6 +104,8 @@ class PullConfigReq(BaseModel):
     time_field: str | None = Field(None, max_length=32)
     # 鉴权方式; 请求中缺省 (None) = 保留现有配置, {"type":"none"} = 关闭鉴权
     auth: PullAuthReq | None = None
+    # 单次拉取请求超时 (秒), 默认 30 与历史行为一致; 大响应接口可调高
+    timeout_seconds: int = Field(30, ge=5, le=300)
 
 
 class ApiKeyReq(BaseModel):
@@ -119,6 +121,9 @@ class DetectUrlReq(BaseModel):
     body: str | None = None
     response_path: str = ""
     field_map: dict[str, str] | None = None
+    # 探测超时; 与 PullConfig.timeout_seconds 同口径 (默认 30 与历史行为一致),
+    # 大响应接口 (如全量集合竞价 /day ~77s) 探测时需要更高超时
+    timeout_seconds: int = Field(30, ge=5, le=300)
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +899,7 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         date_format=body.date_format,
         time_field=body.time_field,
         auth=body.auth.model_dump() if body.auth else (old_pull.auth if old_pull else None),
+        timeout_seconds=body.timeout_seconds,
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,
@@ -1142,7 +1148,7 @@ async def detect_url(body: DetectUrlReq):
         raise HTTPException(400, "仅支持 GET / POST")
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=body.timeout_seconds, follow_redirects=True) as client:
             headers = body.headers or {}
             kwargs: dict = {"headers": headers}
             if method == "POST" and body.body:
