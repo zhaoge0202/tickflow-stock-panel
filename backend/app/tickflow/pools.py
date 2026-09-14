@@ -64,8 +64,11 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
 
     symbols = _fetch_pool(pool_id)
     if symbols:
+        from app.services.fs_utils import atomic_write_parquet
+
         cache.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}).write_parquet(cache)
+        # 原子写: 半截缓存会让上面的 read_parquet 每次都抛错, 不会自愈
+        atomic_write_parquet(pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}), cache)
     return symbols
 
 

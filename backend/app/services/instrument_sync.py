@@ -13,6 +13,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.services.fs_utils import atomic_write_parquet
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def sync_instruments(data_dir: Path) -> int:
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    df.write_parquet(out)
+    atomic_write_parquet(df, out)
 
     logger.info("instruments synced: %d rows → %s", df.height, out)
     return df.height
@@ -147,6 +148,6 @@ def enrich_names_from_quotes(
         .alias("name"),
     ).drop("_new_name")
 
-    df.write_parquet(inst_path)
+    atomic_write_parquet(df, inst_path)
     logger.info("instruments name enriched from quotes: %d names", len(name_map))
     return len(name_map)
