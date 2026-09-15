@@ -18,6 +18,7 @@ import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -103,10 +104,12 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
   activeSymbol?: string
 }) {
   const navigate = useNavigate()
+  const alertsPollingInterval = useSmartPollingInterval(15_000)
   const alerts = useQuery({
     queryKey: ['alerts', ''],
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
-    refetchInterval: 10000,
+    refetchInterval: alertsPollingInterval,
+    refetchIntervalInBackground: false,
   })
   const events: AlertEvent[] = alerts.data?.alerts ?? []
   // 切股导航列表: 有 symbol 的触发记录

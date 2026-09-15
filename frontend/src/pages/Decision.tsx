@@ -24,6 +24,7 @@ import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { toast } from '@/components/Toast'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 const STATUS_LABEL: Record<DecisionStatus, string> = {
   pending: '新提醒',
@@ -60,25 +61,28 @@ export function Decision() {
   const selectedSymbol = params.get('symbol') || ''
   const [positionCreateOpen, setPositionCreateOpen] = useState(false)
   const qc = useQueryClient()
+  const queuePollingInterval = useSmartPollingInterval(15_000)
+  const breadthPollingInterval = useSmartPollingInterval(30_000)
+
   const queueQ = useQuery({
     queryKey: QK.decisionQueue(),
     queryFn: () => api.decisionQueue(),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
+    refetchInterval: queuePollingInterval,
+    refetchIntervalInBackground: false,
     placeholderData: prev => prev,
   })
   const summaryQ = useQuery({
     queryKey: QK.decisionSummary(),
     queryFn: () => api.decisionSummary(),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
+    refetchInterval: queuePollingInterval,
+    refetchIntervalInBackground: false,
     placeholderData: prev => prev,
   })
   const breadthQ = useQuery({
     queryKey: QK.marketBreadth,
     queryFn: () => api.marketBreadthLatest(),
-    refetchInterval: 15000,
-    refetchIntervalInBackground: true,
+    refetchInterval: breadthPollingInterval,
+    refetchIntervalInBackground: false,
     placeholderData: prev => prev,
   })
   const items = queueQ.data?.items ?? []
@@ -96,7 +100,8 @@ export function Decision() {
     queryKey: QK.decisionItem(selected),
     queryFn: () => api.decisionItem(selected),
     enabled: !!selected,
-    refetchInterval: 5000,
+    refetchInterval: queuePollingInterval,
+    refetchIntervalInBackground: false,
   })
   const detailItem = detailQ.data?.symbol === selected ? detailQ.data : undefined
   const detailLoading =
@@ -478,7 +483,8 @@ function DecisionDetail({ item, loading, onChanged }: {
     queryKey: QK.alertOutcomes(7),
     queryFn: () => api.alertOutcomes({ days: 7 }),
     enabled: !!item?.symbol,
-    refetchInterval: 15000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
   const outcomes = (outcomesQ.data?.outcomes ?? []).filter((row: any) => row.symbol === item?.symbol)
 

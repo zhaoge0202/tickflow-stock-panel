@@ -1,14 +1,89 @@
 """Polars parquet helpers."""
 from __future__ import annotations
 
+import errno
 import logging
+import os
+import random
+import threading
 import time
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import polars as pl
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_file_fd(stream: BinaryIO, timeout_s: float = 15.0) -> None:
+    """带超时的非阻塞轮询跨进程锁。"""
+    start = time.monotonic()
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            is_lock_blocked = (
+                exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+                or getattr(exc, "winerror", None) in {32, 33}
+            )
+            if not is_lock_blocked:
+                raise
+            if time.monotonic() - start >= timeout_s:
+                raise TimeoutError(f"获取跨进程文件锁超时 ({timeout_s}s)") from exc
+            time.sleep(0.05 + random.random() * 0.05)
+
+
+def _unlock_file_fd(stream: BinaryIO) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        logger.warning("释放文件锁失败", exc_info=True)
+
+
+@contextmanager
+def interprocess_file_lock(lock_path: Path, timeout_s: float = 15.0) -> Iterator[None]:
+    """跨平台跨进程文件锁上下文管理器。
+
+    使用操作系统底层文件锁 (Windows: msvcrt.locking, POSIX: fcntl.flock)。
+    同一读改写事务的所有参与者必须使用同一锁文件。
+    """
+    if timeout_s < 0:
+        raise ValueError("timeout_s must not be negative")
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        try:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+        except OSError:
+            pass
+        _lock_file_fd(stream, timeout_s=timeout_s)
+        try:
+            yield
+        finally:
+            _unlock_file_fd(stream)
 
 
 def replace_with_retry(
@@ -18,13 +93,13 @@ def replace_with_retry(
     attempts: int = 10,
     delay_s: float = 0.5,
 ) -> None:
-    """原子替换 parquet，并穿过 Windows 读端的短暂文件占用。"""
+    """原子替换 parquet, 并穿过 Windows 读端短暂占用。"""
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
     if delay_s < 0:
         raise ValueError("delay_s must not be negative")
 
-    last: PermissionError | None = None
+    last: Exception | None = None
     for index in range(attempts):
         try:
             src.replace(dst)
@@ -35,19 +110,70 @@ def replace_with_retry(
                     dst,
                 )
             return
-        except PermissionError as exc:
+        except OSError as exc:
+            if not isinstance(exc, PermissionError) and getattr(exc, "winerror", None) not in {32, 33}:
+                raise
             last = exc
             if index == 0:
                 logger.warning(
-                    "parquet replace blocked by concurrent reader, retrying "
-                    "(total <= %.1fs): %s",
+                    "parquet replace blocked by concurrent reader/writer, retrying "
+                    "(total <= %.1fs): %s (%s)",
                     attempts * delay_s,
                     dst,
+                    exc,
                 )
             if index < attempts - 1:
-                time.sleep(delay_s)
+                # 增加微抖动, 避免多个重试进程同频共振
+                jitter = delay_s * (0.9 + 0.2 * random.random())
+                time.sleep(jitter)
 
     raise last  # type: ignore[misc]  # attempts >= 1 时 last 必已赋值
+
+
+def _write_parquet_snapshot(
+    df: pl.DataFrame, out: Path, *, attempts: int = 10, delay_s: float = 0.5,
+) -> None:
+    """调用方持有目标文件锁; 独占临时文件只承载本次快照。"""
+    tmp = out.with_name(f".{out.name}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex}.tmp")
+    try:
+        df.write_parquet(tmp)
+        replace_with_retry(tmp, out, attempts=attempts, delay_s=delay_s)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def atomic_write_parquet(
+    df: pl.DataFrame,
+    out: Path,
+    *,
+    lock_timeout_s: float = 15.0,
+    attempts: int = 10,
+    delay_s: float = 0.5,
+) -> None:
+    """原子覆盖完整快照; 增量合并应使用 atomic_update_parquet。"""
+    out = Path(out)
+    with interprocess_file_lock(out.with_name(f".{out.name}.lock"), lock_timeout_s):
+        _write_parquet_snapshot(df, out, attempts=attempts, delay_s=delay_s)
+
+
+def atomic_update_parquet(
+    out: Path,
+    update: Callable[[pl.DataFrame], pl.DataFrame],
+    *,
+    lock_timeout_s: float = 15.0,
+) -> tuple[int, int]:
+    """在单文件跨进程锁内读、合并和写入, 返回合并前后行数。
+
+    update 只能进行当前分区的本地计算, 不执行网络请求或全量历史扫描。
+    失败时保留旧文件; 与完整快照写入共用同一锁, 避免读取旧基底后丢更新。
+    """
+    out = Path(out)
+    with interprocess_file_lock(out.with_name(f".{out.name}.lock"), lock_timeout_s):
+        existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
+        merged = update(existing)
+        _write_parquet_snapshot(merged, out)
+        return existing.height, merged.height
+
 
 DAILY_STORAGE_SCHEMA: dict[str, pl.DataType] = {
     "symbol": pl.Utf8,

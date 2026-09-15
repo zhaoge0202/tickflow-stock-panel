@@ -171,4 +171,8 @@ export const SSE_INVALIDATE_PREFIXES = [
   'overview-market',
   'limit-ladder',
   'decision',
+  'market-snapshot',
+  'abnormal',
+  'market-breadth',
+  'sector-flow',
 ] as const

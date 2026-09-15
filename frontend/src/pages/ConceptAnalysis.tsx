@@ -19,6 +19,7 @@ import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/Stock
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
 import { api, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { useMarketSnapshot } from '@/lib/useSharedQueries'
 import { storage } from '@/lib/storage'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
@@ -279,13 +280,7 @@ export function ConceptAnalysis() {
     !!activeConfig && activeConfig.id === PRESET_CONCEPT_ID &&
     !rowsQuery.isLoading && (rowsQuery.data?.total ?? 0) === 0
 
-  const marketQuery = useQuery({
-    queryKey: QK.marketSnapshot(),
-    queryFn: () => api.marketSnapshot(),
-    // 概念榜单需要跟随最新行情快照刷新。
-    staleTime: 5_000,
-    refetchInterval: 8_000,
-  })
+  const marketQuery = useMarketSnapshot()
 
   const marketMap = useMemo(() => buildMarketMap(marketQuery.data?.rows ?? []), [marketQuery.data?.rows])
   const resolved = useMemo(

@@ -47,6 +47,18 @@ export function useQuoteStreamStatus(): QuoteStreamStatus {
   return useSyncExternalStore(_subscribeStatus, _getStatus, () => 'disconnected' as const)
 }
 
+/**
+ * 智能轮询间隔控制 Hook:
+ * - 当 SSE 处于已连接状态 ('connected') 时，由 SSE 事件驱动响应式更新，保留 60s 低频轮询，覆盖页面关闭推送或事件缺失；
+ * - 当 SSE 处于断开 ('disconnected') 或重连 ('reconnecting') 时，自动退化为 fallbackInterval（默认 15000ms），保障兜底同步。
+ */
+export function useSmartPollingInterval(
+  fallbackInterval: number = 15_000,
+): number {
+  const status = useQuoteStreamStatus()
+  return status === 'connected' ? 60_000 : fallbackInterval
+}
+
 // ===== 焦点股票注册表 (个股对话框用) =====
 // 个股对话框打开时注册当前 symbol, SSE quotes_updated 推送时只取当日最新行，
 // 再原位更新该 symbol 的日K查询缓存，避免重复下载整段历史。
@@ -114,6 +126,42 @@ export function useQuoteStream(
     let failCount = 0
     let toastFired = false
 
+    const invalidateQuoteQueries = () => {
+      // 实时行情未开启时不处理行情刷新
+      if (!enabledRef.current) return
+      // 根据用户配置过滤 invalidation
+      const pages = pagesRef.current
+      if (pages) {
+        // 只 invalidate 开启的页面对应的 prefix
+        const activePrefixes = SSE_INVALIDATE_PREFIXES.filter((p) => {
+          // 'quote-status' 始终刷新 (全局状态)
+          if (p === 'quote-status') return true
+          // 兼容旧配置: 'watchlist' 拆成两个精确前缀后, 未单独设置时沿用旧 'watchlist' 开关
+          if (
+            (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
+            pages[p] === undefined
+          ) {
+            return pages['watchlist'] !== false
+          }
+          return pages[p] !== false
+        })
+        qc.invalidateQueries({
+          predicate: (query) =>
+            activePrefixes.some(
+              (prefix) => String(query.queryKey[0]).startsWith(prefix),
+            ),
+        })
+      } else {
+        // 无配置时全部刷新 (向后兼容)
+        qc.invalidateQueries({
+          predicate: (query) =>
+            SSE_INVALIDATE_PREFIXES.some(
+              (prefix) => String(query.queryKey[0]).startsWith(prefix),
+            ),
+        })
+      }
+    }
+
     const connect = () => {
       _setStatus(failCount > 0 ? 'reconnecting' : _streamStatus)
       const es = new EventSource('/api/intraday/stream')
@@ -124,44 +172,18 @@ export function useQuoteStream(
         failCount = 0
         toastFired = false
         _setStatus('connected')
+        // SSE 不回放断线期间的事件，连接恢复后主动补拉当前页面。
+        for (const key of ['alerts', 'alerts-total', 'decision', 'alert-outcomes', 'screener-cached', 'screener-auction-confirmation']) {
+          void qc.invalidateQueries({ queryKey: [key] })
+        }
+        invalidateQuoteQueries()
       }
 
       // sse-starlette ping 心跳走 SSE comment，不会到达这里
 
       es.addEventListener('quotes_updated', () => {
-        // 实时行情未开启时不处理行情刷新
+        invalidateQuoteQueries()
         if (!enabledRef.current) return
-        // 根据用户配置过滤 invalidation
-        const pages = pagesRef.current
-        if (pages) {
-          // 只 invalidate 开启的页面对应的 prefix
-          const activePrefixes = SSE_INVALIDATE_PREFIXES.filter((p) => {
-            // 'quote-status' 始终刷新 (全局状态)
-            if (p === 'quote-status') return true
-            // 兼容旧配置: 'watchlist' 拆成两个精确前缀后, 未单独设置时沿用旧 'watchlist' 开关
-            if (
-              (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
-              pages[p] === undefined
-            ) {
-              return pages['watchlist'] !== false
-            }
-            return pages[p] !== false
-          })
-          qc.invalidateQueries({
-            predicate: (query) =>
-              activePrefixes.some(
-                (prefix) => String(query.queryKey[0]).startsWith(prefix),
-              ),
-          })
-        } else {
-          // 无配置时全部刷新 (向后兼容)
-          qc.invalidateQueries({
-            predicate: (query) =>
-              SSE_INVALIDATE_PREFIXES.some(
-                (prefix) => String(query.queryKey[0]).startsWith(prefix),
-              ),
-          })
-        }
         // 焦点股票日K增量刷新: 只取内存中的当日行并合并缓存尾部。
         if (_focusSymbol) {
           const symbol = _focusSymbol

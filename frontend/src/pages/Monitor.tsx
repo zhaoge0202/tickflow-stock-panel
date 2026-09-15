@@ -20,6 +20,7 @@ import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { StockPreviewDialog, toNavItems, type NavItem } from '@/components/StockPreviewDialog'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
@@ -154,11 +155,14 @@ export function Monitor() {
     return parts.length > 0 ? parts.join(',') : undefined
   }, [monitorExtFields])
 
+  const alertsPollingInterval = useSmartPollingInterval(15_000)
   const alertsQuery = useQuery({
     queryKey: [...QK.alerts(filter === 'all' ? undefined : filter), extColumnsParam ?? ''],
     queryFn: () => api.alertsList({ days: 7, limit: 500, source: filter === 'all' ? undefined : filter, extColumns: extColumnsParam }),
-    // 10s 轮询仅作 SSE strategy_alert 事件的兜底; 后台标签页不再拉 500 条全量
-    refetchInterval: 10000,
+    // 智能轮询: SSE 正常连接时由 strategy_alert 事件触发 invalidate, 保留 60s 兜底;
+    // 断开连接时退化为 15s 轮询兜底, 且后台标签页不拉取。
+    refetchInterval: alertsPollingInterval,
+    refetchIntervalInBackground: false,
   })
   const total = alertsQuery.data?.total ?? 0
 

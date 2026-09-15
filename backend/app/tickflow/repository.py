@@ -31,7 +31,7 @@ from app.enriched_generation import (
     get_enriched_generation,
 )
 from app.market_time import cn_today
-from app.parquet import replace_with_retry, scan_enriched_parquet
+from app.parquet import atomic_write_parquet, scan_enriched_parquet
 from app.polars_guard import guarded_collect
 
 logger = logging.getLogger(__name__)
@@ -2359,16 +2359,12 @@ class KlineRepository:
 
     @staticmethod
     def _atomic_write_parquet(df: pl.DataFrame, out: Path) -> None:
-        """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
+        """先写进程隔离临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
-        直接 write_parquet(out) 在进程被 kill (dev.sh 清端口用 kill -9)
-        或断电时会留下半截文件, 之后 scan_parquet glob 整条链路报错。
-        临时文件后缀 .tmp 不匹配 *.parquet glob, 不会被扫描误读。
-        Windows 下目标正被并发读取时由 replace_with_retry 短退避穿过。
+        统一委托给 app.parquet.atomic_write_parquet:
+        自带独占临时文件名、跨进程文件锁与 Windows 并发读退避重试。
         """
-        tmp = out.with_name(out.name + ".tmp")
-        df.write_parquet(tmp)
-        replace_with_retry(tmp, out)
+        atomic_write_parquet(df, out)
 
     @staticmethod
     def _dedupe_symbol_date(df: pl.DataFrame, context: str) -> pl.DataFrame:
