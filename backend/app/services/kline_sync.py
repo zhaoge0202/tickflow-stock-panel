@@ -20,11 +20,12 @@ import polars as pl
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today, is_trading_weekday
+from app.parquet import atomic_update_parquet, atomic_write_parquet
 from app.services import preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
-from app.tickflow.repository import KlineRepository, replace_with_retry
+from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +37,9 @@ class MinuteFetchError(RuntimeError):
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
-    与 repository._atomic_write_parquet 同语义。adj_factor 的 all.parquet 是全市场
-    单文件、每次「读→concat→原地写」, 直接 write_parquet(out) 在进程被 kill
-    (dev.sh 清端口用 kill -9)、reap 超时或断电时会留下半截文件, 之后复权视图
-    scan_parquet 整条链路报错、enriched 全市场重算不出。临时文件后缀 .tmp 不匹配
-    *.parquet glob, 不会被扫描误读。Windows 下目标正被并发读取时由
-    replace_with_retry 短退避穿过。
+    统一委托给 app.parquet.atomic_write_parquet 保证进程安全。
     """
-    tmp = out.with_name(out.name + ".tmp")
-    df.write_parquet(tmp)
-    replace_with_retry(tmp, out)
+    atomic_write_parquet(df, out)
 
 
 # 标准列(无论 SDK 返回什么形状,我们把它规范成这套)
@@ -426,17 +420,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             affected = new_data["symbol"].unique().to_list()
             factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
             out = repo.store.data_dir / factor_dir / "all.parquet"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            if out.exists():
-                existing = pl.read_parquet(out)
-                before = existing.height
-                merged = pl.concat([existing, new_data]).unique(
-                    subset=["symbol", "trade_date"], keep="last",
-                ).sort(["symbol", "trade_date"])
-                _atomic_write_parquet(merged, out)
-                return merged.height - before, affected
-            _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
-            return new_data.height, affected
+            before, after = _merge_adj_factor(new_data, out)
+            return after - before, affected
         # 自定义源未配置 adj_factor → 回退 TickFlow
 
     if not capset.has(Cap.ADJ_FACTOR):
@@ -493,23 +478,22 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
 
     factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
     out = repo.store.data_dir / factor_dir / "all.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    before, after = _merge_adj_factor(new_data, out)
+    added = after - before
+    logger.info("adj_factor merged: %d total (+%d new), %d/%d symbols",
+                after, added, len(affected), len(symbols))
+    return added, affected
 
-    if out.exists():
-        existing = pl.read_parquet(out)
-        before = existing.height
-        merged = pl.concat([existing, new_data]).unique(
-            subset=["symbol", "trade_date"], keep="last",
-        ).sort(["symbol", "trade_date"])
-        _atomic_write_parquet(merged, out)
-        added = merged.height - before
-        logger.info("adj_factor merged: %d total (+%d new), %d/%d symbols",
-                     merged.height, added, new_data.height, len(symbols))
-        return added, affected
-    else:
-        _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
-        logger.info("adj_factor synced: %d rows (%d symbols)", new_data.height, len(symbols))
-        return new_data.height, affected
+
+def _merge_adj_factor(new_data: pl.DataFrame, out) -> tuple[int, int]:
+    """复权因子增量事务; 同时保留其他同步任务写入的标的。"""
+    def merge(existing: pl.DataFrame) -> pl.DataFrame:
+        combined = pl.concat([existing, new_data]) if not existing.is_empty() else new_data
+        return combined.unique(subset=["symbol", "trade_date"], keep="last").sort(
+            ["symbol", "trade_date"],
+        )
+
+    return atomic_update_parquet(out, merge)
 
 
 # ===== 分钟 K 同步 =====
@@ -717,19 +701,18 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     for day_df in df.partition_by("_trade_date"):
         trade_date = day_df["_trade_date"][0]
         out = minute_dir / f"date={trade_date}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.exists():
-            existing = pl.read_parquet(out)
+        incoming = day_df.drop("_trade_date")
+
+        def merge(existing: pl.DataFrame, incoming: pl.DataFrame = incoming) -> pl.DataFrame:
             if "datetime" in existing.columns:
                 existing = existing.filter(pl.col("datetime").is_not_null())
-            day_df = pl.concat([existing, day_df.drop("_trade_date")]).unique(
-                subset=["symbol", "datetime"], keep="last",
+            combined = pl.concat([existing, incoming]) if not existing.is_empty() else incoming
+            return combined.unique(subset=["symbol", "datetime"], keep="last").sort(
+                ["symbol", "datetime"],
             )
-        else:
-            day_df = day_df.drop("_trade_date")
-        day_df = day_df.sort("symbol", "datetime")
-        _atomic_write_parquet(day_df, out)
-        written += day_df.height
+
+        _, after = atomic_update_parquet(out, merge)
+        written += after
     return written
 
 

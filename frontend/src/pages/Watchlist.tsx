@@ -42,6 +42,7 @@ import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primit
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -789,9 +790,12 @@ export function Watchlist() {
 
   // 实时行情状态: 列表行情和分时图刷新共用。
   const quoteStatus = useQuoteStatus()
+  const streamStatus = useQuoteStreamStatus()
   const realtimeRunning = quoteStatus.data?.running ?? false
+  // SSE 正常连接时由 quotes_updated 事件驱动刷新, 轮询放宽至 60s 兜底;
+  // SSE 断开时退化为行情轮询间隔 (3s~15s) 兜底。
   const watchlistRefreshInterval = realtimeRunning
-    ? Math.max(3_000, Math.min(15_000, Math.round((quoteStatus.data?.interval_s ?? 15) * 1000)))
+    ? (streamStatus === 'connected' ? 60_000 : Math.max(3_000, Math.min(15_000, Math.round((quoteStatus.data?.interval_s ?? 15) * 1000))))
     : false
   const groupList = useQuery({
     queryKey: QK.watchlistGroups,
@@ -814,13 +818,13 @@ export function Watchlist() {
   }, [groupList.isSuccess, groups, selectedGroup])
 
   // enriched 数据 — 传入 ext_columns 参数
-  // SSE 仍是首选触发方式; 这里加页面级轮询兜底, 避免 SSE/页面配置异常时自选列表停在旧行情。
+  // SSE 是首选触发方式 (quotes_updated); 这里加页面级长轮询兜底, 避免 SSE 断线时停在旧行情。
   const enriched = useQuery({
     queryKey: QK.watchlistEnriched(extColumnsParam),
     queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
     enabled: (list.data?.symbols.length ?? 0) > 0,
     refetchInterval: watchlistRefreshInterval,
-    refetchIntervalInBackground: true,
+    refetchIntervalInBackground: false,
   })
 
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []

@@ -16,6 +16,7 @@ import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 /**
  * 异动监控 — 全时段异动中心, 按交易时间线分三个 tab:
@@ -47,8 +48,6 @@ const STATUS_META: Record<AbnormalStatus, { label: string; cls: string; bar: str
 }
 
 const BOARDS = ['主板', '创业板', '科创板', '北交所'] as const
-
-const REFRESH_MS = 60_000
 
 type AbnormalTab = 'auction' | 'intraday' | 'deviation'
 
@@ -368,11 +367,12 @@ function IntradayView({ onPreview }: {
   const [boardFilter, setBoardFilter] = useState<'all' | (typeof BOARDS)[number]>('all')
   const [query, setQuery] = useState('')
   const [excludeSt, setExcludeSt] = useState(true)
+  const abnormalPollingInterval = useSmartPollingInterval(15_000)
 
   const q = useQuery({
     queryKey: QK.abnormalIntraday(500),
     queryFn: () => api.abnormalIntraday(500),
-    refetchInterval: REFRESH_MS,
+    refetchInterval: abnormalPollingInterval,
   })
   const data = q.data
   const counts = data?.counts ?? {}
@@ -584,12 +584,13 @@ function DeviationView({ onPreview }: {
   const [watchlistOnly, setWatchlistOnly] = useState(false)
   // 默认过滤 ST/*ST 风险警示股票 (口径与后端 is_st_name 一致: 名称含 ST)
   const [excludeSt, setExcludeSt] = useState(true)
+  const overviewPollingInterval = useSmartPollingInterval(30_000)
 
   const overview = useQuery({
     queryKey: QK.abnormalOverview(minCloseness, 300),
     queryFn: () => api.abnormalOverview(minCloseness, 300),
     enabled, // 关闭时零计算
-    refetchInterval: enabled ? REFRESH_MS : false,
+    refetchInterval: enabled ? overviewPollingInterval : false,
   })
   // 自选过滤在关闭 (查看上次结果) 时也可用: 自选列表是轻量接口, 不涉及全市场计算
   const watchlist = useQuery({

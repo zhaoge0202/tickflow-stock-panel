@@ -7,6 +7,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from './api'
 import { QK } from './queryKeys'
+import { useSmartPollingInterval } from './useQuoteStream'
 
 // ===== 全局共享 =====
 
@@ -91,5 +92,17 @@ export function useDataStatus(opts?: {
     queryFn: api.dataStatus,
     staleTime: opts?.staleTime,
     refetchInterval: opts?.refetchInterval,
+  })
+}
+
+/** 全市场行情快照 — 概念分析 / 行业分析共用，由 SSE quotes_updated 驱动刷新 */
+export function useMarketSnapshot(opts?: { enabled?: boolean }) {
+  const fallbackInterval = useSmartPollingInterval(15_000)
+  return useQuery({
+    queryKey: QK.marketSnapshot(),
+    queryFn: () => api.marketSnapshot(),
+    enabled: opts?.enabled ?? true,
+    staleTime: 5_000,
+    refetchInterval: fallbackInterval,
   })
 }
