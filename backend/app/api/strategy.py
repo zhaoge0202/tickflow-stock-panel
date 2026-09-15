@@ -29,6 +29,7 @@ from app.strategy.scoring import (
     effective_scoring,
     effective_scoring_directions,
 )
+from app.services.ndjson_heartbeat import with_heartbeat
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 logger = logging.getLogger(__name__)
@@ -936,7 +937,11 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
         except Exception as e:
             yield json.dumps({"type": "error", "message": f"AI生成失败: {e}"}, ensure_ascii=False) + "\n"
 
-    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        with_heartbeat(event_generator()),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 

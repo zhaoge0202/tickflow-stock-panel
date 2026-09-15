@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { api, type PriceLevel, type LevelType } from './api'
+import { api, friendlyStreamError, type PriceLevel, type LevelType } from './api'
 
 /**
  * AI 个股分析 —— 全局任务/报告 store(与 aiReportStore 解耦、并行存在)。
@@ -235,7 +235,7 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
     const msg = String(e?.message ?? '分析失败')
     patchTask(id, {
       phase: 'error',
-      error: normalizeAiError(msg),
+      error: normalizeAiError(friendlyStreamError(msg)),
     })
   }
 }

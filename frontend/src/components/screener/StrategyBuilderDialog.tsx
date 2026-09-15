@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Modal } from '@/components/Modal'
 import { X, Sparkles, Save, Loader2, ChevronLeft, ChevronRight, AlertTriangle, Settings2, FileText, Copy, Check, Terminal } from 'lucide-react'
-import { api } from '@/lib/api'
+import { api, friendlyStreamError } from '@/lib/api'
 import type { AiIterateRound } from '@/lib/api'
 import { storage } from '@/lib/storage'
 import { cn } from '@/lib/cn'
@@ -349,7 +349,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         if (genRules) setRules(genRules)
       }
     } catch (e: any) {
-      const msg = String(e?.message ?? '')
+      const msg = friendlyStreamError(String(e?.message ?? ''))
       setError(msg.includes('API Key') || msg.includes('api_key') ? 'AI API Key 未配置或无效' : (msg || '生成失败'))
     } finally { setLoading(false) }
   }
@@ -378,7 +378,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       const updatedRules = parseRules(finalResult.code)
       if (genDesc) setDescription(genDesc)
       if (updatedRules) setRules(updatedRules)
-    } catch (e: any) { setError(String(e?.message ?? '修改失败')) }
+    } catch (e: any) { setError(friendlyStreamError(String(e?.message ?? '')) || '修改失败') }
     finally { setLoading(false) }
   }
 
