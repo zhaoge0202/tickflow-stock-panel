@@ -16,7 +16,7 @@ import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.market_time import CN_TZ
+from app.market_time import CN_TZ, cn_today
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -828,8 +828,9 @@ async def upload_data(
     keep = [c for c in df.columns if c in all_config_cols]
     df = df.select(keep)
 
-    # 解析快照日期
-    snap = date.fromisoformat(snapshot_date) if snapshot_date else date.today()
+    # 解析快照日期: 非法值 400 (与 /rows 同一校验); 缺省按北京日期落盘,
+    # 服务器时区不能决定分区归属 (UTC 容器北京 08:00 前会写进前一天)
+    snap = date.fromisoformat(_partition_date(snapshot_date)) if snapshot_date else cn_today()
 
     rows = write_ext_parquet(df, config, _data_dir(request), snapshot_date=snap)
 
@@ -861,7 +862,8 @@ def ingest_data(request: Request, config_id: str, body: IngestReq):
         if missing:
             raise HTTPException(400, f"第 {i + 1} 行缺少字段: {', '.join(sorted(missing))}")
 
-    snap = date.fromisoformat(body.date) if body.date else date.today()
+    # 同 /upload: 非法日期 400, 缺省按北京日期落盘
+    snap = date.fromisoformat(_partition_date(body.date)) if body.date else cn_today()
 
     rows_written = rows_to_parquet(body.rows, config, _data_dir(request), snapshot_date=snap)
 
