@@ -12,6 +12,7 @@ from typing import Literal
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -634,7 +635,8 @@ def write_ext_parquet(
     Returns:
         写入行数。
     """
-    snap = snapshot_date or date.today()
+    # 缺省分区日期按北京日期, 与定时拉取 (ext_pull.fetch_and_ingest) 同口径
+    snap = snapshot_date or cn_today()
     cfg_dir = _config_dir(config.id, data_dir)
 
     # 标准化 symbol 列: 用维表查找 → 准确匹配交易所

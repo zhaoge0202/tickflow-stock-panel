@@ -611,7 +611,10 @@ def _openai_client(api_key: str, timeout: float):
         api_key=api_key,
         base_url=normalize_openai_base_url(secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)),
         timeout=timeout,
-        max_retries=0,
+        # SDK 层重试仅覆盖首包前的连接错误/超时/429/5xx, 此时尚未产出任何内容,
+        # 重试安全; 首 chunk 之后的断流不在此列, 由上层协议报错处理。
+        # 根因: DeepSeek 等上游高峰过载时首包失败率高, max_retries=0 导致一次抖动即终止。
+        max_retries=2,
         default_headers={"User-Agent": user_agent},
     )
 
