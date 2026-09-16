@@ -6,6 +6,7 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
+import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { fmtPct } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
@@ -114,6 +115,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
   const [intradayDays, setIntradayDays] = useState<number | null>(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
+  const customNames = useCustomSignalNames()
   const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
   const qc = useQueryClient()
@@ -550,7 +552,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                   {triggerInfo.signals && triggerInfo.signals.length > 0 && (
                     <div className="flex items-center gap-1 flex-wrap">
                       {triggerInfo.signals.map((s, j) => (
-                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{cnSignal(s)}</span>
+                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{cnSignal(s, customNames)}</span>
                       ))}
                     </div>
                   )}
