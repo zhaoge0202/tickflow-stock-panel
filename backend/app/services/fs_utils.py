@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 只做类型标注; JSON 原子写的调用方 (preferences/secrets) 不必加载 polars
+    import polars as pl
 
 
 def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
@@ -24,3 +28,19 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
         except OSError:
             pass
     os.replace(tmp, path)
+
+
+def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
+    """parquet 版原子写: 先写 `<name>.tmp` 再替换, 与 repository / kline_sync 的
+    `_atomic_write_parquet` 同语义。
+
+    直接 `df.write_parquet(path)` 在进程被 kill (dev.sh 清端口用 kill -9)、断电或
+    磁盘写满时会留下半截文件, 之后读侧 `read_parquet` / `scan_parquet` 整条报错。
+    `.tmp` 后缀不匹配 `*.parquet` glob, 不会被视图误读。Windows 下目标正被并发读取时
+    由 `replace_with_retry` 短退避穿过。
+    """
+    from app.tickflow.repository import replace_with_retry  # 惰性导入, 避免模块级环
+
+    tmp = path.with_name(path.name + ".tmp")
+    df.write_parquet(tmp)
+    replace_with_retry(tmp, path)

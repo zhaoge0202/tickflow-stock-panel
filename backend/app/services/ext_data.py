@@ -13,7 +13,7 @@ from typing import Literal
 import polars as pl
 
 from app.market_time import cn_today
-from app.services.fs_utils import atomic_write_text
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -688,7 +688,8 @@ def write_ext_parquet(
         tf = config.pull.time_field if config.pull else None
         if tf and tf in df.columns:
             df = df.sort(["symbol", tf] if "symbol" in df.columns else [tf], maintain_order=True)
-    df.write_parquet(out_path)
+    # 原子写: 中断时半截文件会让下一次写入走「合并去重失败, 将覆盖写入」, 静默丢掉已有行
+    atomic_write_parquet(df, out_path)
     logger.info("扩展表写入: %s → %s (%d 行)", config.id, out_path, len(df))
     # 扩展列已接入 enriched 帧/因子注册表: 写入后必须失效相关缓存
     _invalidate_ext_derived(data_dir, keep_strategy_cache=keep_strategy_cache)
@@ -769,7 +770,7 @@ def fix_symbol_format(config: ExtConfig, data_dir: Path) -> int:
             df = df.with_columns(normalize_symbol(df["symbol"], lookup))
             new = df["symbol"].to_list()
             if old != new:
-                df.write_parquet(parquet_path)
+                atomic_write_parquet(df, parquet_path)
                 fixed += 1
                 logger.info("代码格式修复: %s/%s (%d 行)", config.id, parquet_path.parent.name, len(df))
         except Exception as e:
