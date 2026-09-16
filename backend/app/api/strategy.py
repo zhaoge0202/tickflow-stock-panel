@@ -919,11 +919,11 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
     async def event_generator():
         gen = AIStrategyGenerator()
         chunks: list[str] = []
-        yield json.dumps({"type": "meta", "strategy_id": req.strategy_id, "step": req.step}, ensure_ascii=False) + "\n"
+        yield json.dumps({"type": "meta", "strategy_id": req.strategy_id, "step": req.step}, ensure_ascii=False)
         try:
             async for chunk in gen.stream(prompt):
                 chunks.append(chunk)
-                yield json.dumps({"type": "delta", "content": chunk}, ensure_ascii=False) + "\n"
+                yield json.dumps({"type": "delta", "content": chunk}, ensure_ascii=False)
             result = gen.validate_code("".join(chunks))
             if gen.needs_structural_repair(result):
                 result = await gen.repair_code(result["code"], result["error"])
@@ -931,14 +931,20 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
                 result = _normalize_build_result(result, req.strategy_id, req.name, req.description)
             elif req.strategy_id:
                 result = _normalize_build_result(result, req.strategy_id)
-            yield json.dumps({"type": "result", **result}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "result", **result}, ensure_ascii=False)
         except RuntimeError as e:
-            yield json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
         except Exception as e:
-            yield json.dumps({"type": "error", "message": f"AI生成失败: {e}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "message": f"AI生成失败: {e}"}, ensure_ascii=False)
+
+    # 与复盘/个股/财务/轮动的流式端点同口径: 事件行不带换行, 由外层统一补换行。
+    # with_heartbeat 插入的 ping 行本身不带换行, 事件行若自带换行, ping 会与下一行粘成一行。
+    async def stream_gen():
+        async for line in with_heartbeat(event_generator()):
+            yield line + "\n"
 
     return StreamingResponse(
-        with_heartbeat(event_generator()),
+        stream_gen(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
