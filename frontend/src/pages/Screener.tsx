@@ -1161,9 +1161,11 @@ export function Screener() {
     onSuccess: (_, variables) => {
       qc.invalidateQueries({ queryKey: QK.strategyPurchaseMarks })
       if (!variables.marked) {
+        const foundRow = displayRows.find((r: any) => r.symbol === variables.symbol)
+        const realName = foundRow?.name || variables.symbol
         addOrUpdateMonitoredPosition({
           symbol: variables.symbol,
-          name: variables.symbol,
+          name: realName,
           costPrice: variables.signalPrice || 0,
           buyDate: variables.signalDate,
           strategyId: variables.strategyId,
