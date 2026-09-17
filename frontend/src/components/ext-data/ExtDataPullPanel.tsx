@@ -29,6 +29,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
   const [timeWindowStart, setTimeWindowStart] = useState(pull?.time_window_start ?? '')
   const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
   const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
+  const [dateFormat, setDateFormat] = useState(pull?.date_format ?? 'iso')
+  const [timeField, setTimeField] = useState(pull?.time_field ?? '')
+  const [timeoutSec, setTimeoutSec] = useState(pull?.timeout_seconds ?? 30)
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
 
   // 接口鉴权: 方式入 pull 配置; Key 本体只存后端 secrets.json
@@ -65,6 +68,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
     catch { setError(`${label} 不是有效 JSON`); return null }
   }
 
+  // 有效超时 (5~300 归一): 后端配置、前端 fetch 的 timeoutMs 共用同一口径
+  const effTimeoutSec = Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : 30
+
   // 构建保存 payload (复用当前编辑态), enabledOverride 用于开关自动保存
   const buildPayload = (enabledOverride?: boolean) => {
     const headers = parseJson(headerStr, 'Headers')
@@ -83,6 +89,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
       time_window_start: timeWindowStart || null,
       time_window_end: timeWindowEnd || null,
       date_param: dateParam.trim() || null,
+      date_format: dateFormat,
+      time_field: timeField.trim() || null,
+      timeout_seconds: effTimeoutSec,
     }
   }
 
@@ -116,7 +125,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
     if (!payload) { setTesting(false); return }
     saveKeyIfNeeded()
       .then(() => api.extDataPullConfig(config.id, payload))
-      .then(() => api.extDataPullTest(config.id))
+      .then(() => api.extDataPullTest(config.id, effTimeoutSec))
       .then(r => { setTestResult(r); onSaved() })
       .catch(e => setError(e.message || '测试失败'))
       .finally(() => setTesting(false))
@@ -124,7 +133,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
   const handleRun = () => {
     setRunning(true); setError(''); setRunResult(null)
-    api.extDataPullRun(config.id)
+    api.extDataPullRun(config.id, effTimeoutSec)
       .then(r => {
         setRunResult({ rows: r.rows, date: r.date })
         onSaved()
@@ -136,7 +145,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
   const handleBackfill = () => {
     setBfRunning(true); setError(''); setBfResult(null)
-    api.extDataBackfill(config.id, bfStart, bfEnd)
+    // 服务端逐日串行拉取, 前端超时按 天数×单日超时 估算 (+30s 写盘缓冲)
+    const daySpan = Math.max(1, Math.round((Date.parse(bfEnd) - Date.parse(bfStart)) / 86400_000) + 1)
+    api.extDataBackfill(config.id, bfStart, bfEnd, daySpan * effTimeoutSec * 1000 + 30_000)
       .then(r => {
         setBfResult(r)
         onSaved()
@@ -330,12 +341,48 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
         <div>
           <div className="text-[10px] text-muted mb-1">日期参数名 (接口支持按日查询时填, 如 date)</div>
+          <div className="flex items-center gap-1.5">
+            <input
+              value={dateParam} onChange={e => setDateParam(e.target.value)}
+              placeholder="date · 留空=接口只有当日快照"
+              className="flex-1 min-w-0 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+            />
+            <select
+              aria-label="日期参数值格式"
+              value={dateFormat} onChange={e => setDateFormat(e.target.value)}
+              disabled={!dateParam.trim()}
+              title="日期参数值的序列化格式; 时间戳 = 该交易日北京时间 00:00:00"
+              className="shrink-0 rounded-btn border border-border bg-elevated px-1.5 py-1.5 text-[10px] text-secondary outline-none focus:border-accent disabled:opacity-40"
+            >
+              <option value="iso">YYYY-MM-DD</option>
+              <option value="compact">YYYYMMDD</option>
+              <option value="ts_s">秒时间戳</option>
+              <option value="ts_ms">毫秒时间戳</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-[10px] text-muted mb-1">时间字段 (日内多行数据填, 如 ts · 竞价/分时快照)</div>
           <input
-            value={dateParam} onChange={e => setDateParam(e.target.value)}
-            placeholder="date · 留空=接口只有当日快照"
-            className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
+            value={timeField} onChange={e => setTimeField(e.target.value)}
+            placeholder="ts · 留空=每日快照表 (同代码一天一行)"
+            title="配置后同一代码允许一天多行, 按代码+时间列去重"
+            className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
           />
         </div>
+
+        <div>
+          <div className="text-[10px] text-muted mb-1">拉取超时 (秒 · 大响应接口可调高)</div>
+          <input
+            type="number" min={5} max={300} step={5}
+            value={timeoutSec}
+            onChange={e => setTimeoutSec(Number(e.target.value))}
+            title="单次拉取/测试/回补请求的超时, 默认 30 秒, 范围 5~300"
+            className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[10px] font-mono text-foreground"
+          />
+        </div>
+
 
         <div>
           <div className="text-[10px] text-muted mb-1">字段映射 (外部名 → 内部名，JSON，可选)</div>

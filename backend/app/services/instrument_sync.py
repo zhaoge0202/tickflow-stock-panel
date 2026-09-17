@@ -18,6 +18,7 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_today
+from app.services.fs_utils import atomic_write_parquet
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -285,14 +286,9 @@ def sync_instruments(data_dir: Path) -> int:
 
     返回写入的行数。
     """
-    provider_rows = _fetch_instruments_via_provider()
-    if provider_rows is None:
+    all_rows = _fetch_instruments_via_provider()
+    if all_rows is None:
         all_rows = _fetch_instruments_via_tickflow()
-    else:
-        tickflow_rows = _fetch_instruments_via_tickflow()
-        all_rows = _merge_instrument_rows(provider_rows, tickflow_rows) if tickflow_rows else provider_rows
-        logger.info("instruments merged: provider=%d, tickflow=%d, final=%d",
-                    len(provider_rows), len(tickflow_rows), len(all_rows))
 
     if not all_rows:
         return 0
@@ -319,7 +315,7 @@ def sync_instruments(data_dir: Path) -> int:
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    df.write_parquet(out)
+    atomic_write_parquet(df, out)
 
     logger.info("instruments synced: %d rows → %s", df.height, out)
     return df.height
@@ -368,6 +364,6 @@ def enrich_names_from_quotes(
         .alias("name"),
     ).drop("_new_name")
 
-    df.write_parquet(inst_path)
+    atomic_write_parquet(df, inst_path)
     logger.info("instruments name enriched from quotes: %d names", len(name_map))
     return len(name_map)

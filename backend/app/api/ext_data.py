@@ -16,7 +16,7 @@ import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.market_time import CN_TZ
+from app.market_time import CN_TZ, cn_today
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -97,8 +97,15 @@ class PullConfigReq(BaseModel):
     time_window_end: str | None = None     # "HH:MM", None=不限
     # 接口按日查询的参数名 (如 "date"): 配置后支持历史回补, 且当日拉取也带日期参数
     date_param: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    # 日期参数值的格式: iso/compact/ts_s/ts_ms (时间戳=该交易日北京时间 00:00:00), 缺省 iso
+    date_format: str = "iso"
+    # 日内序列表时间列名 (字段映射后的列名, 如 "ts"): 配置后同 symbol 允许多行,
+    # 按 [symbol, time_field] 去重; 留空 = 每日快照表 (按 symbol 去重)
+    time_field: str | None = Field(None, max_length=32)
     # 鉴权方式; 请求中缺省 (None) = 保留现有配置, {"type":"none"} = 关闭鉴权
     auth: PullAuthReq | None = None
+    # 单次拉取请求超时 (秒), 默认 30 与历史行为一致; 大响应接口可调高
+    timeout_seconds: int = Field(30, ge=5, le=300)
 
 
 class ApiKeyReq(BaseModel):
@@ -114,6 +121,9 @@ class DetectUrlReq(BaseModel):
     body: str | None = None
     response_path: str = ""
     field_map: dict[str, str] | None = None
+    # 探测超时; 与 PullConfig.timeout_seconds 同口径 (默认 30 与历史行为一致),
+    # 大响应接口 (如全量集合竞价 /day ~77s) 探测时需要更高超时
+    timeout_seconds: int = Field(30, ge=5, le=300)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +214,20 @@ def _safe_json_value(value):
     return value
 
 
+def _partition_date(raw: str) -> str:
+    """把 `date` 入参规范成 `YYYY-MM-DD` 分区名。
+
+    这个值直接拼进分区目录名 (`timeseries/date=<value>`), 所以非法值不只是格式问题:
+    `date=x/../../../../kline_daily` 会让读取路径离开 `ext_data/<id>/timeseries/`。
+    同一文件的 `/sync`、`/ingest`、`/backfill` 都先 `date.fromisoformat` 再用, 只有
+    `/rows` 和 `/dimension-members` 走的这条路把原始字符串直接拼进了路径。
+    """
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError as e:
+        raise HTTPException(400, f"日期格式错误: {raw}") from e
+
+
 def _read_ext_dataframe(
     config: ExtConfig,
     data_dir: Path,
@@ -222,10 +246,11 @@ def _read_ext_dataframe(
         return pl.DataFrame(), None
 
     if snapshot_date:
-        path = base / f"date={snapshot_date}" / "part.parquet"
+        day = _partition_date(snapshot_date)
+        path = base / f"date={day}" / "part.parquet"
         if not path.exists():
-            return pl.DataFrame(), snapshot_date
-        return pl.read_parquet(path), snapshot_date
+            return pl.DataFrame(), day
+        return pl.read_parquet(path), day
 
     partitions = sorted(
         d for d in base.iterdir()
@@ -438,6 +463,10 @@ def list_rows(
     data_dir = _data_dir(request)
     df, active_date = _read_ext_dataframe(config, data_dir, snapshot_date)
     df = _with_instrument_name(df, data_dir)
+    # 日内序列表: 按时间列升序, 保证分页/截断取到的是最早的盘
+    tf = config.pull.time_field if config.pull else None
+    if tf and tf in df.columns:
+        df = df.sort(tf)
     requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
     if requested:
         keep = [c for c in ["symbol", "code", "name", *requested] if c in df.columns]
@@ -574,6 +603,9 @@ def _prev_daily_close(data_dir: Path, target_date: str) -> pl.DataFrame | None:
     return (
         df.with_columns(_bare_symbol_expr().alias("_bare"))
         .select([pl.col("_bare"), pl.col("close").cast(pl.Float64).alias("prev_close")])
+        # 前收 <= 0 / 非有限视为缺失 (否则 close/ref 为 inf, 整个响应 JSON 渲染 500),
+        # 缺失时由调用方退化为当日首根有效分钟 close
+        .filter(pl.col("prev_close").is_finite() & (pl.col("prev_close") > 0))
         .unique(subset=["_bare"], keep="last")
     )
 
@@ -622,7 +654,10 @@ def _dimension_intraday_compute(
     except Exception as exc:  # noqa: BLE001
         logger.warning("dimension-intraday read minute partition failed: %s", exc)
         return {"status": "no_data", "reason": "minute_schema", "date": target, "points": []}
-    bars = bars.drop_nulls(subset=["datetime", "close"])
+    # close <= 0 / 非有限的分钟行无效: 作基准时 pct 为 inf, 作分子时是 -100% 假跌幅
+    bars = bars.drop_nulls(subset=["datetime", "close"]).filter(
+        pl.col("close").cast(pl.Float64).is_finite() & (pl.col("close") > 0)
+    )
     if bars.is_empty():
         return {"status": "no_data", "reason": "minute_empty", "date": target, "points": []}
     bars = bars.with_columns(_bare_symbol_expr().alias("_bare"))
@@ -793,8 +828,9 @@ async def upload_data(
     keep = [c for c in df.columns if c in all_config_cols]
     df = df.select(keep)
 
-    # 解析快照日期
-    snap = date.fromisoformat(snapshot_date) if snapshot_date else date.today()
+    # 解析快照日期: 非法值 400 (与 /rows 同一校验); 缺省按北京日期落盘,
+    # 服务器时区不能决定分区归属 (UTC 容器北京 08:00 前会写进前一天)
+    snap = date.fromisoformat(_partition_date(snapshot_date)) if snapshot_date else cn_today()
 
     rows = write_ext_parquet(df, config, _data_dir(request), snapshot_date=snap)
 
@@ -826,7 +862,8 @@ def ingest_data(request: Request, config_id: str, body: IngestReq):
         if missing:
             raise HTTPException(400, f"第 {i + 1} 行缺少字段: {', '.join(sorted(missing))}")
 
-    snap = date.fromisoformat(body.date) if body.date else date.today()
+    # 同 /upload: 非法日期 400, 缺省按北京日期落盘
+    snap = date.fromisoformat(_partition_date(body.date)) if body.date else cn_today()
 
     rows_written = rows_to_parquet(body.rows, config, _data_dir(request), snapshot_date=snap)
 
@@ -861,7 +898,10 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         time_window_start=body.time_window_start,
         time_window_end=body.time_window_end,
         date_param=body.date_param,
+        date_format=body.date_format,
+        time_field=body.time_field,
         auth=body.auth.model_dump() if body.auth else (old_pull.auth if old_pull else None),
+        timeout_seconds=body.timeout_seconds,
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,
@@ -1110,7 +1150,7 @@ async def detect_url(body: DetectUrlReq):
         raise HTTPException(400, "仅支持 GET / POST")
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=body.timeout_seconds, follow_redirects=True) as client:
             headers = body.headers or {}
             kwargs: dict = {"headers": headers}
             if method == "POST" and body.body:

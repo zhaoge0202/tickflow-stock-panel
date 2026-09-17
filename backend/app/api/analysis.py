@@ -9,6 +9,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.services.fs_utils import atomic_write_text
+
 router = APIRouter(prefix="/api/analysis-menus", tags=["analysis-menus"])
 
 
@@ -103,9 +105,9 @@ def _save(request: Request, menu: AnalysisMenu) -> AnalysisMenu:
     menu.builtin = False
     base = _base_dir(request)
     base.mkdir(parents=True, exist_ok=True)
-    _path(request, menu.id).write_text(
+    atomic_write_text(
+        _path(request, menu.id),
         json.dumps(menu.model_dump(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     return menu
 

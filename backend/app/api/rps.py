@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.services import rps_rotation
 from app.services.concept_rotation_analyzer import analyze_rotation_stream
+from app.services.ndjson_heartbeat import with_heartbeat
 
 router = APIRouter(prefix="/api/rps", tags=["rps"])
 
@@ -61,8 +62,10 @@ async def analyze_rotation(request: Request, req: AnalyzeRequest):
     level = req.level if (kind == "industry" and req.level in (1, 2, 3)) else None
 
     async def stream_gen():
-        async for chunk in analyze_rotation_stream(
-            repo, days, req.focus, quote_service, depth_service, kind, level,
+        async for chunk in with_heartbeat(
+            analyze_rotation_stream(
+                repo, days, req.focus, quote_service, depth_service, kind, level,
+            ),
         ):
             yield chunk + "\n"
 

@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Repeat, Sparkles, ArrowDownUp, RefreshCw, AlertCircle } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { api, friendlyStreamError } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { fmtPct } from '@/lib/format'
@@ -77,7 +77,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
         // done: 无操作
       }
     } catch (e) {
-      setAnalysisError(e instanceof Error ? e.message : String(e))
+      setAnalysisError(friendlyStreamError(e instanceof Error ? e.message : String(e)))
     } finally {
       setAnalyzing(false)
     }

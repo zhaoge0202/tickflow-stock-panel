@@ -79,6 +79,28 @@ def _safe(result_dict: dict) -> dict:
     return result_dict
 
 
+def _coverage_warnings(
+    svc, as_of, *, engine=None, strategy_ids=None, params_map=None, overrides_map=None,
+) -> list[str]:
+    """数据充足性提示 (#303): enriched 覆盖低于暖机需求时给出人话警告。
+
+    advisory 元数据: 任何计算失败都静默返回 [], 绝不影响选股主流程。
+    引擎/服务无该方法时 (测试 Fake) 同样跳过, 与 build_shared_matrix 的
+    可选能力探测同风格。
+    """
+    try:
+        required: int | None = None
+        rhb = getattr(engine, "required_history_bars", None)
+        if engine is not None and strategy_ids and callable(rhb):
+            required = rhb(strategy_ids, params_map=params_map, overrides_map=overrides_map)
+        cw = getattr(svc, "coverage_warnings", None)
+        if callable(cw):
+            return cw(as_of, required_bars=required)
+    except Exception:
+        logger.debug("coverage warnings unavailable", exc_info=True)
+    return []
+
+
 def _one_word_limit_expr(status_main: str, columns: list[str]) -> Any:
     required = {"open", "high", "low", "close", "status"}
     if not required.issubset(columns):
@@ -266,6 +288,10 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             "as_of": as_of,
             "rows": safe_data.get("rows", []),
         }
+        if safe_data.get("warnings"):
+            # 数据不足提示 (#303) 随缓存下发 (get_cached 原样读出),
+            # 单跑刷新不得冲掉 run_all 写入的提示
+            results[strategy_id]["warnings"] = safe_data["warnings"]
         strategy_cache.write_cache(data_dir, as_of, results)
 
 
@@ -342,6 +368,9 @@ def run_custom(req: CustomRequest, request: Request):
         pool=req.pool,
     )
     safe_data = _safe(asdict(result))
+    warnings = _coverage_warnings(svc, as_of)
+    if warnings:
+        safe_data["warnings"] = warnings
     ext_values = _load_ext_value_maps(repo, req.ext_columns)
     return _result_with_ext(safe_data, ext_values)
 
@@ -399,9 +428,17 @@ def run_preset(req: PresetRequest, request: Request):
         raise HTTPException(status_code=status_code, detail=str(e)) from e
 
     safe_data = _safe(asdict(result))
-    # 分钟周期结果不写入盘后缓存 (strategy_cache 是日线语义, as_of/updated_at
-    # 混入分钟结果会污染页面秒加载路径)。
     if req.timeframe == "1d":
+        # 数据不足提示随结果返回并写入盘后缓存 (#303); 分钟周期结果不写入盘后缓存
+        # (strategy_cache 是日线语义, as_of/updated_at 混入分钟结果会污染页面秒加载路径),
+        # 分钟策略数据源也与日线 enriched 历史无关, 不提示。
+        warnings = _coverage_warnings(
+            svc, as_of, engine=engine, strategy_ids=[req.strategy_id],
+            params_map={req.strategy_id: params},
+            overrides_map={req.strategy_id: overrides or {}},
+        )
+        if warnings:
+            safe_data["warnings"] = warnings
         _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
         _record_strategy_selections(
             data_dir,
@@ -1299,6 +1336,13 @@ def _run_all_progressive(
                 "rows": _safe(asdict(result)).get("rows", []),
                 "computed_at": int(time.time() * 1000),
             }
+            if timeframe == "1d":
+                w = _coverage_warnings(
+                    svc, as_of, engine=engine, strategy_ids=[sid],
+                    params_map=params_map, overrides_map=overrides_map,
+                )
+                if w:
+                    payload["warnings"] = w
             all_results[sid] = payload
             elapsed_map[sid] = (time.perf_counter() - t0) * 1000
             # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到
@@ -1463,6 +1507,13 @@ def run_all(request: Request, body: Optional[dict] = None):
             "as_of": str(as_of),
             "rows": safe_rows,
         }
+        if timeframe == "1d":
+            w = _coverage_warnings(
+                svc, as_of, engine=engine, strategy_ids=[sid],
+                params_map=params_map, overrides_map=overrides_map,
+            )
+            if w:
+                results[sid]["warnings"] = w
 
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
@@ -1702,32 +1753,48 @@ def limit_ladder(
     if ext_specs:
         db = repo.store.db
         data_dir = repo.store.data_dir
+        from app.api.ext_data import _read_ext_dataframe
         from app.services.ext_data import ExtConfigStore
 
         ext_store = ExtConfigStore(data_dir)
         configs = {c.id: c for c in ext_store.load_all()}
 
+        def _dedup_ext(frame: pl.DataFrame, field: str, out_col: str) -> pl.DataFrame | None:
+            """(symbol, 字段) 两列并按 symbol 去重; 缺列时返回 None。"""
+            if frame.is_empty() or "symbol" not in frame.columns or field not in frame.columns:
+                return None
+            return (
+                frame
+                .select(["symbol", field])
+                .unique(subset=["symbol"], keep="last")
+                .rename({field: out_col})
+            )
+
         for config_id, field_name in ext_specs:
             view_name = f"ext_{config_id}"
             ext_col_name = f"{config_id}__{field_name}"
             try:
-                ext_df = pl.from_arrow(db.query(
-                    f"SELECT symbol, {quote_ident(field_name)} FROM {view_name}"
-                ).arrow())
-                if not ext_df.is_empty() and "symbol" in ext_df.columns:
-                    ext_df = ext_df.rename({field_name: ext_col_name})
-                    df = df.join(ext_df.select(["symbol", ext_col_name]), on="symbol", how="left")
+                # 扩展时序数据必须只取最新分区; 否则一个 symbol 会按历史分区数被 JOIN 放大
+                # (ext_{id} 视图覆盖 timeseries/**), 与自选股列表同口径。
+                cfg = configs.get(config_id)
+                if cfg:
+                    ext_df, _ = _read_ext_dataframe(cfg, data_dir)
+                else:
+                    ext_df = pl.from_arrow(db.query(
+                        f"SELECT symbol, {quote_ident(field_name)} FROM {view_name}"
+                    ).arrow())
+                joined = _dedup_ext(ext_df, field_name, ext_col_name)
+                if joined is not None:
+                    df = df.join(joined, on="symbol", how="left")
                     ext_col_names.append(ext_col_name)
             except Exception:
                 cfg = configs.get(config_id)
                 if cfg:
                     try:
-                        from app.api.ext_data import _parquet_glob
-                        glob = _parquet_glob(cfg, data_dir)
-                        ext_df = pl.read_parquet(glob)
-                        if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                            ext_df = ext_df.select(["symbol", field_name]).rename({field_name: ext_col_name})
-                            df = df.join(ext_df, on="symbol", how="left")
+                        ext_df, _ = _read_ext_dataframe(cfg, data_dir)
+                        joined = _dedup_ext(ext_df, field_name, ext_col_name)
+                        if joined is not None:
+                            df = df.join(joined, on="symbol", how="left")
                             ext_col_names.append(ext_col_name)
                     except Exception:
                         pass

@@ -16,6 +16,7 @@ import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
+import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
 import { useSmartPollingInterval } from '@/lib/useQuoteStream'
@@ -105,6 +106,7 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
 }) {
   const navigate = useNavigate()
   const alertsPollingInterval = useSmartPollingInterval(15_000)
+  const customNames = useCustomSignalNames()
   const alerts = useQuery({
     queryKey: ['alerts', ''],
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
@@ -196,7 +198,7 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
                   {ev.signals && ev.signals.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {ev.signals.map(signal => (
-                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(signal)}</span>
+                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(signal, customNames)}</span>
                       ))}
                     </div>
                   )}
@@ -217,7 +219,7 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
                   {ev.signals && ev.signals.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {ev.signals.map((s, j) => (
-                        <span key={j} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(s)}</span>
+                        <span key={j} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(s, customNames)}</span>
                       ))}
                     </div>
                   )}
@@ -401,15 +403,16 @@ function BreadthBar({ data }: { data: OverviewMarket['breadth'] }) {
   const flatW = Math.max(0, 100 - upW - downW)
   return (
     <div className="space-y-2">
+      {/* 与上方涨跌分布同向: 左跌(绿) 右涨(红) */}
       <div className="flex h-2.5 overflow-hidden rounded-full bg-elevated">
-        <div className="bg-bull/85" style={{ width: `${upW}%` }} />
-        <div className="bg-muted/45" style={{ width: `${flatW}%` }} />
         <div className="bg-bear/85" style={{ width: `${downW}%` }} />
+        <div className="bg-muted/45" style={{ width: `${flatW}%` }} />
+        <div className="bg-bull/85" style={{ width: `${upW}%` }} />
       </div>
       <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-        <div className="rounded bg-bull/8 px-2 py-1 text-bull">涨 <span className="font-mono">{data.up}</span></div>
-        <div className="rounded bg-elevated/70 px-2 py-1 text-muted">平 <span className="font-mono">{data.flat}</span></div>
         <div className="rounded bg-bear/8 px-2 py-1 text-bear">跌 <span className="font-mono">{data.down}</span></div>
+        <div className="rounded bg-elevated/70 px-2 py-1 text-muted">平 <span className="font-mono">{data.flat}</span></div>
+        <div className="rounded bg-bull/8 px-2 py-1 text-bull">涨 <span className="font-mono">{data.up}</span></div>
       </div>
     </div>
   )
