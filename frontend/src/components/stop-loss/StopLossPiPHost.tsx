@@ -235,6 +235,37 @@ export function StopLossPiPHost() {
   const draggingRef = useRef(false)
   const dragStartRef = useRef({ mx: 0, my: 0, ox: 0, oy: 0 })
 
+  // ===== 0. 自动补齐股票名称 (解决历史数据或快捷标记只有代码没有名称的问题) =====
+  useEffect(() => {
+    const needNameSymbols = positions
+      .filter((p) => !p.name || p.name === p.symbol || p.name.toUpperCase().includes('.SZ') || p.name.toUpperCase().includes('.SH') || p.name.toUpperCase().includes('.BJ'))
+      .map((p) => p.symbol)
+
+    if (needNameSymbols.length === 0) return
+
+    let active = true
+    api.instrumentNames(needNameSymbols)
+      .then((res) => {
+        if (!active || !res?.names) return
+        for (const [sym, realName] of Object.entries(res.names)) {
+          if (realName && realName !== sym) {
+            const cur = positions.find((p) => p.symbol.toUpperCase() === sym.toUpperCase())
+            if (cur && cur.name !== realName) {
+              addOrUpdateMonitoredPosition({
+                ...cur,
+                name: realName,
+              })
+            }
+          }
+        }
+      })
+      .catch(() => {})
+
+    return () => {
+      active = false
+    }
+  }, [positions])
+
   // ===== 1. 实时行情高频轮询 (每 2.5 秒更新一次盯盘标的) =====
   useEffect(() => {
     if (!isPipOpen || positions.length === 0) return
@@ -468,7 +499,15 @@ export function StopLossPiPHost() {
       const latest = rows[rows.length - 1]
       const cur = latest ? Number(latest.close) : 10
       const cost = parseFloat(newCostInput) > 0 ? parseFloat(newCostInput) : cur
-      const name = res.name || symbol
+      let name = res.name
+      if (!name || name === symbol) {
+        try {
+          const namesResp = await api.instrumentNames([symbol])
+          name = namesResp?.names?.[symbol] || symbol
+        } catch {
+          name = symbol
+        }
+      }
 
       addOrUpdateMonitoredPosition({
         symbol,
