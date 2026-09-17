@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from app.services import auction_benchmark, dragon_tiger, market_recap_reports, preferences
 from app.services.market_recap import recap_market_stream
+from app.services.ndjson_heartbeat import with_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,9 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
             raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}")
 
     async def stream_gen():
-        async for chunk in recap_market_stream(repo, quote_service, depth_service, as_of, req.focus):
+        async for chunk in with_heartbeat(
+            recap_market_stream(repo, quote_service, depth_service, as_of, req.focus),
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(

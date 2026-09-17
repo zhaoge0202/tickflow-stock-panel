@@ -20,6 +20,7 @@ import { boardTag } from '@/lib/board'
 import { boardTag as boardBadge } from '@/components/stock-table/primitives'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { cnSignal } from '@/lib/signals'
+import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
@@ -380,14 +381,7 @@ const statValueColor = (v: number | null | undefined) => {
 }
 
 /** 信号 ID → 可读名称映射 (内置 + 自定义), 供交易记录显示具体触发信号。 */
-function useSignalNames(): Record<string, string> {
-  const customQ = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
-  return useMemo(() => {
-    const names: Record<string, string> = {}
-    for (const cs of customQ.data?.signals ?? []) names[`csg_${cs.id}`] = cs.name
-    return names
-  }, [customQ.data])
-}
+const useSignalNames = useCustomSignalNames
 
 function ExitReasonBadge({ reason, signalId, signalNames }: { reason: string; signalId?: string | null; signalNames?: Record<string, string> }) {
   const config: Record<string, { label: string; cls: string }> = {

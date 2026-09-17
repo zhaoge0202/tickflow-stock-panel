@@ -12,6 +12,9 @@ from typing import Literal
 
 import polars as pl
 
+from app.market_time import cn_today
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,12 @@ class ExtField:
         return cls(d["name"], d.get("dtype", "string"), d.get("label", ""))
 
 
+# 日期参数值的序列化格式 (date_format):
+#   iso=YYYY-MM-DD (默认) / compact=YYYYMMDD / ts_s=unix秒 / ts_ms=unix毫秒
+# 时间戳约定为该交易日北京时间 00:00:00
+PULL_DATE_FORMATS = ("iso", "compact", "ts_s", "ts_ms")
+
+
 class PullConfig:
     """定时拉取配置。"""
     __slots__ = (
@@ -42,7 +51,7 @@ class PullConfig:
         "field_map", "schedule_minutes", "enabled",
         "last_run", "last_status", "last_message", "last_rows",
         "next_run", "time_window_start", "time_window_end", "date_param",
-        "auth",
+        "date_format", "time_field", "auth", "timeout_seconds",
     )
 
     def __init__(
@@ -63,7 +72,10 @@ class PullConfig:
         time_window_start: str | None = None,
         time_window_end: str | None = None,
         date_param: str | None = None,
+        date_format: str = "iso",
+        time_field: str | None = None,
         auth: dict | None = None,
+        timeout_seconds: int = 30,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -81,11 +93,23 @@ class PullConfig:
         self.time_window_start = time_window_start  # 每日拉取窗口起始 "HH:MM", None=不限
         self.time_window_end = time_window_end      # 每日拉取窗口结束 "HH:MM", None=不限
         # 接口按日期查询的参数名 (如 "date"): 非 None 时请求
-        # 带 ?{date_param}=YYYY-MM-DD, 支持历史回补; None = 接口只有当日快照
+        # 带 ?{date_param}={按 date_format 序列化的日期}, 支持历史回补; None = 接口只有当日快照
         self.date_param = date_param
+        # 日期参数值的格式; config.json 被手改写入非法值时归一为 iso (fail-closed)
+        self.date_format = date_format if date_format in PULL_DATE_FORMATS else "iso"
+        # 日内序列表: 响应行里的时间列名 (字段映射后的列名, 如 "ts")。配置后同一
+        # symbol 允许多行 (按 [symbol, time_field] 去重), 用于集合竞价等日内多盘
+        # 数据; None = 每日快照表 (按 symbol 去重, 默认)
+        self.time_field = (time_field or "").strip() or None
         # 拉取接口鉴权方式 {"type": "none|bearer|header|query", "header": ..., "param": ...},
         # 与自定义行情源 AuthConfig 同口径; Key 本体存 secrets_store, 不落 config.json
         self.auth = auth
+        # 单次拉取请求超时 (秒)。默认 30 与历史硬编码一致; 大响应接口 (如全量
+        # 集合竞价 /day ~77s) 可调高。config.json 手改写入非法值时归一 30 (fail-closed)
+        self.timeout_seconds = (
+            int(timeout_seconds) if isinstance(timeout_seconds, (int, float))
+            and 5 <= timeout_seconds <= 300 else 30
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -105,7 +129,10 @@ class PullConfig:
             "time_window_start": self.time_window_start,
             "time_window_end": self.time_window_end,
             "date_param": self.date_param,
+            "date_format": self.date_format,
+            "time_field": self.time_field,
             "auth": self.auth,
+            "timeout_seconds": self.timeout_seconds,
         }
 
     @classmethod
@@ -129,7 +156,10 @@ class PullConfig:
             time_window_start=d.get("time_window_start"),
             time_window_end=d.get("time_window_end"),
             date_param=d.get("date_param"),
+            date_format=d.get("date_format", "iso"),
+            time_field=d.get("time_field"),
             auth=d.get("auth"),
+            timeout_seconds=d.get("timeout_seconds", 30),
         )
 
 
@@ -297,9 +327,8 @@ class ExtConfigStore:
         config.updated_at = datetime.now().isoformat()
         cp = self._config_path(config.id)
         cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(
-            json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        atomic_write_text(
+            cp, json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
         )
         # 字段集/模式变化会改变扩展列集合: 失效扩展帧缓存与策略结果缓存。
         # 定时拉取循环的 last_run/next_run 例行回写传 keep_strategy_cache=True,
@@ -326,9 +355,8 @@ class ExtConfigStore:
             for c in configs:
                 cp = self._config_path(c.id)
                 cp.parent.mkdir(parents=True, exist_ok=True)
-                cp.write_text(
-                    json.dumps(c.to_dict(), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                atomic_write_text(
+                    cp, json.dumps(c.to_dict(), ensure_ascii=False, indent=2),
                 )
             # 迁移完成后重命名旧文件作为备份
             backup = old_path.with_suffix(".json.bak")
@@ -607,7 +635,8 @@ def write_ext_parquet(
     Returns:
         写入行数。
     """
-    snap = snapshot_date or date.today()
+    # 缺省分区日期按北京日期, 与定时拉取 (ext_pull.fetch_and_ingest) 同口径
+    snap = snapshot_date or cn_today()
     cfg_dir = _config_dir(config.id, data_dir)
 
     # 标准化 symbol 列: 用维表查找 → 准确匹配交易所
@@ -640,13 +669,27 @@ def write_ext_parquet(
         if out_path.exists():
             try:
                 existing = pl.read_parquet(out_path)
-                key = "symbol" if "symbol" in df.columns else df.columns[0]
-                df = pl.concat([existing, df]).unique(subset=[key], keep="last")
+                key: str | list[str] = "symbol" if "symbol" in df.columns else df.columns[0]
+                # 日内序列表 (配置 time_field): 同 symbol 同时刻去重, 不同盘并存
+                tf = config.pull.time_field if config.pull else None
+                if tf and tf in df.columns:
+                    key = [key, tf]
+                df = pl.concat([existing, df]).unique(
+                    subset=[key] if isinstance(key, str) else key, keep="last"
+                )
             except Exception as e:
                 logger.warning("扩展表 %s 合并去重失败, 将覆盖写入: %s", config.id, e)
 
     df = cast_df_to_schema(df, config.fields)
-    df.write_parquet(out_path)
+    if config.mode != "snapshot":
+        # 日内序列表: 分区内按 [symbol, 时间列] 升序落盘。读侧 (screener._load_ext_value_maps、
+        # ext_factors 因子帧、板块资金流) 按 symbol unique(keep="last") 收敛到一行, 只认行序;
+        # 上面的合并去重不保序, 上游返回顺序也不保证时间序, 不排序时取到的是随机一盘
+        tf = config.pull.time_field if config.pull else None
+        if tf and tf in df.columns:
+            df = df.sort(["symbol", tf] if "symbol" in df.columns else [tf], maintain_order=True)
+    # 原子写: 中断时半截文件会让下一次写入走「合并去重失败, 将覆盖写入」, 静默丢掉已有行
+    atomic_write_parquet(df, out_path)
     logger.info("扩展表写入: %s → %s (%d 行)", config.id, out_path, len(df))
     # 扩展列已接入 enriched 帧/因子注册表: 写入后必须失效相关缓存
     _invalidate_ext_derived(data_dir, keep_strategy_cache=keep_strategy_cache)
@@ -727,7 +770,7 @@ def fix_symbol_format(config: ExtConfig, data_dir: Path) -> int:
             df = df.with_columns(normalize_symbol(df["symbol"], lookup))
             new = df["symbol"].to_list()
             if old != new:
-                df.write_parquet(parquet_path)
+                atomic_write_parquet(df, parquet_path)
                 fixed += 1
                 logger.info("代码格式修复: %s/%s (%d 行)", config.id, parquet_path.parent.name, len(df))
         except Exception as e:

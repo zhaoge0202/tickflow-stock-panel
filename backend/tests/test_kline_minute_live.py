@@ -61,6 +61,8 @@ def _patch_market(monkeypatch, *, in_session: bool) -> None:
     monkeypatch.setattr(kline_api, "cn_now", lambda: _NOW)
     monkeypatch.setattr(kline_api, "cn_today", lambda: _TODAY)
     monkeypatch.setattr(kline_api, "in_continuous_session", lambda: in_session)
+    # 缺省日期路径会问交易日探针; 钉成交易日 (_NOW 是周三), 不打真实行情请求
+    monkeypatch.setattr(kline_api.trading_day, "is_trading_day", lambda now=None: True)
 
 
 def _patch_live_fetch(monkeypatch) -> None:

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.services.fs_utils import atomic_write_parquet
+
 logger = logging.getLogger(__name__)
 
 # ───────────────────────── 状态分类阈值(可调) ─────────────────────────
@@ -540,7 +542,7 @@ def refresh_phase_labels(data_dir: Path) -> int:
     except Exception as e:
         logger.warning("refresh_phase_labels failed: %s", e)
         return 0
-    labeled.write_parquet(regime_path(data_dir))
+    atomic_write_parquet(labeled, regime_path(data_dir))
     return labeled.height
 
 
@@ -575,7 +577,8 @@ def upsert_regime_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
         new_rows = new_rows.select(target_cols)
         combined = pl.concat([kept, new_rows], how="vertical_relaxed")
     combined = combined.sort("date").unique(subset=["date"], keep="last")
-    combined.write_parquet(p)
+    # 原子写: 半截文件会让 load_regime_history 返回空表, 下一次 upsert 只写回本批新行
+    atomic_write_parquet(combined, p)
 
 
 def get_regime_coverage(data_dir: Path) -> dict:

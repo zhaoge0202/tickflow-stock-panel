@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.services import stock_reports
+from app.services.ndjson_heartbeat import with_heartbeat
 from app.services.stock_analyzer import analyze_stock_stream
 
 logger = logging.getLogger(__name__)
@@ -165,7 +166,7 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     data_dir = repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in analyze_stock_stream(repo, data_dir, req.symbol, req.focus):
+        async for chunk in with_heartbeat(analyze_stock_stream(repo, data_dir, req.symbol, req.focus)):
             yield chunk + "\n"
 
     return StreamingResponse(

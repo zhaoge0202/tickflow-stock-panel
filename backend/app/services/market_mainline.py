@@ -21,6 +21,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.services.fs_utils import atomic_write_parquet
 from app.services.rps_rotation import _load_concept_map_df
 
 logger = logging.getLogger(__name__)
@@ -273,7 +274,7 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
         kept = kept.select(keep_exprs)
         combined = pl.concat([kept, new_rows.select(target_cols)], how="vertical_relaxed")
     combined = combined.sort(["date", "kind", "rank"])
-    combined.write_parquet(p)
+    atomic_write_parquet(combined, p)
 
 
 def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = None,

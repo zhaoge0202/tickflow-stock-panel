@@ -22,6 +22,7 @@ from app.data_providers.custom.mapper import (
     map_rows,
 )
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
+from app.market_time import cn_now
 from app.tickflow.rate_limits import chunked, sleep_between_batches
 
 logger = logging.getLogger(__name__)
@@ -279,9 +280,12 @@ class GenericHTTPProvider:
         传当日值。稳态增量 (get_intraday_latest) YAML 声明式源不提供 — 服务自动
         降级为仅修复轮模式并放慢节奏。
         """
-        start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # 当日窗口按北京时间墙钟 (naive, 与分钟K契约及 kline_sync.fetch_intraday_custom_batch
+        # 回退路径同口径): datetime.now() 取服务器本地时区, UTC 主机上窗口整体早 8 小时
+        end = cn_now().replace(tzinfo=None)
+        start = end.replace(hour=0, minute=0, second=0, microsecond=0)
         return self._fetch_minute_dataset(
-            "full_minute", symbols, start, datetime.now(), asset_type, "1m", None,
+            "full_minute", symbols, start, end, asset_type, "1m", None,
         )
 
     def _fetch_minute_dataset(

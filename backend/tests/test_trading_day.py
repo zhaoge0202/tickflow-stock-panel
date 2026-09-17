@@ -254,3 +254,25 @@ def test_fuyao_provider_trading_days_conversion(monkeypatch):
     monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
     days = FuyaoProvider().trading_days()
     assert days == {date(2026, 9, 4), date(2026, 9, 7)}
+
+
+def test_unknown_verdict_is_cached_within_short_ttl(monkeypatch):
+    """未知结论也要按 _TTL_UNKNOWN_S 缓存: 轮询每拍重探会重复打 tickflow 请求。"""
+    monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
+    calls = {"fuyao": 0, "tickflow": 0}
+
+    def _fuyao(now):
+        calls["fuyao"] += 1
+        return None
+
+    def _tickflow(now):
+        calls["tickflow"] += 1
+        return None
+
+    monkeypatch.setattr(trading_day, "_probe_fuyao", _fuyao)
+    monkeypatch.setattr(trading_day, "_probe_tickflow", _tickflow)
+
+    assert is_trading_day(monday) is None
+    assert is_trading_day(monday) is None
+    assert is_trading_day(monday) is None
+    assert calls == {"fuyao": 1, "tickflow": 1}

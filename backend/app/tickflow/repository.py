@@ -1426,32 +1426,47 @@ class KlineRepository:
                 df = df.filter(pl.col("symbol").is_in(symbols))
             return df.sort(["symbol", "date"])
 
-        selected = list(dict.fromkeys(columns))
+        requested = list(columns)
+        cache = getattr(self, "_enriched_history_cache", None)
+        if cache is not None and not cache.is_empty() and "date" in cache.columns:
+            data_dir = getattr(getattr(self, "store", None), "data_dir", None)
+            cache_valid = data_dir is None
+            if data_dir is not None:
+                try:
+                    current_generation = self.get_matrix_data_generation("stock")
+                except EnrichedGenerationUnavailableError:
+                    current_generation = None
+                cache_valid = (
+                    current_generation is not None
+                    and getattr(self, "_enriched_history_generation", None) == current_generation
+                )
+            cache_start = getattr(self, "_enriched_history_start", None)
+            if cache_start is None and data_dir is None:
+                cache_start = cache["date"].min()
+            if cache_valid and cache_start is not None and cache_start <= start and cache["date"].max() >= end:
+                available = set(cache.columns)
+                selected = [col for col in requested if col in available]
+                if "symbol" not in selected and "symbol" in available:
+                    selected.insert(0, "symbol")
+                if "date" not in selected and "date" in available:
+                    selected.insert(1, "date")
+                # 先投影再过滤, 避免把无关宽列带入 Polars 过滤和后续计算。
+                filter_columns = list(dict.fromkeys(selected))
+                df = cache.select(filter_columns).filter(
+                    (pl.col("date") >= start) & (pl.col("date") <= end)
+                )
+                if symbols is not None:
+                    df = df.filter(pl.col("symbol").is_in(symbols))
+                # 空结果保留历史接口的完整 schema; 非空结果按请求列返回。
+                return cache.clear() if df.is_empty() else df.select(selected)
+        elif getattr(self, "_enriched_warming", False):
+            return None
+
+        selected = list(dict.fromkeys(requested))
         if "symbol" not in selected:
             selected.insert(0, "symbol")
         if "date" not in selected:
             selected.insert(1, "date")
-
-        cache = getattr(self, "_enriched_history_cache", None)
-        if cache is not None and not cache.is_empty() and "date" in cache.columns:
-            try:
-                current_generation = self.get_matrix_data_generation("stock")
-            except EnrichedGenerationUnavailableError:
-                current_generation = None
-            if current_generation is not None and self._enriched_history_generation == current_generation:
-                available = set(cache.columns)
-                if (
-                    all(col in available for col in selected)
-                    and self._enriched_history_start is not None
-                    and self._enriched_history_start <= start
-                    and cache["date"].max() >= end
-                ):
-                    df = cache.filter((pl.col("date") >= start) & (pl.col("date") <= end))
-                    if symbols is not None:
-                        df = df.filter(pl.col("symbol").is_in(symbols))
-                    return df.select(selected)
-        elif getattr(self, "_enriched_warming", False):
-            return None
 
         try:
             lf = scan_enriched_parquet(self._enriched_glob)

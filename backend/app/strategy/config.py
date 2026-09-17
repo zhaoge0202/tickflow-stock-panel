@@ -11,6 +11,8 @@ import json
 import logging
 from pathlib import Path
 
+from app.services.fs_utils import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # 进程内缓存: 监控引擎每轮对每条策略规则调用 load_override, 每次读盘+parse 纯重复;
@@ -77,7 +79,7 @@ def save_override(data_dir: Path, strategy_id: str, overrides: dict) -> None:
     """保存策略的用户覆盖配置（全量覆盖写）"""
     p = _path(data_dir, strategy_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(overrides, ensure_ascii=False, indent=2))
     _invalidate_override_cache(p)
 
 

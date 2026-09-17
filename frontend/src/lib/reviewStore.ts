@@ -10,7 +10,7 @@
  *  - AbortController 存模块级 ref,组件卸载不中断流
  *  - 订阅者列表(notify 机制),Review mount 时订阅、unmount 时退订
  */
-import { api } from '@/lib/api'
+import { api, friendlyStreamError } from '@/lib/api'
 
 export type ReviewPhase = 'idle' | 'loading' | 'streaming' | 'done' | 'error'
 
@@ -121,7 +121,7 @@ export async function startReviewGeneration(
     }
   } catch (e: any) {
     if (!abortCtrl.signal.aborted) {
-      state = { ...state, error: e?.message ?? '复盘失败', phase: 'error' }
+      state = { ...state, error: friendlyStreamError(e?.message) || '复盘失败', phase: 'error' }
       notify()
     }
   } finally {

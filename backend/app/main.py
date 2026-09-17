@@ -40,6 +40,7 @@ from app.api import (
     rps,
     screener,
     sector_flow,
+    sector_rotation,
     signals,
     signal_frame,
     stock_analysis,
@@ -579,6 +580,7 @@ app.include_router(alert_outcomes.router)
 app.include_router(replay.router)
 app.include_router(rps.router)
 app.include_router(trade_ticks.router)
+app.include_router(sector_rotation.router)
 
 # 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。
 extension_registry, extension_load_errors = configure_backend_extensions(app)

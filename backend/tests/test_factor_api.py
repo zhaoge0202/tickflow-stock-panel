@@ -115,6 +115,33 @@ def test_trial_computes_virtual_factor_via_shared_path() -> None:
     assert payload["ic_mean"] is not None
 
 
+@pytest.mark.parametrize(
+    ("formula", "sign", "win_rate"),
+    [("if_else(close > 40, close, 0)", 1.0, 1.0), ("if_else(close > 40, -close, 0)", -1.0, 0.0)],
+)
+def test_trial_excludes_undefined_ic_of_constant_cross_section(formula, sign, win_rate) -> None:
+    """截面上公式值全相同的日子 Rank IC 无定义 (pl.corr 返回 NaN 而非 null)。
+
+    离散公式常见 (如 ETF 池里的 if_else(change_pct > 0.05, 1, 0), 当天没有标的满足
+    时全为 0)。因子检验 (FactorBacktestService) 与挖掘都按 is_finite 剔除这类日子;
+    试算只滤 null, NaN 混进统计后 IC 均值/标准差/IR 全部变成 NaN (响应里为 null),
+    胜率还把 NaN 当成正 IC 计入 (polars 中 NaN > 0 为真)。
+
+    合成面板: 前 10 个截面三只股票全为 0 (IC 无定义), 之后 26 个截面 |IC| = √3/2
+    (两只并列), 最后 3 个截面 |IC| = 1; 取最近 30 个截面时恰好混入 1 个无定义截面。
+    """
+    response = _client(with_engine=True).post(
+        "/api/factors/trial", json={"formula": formula, "days": 30},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ic_mean"] == pytest.approx(sign * (26 * (3 ** 0.5 / 2) + 3) / 29, abs=1e-4)
+    assert payload["ic_win_rate"] == pytest.approx(win_rate)
+    assert payload["n_dates"] == 29
+    assert [point["ic"] for point in payload["ic_series"] if point["ic"] is None] == []
+    assert len(payload["ic_series"]) == 29
+
+
 def test_group_and_status_update_after_registry_load(tmp_path, cleanup_registry) -> None:
     """改分组/状态在因子已注册 (启动加载后) 的真实路径下可用。
 
