@@ -136,7 +136,8 @@ def trial_formula(req: FormulaTrialRequest, request: Request) -> dict:
             pl.corr(pl.col(FACTOR_COLUMN).rank(method="average"), pl.col("_next_return").rank(method="average")).alias("ic"),
             pl.len().alias("n_symbols"),
         )
-        .filter(pl.col("ic").is_not_null())
+        # 截面值全相同时 pl.corr 返回 NaN (非 null), 与 FactorBacktestService 同口径剔除
+        .filter(pl.col("ic").is_not_null() & pl.col("ic").is_finite())
         .sort("date")
         .tail(req.days)
     )
