@@ -158,6 +158,42 @@ def generate_preview_1450_from_context(
         if c not in ["open", "high", "low", "close", "volume", "amount", "date", "symbol"]
     ]
     day_1450 = agg_1450.join(day_meta.select(["symbol"] + meta_cols), on="symbol", how="left")
+
+    # 核心修复: 09:25 集合竞价决定的真实开盘价已在 day_meta/current 中权威定型。
+    # 分钟线第一根 bar 常因数据源延迟记录的是 09:30 连续竞价撮合价而非集合竞价价，
+    # 导致盘中估算的高开幅度失真。此处强制优先继承 day_meta 的权威 open (及融合 low/high 极值)。
+    canonical_bounds = [c for c in ["open", "high", "low"] if c in day_meta.columns]
+    if canonical_bounds:
+        bound_df = day_meta.select(["symbol"] + canonical_bounds).rename(
+            {c: f"_canonical_{c}" for c in canonical_bounds}
+        )
+        day_1450 = day_1450.join(bound_df, on="symbol", how="left")
+        transforms = []
+        if "_canonical_open" in day_1450.columns:
+            transforms.append(
+                pl.when(pl.col("_canonical_open").is_not_null() & (pl.col("_canonical_open") > 0))
+                .then(pl.col("_canonical_open"))
+                .otherwise(pl.col("open"))
+                .alias("open")
+            )
+        if "_canonical_low" in day_1450.columns:
+            transforms.append(
+                pl.when(pl.col("_canonical_low").is_not_null() & (pl.col("_canonical_low") > 0))
+                .then(pl.min_horizontal([pl.col("_canonical_low"), pl.col("low")]))
+                .otherwise(pl.col("low"))
+                .alias("low")
+            )
+        if "_canonical_high" in day_1450.columns:
+            transforms.append(
+                pl.when(pl.col("_canonical_high").is_not_null() & (pl.col("_canonical_high") > 0))
+                .then(pl.max_horizontal([pl.col("_canonical_high"), pl.col("high")]))
+                .otherwise(pl.col("high"))
+                .alias("high")
+            )
+        if transforms:
+            day_1450 = day_1450.with_columns(transforms)
+        day_1450 = day_1450.drop([f"_canonical_{c}" for c in canonical_bounds], strict=False)
+
     panel_1450 = pl.concat([hist_prev, day_1450], how="diagonal_relaxed").sort(["symbol", "date"])
 
     ctx_1450 = StrategyDataContext(

@@ -35,6 +35,8 @@ export interface StopLossCalculation {
   ma5Price: number | null
   effectiveStopPrice: number
   effectiveExitReason: 'trailing_stop' | 'stop_loss' | 'ma5_breakdown' | 'max_hold' | 'none'
+  isProfitLock: boolean    // 回撤线是否高于买入成本 (是: 真正锁定利润止盈; 否: 高点回撤防守)
+  trailingLabel: string    // 自适应文案: 移动止盈 / 高点防守
   safetyMarginPct: number  // (currentPrice - effectiveStopPrice) / currentPrice * 100
   pnlPct: number           // (currentPrice - costPrice) / costPrice * 100
   state: StopLossState
@@ -92,6 +94,9 @@ export function calculateDynamicStopLoss(input: StopLossInput): StopLossCalculat
   const safetyMarginPct = current > 0 ? ((current - effectiveStopPrice) / current) * 100 : 0
   const pnlPct = cost > 0 ? ((current - cost) / cost) * 100 : 0
 
+  const isProfitLock = trailingStopPrice >= cost
+  const trailingLabel = isProfitLock ? '移动止盈' : '高点防守'
+
   let state: StopLossState = 'NORMAL'
   if (current <= effectiveStopPrice || isOverHold) {
     state = 'TRIGGERED'
@@ -108,6 +113,8 @@ export function calculateDynamicStopLoss(input: StopLossInput): StopLossCalculat
     ma5Price: ma5Price != null ? Number(ma5Price.toFixed(3)) : null,
     effectiveStopPrice: Number(effectiveStopPrice.toFixed(3)),
     effectiveExitReason,
+    isProfitLock,
+    trailingLabel,
     safetyMarginPct: Number(safetyMarginPct.toFixed(2)),
     pnlPct: Number(pnlPct.toFixed(2)),
     state,

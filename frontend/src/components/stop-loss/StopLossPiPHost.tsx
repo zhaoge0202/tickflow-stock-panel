@@ -30,6 +30,7 @@ import {
   Target,
   Loader2,
   Tv,
+  RotateCcw,
 } from 'lucide-react'
 
 // ===== 检查浏览器原生 Document Picture-in-Picture 支持 =====
@@ -191,7 +192,7 @@ function renderStopLossCanvas(
       ? '🚨 触及出场线，建议立即离场！'
       : isWarning
         ? `⚠️ 安全垫仅剩 +${calc.safetyMarginPct}% (预警)`
-        : `安全垫 +${calc.safetyMarginPct}% · 移动止盈 ${calc.trailingStopPrice.toFixed(2)}`
+        : `安全垫 +${calc.safetyMarginPct}% · ${calc.trailingLabel} ${calc.trailingStopPrice.toFixed(2)}`
     ctx.fillText(statusText, 20, y + 74)
 
     // 盈亏
@@ -292,46 +293,44 @@ export function StopLossPiPHost() {
     }
   }, [isPipOpen, positions])
 
-  // ===== 2. 视频画中画 Canvas 实时连续重绘 =====
+  // ===== 2. 视频画中画后台预热 (常驻建立媒体流，确保 metadata 早就就绪，绝不抛 InvalidStateError) =====
   useEffect(() => {
-    if (canvasRef.current) {
-      renderStopLossCanvas(canvasRef.current, positions)
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas')
     }
-  }, [positions])
+    renderStopLossCanvas(canvasRef.current, positions)
 
-  // ===== 3. 终极置顶: 启动真正的操作系统级视频画中画 (100% 任何软件无法遮挡) =====
-  const startSystemVideoPip = useCallback(async () => {
-    try {
-      if (!canvasRef.current) {
-        const c = document.createElement('canvas')
-        canvasRef.current = c
-      }
-      renderStopLossCanvas(canvasRef.current, positions)
+    let v = videoRef.current
+    if (!v) {
+      v = document.createElement('video')
+      v.muted = true
+      v.playsInline = true
+      v.autoplay = true
+      v.style.position = 'fixed'
+      v.style.width = '1px'
+      v.style.height = '1px'
+      v.style.opacity = '0.001'
+      v.style.pointerEvents = 'none'
+      v.style.zIndex = '-9999'
+      document.body.appendChild(v)
 
-      let v = videoRef.current
-      if (!v) {
-        v = document.createElement('video')
-        v.muted = true
-        v.playsInline = true
-        const stream = (canvasRef.current as any).captureStream(2)
+      const stream = (canvasRef.current as any).captureStream
+        ? (canvasRef.current as any).captureStream(2)
+        : null
+      if (stream) {
         v.srcObject = stream
-        videoRef.current = v
-        v.addEventListener('leavepictureinpicture', () => {
-          setIsVideoPipActive(false)
-        })
+        v.play().catch(() => {})
       }
-
-      await v.play()
-      await v.requestPictureInPicture()
-      setIsVideoPipActive(true)
-      toast('🎯 操作系统级永远置顶画中画已成功启动！点击任何其他软件均无法遮挡', 'success')
-    } catch (err: any) {
-      console.warn('视频画中画开启失败:', err)
-      toast(`画中画启动提示: ${err.message || '请允许画中画权限'}`, 'error')
+      videoRef.current = v
+      v.addEventListener('leavepictureinpicture', () => {
+        setIsVideoPipActive(false)
+      })
+    } else if (v.paused) {
+      v.play().catch(() => {})
     }
   }, [positions])
 
-  // ===== 4. DOM 原生画中画 / 独立小窗管理 =====
+  // ===== 3. DOM 原生画中画 / 独立小窗管理 =====
   const copyStylesToWindow = (targetWin: Window) => {
     Array.from(document.styleSheets).forEach((styleSheet) => {
       try {
@@ -402,6 +401,59 @@ export function StopLossPiPHost() {
       console.error('打开独立小窗失败:', err)
     }
   }, [positions.length])
+
+  // ===== 4. 终极置顶: 智能选择最强系统级画中画 (100% 任何外部软件无法遮挡) =====
+  const handleToggleSystemPip = useCallback(async () => {
+    // 1. 若当前已处于置顶状态，点击直接退出
+    if (pipWindow) {
+      pipWindow.close()
+      setPipWindow(null)
+      toast('已退出置顶盯盘')
+      return
+    }
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture().catch(() => {})
+      setIsVideoPipActive(false)
+      toast('已退出置顶画中画')
+      return
+    }
+
+    // 2. 优先策略: 现代浏览器原生 Document Picture-in-Picture (支持完整鼠标/键盘交互，绝对系统置顶)
+    if (isDocumentPipSupported()) {
+      try {
+        await openFloatingWindow()
+        return
+      } catch (err) {
+        console.warn('Document PiP 调起失败，自动回退至视频画中画:', err)
+      }
+    }
+
+    // 3. 兼容策略: 视频画中画 (Video PiP，全浏览器 100% 绝对置顶，同花顺等绝不遮挡)
+    try {
+      const v = videoRef.current
+      if (!v) {
+        throw new Error('画中画组件未就绪，请稍候重试')
+      }
+
+      // 确保至少播放并且 metadata 就绪
+      if (v.readyState < 1) {
+        v.play().catch(() => {})
+        await new Promise<void>((resolve) => {
+          v.onloadedmetadata = () => resolve()
+          setTimeout(resolve, 200)
+        })
+      } else if (v.paused) {
+        v.play().catch(() => {})
+      }
+
+      await v.requestPictureInPicture()
+      setIsVideoPipActive(true)
+      toast('🎯 操作系统级置顶画中画已启动！同花顺/通达信绝对无法遮挡', 'success')
+    } catch (err: any) {
+      console.warn('视频画中画开启失败，回退至独立小窗:', err)
+      openFloatingWindow()
+    }
+  }, [pipWindow, openFloatingWindow])
 
   // ===== 5. 手动添加标的逻辑 =====
   const handleAddNewSymbol = async () => {
@@ -526,20 +578,20 @@ export function StopLossPiPHost() {
         </div>
 
         <div className="flex items-center gap-1 text-muted">
-          {/* 按钮 1: 真正操作系统级永远置顶画中画 (任何软件绝不遮挡) */}
+          {/* 按钮 1: 真正操作系统级永远置顶小窗 (同花顺/通达信绝对无法遮挡) */}
           <button
             type="button"
-            onClick={startSystemVideoPip}
+            onClick={handleToggleSystemPip}
             className={cn(
               'flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors cursor-pointer border',
-              isVideoPipActive
+              pipWindow || isVideoPipActive
                 ? 'bg-bull/20 text-bull border-bull/40 shadow-sm'
                 : 'border-border/80 bg-elevated/60 text-secondary hover:text-foreground hover:border-accent/40',
             )}
-            title="【终极置顶】开启系统级永远置顶画中画小窗（同花顺/通达信绝对无法遮挡，实时每秒刷新）"
+            title="【终极置顶】开启系统级永远置顶小窗（同花顺/通达信绝对无法遮挡，实时刷新并支持操作）"
           >
             <Tv className="h-3 w-3 text-bull" />
-            <span>系统置顶</span>
+            <span>{pipWindow || isVideoPipActive ? '置顶中' : '系统置顶'}</span>
           </button>
 
           {/* 按钮 2: 手动添加标的 */}
@@ -738,15 +790,29 @@ export function StopLossPiPHost() {
                             autoFocus
                             value={editingPrice}
                             onChange={(e) => setEditingPrice(e.target.value)}
-                            className="w-14 rounded border border-accent bg-surface px-1 py-0.5 text-right font-mono text-xs text-foreground focus:outline-none"
+                            onBlur={() => {
+                              const p = parseFloat(editingPrice)
+                              if (p > 0 && Math.abs(p - item.costPrice) > 0.001) {
+                                addOrUpdateMonitoredPosition({
+                                  ...item,
+                                  costPrice: p,
+                                  peakPrice: Math.max(p, item.currentPrice || 0),
+                                })
+                                toast(`已更新成本为 ${p.toFixed(2)} 并重置高点`, 'success')
+                              }
+                              setEditingSymbol(null)
+                            }}
+                            className="w-14 rounded border border-accent bg-surface px-1 py-0.5 text-right font-mono text-xs text-foreground focus:outline-none shadow-xs"
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
                                 const p = parseFloat(editingPrice)
-                                if (p > 0) {
+                                if (p > 0 && Math.abs(p - item.costPrice) > 0.001) {
                                   addOrUpdateMonitoredPosition({
                                     ...item,
                                     costPrice: p,
+                                    peakPrice: Math.max(p, item.currentPrice || 0),
                                   })
+                                  toast(`已更新成本为 ${p.toFixed(2)} 并重置高点`, 'success')
                                 }
                                 setEditingSymbol(null)
                               } else if (e.key === 'Escape') {
@@ -761,11 +827,13 @@ export function StopLossPiPHost() {
                             setEditingSymbol(item.symbol)
                             setEditingPrice(String(item.costPrice))
                           }}
-                          className="font-mono font-medium text-secondary hover:text-accent cursor-pointer flex items-center gap-0.5"
-                          title="点击快速修改买入成本价"
+                          className="font-mono font-medium text-secondary hover:text-accent cursor-pointer flex items-center gap-0.5 group"
+                          title="点击快速修改买入成本价 (修改后自动按新成本重置高点)"
                         >
-                          {fmtPrice(item.costPrice)}
-                          <Edit2 className="h-2.5 w-2.5 opacity-40 hover:opacity-100" />
+                          <span className="underline decoration-dotted decoration-muted group-hover:decoration-accent">
+                            {fmtPrice(item.costPrice)}
+                          </span>
+                          <Edit2 className="h-2.5 w-2.5 opacity-40 group-hover:opacity-100 text-accent" />
                         </span>
                       )}
                     </div>
@@ -775,9 +843,27 @@ export function StopLossPiPHost() {
                         最高 Peak
                         <ArrowUpRight className="h-2.5 w-2.5 text-bull" />
                       </span>
-                      <span className="font-mono font-medium text-bull">
-                        {fmtPrice(calc.peakPrice)}
-                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-mono font-medium text-bull">
+                          {fmtPrice(calc.peakPrice)}
+                        </span>
+                        {calc.peakPrice > item.costPrice && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              addOrUpdateMonitoredPosition({
+                                ...item,
+                                peakPrice: Math.max(item.costPrice, item.currentPrice || 0),
+                              })
+                              toast(`已重置 ${item.name} 的 Peak 为当前买入基准`)
+                            }}
+                            className="p-0.5 rounded text-[9px] text-muted hover:text-foreground hover:bg-elevated cursor-pointer"
+                            title="一键将 Peak 重新对齐为当前买入基准 (去除买入前的历史虚高点)"
+                          >
+                            <RotateCcw className="h-2.5 w-2.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -854,7 +940,11 @@ export function StopLossPiPHost() {
                         </b>
                       </span>
                       <span>
-                        移动止盈线: <span className="font-mono text-secondary">{fmtPrice(calc.trailingStopPrice)}</span>
+                        {calc.trailingLabel}线:{' '}
+                        <span className="font-mono text-secondary">{fmtPrice(calc.trailingStopPrice)}</span>
+                        <span className="text-[9px] text-muted ml-0.5">
+                          ({calc.isProfitLock ? '锁定利润' : '高点-3.5%'})
+                        </span>
                       </span>
                     </div>
                   </div>

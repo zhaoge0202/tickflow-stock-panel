@@ -99,6 +99,7 @@ export function addOrUpdateMonitoredPosition(pos: {
   symbol: string
   name: string
   costPrice: number
+  peakPrice?: number
   buyDate?: string
   strategyId?: string
   strategyName?: string
@@ -111,15 +112,26 @@ export function addOrUpdateMonitoredPosition(pos: {
   const existingIdx = _positions.findIndex((p) => p.symbol.toUpperCase() === normSymbol)
 
   const initialCost = pos.costPrice > 0 ? pos.costPrice : (pos.currentPrice || 10)
-  const initialHigh = Math.max(initialCost, pos.todayHigh || 0, pos.currentPrice || 0)
+  // 新加标的: 初始 Peak 默认为买入起步价 (成本与现价较高者), 避免拿买入前的历史全天最高绑架持仓
+  const initialPeak = pos.peakPrice && pos.peakPrice > 0
+    ? pos.peakPrice
+    : Math.max(initialCost, pos.currentPrice || 0)
 
   if (existingIdx >= 0) {
     const prev = _positions[existingIdx]
+    const costChanged = pos.costPrice > 0 && Math.abs(pos.costPrice - prev.costPrice) > 0.001
+    // 用户修改成本价或显式重置 Peak 时，重置 Peak 为新买入基准，不再锁死在买入前的高点
+    const resolvedPeak = pos.peakPrice && pos.peakPrice > 0
+      ? pos.peakPrice
+      : costChanged
+        ? Math.max(pos.costPrice, pos.currentPrice ?? prev.currentPrice ?? 0)
+        : Math.max(prev.peakPrice, initialPeak)
+
     const updated: MonitoredPosition = {
       ...prev,
       name: pos.name || prev.name,
       costPrice: pos.costPrice > 0 ? pos.costPrice : prev.costPrice,
-      peakPrice: Math.max(prev.peakPrice, initialHigh),
+      peakPrice: resolvedPeak,
       currentPrice: pos.currentPrice ?? prev.currentPrice,
       todayHigh: pos.todayHigh ?? prev.todayHigh,
       ma5: pos.ma5 !== undefined ? pos.ma5 : prev.ma5,
@@ -132,7 +144,7 @@ export function addOrUpdateMonitoredPosition(pos: {
       symbol: normSymbol,
       name: pos.name || normSymbol,
       costPrice: initialCost,
-      peakPrice: initialHigh,
+      peakPrice: initialPeak,
       buyDate: pos.buyDate || todayStr,
       strategyId: pos.strategyId,
       strategyName: pos.strategyName,
@@ -148,6 +160,23 @@ export function addOrUpdateMonitoredPosition(pos: {
   _isPipOpen = true
   savePipOpenToStorage(true)
   _emit()
+}
+
+/** 重置标的的最高 Peak (例如盘后重新对齐买入基准) */
+export function resetPositionPeak(symbol: string) {
+  const normSymbol = symbol.trim().toUpperCase()
+  const idx = _positions.findIndex((p) => p.symbol.toUpperCase() === normSymbol)
+  if (idx >= 0) {
+    const prev = _positions[idx]
+    const newPeak = Math.max(prev.costPrice, prev.currentPrice || 0)
+    _positions = [
+      ..._positions.slice(0, idx),
+      { ...prev, peakPrice: newPeak },
+      ..._positions.slice(idx + 1),
+    ]
+    savePositionsToStorage(_positions)
+    _emit()
+  }
 }
 
 /** 移除盯盘持仓 */
@@ -176,7 +205,9 @@ export function updateMonitoredQuotes(
     if (!q) return item
 
     const newCurrent = q.currentPrice > 0 ? q.currentPrice : item.currentPrice
-    const newHigh = Math.max(item.peakPrice, q.high || 0, newCurrent || 0)
+    // 关键修正: 持仓生命周期的最高 Peak 只能由买入后的实际现价 newCurrent 推高，
+    // 绝不能拿当日全天历史最高价 q.high 硬性抬高，否则尾盘买入的持仓会被买入前的历史冲高永久绑架！
+    const newHigh = Math.max(item.peakPrice, newCurrent || 0)
     const newMa5 = q.ma5 !== undefined ? q.ma5 : item.ma5
 
     // 计算实时动态出场状态
