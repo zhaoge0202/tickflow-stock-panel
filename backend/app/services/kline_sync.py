@@ -969,6 +969,13 @@ def sync_minute_batch(
 
     tf = get_client()
 
+    # naive 窗口按北京墙钟解释 (同 _as_beijing): /api/kline/minute-batch 以 naive 北京墙钟
+    # 构造窗口, 直接交给 _datetime_to_ms 会按服务器本地时区换算, UTC 主机上整体晚 8 小时
+    if start_time is not None:
+        start_time = _as_beijing(start_time)
+    if end_time is not None:
+        end_time = _as_beijing(end_time)
+
     # TickFlow count 上限 10000 根/股, 1 天 240 根 → 单次最多约 41 个交易日。
     # 按 segment_trading_days 交易日分段 (交易日→自然日 ×7/5 换算, 含节假日余量)。
     seg_calendar_days = max(1, int(segment_trading_days * 7 / 5))
