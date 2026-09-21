@@ -148,6 +148,7 @@ def test_sync_instruments_interrupted_keeps_existing_table(tmp_path: Path, crash
         instrument_sync, "_fetch_instruments_via_provider",
         lambda: [{"symbol": "600036.SH", "name": "招商银行"}],
     )
+    monkeypatch.setattr(instrument_sync, "_fetch_instruments_via_tickflow", lambda: [])
 
     crash.armed = True
     with pytest.raises(OSError, match="simulated kill"):
