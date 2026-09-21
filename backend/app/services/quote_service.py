@@ -254,12 +254,21 @@ class QuoteService:
     CUSTOM_PROVIDER_MIN_INTERVAL = 1.0
     DEFAULT_INTERVAL = 6.0
     MAX_INTERVAL = 60.0
+    # 全量 enriched 是冷路径兜底, 同一天最多启动一次, 避免 live_agg
+    # 暂不可用时每轮行情都重复扫描 90 日 × 全市场 parquet。
+    FULL_ENRICHED_REBUILD_COOLDOWN_S = 60.0
+    FETCH_BACKOFF_FACTOR = 1.2
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # 串行化行情拉取: 手动 POST /refresh 与后台轮询线程可能并发调用
         # _fetch_quotes, 两者同时写同一批 parquet/缓存会互相覆盖
         self._fetch_lock = threading.Lock()
+        # 全量 enriched 采用 single-flight: 行情轮询只负责提交一次后台任务,
+        # 后续轮次合并掉, 不阻塞下一轮行情采集和 HTTP 请求。
+        self._enriched_rebuild_lock = threading.Lock()
+        self._enriched_rebuild_running = False
+        self._enriched_rebuild_last_started = 0.0
         self._running = False
         self._enabled = False      # 全局开关 (持久化到 preferences)
         # 暂停态: 盘后管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
@@ -711,11 +720,23 @@ class QuoteService:
 
                 phase = self._market_phase()
                 if self._should_fetch_for_phase(phase):
+                    fetch_started = time.perf_counter()
                     is_final = phase in {"morning_final", "close_final"}
                     ok = self._fetch_quotes(
                         final=is_final,
                         final_boundary_ms=self._final_boundary_ms(phase),
                     )
+                    fetch_elapsed = time.perf_counter() - fetch_started
+                    if fetch_elapsed > sleep_s:
+                        sleep_s = min(
+                            self.MAX_INTERVAL,
+                            max(sleep_s, fetch_elapsed * self.FETCH_BACKOFF_FACTOR),
+                        )
+                        logger.info(
+                            "行情轮询自适应退避: 本轮 %.1fs, 下轮等待 %.1fs",
+                            fetch_elapsed,
+                            sleep_s,
+                        )
                     if is_final:
                         key = self._final_sync_key(phase)
                         label = "午休" if phase == "morning_final" else "收盘"
@@ -2165,7 +2186,78 @@ class QuoteService:
     # enriched 增量计算
     # ================================================================
 
-    def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
+    def _schedule_full_enriched_rebuild(
+        self,
+        daily_df: pl.DataFrame,
+        quote_extra: pl.DataFrame | None,
+        *,
+        asset_type: str,
+        merge: bool,
+    ) -> None:
+        """提交一次全量 enriched 重建, 同日重复请求合并。
+
+        这个任务仍复用 repository 的写锁和 heavy-job limiter, 但不占住行情
+        轮询线程; 轮询线程只做快照落盘和增量路径。
+        """
+        now = time.monotonic()
+        with self._enriched_rebuild_lock:
+            if self._enriched_rebuild_running:
+                logger.debug("enriched 全量重建已在运行, 合并本轮请求")
+                return
+            if now - self._enriched_rebuild_last_started < self.FULL_ENRICHED_REBUILD_COOLDOWN_S:
+                logger.debug("enriched 全量重建仍在冷却窗口, 跳过本轮请求")
+                return
+            self._enriched_rebuild_running = True
+            self._enriched_rebuild_last_started = now
+
+        # 股票主路径直接复用 repository 已有的 warmup, 它会更新
+        # enriched/live_agg 两份缓存。不要在行情线程里自己重算一遍。
+        starter = getattr(self._repo, "start_enriched_warmup", None)
+        if asset_type == "stock" and callable(starter):
+            try:
+                started = bool(starter())
+                logger.info("enriched 全量重建请求%s (repository warmup)", "已提交" if started else "已在运行")
+            except Exception:
+                logger.warning("提交 enriched warmup 失败", exc_info=True)
+            finally:
+                with self._enriched_rebuild_lock:
+                    self._enriched_rebuild_running = False
+            return
+
+        daily_snapshot = daily_df.clone()
+        quote_snapshot = quote_extra.clone() if quote_extra is not None else None
+
+        def _run() -> None:
+            try:
+                self._flush_live_enriched(
+                    daily_snapshot,
+                    quote_snapshot,
+                    asset_type=asset_type,
+                    merge=merge,
+                    _background=True,
+                    _force_full=True,
+                )
+            finally:
+                with self._enriched_rebuild_lock:
+                    self._enriched_rebuild_running = False
+
+        threading.Thread(
+            target=_run,
+            name="enriched-live-rebuild",
+            daemon=True,
+        ).start()
+        logger.info("enriched 全量重建已转后台 (asset_type=%s)", asset_type)
+
+    def _flush_live_enriched(
+        self,
+        daily_df: pl.DataFrame,
+        quote_extra: pl.DataFrame = None,
+        asset_type: str = "stock",
+        merge: bool = False,
+        *,
+        _background: bool = False,
+        _force_full: bool = False,
+    ) -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。
 
         quote_extra: API 直接提供的补充字段 (prev_close, change_pct 等),
@@ -2176,14 +2268,23 @@ class QuoteService:
             t0 = time.perf_counter()
 
             # ---- 尝试增量路径 ----
-            live_agg = self._repo.get_live_agg() if asset_type == "stock" else pl.DataFrame()
-            prev_enriched, prev_date = (
-                self._repo.get_enriched_latest()
-                if asset_type == "stock"
-                else self._repo.get_enriched_latest_asset(asset_type)
-            )
+            if asset_type == "stock":
+                peek_live_agg = getattr(self._repo, "peek_live_agg", None)
+                live_agg = peek_live_agg() if callable(peek_live_agg) else self._repo.get_live_agg()
+            else:
+                live_agg = pl.DataFrame()
+            if asset_type == "stock":
+                peek_enriched_latest = getattr(self._repo, "peek_enriched_latest", None)
+                if callable(peek_enriched_latest):
+                    prev_enriched, prev_date = peek_enriched_latest()
+                else:
+                    prev_enriched, prev_date = self._repo.get_enriched_latest()
+            else:
+                prev_enriched, prev_date = self._repo.get_enriched_latest_asset(asset_type)
 
             use_incremental = (
+                not _force_full
+                and
                 asset_type == "stock"
                 and not live_agg.is_empty()
                 and not prev_enriched.is_empty()
@@ -2218,6 +2319,15 @@ class QuoteService:
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")
                     use_incremental = False
+
+            if not use_incremental and not _background:
+                self._schedule_full_enriched_rebuild(
+                    daily_df,
+                    quote_extra,
+                    asset_type=asset_type,
+                    merge=merge,
+                )
+                return
 
             # ---- 全量回退路径 ----
             if not use_incremental:

@@ -434,7 +434,11 @@ class KlineRepository:
 
         logger.info("cache refresh done (%.2fs)", time.perf_counter() - started)
 
-    def _start_enriched_warmup(self) -> None:
+    def start_enriched_warmup(self) -> bool:
+        """请求一次 enriched 后台预热, 返回是否实际启动了新任务。"""
+        return self._start_enriched_warmup()
+
+    def _start_enriched_warmup(self) -> bool:
         """启动后台 daemon 线程预热 enriched 缓存 (compute_indicators)。
 
         仿 QuoteService 的线程模式: 设 warming 标志 → 起 daemon → 完成后清标志 +
@@ -443,7 +447,7 @@ class KlineRepository:
         with self._warmup_lock:
             if self._enriched_warming:
                 logger.info("enriched warmup already in progress, skip")
-                return
+                return False
             self._enriched_warming = True
 
         def _warmup() -> None:
@@ -473,6 +477,7 @@ class KlineRepository:
             target=_warmup, name="enriched-warmup", daemon=True,
         )
         self._warmup_thread.start()
+        return True
 
     def _notify_refresh_done(self) -> None:
         callback = self._on_refresh_done
@@ -1361,6 +1366,16 @@ class KlineRepository:
             return pl.DataFrame(), self._enriched_cache_date
         return self._enriched_cache, self._enriched_cache_date
 
+    def peek_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
+        """无 IO 返回当前 enriched 快照, 不触发同步刷新。
+
+        实时行情热路径只能消费已经准备好的快照; 冷缓存由后台 warmup 负责,
+        避免第一次缺缓存时把全量重算拉回行情轮询线程。
+        """
+        if self._enriched_cache is None:
+            return pl.DataFrame(), self._enriched_cache_date
+        return self._enriched_cache, self._enriched_cache_date
+
     def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
         """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。
 
@@ -1530,6 +1545,12 @@ class KlineRepository:
                             self._live_agg_cache_date, expected,
                         )
                         self._refresh_enriched()
+        if self._live_agg_cache is None:
+            return pl.DataFrame()
+        return self._live_agg_cache
+
+    def peek_live_agg(self) -> pl.DataFrame:
+        """无 IO 返回当前盘中递推聚合, 不触发同步 enriched 刷新。"""
         if self._live_agg_cache is None:
             return pl.DataFrame()
         return self._live_agg_cache
