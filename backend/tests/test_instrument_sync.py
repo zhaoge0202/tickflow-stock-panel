@@ -1,9 +1,27 @@
 from datetime import date
-from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.services import instrument_sync as ins
+
+
+def _provider_row(symbol: str, *, total=None, floating=None) -> dict:
+    code, exchange = symbol.split(".")
+    return {
+        "symbol": symbol,
+        "name": f"测试{code}",
+        "code": code,
+        "exchange": exchange,
+        "region": "CN",
+        "type": "stock",
+        "listing_date": None,
+        "total_shares": total,
+        "float_shares": floating,
+        "tick_size": 0.01,
+        "limit_up": None,
+        "limit_down": None,
+    }
 
 
 def test_merge_instrument_rows_fills_missing_metadata_from_tickflow():
@@ -140,3 +158,70 @@ def test_sync_instruments_sanitizes_limits_before_write(tmp_path, monkeypatch):
     assert row["limit_source"] == "theoretical"
     assert row["limit_base_date"] == "2026-07-20"
     assert str(row["as_of"]) == "2026-07-21"
+
+
+def test_sync_instruments_preserves_existing_and_fills_share_history(tmp_path, monkeypatch):
+    path = tmp_path / "instruments" / "instruments.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame([
+        _provider_row("600000.SH", total=10_000_000.0, floating=8_000_000.0),
+        _provider_row("000001.SZ"),
+    ]).write_parquet(path)
+    shares = tmp_path / "financials" / "shares" / "part.parquet"
+    shares.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "period_end": ["2026-09-20"],
+        "announce_date": ["2026-09-20"],
+        "total_shares": [20_000_000.0],
+        "float_shares": [15_000_000.0],
+    }).write_parquet(shares)
+
+    monkeypatch.setattr(ins, "cn_today", lambda: date(2026, 9, 21))
+    monkeypatch.setattr(ins, "_fetch_instruments_via_provider", lambda: [
+        _provider_row("600000.SH"),
+        _provider_row("000001.SZ"),
+    ])
+    monkeypatch.setattr(ins, "_fetch_instruments_via_tickflow", lambda: [])
+
+    assert ins.sync_instruments(tmp_path) == 2
+    result = pl.read_parquet(path).sort("symbol")
+    assert result["total_shares"].to_list() == [20_000_000.0, 10_000_000.0]
+    assert result["float_shares"].to_list() == [15_000_000.0, 8_000_000.0]
+
+
+def test_sync_instruments_rejects_partial_universe_before_overwrite(tmp_path, monkeypatch):
+    path = tmp_path / "instruments" / "instruments.parquet"
+    path.parent.mkdir(parents=True)
+    old = pl.DataFrame([
+        _provider_row(
+            f"{600000 + i:06d}.SH",
+            total=10_000_000.0,
+            floating=8_000_000.0,
+        )
+        for i in range(100)
+    ])
+    old.write_parquet(path)
+
+    monkeypatch.setattr(ins, "cn_today", lambda: date(2026, 9, 21))
+    monkeypatch.setattr(ins, "_fetch_instruments_via_provider", lambda: [
+        _provider_row("600000.SH"),
+    ])
+    monkeypatch.setattr(ins, "_fetch_instruments_via_tickflow", lambda: [])
+
+    with pytest.raises(ins.InstrumentSyncError, match="标的数异常下降"):
+        ins.sync_instruments(tmp_path)
+    assert pl.read_parquet(path).height == 100
+
+
+def test_sync_instruments_excludes_bond_subscription_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(ins, "cn_today", lambda: date(2026, 9, 21))
+    monkeypatch.setattr(ins, "_fetch_instruments_via_provider", lambda: [
+        _provider_row("600000.SH", total=10.0, floating=8.0),
+        _provider_row("072997.SZ"),
+        _provider_row("082997.SZ"),
+    ])
+    monkeypatch.setattr(ins, "_fetch_instruments_via_tickflow", lambda: [])
+
+    assert ins.sync_instruments(tmp_path) == 1
+    assert pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")["symbol"].to_list() == ["600000.SH"]
