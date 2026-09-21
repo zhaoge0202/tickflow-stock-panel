@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -50,6 +51,13 @@ _table_cache: dict[str, dict | None] = {
 }
 _table_cache_ts: dict[str, float] = {k: 0.0 for k in _table_cache}
 _table_cache_lock = threading.Lock()
+_status_refresh_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="data-status-refresh",
+)
+_status_refreshing: set[str] = set()
+_status_refreshing_lock = threading.Lock()
+_status_generation = 0
 
 _last_finished_cache: dict[str, str | None] | None = None
 _last_finished_lock = threading.Lock()
@@ -61,7 +69,9 @@ def invalidate_data_cache(table: str | None = None) -> None:
     table=None 时清所有表 cache + storage(粗粒度,用于 pipeline 完成/clear);
     指定 table 时只清那张表,不影响 storage(细粒度,用于单 stage 写完)。
     """
+    global _status_generation
     with _table_cache_lock:
+        _status_generation += 1
         if table is None:
             global _storage_cache, _storage_cache_ts, _last_finished_cache
             _storage_cache = None
@@ -81,21 +91,42 @@ def invalidate_storage_cache() -> None:
 
 
 def _get_table_stats(name: str, fetch: Callable[[], dict | None]) -> dict | None:
-    """走 TTL+事件 双重缓存。fetch 在锁外执行避免阻塞别的请求。"""
+    """走 TTL+事件双重缓存, 过期时后台刷新并立即返回旧快照。"""
     ttl = _TABLE_TTL_LARGE if name in _LARGE_TABLES else _TABLE_TTL
     now = time.time()
     with _table_cache_lock:
         cached = _table_cache.get(name)
         cached_ts = _table_cache_ts.get(name, 0.0)
-        if cached is not None and (now - cached_ts) < ttl:
-            return cached
+    if cached is not None and (now - cached_ts) < ttl:
+        return cached
 
-    fresh = fetch()
+    with _status_refreshing_lock:
+        if name not in _status_refreshing:
+            _status_refreshing.add(name)
+            with _table_cache_lock:
+                generation = _status_generation
+            _status_refresh_executor.submit(_refresh_table_stats, name, fetch, generation)
+    # status 接口不能因为冷缓存同步扫描 parquet / DuckDB 而阻塞 HTTP。
+    # 首次加载返回 None, 后续轮询会拿到后台生成的快照。
+    return cached
 
-    with _table_cache_lock:
-        _table_cache[name] = fresh
-        _table_cache_ts[name] = now
-    return fresh
+
+def _refresh_table_stats(
+    name: str,
+    fetch: Callable[[], dict | None],
+    generation: int,
+) -> None:
+    try:
+        fresh = fetch()
+        with _table_cache_lock:
+            if generation == _status_generation:
+                _table_cache[name] = fresh
+                _table_cache_ts[name] = time.time()
+    except Exception:  # noqa: BLE001
+        logger.warning("后台刷新数据状态失败: %s", name, exc_info=True)
+    finally:
+        with _status_refreshing_lock:
+            _status_refreshing.discard(name)
 
 
 def _safe_aggregate(repo, view: str) -> dict | None:
@@ -565,17 +596,37 @@ def _next_cron_run(scheduler, job_id: str) -> str | None:
 
 
 def _get_storage(data_dir: Path) -> dict:
-    """返回缓存的 storage 统计；走独立 TTL，stage 写完不触发重算。"""
+    """返回缓存的 storage 统计；过期时后台刷新, 不阻塞 status 请求。"""
     global _storage_cache, _storage_cache_ts
     now = time.time()
     with _storage_lock:
         if _storage_cache is not None and (now - _storage_cache_ts) < _STORAGE_TTL:
             return _storage_cache
-    fresh = _compute_storage(data_dir)
+        refreshing = "storage" in _status_refreshing
+    if not refreshing:
+        with _status_refreshing_lock:
+            if "storage" not in _status_refreshing:
+                _status_refreshing.add("storage")
+                with _table_cache_lock:
+                    generation = _status_generation
+                _status_refresh_executor.submit(_refresh_storage, data_dir, generation)
     with _storage_lock:
-        _storage_cache = fresh
-        _storage_cache_ts = now
-    return fresh
+        return _storage_cache or {}
+
+
+def _refresh_storage(data_dir: Path, generation: int) -> None:
+    global _storage_cache, _storage_cache_ts
+    try:
+        fresh = _compute_storage(data_dir)
+        with _storage_lock:
+            if generation == _status_generation:
+                _storage_cache = fresh
+                _storage_cache_ts = time.time()
+    except Exception:  # noqa: BLE001
+        logger.warning("后台刷新 storage 状态失败", exc_info=True)
+    finally:
+        with _status_refreshing_lock:
+            _status_refreshing.discard("storage")
 
 
 def _last_finished(job_label: str) -> str | None:

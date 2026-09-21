@@ -239,6 +239,56 @@ def build_focus_three_versions(
 
     strategy_def = engine.get(strategy_id)
     strategy_name = (strategy_def.meta.get("name") if strategy_def else None) or strategy_id
+
+    # 1.1 盘中秒读: 若今天未收盘且 14:50 尾盘初选快照已落盘，直接秒返初选版 (<5ms)
+    preview_data = load_preview_snapshot(data_dir, strategy_id, d_str)
+    if not force_refresh and is_today_unclosed and preview_data is not None:
+        raw_p_rows = preview_data.get("rows") or []
+        enriched_p_rows = []
+        for r in raw_p_rows:
+            row = dict(r)
+            row["version_tags"] = [{"type": "preview_seen", "label": "初选入选", "color": "orange"}]
+            enriched_p_rows.append(row)
+        return {
+            "as_of": d_str,
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_name,
+            "current_stage": "preview",
+            "is_unclosed": True,
+            "versions": {
+                "preview": {
+                    "label": "14:50 尾盘初选",
+                    "time": "14:50",
+                    "status": "ready",
+                    "total": len(enriched_p_rows),
+                    "rows": _sanitize_rows(enriched_p_rows),
+                },
+                "final": {
+                    "label": "收盘正式版",
+                    "time": "15:35",
+                    "status": "unclosed",
+                    "total": 0,
+                    "rows": [],
+                },
+                "preselect": {
+                    "label": "次日竞价预选",
+                    "time": "15:35",
+                    "status": "unclosed",
+                    "total": 0,
+                    "rows": [],
+                },
+            },
+            "dropped_from_preview": [],
+            "summary": {
+                "preview_total": len(raw_p_rows),
+                "final_total": 0,
+                "preselect_total": 0,
+                "confirmed_count": 0,
+                "dropped_count": 0,
+                "late_entrant_count": 0,
+            },
+        }
+
     overrides = strategy_config.load_override(data_dir, strategy_id)
     params = dict((overrides or {}).get("params") or {})
 
@@ -254,6 +304,38 @@ def build_focus_three_versions(
             params_map={strategy_id: params},
             overrides_map={strategy_id: overrides},
         )
+        # 如果当天已经收盘 (>=15:00) 且盘后管道尚未生成完整日线数据 (base_ctx.current 样本过小)，
+        # 自动利用本地完整 kline_minute 聚合出 15:00 全量数据，确保收盘选股完整准确！
+        min_file = data_dir / "kline_minute" / f"date={d_str}" / "part.parquet"
+        if not is_today_unclosed and (base_ctx.current is None or len(base_ctx.current) < 1000) and min_file.exists():
+            df_m = pl.read_parquet(min_file)
+            if not df_m.is_empty():
+                agg_1500 = (
+                    df_m.sort("datetime")
+                    .group_by("symbol")
+                    .agg([
+                        pl.first("open").alias("open"),
+                        pl.max("high").alias("high"),
+                        pl.min("low").alias("low"),
+                        pl.last("close").alias("close"),
+                        pl.sum("volume").alias("volume"),
+                        pl.sum("amount").alias("amount"),
+                    ])
+                    .with_columns(pl.lit(target_date).alias("date"))
+                )
+                if base_ctx.history is not None:
+                    hist_prev = base_ctx.history.filter(pl.col("date") < target_date)
+                    day_meta = base_ctx.history.filter(pl.col("date") < target_date).unique(subset=["symbol"], keep="last")
+                    meta_cols = [c for c in day_meta.columns if c not in ["open", "high", "low", "close", "volume", "amount", "date", "symbol"]]
+                    day_1500 = agg_1500.join(day_meta.select(["symbol"] + meta_cols), on="symbol", how="left")
+                    panel_1500 = pl.concat([hist_prev, day_1500], how="diagonal_relaxed").sort(["symbol", "date"])
+                    base_ctx = StrategyDataContext(
+                        asset_type="stock",
+                        timeframe="1d",
+                        as_of=target_date,
+                        current=day_1500,
+                        history=panel_1500,
+                    )
     except Exception as e:
         logger.warning("build_strategy_context 失败: %s", e)
         base_ctx = None
@@ -348,27 +430,46 @@ def build_focus_three_versions(
         row["version_tags"] = tags
         enriched_preselect_rows.append(row)
 
-    # (C) 提取 14:50 选出但在收盘被淘汰的标的 (变脸淘汰归因)
+    # (C) 提取 14:50 选出但在收盘被淘汰的标的 (仅在收盘定版后对比计算)
     dropped_rows = []
-    for sym, r_prev in preview_sym_map.items():
-        if sym not in final_sym_map:
-            reason = "尾盘其他条件过滤淘汰"
-            c_prev = float(r_prev.get("close") or 0)
-            h_prev = float(r_prev.get("high") or 0)
-            if h_prev > 0 and (c_prev / h_prev) >= 0.98:
-                reason = "尾盘冲高回落，上影线超标 (跌破0.98*high)"
+    if not is_today_unclosed:
+        for sym, r_prev in preview_sym_map.items():
+            if sym not in final_sym_map:
+                c_prev = float(r_prev.get("close") or 0)
+                h_prev = float(r_prev.get("high") or 0)
+                final_row = None
+                if base_ctx is not None and base_ctx.current is not None:
+                    f_df = base_ctx.current.filter(pl.col("symbol") == sym)
+                    if not f_df.is_empty():
+                        final_row = f_df.to_dicts()[0]
 
-            dropped_rows.append({
-                "symbol": sym,
-                "name": r_prev.get("name") or sym,
-                "preview_close": c_prev,
-                "preview_change_pct": r_prev.get("change_pct"),
-                "preview_score": r_prev.get("score"),
-                "reason": reason,
-                "version_tags": [
-                    {"type": "dropped", "label": "尾盘变脸淘汰", "color": "red"}
-                ]
-            })
+                c_final = float(final_row.get("close", c_prev)) if final_row else c_prev
+                h_final = float(final_row.get("high", h_prev)) if final_row else h_prev
+                is_lu = bool(final_row.get("signal_limit_up", False)) if final_row else False
+
+                reason = "尾盘其他条件过滤淘汰"
+                if is_lu:
+                    reason = "尾盘偷袭封死涨停板 (策略排他)"
+                elif h_final > 0 and (c_final / h_final) < 0.98:
+                    reason = f"尾盘冲高回落，上影线超标 (收盘/最高={c_final/h_final:.3f} < 0.98)"
+                elif float(r_prev.get("change_pct", 0) or 0) > 0.085:
+                    reason = "涨幅过高 (>8.5%超限)"
+                elif float(r_prev.get("open_gap", 0) or 0) > 0.035:
+                    reason = "早盘高开超标 (>3.5%)"
+                else:
+                    reason = "竞价高开幅度或分时防守未达标"
+
+                dropped_rows.append({
+                    "symbol": sym,
+                    "name": r_prev.get("name") or sym,
+                    "preview_close": c_prev,
+                    "preview_change_pct": r_prev.get("change_pct"),
+                    "preview_score": r_prev.get("score"),
+                    "reason": reason,
+                    "version_tags": [
+                        {"type": "dropped", "label": "尾盘变脸淘汰", "color": "red"}
+                    ]
+                })
 
     # (D) 丰富 Preview 版自身的标签
     enriched_preview_rows = []
@@ -376,10 +477,13 @@ def build_focus_three_versions(
         row = dict(r)
         sym = str(row.get("symbol", ""))
         tags = []
-        if sym in final_sym_map:
-            tags.append({"type": "confirmed", "label": "最终保留", "color": "green"})
+        if not is_today_unclosed:
+            if sym in final_sym_map:
+                tags.append({"type": "confirmed", "label": "最终保留", "color": "green"})
+            else:
+                tags.append({"type": "dropped", "label": "收盘已淘汰", "color": "red"})
         else:
-            tags.append({"type": "dropped", "label": "收盘已淘汰", "color": "red"})
+            tags.append({"type": "preview_seen", "label": "初选入选", "color": "orange"})
         row["version_tags"] = tags
         enriched_preview_rows.append(row)
 
@@ -423,9 +527,9 @@ def build_focus_three_versions(
             "preview_total": len(preview_rows),
             "final_total": len(final_rows),
             "preselect_total": len(preselect_rows),
-            "confirmed_count": len(set(preview_sym_map.keys()) & set(final_sym_map.keys())),
-            "dropped_count": len(dropped_rows),
-            "late_entrant_count": len(set(final_sym_map.keys()) - set(preview_sym_map.keys())),
+            "confirmed_count": len(set(preview_sym_map.keys()) & set(final_sym_map.keys())) if not is_today_unclosed else 0,
+            "dropped_count": len(dropped_rows) if not is_today_unclosed else 0,
+            "late_entrant_count": len(set(final_sym_map.keys()) - set(preview_sym_map.keys())) if not is_today_unclosed else 0,
         },
     }
 
