@@ -105,6 +105,7 @@ _quality: dict[str, dict] = {}
 # 不应让 enriched 计算每轮重复扫描数百万条事实；短 TTL 既能复用结果，也能
 # 在 09:25 成交行落盘后及时刷新。
 _auction_result_cache: dict[tuple[str, str], tuple[float, pl.DataFrame]] = {}
+_auction_tick_cache: dict[tuple[str, str], tuple[float, pl.DataFrame]] = {}
 _auction_result_cache_lock = threading.Lock()
 _AUCTION_RESULT_CACHE_TTL_S = 30.0
 
@@ -123,6 +124,13 @@ def _invalidate_auction_result_cache(
         ]
         for key in stale_keys:
             _auction_result_cache.pop(key, None)
+        stale_tick_keys = [
+            key for key in _auction_tick_cache
+            if key[0] == data_key
+            and (trade_dates is None or key[1] in trade_dates)
+        ]
+        for key in stale_tick_keys:
+            _auction_tick_cache.pop(key, None)
 
 
 def append_many(
@@ -447,6 +455,132 @@ def auction_result_fields(
 
     with _auction_result_cache_lock:
         _auction_result_cache[cache_key] = (now, frame)
+    if symbols:
+        return frame.filter(pl.col("symbol").is_in(sorted(symbols)))
+    return frame
+
+
+AUCTION_TICK_FEATURE_COLUMNS = (
+    "auction_tick_count",
+    "auction_tick_seconds",
+    "auction_trade_price_change",
+    "auction_trade_price_range",
+    "auction_trade_volume_delta",
+    "auction_trade_volume_per_second",
+    "auction_trade_unmatched_ratio",
+    "auction_trade_pressure_score",
+    "auction_trade_depth_imbalance",
+    "auction_trade_spread_pct",
+)
+
+
+def auction_tick_features(
+    data_dir: Path,
+    *,
+    target_date: date,
+    symbols: list[str] | set[str] | None = None,
+) -> pl.DataFrame:
+    """聚合 09:15-09:25 竞价快照为逐日特征。
+
+    竞价参考价本身不是 09:25 最终成交结果，但它是竞价过程的真实观测；
+    因此本组特征允许 ``auction_reference`` 与真实撮合快照共同参与，另由
+    ``auction_result_fields`` 单独提供 09:25 最终成交口径。成交量沿用 TDX
+    累计口径，因此同时输出累计量差和每秒增量；没有事实时返回固定 schema
+    的空帧，便于回测和实时路径 fail-closed。
+    """
+    schema = {
+        "symbol": pl.Utf8,
+        "date": pl.Date,
+        **{name: pl.Float64 for name in AUCTION_TICK_FEATURE_COLUMNS},
+    }
+    empty = pl.DataFrame(schema=schema)
+    ds = target_date.isoformat()
+    cache_key = (str(Path(data_dir).resolve()), ds)
+    now = time.monotonic()
+    with _auction_result_cache_lock:
+        cached = _auction_tick_cache.get(cache_key)
+        if cached is not None and now - cached[0] < _AUCTION_RESULT_CACHE_TTL_S:
+            frame = cached[1]
+            return frame.filter(pl.col("symbol").is_in(sorted(symbols))) if symbols else frame
+
+    base = Path(data_dir) / "quote_ticks" / f"date={ds}"
+    paths = sorted(base.rglob("*.parquet")) if base.exists() else []
+    if not paths:
+        frame = empty
+    else:
+        start_ms = int(datetime.combine(target_date, dt_time(9, 15), tzinfo=CN_TZ).timestamp() * 1000)
+        end_ms = int(datetime.combine(target_date, dt_time(9, 25), tzinfo=CN_TZ).timestamp() * 1000)
+        try:
+            lf = scan_parquet_compat(
+                [str(path) for path in paths],
+                schema=QUOTE_TICK_SCHEMA_OVERRIDES,
+                hive_partitioning=False,
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            )
+            fields = [
+                "symbol", "event_ts", "ingest_ts", "price_type", "market_phase",
+                "last_price", "auction_price", "volume", "auction_matched_volume",
+                "auction_unmatched_ratio",
+                "auction_pressure_score", "depth_imbalance", "spread_pct",
+            ]
+            trade = (
+                lf.select(fields)
+                .filter(
+                    pl.col("symbol").is_not_null()
+                    & pl.col("event_ts").is_between(start_ms, end_ms, closed="left")
+                    & (pl.col("last_price").fill_null(pl.col("auction_price")) > 0)
+                    & (
+                        (pl.col("auction_matched_volume").fill_null(0) > 0)
+                        | (pl.col("volume").fill_null(0) > 0)
+                    )
+                )
+                .with_columns(
+                    pl.coalesce([pl.col("auction_price"), pl.col("last_price")]).alias("_price"),
+                    pl.when(pl.col("auction_matched_volume") > 0)
+                    .then(pl.col("auction_matched_volume"))
+                    .otherwise(pl.col("volume"))
+                    .alias("_matched_volume"),
+                )
+                .sort(["symbol", "event_ts", "ingest_ts"])
+            )
+            frame = (
+                trade.group_by("symbol", maintain_order=True)
+                .agg([
+                    pl.len().cast(pl.Float64).alias("auction_tick_count"),
+                    (pl.col("event_ts").last() - pl.col("event_ts").first())
+                    .cast(pl.Float64)
+                    .truediv(1000.0)
+                    .alias("auction_tick_seconds"),
+                    (pl.col("_price").last() / pl.col("_price").first() - 1.0)
+                    .alias("auction_trade_price_change"),
+                    (pl.col("_price").max() / pl.col("_price").min() - 1.0)
+                    .alias("auction_trade_price_range"),
+                    pl.max_horizontal(
+                        pl.col("_matched_volume").last() - pl.col("_matched_volume").first(),
+                        pl.lit(0.0),
+                    ).alias("auction_trade_volume_delta"),
+                    pl.lit(None, dtype=pl.Float64).alias("auction_trade_volume_per_second"),
+                    pl.col("auction_unmatched_ratio").drop_nulls().last().alias("auction_trade_unmatched_ratio"),
+                    pl.col("auction_pressure_score").drop_nulls().last().alias("auction_trade_pressure_score"),
+                    pl.col("depth_imbalance").drop_nulls().last().alias("auction_trade_depth_imbalance"),
+                    pl.col("spread_pct").drop_nulls().last().alias("auction_trade_spread_pct"),
+                ])
+                .with_columns(
+                    pl.when(pl.col("auction_tick_seconds") > 0)
+                    .then(pl.col("auction_trade_volume_delta") / pl.col("auction_tick_seconds"))
+                    .otherwise(pl.col("auction_trade_volume_delta"))
+                    .alias("auction_trade_volume_per_second"),
+                    pl.lit(target_date).cast(pl.Date).alias("date"),
+                )
+                .select(["symbol", "date", *AUCTION_TICK_FEATURE_COLUMNS])
+                .collect(engine="streaming")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("竞价秒级特征读取失败(%s): %s", base, exc)
+            frame = empty
+
+    with _auction_result_cache_lock:
+        _auction_tick_cache[cache_key] = (now, frame)
     if symbols:
         return frame.filter(pl.col("symbol").is_in(sorted(symbols)))
     return frame

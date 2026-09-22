@@ -32,6 +32,10 @@ _QUOTE_BATCH = 50
 _QUOTE_WORKERS_DEFAULT = 4
 _QUOTE_WORKERS_MAX = 16
 _KLINE_BATCH = 8
+# 日K接口是逐股请求; 与 sidecar 共享 HTTP 闸门, 允许多个请求在闸门内排队,
+# 避免 09-21 全市场修复被单线程拉取拖成数小时。
+_DAILY_WORKERS_DEFAULT = 8
+_DAILY_WORKERS_MAX = 32
 # 分钟K是单票 HTTP(I/O bound); 默认 8 并发, 可通过 TDX_API_MINUTE_WORKERS 上调。
 # tdx-api 侧有代理/IP 池, 适度并发通常比串行快一个数量级; 过高可能打满节点或触发超时重试。
 _MINUTE_WORKERS_DEFAULT = 8
@@ -156,26 +160,44 @@ class TDXAPIProvider:
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
+        def _fetch_one(symbol: str) -> pl.DataFrame | None:
+            app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
+            try:
+                rows = self._fetch_kline_rows(symbol, "day")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("tdx-api daily 拉取失败(%s): %s", app_symbol, exc)
+                return None
+            mapped = [
+                row for row in (self._daily_row(app_symbol, item) for item in rows)
+                if row is not None and _in_date_range(row["date"], start_time, end_time)
+            ]
+            if not mapped:
+                return None
+            frame = normalize_daily(mapped, source=self.name)
+            return frame if not frame.is_empty() else None
+
+        workers = min(_daily_workers(), len(symbols))
         frames: list[pl.DataFrame] = []
-        chunks = chunked(symbols, _KLINE_BATCH)
-        for i, chunk in enumerate(chunks):
-            for symbol in chunk:
-                app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
-                try:
-                    rows = self._fetch_kline_rows(symbol, "day")
-                except Exception as e:
-                    logger.warning("tdx-api daily 拉取失败(%s): %s", app_symbol, e)
-                    continue
-                mapped = [
-                    row for row in (self._daily_row(app_symbol, item) for item in rows)
-                    if row is not None and _in_date_range(row["date"], start_time, end_time)
-                ]
-                if mapped:
-                    df = normalize_daily(mapped, source=self.name)
-                    if not df.is_empty():
-                        frames.append(df)
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(chunks))
+        if workers <= 1:
+            completed = 0
+            for symbol in symbols:
+                frame = _fetch_one(symbol)
+                if frame is not None:
+                    frames.append(frame)
+                completed += 1
+                if on_chunk_done:
+                    on_chunk_done(completed, len(symbols))
+        else:
+            completed = 0
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tdx-daily") as executor:
+                futures = {executor.submit(_fetch_one, symbol): symbol for symbol in symbols}
+                for future in as_completed(futures):
+                    frame = future.result()
+                    if frame is not None:
+                        frames.append(frame)
+                    completed += 1
+                    if on_chunk_done:
+                        on_chunk_done(completed, len(symbols))
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     # ---- minute ----
@@ -1276,6 +1298,17 @@ def _minute_workers() -> int:
     except ValueError:
         workers = _MINUTE_WORKERS_DEFAULT
     return max(1, min(_MINUTE_WORKERS_MAX, workers))
+
+
+def _daily_workers() -> int:
+    try:
+        workers = int(
+            os.getenv("TDX_API_DAILY_WORKERS", str(_DAILY_WORKERS_DEFAULT))
+            or _DAILY_WORKERS_DEFAULT
+        )
+    except ValueError:
+        workers = _DAILY_WORKERS_DEFAULT
+    return max(1, min(_DAILY_WORKERS_MAX, workers))
 
 
 def _tdx_http_gate_timeout() -> float:

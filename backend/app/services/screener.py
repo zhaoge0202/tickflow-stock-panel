@@ -222,6 +222,11 @@ class ScreenerService:
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
                      "amount", "auction_result_price", "auction_result_volume",
                      "auction_result_amount", "raw_close", "raw_high", "raw_low",
+                     "auction_tick_count", "auction_tick_seconds",
+                     "auction_trade_price_change", "auction_trade_price_range",
+                     "auction_trade_volume_delta", "auction_trade_volume_per_second",
+                     "auction_trade_unmatched_ratio", "auction_trade_pressure_score",
+                     "auction_trade_depth_imbalance", "auction_trade_spread_pct",
                      "turnover_rate"]
 
         try:
@@ -345,6 +350,11 @@ class ScreenerService:
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
                      "amount", "auction_result_price", "auction_result_volume",
                      "auction_result_amount", "raw_close", "raw_high", "raw_low",
+                     "auction_tick_count", "auction_tick_seconds",
+                     "auction_trade_price_change", "auction_trade_price_range",
+                     "auction_trade_volume_delta", "auction_trade_volume_per_second",
+                     "auction_trade_unmatched_ratio", "auction_trade_pressure_score",
+                     "auction_trade_depth_imbalance", "auction_trade_spread_pct",
                      "turnover_rate"]
 
         try:

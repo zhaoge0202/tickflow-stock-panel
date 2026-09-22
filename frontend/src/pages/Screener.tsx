@@ -438,6 +438,11 @@ export function Screener() {
     staleTime: 30_000,
   })
 
+  // Focus 策略三版本数据（严格限制在当前选中日期，防止跨天读取历史缓存）
+  const focusDataValid = isFocusStrategy && focusVersionsQuery.data?.as_of === asOf
+    ? focusVersionsQuery.data
+    : null
+
   // 卡片显示: 按周期筛选 (all=全部, 1d=仅日线, 1m=仅分钟); 未声明 timeframes 视为日线
   const displayPool = useMemo(() => visiblePool.filter(id => {
     if (tfFilter === 'all') return true
@@ -538,7 +543,16 @@ export function Screener() {
       const expiredCount = Math.max(everCount - r.total, 0)
       if (expiredCount > 0) expired[id] = expiredCount
     }
-    setHitCounts(counts)
+    setHitCounts(() => {
+      const next = { ...counts }
+      if (isFocusStrategy && activeStrategy && focusDataValid) {
+        const curVerTotal = focusDataValid.versions[focusActiveVersion]?.total
+        if (curVerTotal != null) {
+          next[activeStrategy] = curVerTotal
+        }
+      }
+      return next
+    })
     setExpiredCounts(expired)
     // 渐进式: computed_at 晚于本轮起点的策略已算完, 从 pending 中移除;
     // 无 computed_at (监控实时叠加/旧缓存) 视为新鲜。容差吸收前后端时钟差。
@@ -553,7 +567,7 @@ export function Screener() {
         setPendingRun(rest.length ? { ...pendingRun, ids: rest } : null)
       }
     }
-  }, [summaryQuery.data, asOf, pendingRun])
+  }, [summaryQuery.data, asOf, pendingRun, isFocusStrategy, activeStrategy, focusDataValid, focusActiveVersion])
 
   // 渐进式兜底: 后台计算最长等 8 分钟, 防止异常时无限轮询
   useEffect(() => {
@@ -663,6 +677,7 @@ export function Screener() {
     if (!cacheCoversPool) return null
     return visiblePool.reduce((sum, id) => sum + (summaryQuery.data?.results[id]?.total ?? 0), 0)
   }, [cacheCoversPool, visiblePool, summaryQuery.data])
+  // preselect 结果
   const preselectPayload = preselectQuery.data
   const preselectResults = useMemo<Record<string, any> | null>(() => {
     if (
@@ -680,6 +695,19 @@ export function Screener() {
       }])
     return Object.fromEntries(entries)
   }, [preselectPayload, asOf, auctionTradeDate])
+
+  // Focus 策略三版本数据（严格限制在当前选中日期，防止跨天读取历史缓存）
+  const focusFinalCount = focusDataValid?.versions.final.total ?? (
+    summaryQuery.data?.results[activeStrategy!]?.as_of === asOf
+      ? summaryQuery.data?.results[activeStrategy!]?.total ?? 0
+      : 0
+  )
+  const focusPreviewCount = focusDataValid?.versions.preview.total ?? 0
+  const focusPreselectCount = focusDataValid?.versions.preselect.total ?? (
+    preselectResults?.[activeStrategy!]?.as_of === asOf
+      ? preselectResults?.[activeStrategy!]?.total ?? 0
+      : 0
+  )
   const preselectTotal = useMemo(() => {
     if (!preselectResults) return 0
     return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
@@ -1675,7 +1703,7 @@ export function Screener() {
                         }`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-bull" />
-                        收盘正式版 ({focusVersionsQuery.data?.versions.final.total ?? (summaryQuery.data?.results[activeStrategy!]?.total ?? 0)})
+                        收盘正式版 ({focusFinalCount})
                       </button>
                       <button
                         type="button"
@@ -1687,7 +1715,7 @@ export function Screener() {
                         }`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                        14:50 尾盘初选 ({focusVersionsQuery.data?.versions.preview.total ?? 0})
+                        14:50 尾盘初选 ({focusPreviewCount})
                       </button>
                       <button
                         type="button"
@@ -1699,22 +1727,22 @@ export function Screener() {
                         }`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                        次日竞价预选 ({focusVersionsQuery.data?.versions.preselect.total ?? (preselectResults?.[activeStrategy!]?.total ?? 0)})
+                        次日竞价预选 ({focusPreselectCount})
                       </button>
                     </div>
-                    {focusVersionsQuery.data && (
+                    {focusDataValid && (
                       <div className="flex items-center gap-2 text-[11px] text-muted pr-2">
-                        <span className="text-bull/90 font-medium">初选确认 {focusVersionsQuery.data.summary.confirmed_count}</span>
+                        <span className="text-bull/90 font-medium">初选确认 {focusDataValid.summary.confirmed_count}</span>
                         <span>·</span>
-                        <span className="text-amber-400/90 font-medium">尾盘突击 {focusVersionsQuery.data.summary.late_entrant_count}</span>
+                        <span className="text-amber-400/90 font-medium">尾盘突击 {focusDataValid.summary.late_entrant_count}</span>
                         <span>·</span>
-                        <span className="text-red-400/90 font-medium">变脸淘汰 {focusVersionsQuery.data.summary.dropped_count}</span>
+                        <span className="text-red-400/90 font-medium">变脸淘汰 {focusDataValid.summary.dropped_count}</span>
                       </div>
                     )}
                   </div>
 
                   {/* 尾盘变脸淘汰折叠提示 */}
-                  {(focusVersionsQuery.data?.dropped_from_preview?.length ?? 0) > 0 && (
+                  {focusDataValid && focusDataValid.dropped_from_preview.length > 0 && (
                     <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs">
                       <div
                         className="flex items-center justify-between cursor-pointer text-warning/90 font-medium select-none"
@@ -1722,7 +1750,7 @@ export function Screener() {
                       >
                         <span className="flex items-center gap-1.5">
                           <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0" />
-                          <span>尾盘变脸淘汰参考：共 {focusVersionsQuery.data?.dropped_from_preview.length} 只标的在 14:50 初选入选，但收盘被淘汰</span>
+                          <span>尾盘变脸淘汰参考：共 {focusDataValid.dropped_from_preview.length} 只标的在 14:50 初选入选，但收盘被淘汰</span>
                         </span>
                         <span className="text-[11px] text-warning/70 hover:text-warning underline ml-2 shrink-0">
                           {showDroppedList ? '收起明细' : '展开查看原因'}
@@ -1730,7 +1758,7 @@ export function Screener() {
                       </div>
                       {showDroppedList && (
                         <div className="mt-2 pt-2 border-t border-warning/20 space-y-1.5 text-muted">
-                          {focusVersionsQuery.data?.dropped_from_preview.map(item => (
+                          {focusDataValid.dropped_from_preview.map(item => (
                             <div key={item.symbol} className="flex flex-wrap items-center justify-between gap-2 py-0.5 border-b border-warning/10 last:border-0">
                               <div className="flex items-center gap-2">
                                 <span className="font-mono text-secondary font-medium">{item.symbol}</span>
@@ -1769,7 +1797,7 @@ export function Screener() {
                 <EmptyState
                   icon={ScanSearch}
                   title={
-                    isFocusStrategy && asOf === todayIso && focusVersionsQuery.data?.is_unclosed
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.is_unclosed
                       ? (focusActiveVersion === 'preview' ? '14:50 尾盘初选尚未就绪' : '今日盘后尚未定版')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? auctionWaitingHint
@@ -1790,7 +1818,7 @@ export function Screener() {
                               : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
                   }
                   hint={
-                    isFocusStrategy && asOf === todayIso && focusVersionsQuery.data?.is_unclosed
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.is_unclosed
                       ? (focusActiveVersion === 'preview' ? '系统将在 14:50 自动聚合生成尾盘初选候选池，请稍候…' : '收盘正式版与次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? '预选不是最终结果，次交易日竞价确认后会自动切换。'

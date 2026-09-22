@@ -173,6 +173,63 @@ def test_auction_result_cache_invalidates_after_new_tick(tmp_path):
     assert result["auction_result_price"].item() == 8.26
 
 
+def test_auction_tick_features_aggregate_auction_snapshots(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 20, 0),
+            "ingest_ts": _ms(9, 20, 1),
+            "last_price": 8.00,
+            "volume": 100.0,
+            "price_type": "trade",
+            "market_phase": None,
+            "auction_unmatched_ratio": 0.6,
+            "auction_pressure_score": -0.1,
+            "depth_imbalance": -0.2,
+            "spread_pct": 0.01,
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 24, 0),
+            "ingest_ts": _ms(9, 24, 1),
+            "last_price": 8.16,
+            "volume": 160.0,
+            "price_type": "trade",
+            "market_phase": None,
+            "auction_unmatched_ratio": 0.3,
+            "auction_pressure_score": 0.25,
+            "depth_imbalance": 0.4,
+            "spread_pct": 0.005,
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 24, 2),
+            "ingest_ts": _ms(9, 24, 3),
+            "last_price": 8.30,
+            "volume": 200.0,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.auction_tick_features(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"]
+    )
+
+    assert result.height == 1
+    row = result.row(0, named=True)
+    assert row["auction_tick_count"] == 3.0
+    assert row["auction_tick_seconds"] == 242.0
+    assert row["auction_trade_price_change"] == 8.30 / 8.0 - 1.0
+    assert row["auction_trade_price_range"] == 8.30 / 8.0 - 1.0
+    assert row["auction_trade_volume_delta"] == 100.0
+    assert row["auction_trade_volume_per_second"] == 100.0 / 242.0
+    assert row["auction_trade_pressure_score"] == 0.25
+    assert row["auction_trade_depth_imbalance"] == 0.4
+
+
 def test_apply_auction_result_uses_enriched_adjustment_ratio(tmp_path):
     from app.indicators.pipeline import apply_auction_result_fields_to_enriched
 

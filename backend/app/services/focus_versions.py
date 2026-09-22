@@ -536,6 +536,7 @@ def build_focus_three_versions(
     # 盘后历史结果持久化保存，供后续直接毫秒级秒开
     if not is_today_unclosed:
         try:
+            full_cache_path.parent.mkdir(parents=True, exist_ok=True)
             full_cache_path.write_text(
                 json.dumps(result_payload, default=_json_default, ensure_ascii=False, indent=2),
                 encoding="utf-8",
