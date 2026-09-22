@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight, Target, AlertTriangle } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Info, History, ChevronLeft, ChevronRight, Target, AlertTriangle, Activity } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
 import {
   addOrUpdateMonitoredPosition,
@@ -1730,15 +1731,25 @@ export function Screener() {
                         次日竞价预选 ({focusPreselectCount})
                       </button>
                     </div>
-                    {focusDataValid && (
-                      <div className="flex items-center gap-2 text-[11px] text-muted pr-2">
-                        <span className="text-bull/90 font-medium">初选确认 {focusDataValid.summary.confirmed_count}</span>
-                        <span>·</span>
-                        <span className="text-amber-400/90 font-medium">尾盘突击 {focusDataValid.summary.late_entrant_count}</span>
-                        <span>·</span>
-                        <span className="text-red-400/90 font-medium">变脸淘汰 {focusDataValid.summary.dropped_count}</span>
-                      </div>
-                    )}
+                    <div className="flex items-center gap-2 pr-1">
+                      {focusDataValid && (
+                        <div className="flex items-center gap-2 text-[11px] text-muted pr-1">
+                          <span className="text-bull/90 font-medium">初选确认 {focusDataValid.summary.confirmed_count}</span>
+                          <span>·</span>
+                          <span className="text-amber-400/90 font-medium">尾盘突击 {focusDataValid.summary.late_entrant_count}</span>
+                          <span>·</span>
+                          <span className="text-red-400/90 font-medium">变脸淘汰 {focusDataValid.summary.dropped_count}</span>
+                        </div>
+                      )}
+                      <Link
+                        to="/data"
+                        className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-surface border border-border/80 text-muted hover:text-accent hover:border-accent/40 transition-colors"
+                        title="查看数据全景与 Focus 实时链路监控大盘"
+                      >
+                        <Activity className="h-3 w-3 text-secondary" />
+                        数据链路监控
+                      </Link>
+                    </div>
                   </div>
 
                   {/* 尾盘变脸淘汰折叠提示 */}

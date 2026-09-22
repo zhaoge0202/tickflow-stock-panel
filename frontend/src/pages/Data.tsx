@@ -57,6 +57,7 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
+import { FocusPipelineHealthCard } from '@/components/data/FocusPipelineHealthCard'
 
 export function Data() {
   const qc = useQueryClient()
@@ -693,6 +694,9 @@ export function Data() {
             </span>
           </div>
         )}
+
+        {/* Focus 策略实时数据链路与全景健康大盘 */}
+        <FocusPipelineHealthCard />
 
         {/* 实时进度 */}
         <AnimatePresence>
