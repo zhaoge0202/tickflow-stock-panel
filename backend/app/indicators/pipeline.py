@@ -99,6 +99,16 @@ ENRICHED_STORAGE_COLS = [
     "auction_result_price",                   # 09:25 开盘竞价最终成交价, 非竞价过程
     "auction_result_volume",                  # 09:25 最终成交量
     "auction_result_amount",                  # 09:25 最终成交额
+    "auction_tick_count",                     # 09:15-09:25 真实竞价成交快照数
+    "auction_tick_seconds",                   # 竞价真实成交覆盖秒数
+    "auction_trade_price_change",             # 首末真实竞价成交价变化
+    "auction_trade_price_range",              # 竞价真实成交价振幅
+    "auction_trade_volume_delta",             # 累计撮合量首末差
+    "auction_trade_volume_per_second",        # 累计撮合量每秒增量
+    "auction_trade_unmatched_ratio",          # 最后一笔未匹配比例
+    "auction_trade_pressure_score",           # 最后一笔竞价压力
+    "auction_trade_depth_imbalance",          # 最后一笔盘口不平衡
+    "auction_trade_spread_pct",               # 最后一笔盘口价差
     "raw_close", "raw_high", "raw_low",       # 不复权原始价
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
@@ -125,6 +135,16 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "auction_result_price":    "09:25开盘竞价最终成交价",
     "auction_result_volume":   "09:25开盘竞价最终成交量",
     "auction_result_amount":   "09:25开盘竞价最终成交额",
+    "auction_tick_count":      "09:15-09:25真实竞价成交快照数",
+    "auction_tick_seconds":    "竞价真实成交覆盖秒数",
+    "auction_trade_price_change": "竞价首末真实成交价变化",
+    "auction_trade_price_range": "竞价真实成交价振幅",
+    "auction_trade_volume_delta": "竞价累计撮合量首末差",
+    "auction_trade_volume_per_second": "竞价撮合量每秒增量",
+    "auction_trade_unmatched_ratio": "竞价最后未匹配比例",
+    "auction_trade_pressure_score": "竞价最后压力分数",
+    "auction_trade_depth_imbalance": "竞价最后盘口不平衡",
+    "auction_trade_spread_pct": "竞价最后盘口价差",
     "raw_close":               "原始收盘价(未复权)",
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
@@ -1069,17 +1089,20 @@ def attach_auction_result_fields(
     df: pl.DataFrame,
     data_dir: Path,
 ) -> pl.DataFrame:
-    """将本地 quote_ticks 的 09:25 成交结果附着到日K输入帧。
+    """将本地 quote_ticks 的竞价结果和秒级过程特征附着到日K输入帧。
 
     竞价结果是独立的事实层，不属于日K供应商的 OHLCV 响应。按日期读取
     quote_ticks 的窄列派生表，再按 ``symbol/date`` 左连接；已有值只有在本地
-    事实层提供新值时才覆盖。没有真实竞价成交的标的保留 null，后续策略必须
-    fail-closed，不能把日线 open 当作竞价价。
+    事实层提供新值时才覆盖。09:25 最终成交结果与 09:15-09:25 过程特征
+    分开计算，过程特征缺失时保留 null，实验策略按参数决定是否回退。
     """
+    from app.services.quote_tick_store import AUCTION_TICK_FEATURE_COLUMNS
+
     fields = (
         "auction_result_price",
         "auction_result_volume",
         "auction_result_amount",
+        *AUCTION_TICK_FEATURE_COLUMNS,
     )
     if df.is_empty() or "symbol" not in df.columns or "date" not in df.columns:
         return df
@@ -1114,11 +1137,22 @@ def attach_auction_result_fields(
             target_date=target_date,
             symbols=symbols,
         )
-        if not result.is_empty():
-            frames.append(result)
+        tick_features = quote_tick_store.auction_tick_features(
+            data_dir,
+            target_date=target_date,
+            symbols=symbols,
+        )
+        if result.is_empty():
+            combined = tick_features
+        elif tick_features.is_empty():
+            combined = result
+        else:
+            combined = result.join(tick_features, on=["symbol", "date"], how="left")
+        if not combined.is_empty():
+            frames.append(combined)
     if not frames:
         return base
-    auction = pl.concat(frames, how="vertical_relaxed").unique(
+    auction = pl.concat(frames, how="diagonal_relaxed").unique(
         subset=["symbol", "date"], keep="last",
     )
     joined = base.join(auction, on=["symbol", "date"], how="left", suffix="_auction")
@@ -1144,19 +1178,31 @@ def apply_auction_result_fields_to_enriched(
         data_dir,
         target_date=target_date,
     )
+    tick_features = quote_tick_store.auction_tick_features(
+        data_dir,
+        target_date=target_date,
+    )
+    if result.is_empty():
+        result = tick_features
+    elif not tick_features.is_empty():
+        result = result.join(tick_features, on=["symbol", "date"], how="left")
     path = Path(data_dir) / "kline_daily_enriched" / f"date={target_date.isoformat()}" / "part.parquet"
     if result.is_empty() or not path.exists():
         return {"rows": 0, "populated": 0, "changed": False}
     try:
         original = pl.read_parquet(path)
         base = original
+        from app.services.quote_tick_store import AUCTION_TICK_FEATURE_COLUMNS
+
+        auction_fields = (
+            "auction_result_price",
+            "auction_result_volume",
+            "auction_result_amount",
+            *AUCTION_TICK_FEATURE_COLUMNS,
+        )
         missing_exprs = [
             pl.lit(None, dtype=pl.Float64).alias(field)
-            for field in (
-                "auction_result_price",
-                "auction_result_volume",
-                "auction_result_amount",
-            )
+            for field in auction_fields
             if field not in base.columns
         ]
         if missing_exprs:
@@ -1178,25 +1224,18 @@ def apply_auction_result_fields_to_enriched(
             )
         else:
             adjustment = pl.lit(1.0)
-        updates = [
-            pl.coalesce([
-                pl.col("auction_result_price_raw") * adjustment,
-                pl.col("auction_result_price"),
-            ]).alias("auction_result_price"),
-            pl.coalesce([
-                pl.col("auction_result_volume_raw"),
-                pl.col("auction_result_volume"),
-            ]).alias("auction_result_volume"),
-            pl.coalesce([
-                pl.col("auction_result_amount_raw"),
-                pl.col("auction_result_amount"),
-            ]).alias("auction_result_amount"),
-        ]
-        merged = joined.with_columns(updates).drop([
-            "auction_result_price_raw",
-            "auction_result_volume_raw",
-            "auction_result_amount_raw",
-        ]).sort("symbol")
+        updates = []
+        drops = []
+        for field in auction_fields:
+            right = f"{field}_raw"
+            if right not in joined.columns:
+                continue
+            right_expr = pl.col(right)
+            if field == "auction_result_price":
+                right_expr = right_expr * adjustment
+            updates.append(pl.coalesce([right_expr, pl.col(field)]).alias(field))
+            drops.append(right)
+        merged = joined.with_columns(updates).drop(drops).sort("symbol")
         changed = not original.equals(merged)
         if changed:
             publication = EnrichedPublication(data_dir, "stock", recover=True)

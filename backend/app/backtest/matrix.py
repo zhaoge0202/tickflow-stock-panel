@@ -61,6 +61,16 @@ _OPTIONAL_NUMERIC_STORAGE_FIELDS = frozenset({
     "auction_result_price",
     "auction_result_volume",
     "auction_result_amount",
+    "auction_tick_count",
+    "auction_tick_seconds",
+    "auction_trade_price_change",
+    "auction_trade_price_range",
+    "auction_trade_volume_delta",
+    "auction_trade_volume_per_second",
+    "auction_trade_unmatched_ratio",
+    "auction_trade_pressure_score",
+    "auction_trade_depth_imbalance",
+    "auction_trade_spread_pct",
 })
 
 logger = logging.getLogger(__name__)
