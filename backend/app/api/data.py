@@ -1,19 +1,22 @@
 """数据画像 API —— 让前端知道"我们本地有什么数据"。"""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Request
+import polars as pl
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
+from app.market_time import cn_now, cn_today
 from app.services.strategy_date import latest_strategy_date
 
 logger = logging.getLogger(__name__)
@@ -686,6 +689,255 @@ def status(request: Request) -> dict:
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
+    }
+
+
+@router.get("/focus-readiness")
+def focus_readiness(
+    request: Request,
+    as_of: Optional[str] = Query(None, description="目标查询日期 YYYY-MM-DD，默认今天或最新策略日"),
+) -> dict:
+    """Focus 策略实时数据链路与全景健康状态诊断。"""
+    repo = request.app.state.repo
+    data_dir = repo.store.data_dir
+    scheduler = getattr(request.app.state, "scheduler", None)
+    latest_formal_date = latest_strategy_date(data_dir, "stock")
+    target_date_str = as_of or (latest_formal_date.isoformat() if latest_formal_date else cn_today().isoformat())
+
+    # 1. 基础个股维表
+    inst = repo.get_instruments()
+    total_universe = len(inst) if inst is not None and not inst.is_empty() else 5571
+
+    # 2. 当日全市场日K
+    daily_path = data_dir / "kline_daily" / f"date={target_date_str}" / "part.parquet"
+    daily_count = 0
+    if daily_path.exists():
+        try:
+            daily_count = len(pl.read_parquet(daily_path, columns=["symbol"]))
+        except Exception:
+            daily_count = 0
+    daily_status = "ready" if daily_count >= 5000 else ("degraded" if daily_count > 0 else "missing")
+    daily_pct = round(daily_count / total_universe * 100, 1) if total_universe > 0 else 0
+
+    # 3. 当日全量指标 Enriched
+    enriched_path = data_dir / "kline_daily_enriched" / f"date={target_date_str}" / "part.parquet"
+    enriched_count = 0
+    enriched_fields = 0
+    if enriched_path.exists():
+        try:
+            df_enr = pl.read_parquet(enriched_path)
+            enriched_count = len(df_enr)
+            enriched_fields = len(df_enr.columns)
+        except Exception:
+            enriched_count = 0
+    enriched_status = "ready" if enriched_count >= 5000 else ("degraded" if enriched_count > 0 else "missing")
+    enriched_pct = round(enriched_count / total_universe * 100, 1) if total_universe > 0 else 0
+
+    # 4. 当日分钟K
+    min_path = data_dir / "kline_minute" / f"date={target_date_str}" / "part.parquet"
+    minute_rows = 0
+    minute_symbols = 0
+    minute_max_time = None
+    if min_path.exists():
+        try:
+            df_min = pl.read_parquet(min_path)
+            minute_rows = len(df_min)
+            if not df_min.is_empty():
+                minute_symbols = df_min["symbol"].n_unique()
+                minute_max_time = str(df_min["datetime"].max())
+        except Exception:
+            pass
+    minute_status = "ready" if minute_symbols >= 5000 else ("degraded" if minute_symbols > 0 else "missing")
+    minute_pct = round(minute_symbols / total_universe * 100, 1) if total_universe > 0 else 0
+
+    # 5. 当日竞价成交分笔
+    ticks_dir = data_dir / "quote_ticks" / f"date={target_date_str}" / "hour=09"
+    ticks_count = 0
+    ticks_status = "missing"
+    if ticks_dir.exists():
+        p_files = list(ticks_dir.glob("*.parquet"))
+        if p_files:
+            ticks_status = "ready"
+            try:
+                ticks_count = sum(len(pl.read_parquet(p, columns=["symbol"])) for p in p_files[:3])
+            except Exception:
+                pass
+
+    # 6. Focus 三版本定版状态
+    preview_file = data_dir / "user_data" / f"preview_custom_dual_edge_focus_{target_date_str}.json"
+    final_file = data_dir / "user_data" / f"focus_three_versions_custom_dual_edge_focus_{target_date_str}.json"
+    preview_info = {"exists": False, "total": 0, "created_at": None}
+    final_info = {"exists": False, "final_total": 0, "preselect_total": 0, "preview_total": 0}
+    if preview_file.exists():
+        try:
+            p_data = json.loads(preview_file.read_text(encoding="utf-8"))
+            preview_info = {
+                "exists": True,
+                "total": p_data.get("total", 0),
+                "created_at": p_data.get("created_at"),
+            }
+        except Exception:
+            pass
+    if final_file.exists():
+        try:
+            f_data = json.loads(final_file.read_text(encoding="utf-8"))
+            final_info = {
+                "exists": True,
+                "final_total": f_data.get("summary", {}).get("final_total", 0),
+                "preselect_total": f_data.get("summary", {}).get("preselect_total", 0),
+                "preview_total": f_data.get("summary", {}).get("preview_total", 0),
+                "confirmed_count": f_data.get("summary", {}).get("confirmed_count", 0),
+            }
+        except Exception:
+            pass
+
+    # 7. 判定是否能够瞬间极速自愈 (当分钟K充足而日K/enriched残缺时)
+    can_fast_reconstruct = bool(minute_symbols >= 5000 and (daily_count < 1000 or enriched_count < 1000))
+
+    # 综合健康诊断
+    if daily_status == "ready" and enriched_status == "ready":
+        health = "healthy"
+        health_message = f"{target_date_str} 全量日K与指标完全就绪 ({daily_count}/{total_universe} 只，{daily_pct}%)"
+    elif can_fast_reconstruct:
+        health = "can_reconstruct"
+        health_message = f"{target_date_str} 分钟K已齐全({minute_symbols}只)，但日K/指标残缺({daily_count}只)，可点击一键极速补全"
+    elif daily_count == 0 and minute_symbols == 0:
+        health = "missing"
+        health_message = f"{target_date_str} 尚未生成今日行情与日线数据，待收盘盘后同步"
+    else:
+        health = "degraded"
+        health_message = f"{target_date_str} 数据部分残缺 (日K: {daily_count}只, 分钟K: {minute_symbols}只)"
+
+    return {
+        "as_of": target_date_str,
+        "health": health,
+        "health_message": health_message,
+        "total_universe": total_universe,
+        "can_fast_reconstruct": can_fast_reconstruct,
+        "layers": {
+            "instruments": {"count": total_universe, "status": "ready"},
+            "quote_ticks": {"status": ticks_status, "count": ticks_count},
+            "minute": {
+                "count": minute_symbols,
+                "rows": minute_rows,
+                "pct": minute_pct,
+                "max_time": minute_max_time,
+                "status": minute_status,
+            },
+            "daily": {
+                "count": daily_count,
+                "pct": daily_pct,
+                "status": daily_status,
+            },
+            "enriched": {
+                "count": enriched_count,
+                "fields": enriched_fields,
+                "pct": enriched_pct,
+                "status": enriched_status,
+            },
+        },
+        "focus_stages": {
+            "auction_0925": {"status": "ready" if ticks_status == "ready" else "missing", "label": "09:25 竞价确认"},
+            "preview_1450": {"status": "ready" if preview_info["exists"] else "pending", "total": preview_info["total"], "label": "14:50 尾盘初选"},
+            "close_1500": {"status": daily_status, "count": daily_count, "label": "15:00 收盘日K"},
+            "final_1535": {"status": "ready" if final_info["exists"] else "pending", "final_total": final_info["final_total"], "preselect_total": final_info["preselect_total"], "label": "15:35 盘后定版"},
+        },
+        "scheduler": {
+            "next_pipeline_run": _next_cron_run(scheduler, "daily_pipeline"),
+            "last_pipeline_run": _last_finished("pipeline"),
+        },
+    }
+
+
+@router.post("/fast-reconstruct-today")
+def fast_reconstruct_today(
+    request: Request,
+    as_of: Optional[str] = Query(None, description="需要自愈聚合的交易日 YYYY-MM-DD，默认今天"),
+):
+    """当全量分钟K齐全时，极速(0.5秒)将本地分钟K聚合生成全量日K并重算 Enriched 和 Focus 三版本定版。"""
+    repo = request.app.state.repo
+    data_dir = repo.store.data_dir
+    target_date_str = as_of or cn_today().isoformat()
+    target_date = date.fromisoformat(target_date_str)
+
+    min_path = data_dir / "kline_minute" / f"date={target_date_str}" / "part.parquet"
+    if not min_path.exists():
+        raise HTTPException(status_code=400, detail=f"本地未找到 {target_date_str} 的全量分钟K文件")
+
+    t0 = time.perf_counter()
+    df_m = pl.read_parquet(min_path)
+    if df_m.is_empty():
+        raise HTTPException(status_code=400, detail=f"{target_date_str} 的分钟K数据为空")
+
+    # 1. 分钟线聚合出全量日K
+    agg = (
+        df_m.sort("datetime")
+        .group_by("symbol")
+        .agg([
+            pl.first("open").alias("open"),
+            pl.max("high").alias("high"),
+            pl.min("low").alias("low"),
+            pl.last("close").alias("close"),
+            pl.sum("volume").alias("volume"),
+            pl.sum("amount").alias("amount"),
+        ])
+        .with_columns(pl.lit(target_date).alias("date"))
+    )
+
+    # 2. 融合个股基础维表
+    inst = repo.get_instruments()
+    if inst is not None and not inst.is_empty():
+        meta_cols = [c for c in inst.columns if c not in agg.columns]
+        if meta_cols:
+            agg = agg.join(inst.select(["symbol"] + meta_cols), on="symbol", how="left")
+
+    # 3. 写入 kline_daily
+    daily_dir = data_dir / "kline_daily" / f"date={target_date_str}"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    daily_file = daily_dir / "part.parquet"
+    daily_tmp = daily_dir / "part.parquet.tmp"
+    agg.write_parquet(daily_tmp)
+    daily_tmp.replace(daily_file)
+
+    # 4. 删除旧的残缺 enriched 分区，触发干净重算
+    enr_dir = data_dir / "kline_daily_enriched" / f"date={target_date_str}"
+    if enr_dir.exists():
+        import shutil
+        shutil.rmtree(enr_dir, ignore_errors=True)
+
+    # 5. 调用 run_pipeline 快速增量生成 enriched 指标
+    from app.indicators.pipeline import run_pipeline
+    run_pipeline(new_dates_only=True)
+
+    # 6. 刷新 DuckDB 与缓存
+    repo.clear_cache()
+    repo.refresh_cache()
+    repo.rebuild_views()
+    invalidate_data_cache(None)
+
+    # 7. 触发 Focus 策略三版本重新定版
+    engine = getattr(request.app.state, "strategy_engine", None)
+    focus_summary = None
+    if engine:
+        from app.services.focus_versions import build_focus_three_versions
+        res = build_focus_three_versions(
+            repo,
+            engine,
+            strategy_id="custom_dual_edge_focus",
+            as_of=target_date,
+            force_refresh=True,
+        )
+        focus_summary = res.get("summary")
+
+    elapsed = round(time.perf_counter() - t0, 2)
+    logger.info("fast_reconstruct_today 完成: %d 只标的, 耗时 %.2fs", len(agg), elapsed)
+
+    return {
+        "ok": True,
+        "target_date": target_date_str,
+        "symbols_reconstructed": len(agg),
+        "elapsed_seconds": elapsed,
+        "focus_summary": focus_summary,
     }
 
 

@@ -3806,6 +3806,15 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  focusReadiness: (asOf?: string) =>
+    request<FocusReadinessResponse>(
+      `/api/data/focus-readiness${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`,
+    ),
+  fastReconstructToday: (asOf?: string) =>
+    request<FastReconstructResponse>(
+      `/api/data/fast-reconstruct-today${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`,
+      { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS },
+    ),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -4830,6 +4839,46 @@ export interface DataStatus {
   latest_strategy_date: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface FocusReadinessResponse {
+  as_of: string
+  health: 'healthy' | 'can_reconstruct' | 'degraded' | 'missing'
+  health_message: string
+  total_universe: number
+  can_fast_reconstruct: boolean
+  layers: {
+    instruments: { count: number; status: string }
+    quote_ticks: { status: string; count: number }
+    minute: { count: number; rows: number; pct: number; max_time?: string | null; status: string }
+    daily: { count: number; pct: number; status: string }
+    enriched: { count: number; fields: number; pct: number; status: string }
+  }
+  focus_stages: {
+    auction_0925: { status: string; label: string }
+    preview_1450: { status: string; total?: number; label: string }
+    close_1500: { status: string; count?: number; label: string }
+    final_1535: { status: string; final_total?: number; preselect_total?: number; label: string }
+  }
+  scheduler: {
+    next_pipeline_run: string | null
+    last_pipeline_run: string | null
+  }
+}
+
+export interface FastReconstructResponse {
+  ok: boolean
+  target_date: string
+  symbols_reconstructed: number
+  elapsed_seconds: number
+  focus_summary?: {
+    preview_total: number
+    final_total: number
+    preselect_total: number
+    confirmed_count: number
+    dropped_count: number
+    late_entrant_count: number
+  } | null
 }
 
 export interface EnrichedField {
