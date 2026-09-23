@@ -262,6 +262,8 @@ def build_focus_three_versions(
                     "status": "ready",
                     "total": len(enriched_p_rows),
                     "rows": _sanitize_rows(enriched_p_rows),
+                    "empty_title": "14:50 尾盘初选无命中" if len(enriched_p_rows) == 0 else "",
+                    "empty_hint": "今日截至 14:50 全市场标的均未通过尾盘初选风控门槛，策略主动防守空仓。收盘后将自动生成次日竞价预选池。" if len(enriched_p_rows) == 0 else "",
                 },
                 "final": {
                     "label": "收盘正式版",
@@ -269,6 +271,8 @@ def build_focus_three_versions(
                     "status": "unclosed",
                     "total": 0,
                     "rows": [],
+                    "empty_title": "今日盘后尚未定版",
+                    "empty_hint": "收盘正式版与次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。",
                 },
                 "preselect": {
                     "label": "次日竞价预选",
@@ -276,6 +280,8 @@ def build_focus_three_versions(
                     "status": "unclosed",
                     "total": 0,
                     "rows": [],
+                    "empty_title": "次日竞价预选尚未定版",
+                    "empty_hint": "次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。",
                 },
             },
             "dropped_from_preview": [],
@@ -506,6 +512,8 @@ def build_focus_three_versions(
                 "status": "ready" if preview_ready else "pending",
                 "total": len(enriched_preview_rows),
                 "rows": _sanitize_rows(enriched_preview_rows),
+                "empty_title": "14:50 尾盘初选无命中" if preview_ready else "14:50 尾盘初选尚未就绪",
+                "empty_hint": "今日截至 14:50 全市场标的均未通过尾盘初选风控门槛，策略主动防守空仓。收盘后将自动生成次日竞价预选池。" if preview_ready else "系统将在 14:50 自动聚合生成尾盘初选候选池，请稍候…",
             },
             "final": {
                 "label": "收盘正式版",
@@ -513,6 +521,8 @@ def build_focus_three_versions(
                 "status": "ready" if not is_today_unclosed else "unclosed",
                 "total": len(enriched_final_rows),
                 "rows": _sanitize_rows(enriched_final_rows),
+                "empty_title": "收盘正式版无命中" if not is_today_unclosed else "今日盘后尚未定版",
+                "empty_hint": "全市场标的均未满足策略全套严苛条件，策略主动防守空仓。可查看次日竞价预选观察池。" if not is_today_unclosed else "收盘正式版与次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。",
             },
             "preselect": {
                 "label": "次日竞价预选",
@@ -520,6 +530,8 @@ def build_focus_three_versions(
                 "status": "ready" if not is_today_unclosed else "unclosed",
                 "total": len(enriched_preselect_rows),
                 "rows": _sanitize_rows(enriched_preselect_rows),
+                "empty_title": "次日竞价预选无命中" if not is_today_unclosed else "次日竞价预选尚未定版",
+                "empty_hint": "严格策略和盘后放宽预选都没有候选，建议关注盘中动态信号。" if not is_today_unclosed else "次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。",
             },
         },
         "dropped_from_preview": _sanitize_rows(dropped_rows),

@@ -553,6 +553,8 @@ export interface FocusVersionDetail {
   status: 'ready' | 'pending' | 'unclosed'
   total: number
   rows: any[]
+  empty_title?: string
+  empty_hint?: string
 }
 
 export interface FocusVersionsResponse {
