@@ -233,6 +233,17 @@ def build_focus_three_versions(
         try:
             cached_data = json.loads(full_cache_path.read_text(encoding="utf-8"))
             if cached_data.get("as_of") == d_str:
+                for v_name, v_info in cached_data.get("versions", {}).items():
+                    if isinstance(v_info, dict) and not v_info.get("empty_title"):
+                        if v_name == "preview":
+                            v_info["empty_title"] = "14:50 尾盘初选无命中"
+                            v_info["empty_hint"] = "今日截至 14:50 全市场标的均未通过尾盘初选风控门槛，策略主动防守空仓。收盘后将自动生成次日竞价预选池。"
+                        elif v_name == "final":
+                            v_info["empty_title"] = "收盘正式版无命中"
+                            v_info["empty_hint"] = "全市场标的均未满足策略全套严苛条件，策略主动防守空仓。可查看次日竞价预选观察池。"
+                        elif v_name == "preselect":
+                            v_info["empty_title"] = "次日竞价预选无命中"
+                            v_info["empty_hint"] = "严格策略和盘后放宽预选都没有候选，建议关注盘中动态信号。"
                 return cached_data
         except Exception:
             pass
