@@ -1448,6 +1448,27 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 盘中: 14:50:05 自动预生成 Focus 尾盘初选快照，供尾盘 10 分钟秒级查阅 (<5ms)
+    def _focus_preview_snapshot():
+        app_state = _get_app_state()
+        engine = getattr(app_state, "strategy_engine", None) if app_state else None
+        if engine and repo:
+            try:
+                from app.services.focus_versions import build_focus_three_versions
+                logger.info("自动触发 14:50 Focus 尾盘初选快照生成...")
+                build_focus_three_versions(repo, engine, "custom_dual_edge_focus", force_refresh=True)
+                logger.info("14:50 Focus 尾盘初选快照生成完毕")
+            except Exception as e:
+                logger.warning("自动生成 Focus 尾盘初选失败: %s", e)
+
+    scheduler.add_job(
+        _focus_preview_snapshot,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=14, minute=50, second=5, timezone="Asia/Shanghai"),
+        id="focus_preview_snapshot",
+        misfire_grace_time=600,
+        replace_existing=True,
+    )
+
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
     # 只热更新 app.state.capabilities(API 端点、盘后管道 _pipeline_then_refresh 均读它);
     # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。
