@@ -1823,22 +1823,8 @@ export function Screener() {
                 <EmptyState
                   icon={ScanSearch}
                   title={
-                    isFocusStrategy && asOf === todayIso
-                      ? (focusActiveVersion === 'preview'
-                          ? (focusDataValid?.versions.preview?.status === 'ready'
-                              ? '14:50 尾盘初选无命中'
-                              : '14:50 尾盘初选尚未就绪')
-                          : focusActiveVersion === 'final'
-                            ? (focusDataValid?.is_unclosed
-                                ? '今日盘后尚未定版'
-                                : (focusDataValid?.versions.final?.status === 'ready'
-                                    ? '收盘正式版无命中'
-                                    : '今日无命中'))
-                            : (focusDataValid?.is_unclosed
-                                ? '次日竞价预选尚未定版'
-                                : (focusDataValid?.versions.preselect?.status === 'ready'
-                                    ? '次日竞价预选无命中'
-                                    : '今日无预选')))
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                      ? (focusDataValid.versions[focusActiveVersion].empty_title || '今日无命中')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? auctionWaitingHint
                         : displayMode === 'preselect'
@@ -1858,18 +1844,8 @@ export function Screener() {
                               : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
                   }
                   hint={
-                    isFocusStrategy && asOf === todayIso
-                      ? (focusActiveVersion === 'preview'
-                          ? (focusDataValid?.versions.preview?.status === 'ready'
-                              ? '今日截至 14:50 全市场标的均未通过尾盘初选风控门槛，策略主动防守空仓；收盘后将自动生成次日竞价预选池。'
-                              : '系统将在 14:50 自动聚合生成尾盘初选候选池，请稍候…')
-                          : focusActiveVersion === 'final'
-                            ? (focusDataValid?.is_unclosed
-                                ? '收盘正式版与次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。'
-                                : '全市场标的均未满足策略全套严苛条件，策略主动防守空仓。可查看次日竞价预选观察池。')
-                            : (focusDataValid?.is_unclosed
-                                ? '次日竞价预选将在 15:35 盘后数据管道同步完成后自动定版呈现。'
-                                : '严格策略和盘后放宽预选都没有候选，建议关注盘中动态信号。'))
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                      ? (focusDataValid.versions[focusActiveVersion].empty_hint || '暂无数据')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
                         : displayMode === 'preselect'
