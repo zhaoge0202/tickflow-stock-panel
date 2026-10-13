@@ -240,7 +240,16 @@ class TDXAPIProvider:
                 if start_time is not None and end_time is not None and start_time.date() == end_time.date():
                     request_date = start_time.strftime("%Y%m%d")
                 if request_date:
-                    rows = self._fetch_minute_rows_with_retry(symbol, kline_type, request_date)
+                    if asset_type == "index":
+                        rows = self._fetch_minute_rows_with_retry(
+                            symbol, kline_type, request_date, asset_type=asset_type,
+                        )
+                    else:
+                        rows = self._fetch_minute_rows_with_retry(symbol, kline_type, request_date)
+                elif asset_type == "index":
+                    rows = self._fetch_minute_rows_with_retry(
+                        symbol, kline_type, asset_type=asset_type,
+                    )
                 else:
                     rows = self._fetch_minute_rows_with_retry(symbol, kline_type)
             except Exception as e:
@@ -289,13 +298,20 @@ class TDXAPIProvider:
         return pl.concat(out, how="diagonal_relaxed") if out else pl.DataFrame()
 
     def _fetch_minute_rows_with_retry(
-        self, symbol: str, kline_type: str, trade_date: str | None = None,
+        self,
+        symbol: str,
+        kline_type: str,
+        trade_date: str | None = None,
+        *,
+        asset_type: AssetType = "stock",
     ) -> list[dict]:
         """TDX 节点会偶发返回业务超时, 换节点重试可恢复。"""
         last_error: Exception | None = None
         for attempt in range(1, _MINUTE_FETCH_ATTEMPTS + 1):
             try:
-                return self._fetch_kline_rows(symbol, kline_type, trade_date)
+                return self._fetch_kline_rows(
+                    symbol, kline_type, trade_date, asset_type=asset_type,
+                )
             except Exception as e:
                 last_error = e
                 logger.warning(
@@ -811,23 +827,36 @@ class TDXAPIProvider:
         raise ValueError(f"tdx-api 不支持数据集: {dataset}")
 
     def _fetch_kline_rows(
-        self, symbol: str, kline_type: str, trade_date: str | None = None,
+        self,
+        symbol: str,
+        kline_type: str,
+        trade_date: str | None = None,
+        *,
+        asset_type: AssetType = "stock",
     ) -> list[dict]:
+        is_index = asset_type == "index"
         params = {"code": _to_tdx_code(symbol), "type": kline_type}
         if kline_type.startswith("minute"):
             # TDX 原生分钟 K 没有按日期查询，sidecar 会在带 date 时
             # 拉取并过滤最近数据；无 date 的区间请求保持 2400 根限制，
             # 避免后台同步无条件放大为 24000 根。
-            params["limit"] = "800" if trade_date == _cn_today().strftime("%Y%m%d") else "2400"
+            # 指数必须走 /api/index: /api/kline-all/tdx 的股票解码器会把
+            # 指数差分字段当成股票价格，产生数十万的负数 OHLC。
+            params["limit"] = "800" if is_index else (
+                "800" if trade_date == _cn_today().strftime("%Y%m%d") else "2400"
+            )
         if trade_date:
             params["date"] = trade_date
         data = self._request(
             "GET",
-            "/api/kline-all/tdx",
+            "/api/index" if is_index else "/api/kline-all/tdx",
             params=params,
             timeout=max(self.timeout, 60.0),
         )
-        return list((data or {}).get("list") or [])
+        payload = data or {}
+        # /api/kline-all/tdx 返回 lower-case list, /api/index 直接序列化
+        # protocol.KlineResp, 字段名为 Count/List。
+        return list(payload.get("list") or payload.get("List") or [])
 
     def _request(self, method: str, path: str, **kwargs):
         # tdx-api 内部还要占用通达信节点和代理连接。页面查询、后台入库、
