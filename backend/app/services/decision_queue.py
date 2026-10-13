@@ -34,6 +34,16 @@ def build_queue(
     positions = manual_positions.by_symbol(data_dir, repo)
     latest_status = _latest_status_map(data_dir, repo, target_date)
     symbols = _symbols_from_inputs(alerts, positions, latest_status)
+    if not symbols:
+        quality = quote_tick_store.quality(data_dir, [], target_date=target_date)
+        return {
+            "trade_date": target_date.isoformat(),
+            "items": [],
+            "total": 0,
+            "pending": 0,
+            "done": 0,
+            "quality": quality,
+        }
     frames = {
         f["symbol"]: f
         for f in signal_frame.build_latest_frames(

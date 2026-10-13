@@ -123,6 +123,19 @@ def test_decision_summary_does_not_report_all_market_stale_without_items(tmp_pat
     assert summary["quality"]["stale_symbols"] == []
 
 
+def test_decision_queue_empty_inputs_skip_full_market_signal_frames(monkeypatch, tmp_path):
+    def fail_build_frames(*args, **kwargs):
+        raise AssertionError("空决策队列不应构建全市场 signal frames")
+
+    monkeypatch.setattr(decision_queue.signal_frame, "build_latest_frames", fail_build_frames)
+
+    queue = decision_queue.build_queue(tmp_path, FakeRepo(), target_date=TRADE_DATE)
+
+    assert queue["total"] == 0
+    assert queue["items"] == []
+    assert queue["quality"]["missing_symbols"] == []
+
+
 def test_record_action_does_not_rebuild_detail(monkeypatch, tmp_path):
     def fail_get_item(*args, **kwargs):
         raise AssertionError("record_action 不应同步重建详情")

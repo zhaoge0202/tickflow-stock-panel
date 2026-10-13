@@ -112,12 +112,28 @@ _CORE_INDEXES = {
     "000016.SH": "上证50",
 }
 
-# Provider 会在多个请求线程中被分别实例化；闸门必须是模块级共享对象，
+# Provider 会在多个请求线程中被分别实例化; 闸门必须是模块级共享对象,
 # 否则每个实例各自限流仍会把 tdx-api 同时打满。
-# 与 tdx-api Web 层的 4 条行情连接对应。Provider 实例可能有多个，闸门
-# 必须是模块级共享对象，避免每个实例各自放行 4 个请求把 sidecar 打满。
+# 与 tdx-api Web 层的默认 4 条行情连接对应。Provider 实例可能有多个, 闸门
+# 必须是模块级共享对象, 避免每个实例各自放行请求把 sidecar 打满。
+# 生产环境可通过 TDX_API_HTTP_CONCURRENCY 小幅提高, 但仍有硬上限;
+# 该值只在进程启动时读取，便于通过配置和重启回滚。
 _TDX_HTTP_CONCURRENCY_DEFAULT = 4
-_tdx_http_gate = threading.BoundedSemaphore(_TDX_HTTP_CONCURRENCY_DEFAULT)
+_TDX_HTTP_CONCURRENCY_MAX = 16
+
+
+def _tdx_http_concurrency() -> int:
+    try:
+        concurrency = int(
+            os.getenv("TDX_API_HTTP_CONCURRENCY", str(_TDX_HTTP_CONCURRENCY_DEFAULT))
+            or _TDX_HTTP_CONCURRENCY_DEFAULT
+        )
+    except ValueError:
+        concurrency = _TDX_HTTP_CONCURRENCY_DEFAULT
+    return max(1, min(_TDX_HTTP_CONCURRENCY_MAX, concurrency))
+
+
+_tdx_http_gate = threading.BoundedSemaphore(_tdx_http_concurrency())
 
 
 @dataclass
