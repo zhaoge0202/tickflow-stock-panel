@@ -3183,7 +3183,7 @@ export const api = {
   syncIndexDaily: (days = 365) =>
     request<{ status: string; index_count: number; rows_written: number }>(
       `/api/index/sync_daily?days=${days}`,
-      { method: 'POST' },
+      { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS },
     ),
   syncSymbol: (symbol: string, days = 250) =>
     request<{ symbol: string; rows_written: number }>(
