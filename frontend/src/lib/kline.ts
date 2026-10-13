@@ -7,7 +7,7 @@
  * placeholderData 内置"仅同 symbol 占位"守卫: 改日期范围/扩展字段时旧数据可暂显(不闪),
  * 切股时不透传上一只股票的数据(不误显示)。
  */
-import { api, type KlineDailyLatestResponse, type KlineDailyResponse } from '@/lib/api'
+import { api, isCryptoAssetType, type KlineDailyLatestResponse, type KlineDailyResponse } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 /** 分时 tab 多日分时默认周期 (StockPanel 预取与弹窗存储回退共用, 避免魔数两处漂移) */
@@ -99,6 +99,9 @@ function rowMinute(r: { datetime?: string } | undefined): string {
  *
  * - 未传间隔 → 不轮询 (调用方默认关闭)
  * - 无数据 (source=none) → 停
+ * - crypto (24x7 连续交易) → 恒按间隔继续: 无收盘根、无「北京自然日=当日」概念,
+ *   其 date 是 UTC 合约日 (北京 08:00 切日), 复用 A 股的收盘根/当日判据会把
+ *   凌晨到 08:00 之间的有效行情误判为"历史日"而停止刷新。
  * - 响应日期 < 北京今天 → 停: 历史日的本地分钟K不可变 (周末"最新"会被
  *   后端回退到上一交易日, 同样命中此规则)
  * - 当日: 收盘根 (≥15:00 的K) 已出现 **且** 已过 15:30 → 停。
@@ -116,6 +119,7 @@ export function minuteRefetchInterval(ms?: number) {
     const d = query.state.data
     if (!d) return ms
     if (d.source === 'none') return false
+    if (isCryptoAssetType(d.asset_type)) return ms
     if (typeof d.date === 'string' && d.date < cnToday()) return false
     const closeBarArrived = (d.rows ?? []).some((r: { datetime?: string }) => rowMinute(r) >= CLOSE_MINUTE)
     if (closeBarArrived && cnNowHHMM() >= MARKET_ALL_OVER) return false

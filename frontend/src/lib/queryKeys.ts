@@ -38,7 +38,9 @@ export const QK = {
   // 不用 watchlist- 前缀: 避免被 SSE quotes_updated 高频失效(expert 1s/pro 2s)
   // 导致每次都拉 TickFlow 触限流。分时图用固定 refetchInterval 刷新即可。
   minuteBatch:          (symbols: string) => ['minute-batch', symbols] as const,
-  instrumentSearch:     (q: string, assetTypes?: string) => ['instrument-search', q, assetTypes ?? 'stock'] as const,
+  // assetTypes 与请求参数 asset_types 必须一致地进键 (调用方传确定值):
+  // 传 undefined 时请求不带该参数, 与显式 'stock' 是两个语义不同的查询, 不能共用缓存。
+  instrumentSearch:     (q: string, assetTypes: string) => ['instrument-search', q, assetTypes] as const,
 
   // Screener
   screener:             ['screener'] as const,
