@@ -5,9 +5,9 @@
 需要给每个门控加资产分支, 而任意一处漏改都会产出静默错误结果 (CONTRIBUTING §3)。
 本模块只做 crypto 需要的四件事, A 股链路保持零改动。
 
-口径 (app/market_rules + data_providers/binance/provider.py):
-  - 日K date = UTC 合约日;
-  - 分钟 datetime = 北京墙钟 naive, 分区键 = 该分钟的 UTC 合约日;
+口径 (app/market_rules + data_providers/okx/provider.py):
+  - 日K date = 北京自然日 (OKX 官方日线切日口径, 与项目 CN_TZ 契约一致);
+  - 分钟 datetime = 北京墙钟 naive, 分区键 = 该分钟的合约日 (北京日);
   - 无复权因子同步 (永续无除权除息);
   - volume 保持上游口径 (币/张), 不按「手」换算。
 """

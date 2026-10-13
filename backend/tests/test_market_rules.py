@@ -5,7 +5,9 @@
     非 A 股资产时顺手改动 A 股行为;
   - 永续合约规则 (T+0 / 无涨跌停 / 无复权 / 小数仓位 / 365 / 无基准);
   - 未知资产类别 fail-closed;
-  - 合约日换算: 日归属、日边界、带时区入参归一、已过分钟数。
+  - 日归属: 两类资产同为北京自然日, 日边界 = 北京 00:00 (口径由交易所日线切日决定,
+    见 market_rules 的选源约束 —— OKX 官方日线就是 UTC+8 零点);
+  - 带时区入参归一、已过分钟数。
 """
 
 from __future__ import annotations
@@ -41,7 +43,6 @@ def test_cn_rules_keep_existing_a_share_semantics():
         assert rules.halt_filter is True
         assert rules.session_24x7 is False
         assert rules.calendar == "cn"
-        assert rules.contract_day_basis == "cn"
         assert rules.annual_days == 252
         assert rules.default_benchmark == "000001.SH"
 
@@ -70,7 +71,6 @@ def test_crypto_rules_are_not_a_share_semantics():
     assert rules.halt_filter is False
     assert rules.session_24x7 is True
     assert rules.calendar == "none"
-    assert rules.contract_day_basis == "utc"
     assert rules.annual_days == 365
     # 无合适基准: 不得默默套用上证指数
     assert rules.default_benchmark is None
@@ -86,15 +86,15 @@ def test_is_crypto_only_matches_crypto():
 @pytest.mark.parametrize(
     ("beijing_wallclock", "expected"),
     [
-        # 北京 08:00 是币安 UTC 00:00 → 合约日切换点
-        (datetime(2026, 10, 13, 7, 59, 59), date(2026, 10, 12)),
+        # 口径 = 北京自然日 (与 OKX 官方日线切日一致): 北京 00:00 是切换点
+        (datetime(2026, 10, 13, 0, 0, 0), date(2026, 10, 13)),
+        (datetime(2026, 10, 13, 7, 59, 59), date(2026, 10, 13)),
         (datetime(2026, 10, 13, 8, 0, 0), date(2026, 10, 13)),
         (datetime(2026, 10, 13, 23, 59, 59), date(2026, 10, 13)),
-        (datetime(2026, 10, 14, 7, 59, 59), date(2026, 10, 13)),
-        (datetime(2026, 10, 14, 8, 0, 0), date(2026, 10, 14)),
+        (datetime(2026, 10, 14, 0, 0, 0), date(2026, 10, 14)),
     ],
 )
-def test_crypto_contract_date_uses_utc_day(beijing_wallclock, expected):
+def test_crypto_contract_date_uses_beijing_day(beijing_wallclock, expected):
     assert to_contract_date(beijing_wallclock, CRYPTO) == expected
 
 
@@ -118,13 +118,13 @@ def test_contract_date_normalizes_tz_aware_input():
 
 
 def test_contract_today_accepts_explicit_now():
-    assert contract_today(CRYPTO, datetime(2026, 10, 13, 6, 0)) == date(2026, 10, 12)
+    assert contract_today(CRYPTO, datetime(2026, 10, 13, 6, 0)) == date(2026, 10, 13)
     assert contract_today("stock", datetime(2026, 10, 13, 6, 0)) == date(2026, 10, 13)
 
 
 def test_contract_day_bounds():
-    assert contract_day_start(date(2026, 10, 13), CRYPTO) == datetime(2026, 10, 13, 8, 0)
-    assert contract_day_end(date(2026, 10, 13), CRYPTO) == datetime(2026, 10, 14, 8, 0)
+    assert contract_day_start(date(2026, 10, 13), CRYPTO) == datetime(2026, 10, 13, 0, 0)
+    assert contract_day_end(date(2026, 10, 13), CRYPTO) == datetime(2026, 10, 14, 0, 0)
     assert contract_day_start(date(2026, 10, 13), "stock") == datetime(2026, 10, 13, 0, 0)
     assert contract_day_end(date(2026, 10, 13), "stock") == datetime(2026, 10, 14, 0, 0)
 
@@ -157,14 +157,13 @@ def test_crypto_trading_day_is_always_true():
 
 
 def test_elapsed_minutes_crypto_covers_full_contract_day():
-    # 合约日 2026-10-13 从北京 08:00 起算
-    assert elapsed_minutes(datetime(2026, 10, 13, 8, 0), CRYPTO) == 0.0
-    assert elapsed_minutes(datetime(2026, 10, 13, 20, 0), CRYPTO) == 720.0
-    # 北京 07:00 属上一合约日, 已过 23 小时
-    assert elapsed_minutes(datetime(2026, 10, 13, 7, 0), CRYPTO) == 1380.0
+    # 2026-10-13 从北京 00:00 起算, 24 小时铺满
+    assert elapsed_minutes(datetime(2026, 10, 13, 0, 0), CRYPTO) == 0.0
+    assert elapsed_minutes(datetime(2026, 10, 13, 20, 0), CRYPTO) == 1200.0
+    assert elapsed_minutes(datetime(2026, 10, 13, 7, 0), CRYPTO) == 420.0
     # 上界收敛到 1440, 不越界
-    assert elapsed_minutes(datetime(2026, 10, 14, 8, 0), CRYPTO) == 0.0
-    assert elapsed_minutes(datetime(2026, 10, 14, 7, 59), CRYPTO) == pytest.approx(1439.0)
+    assert elapsed_minutes(datetime(2026, 10, 14, 0, 0), CRYPTO) == 0.0
+    assert elapsed_minutes(datetime(2026, 10, 13, 23, 59), CRYPTO) == pytest.approx(1439.0)
 
 
 def test_elapsed_minutes_stock_keeps_two_session_folding():
