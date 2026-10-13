@@ -7,7 +7,7 @@ naive; volume/amount 保持上游口径不换算; 无复权/无涨跌停/无股�
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -227,3 +227,53 @@ def test_client_reads_dedicated_proxy_env_only(monkeypatch):
     # 空白值视为未配置, 不做成空串代理
     monkeypatch.setenv(PROXY_ENV, "   ")
     assert OkxClient().proxy is None
+
+
+def test_minute_full_day_window_pages_beyond_single_page():
+    """24x7 一个合约日 1440 根 1m: 必须按窗口翻页, 不能停在单页上限。
+
+    回归用例: 曾用 CANDLES_MAX_LIMIT(300) 当翻页目标, 结果当日分钟只落 400 根,
+    完整性永远判不通过 (静默少数据)。
+    """
+    from app.data_providers.okx.provider import _bars_needed
+
+    # 整日 1m 窗口 → 需要 1442 根 (窗口分钟数 + 2 容差), 高于单页 300
+    assert _bars_needed("1m", 0, 1440 * 60_000) == 1442
+    # 超过翻页上限时收敛, 不无限翻
+    assert _bars_needed("1m", 0, 10_000 * 60_000) == 1500
+    # 1H 窗口只需数十根
+    assert _bars_needed("1H", 0, 24 * 3600_000) == 26
+    # 未给窗口 → 只要最新一段
+    from app.data_providers.okx.client import CANDLES_MAX_LIMIT
+
+    assert _bars_needed("1m", None, None) == CANDLES_MAX_LIMIT
+
+
+def test_minute_sync_reaches_window_start_via_pagination():
+    """整日窗口下, 翻页必须一直取到窗口起点, 而不是取满一页就停。"""
+    day_start = datetime(2026, 10, 13, 0, 0)
+    recent = [_bar(datetime(2026, 10, 13, 20, 0, tzinfo=UTC) - timedelta(minutes=i)) for i in range(300)]
+    pages = [
+        [_bar(datetime(2026, 10, 13, 15, 0, tzinfo=UTC) - timedelta(minutes=100 * p + i)) for i in range(100)]
+        for p in range(1, 12)
+    ]
+    calls = {'history': 0}
+
+    class PagingClient(FakeClient):
+        def history_candles(self, inst_id, bar, after_ms, limit=100):
+            calls['history'] += 1
+            idx = calls['history'] - 1
+            return pages[idx] if idx < len(pages) else []
+
+    client = PagingClient(candles={SYMBOL: recent})
+    df = OkxProvider(client).get_minute(
+        [SYMBOL], start_time=day_start, end_time=datetime(2026, 10, 14, 0, 0),
+    )
+    # 只取一页只能拿到 300 根 (≈5h); 翻页到位才能覆盖到窗口起点附近
+    assert df.height > 300
+    assert calls['history'] >= 10
+    # 翻页一直取到假数据耗尽: 最早一根 = 全部假数据里最早的一根
+    oldest = min(
+        okx_ms_to_cn_wallclock(int(r[0])) for r in recent + [bar for page in pages for bar in page]
+    )
+    assert df['datetime'].min() == oldest
