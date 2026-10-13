@@ -40,12 +40,32 @@ BAR_MINUTE = "1m"
 # 单标的日K回补上限: 需求窗口最多一年, 取 400 根 (含翻页) 足够
 _DAILY_MAX_BARS = 400
 
+# 各 bar 的分钟数, 用于按窗口长度折算需要多少根 K 线
+_BAR_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1H": 60, "4H": 240, "1D": 1440}
+# 分钟K单次同步的翻页上限 (1440 根/合约日 + 容差; history-candles 每页 100)
+_MINUTE_MAX_BARS = 1500
+
 
 def _to_float(value) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bars_needed(bar: str, start_ms: int | None, end_ms: int | None) -> int:
+    """按请求窗口折算需要多少根 K 线, 决定翻页深度。
+
+    24x7 的一个合约日有 1440 根 1m, 若沿用单页上限 (300) 会永远只同步到约
+    [当前-5h, 当前] 这一段, 当日分钟永远判不完整 (静默少数据)。
+    """
+    if start_ms is None:
+        # 未给窗口: 只要最新一段 (实时/巡检场景)
+        return CANDLES_MAX_LIMIT
+    end = end_ms if end_ms is not None else int(datetime.now(tz=UTC).timestamp() * 1000)
+    minutes = max(1.0, (end - start_ms) / 60000.0)
+    per_bar = _BAR_MINUTES.get(bar, 1)
+    return max(1, min(_MINUTE_MAX_BARS, int(minutes / per_bar) + 2))
 
 
 def okx_ms_to_cn_wallclock(ms: int) -> datetime:
@@ -205,11 +225,12 @@ class OkxProvider:
         """分钟K。datetime 为北京墙钟 naive; 入参按北京墙钟解释。"""
         oldest_ms = int(start_time.replace(tzinfo=CN_TZ).timestamp() * 1000) if start_time else None
         end_ms = int(end_time.replace(tzinfo=CN_TZ).timestamp() * 1000) if end_time else None
+        need = _bars_needed(freq, oldest_ms, end_ms)
 
         frames: list[pl.DataFrame] = []
         for symbol in symbols:
             try:
-                rows = self._fetch_bars(symbol, freq, CANDLES_MAX_LIMIT, oldest_ms)
+                rows = self._fetch_bars(symbol, freq, need, oldest_ms)
             except OkxClientError as e:
                 logger.warning("分钟K拉取失败 %s: %s", symbol, e)
                 continue
