@@ -505,22 +505,16 @@ def _get_previous_closes(
 def _crypto_minute_frame(repo, symbol: str, contract_day: date):
     """读一个 UTC 合约日的本地分钟K (北京墙钟 naive, 已裁到合约日窗口)。
 
-    合约日 D = 北京墙钟 [D 08:00, D+1 08:00), 而 repo.get_minute 按北京日期过滤
-    `datetime.dt.date()`: 合约日尾巴 (次日北京 00:00-08:00) 的行带的是次日的北京日期。
-    因此连读 D 与 D+1 两个北京日期再按合约日窗口裁剪 —— 只查 D 会把上一个合约日的
-    00:00-08:00 混进来, 同时丢掉 D 自己的尾巴 (静默错误口径, CONTRIBUTING §3.3)。
-    仓储层的日期过滤口径待后续按 asset_type 参数化, 本轮不改 repository。
+    日归属 = 北京自然日 (OKX 官方日线切日口径, 见 market_rules 选源约束), 与
+    repo.get_minute 的过滤口径 `datetime.dt.date()` 完全一致 → 单次读取即覆盖整日,
+    不需要跨日补偿读取 (历史上用过 UTC 零点切日的交易所口径, 那时才需要)。
+    这里仍保留窗口裁剪: 防御上游 provider 混入跨日或错日的行。
     """
     import polars as pl
 
-    parts = []
-    for beijing_day in (contract_day, contract_day + timedelta(days=1)):
-        part = repo.get_minute(symbol, beijing_day, asset_type=CRYPTO)
-        if part is not None and not part.is_empty() and "datetime" in part.columns:
-            parts.append(part)
-    if not parts:
+    frame = repo.get_minute(symbol, contract_day, asset_type=CRYPTO)
+    if frame is None or frame.is_empty() or "datetime" not in frame.columns:
         return pl.DataFrame()
-    frame = parts[0] if len(parts) == 1 else pl.concat(parts, how="diagonal_relaxed")
     return frame.filter(
         (pl.col("datetime") >= contract_day_start(contract_day, CRYPTO))
         & (pl.col("datetime") < contract_day_end(contract_day, CRYPTO))
@@ -530,15 +524,14 @@ def _crypto_minute_frame(repo, symbol: str, contract_day: date):
 def _crypto_minute_range_frame(repo, symbol: str, days: int, last_contract_day: date):
     """读最近 days 个合约日的本地分钟K (北京墙钟 naive, 已裁到 [first 08:00, last+1 08:00))。
 
-    与 _crypto_minute_frame 同源: repo.get_minute_range 同样按北京日期过滤, 而合约日的
-    尾巴落在下一个北京日期, 故北京日期跨度取 [first, last+1], 再按合约日窗口裁掉 first
-    之前 (上一个合约日) 的残留行。24x7: 合约日连续, 无需休市探针回退。
+    与 _crypto_minute_frame 同源: 日归属与仓储的北京日期过滤同口径, 直接按
+    [first, last] 读取即可。24x7: 合约日连续, 无需休市探针回退。
     """
     import polars as pl
 
     first = last_contract_day - timedelta(days=days - 1)
     frame = repo.get_minute_range(
-        [symbol], first, last_contract_day + timedelta(days=1), asset_type=CRYPTO,
+        [symbol], first, last_contract_day, asset_type=CRYPTO,
     )
     if frame is None or frame.is_empty() or "datetime" not in frame.columns:
         return pl.DataFrame()

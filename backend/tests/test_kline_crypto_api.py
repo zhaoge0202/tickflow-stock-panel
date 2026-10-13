@@ -1,8 +1,9 @@
 """crypto 资产类别的 K 线 API 分支 (P2-A)。
 
 口径 (app/market_rules + CONTRIBUTING §3):
-  - 「今天」是 UTC 合约日 (= 北京墙钟 - 8h 的日期), 不是北京自然日/服务器本地日期;
-  - 合约日 D = 北京墙钟 [D 08:00, D+1 08:00), 分钟 datetime 存北京墙钟 naive;
+  - 「今天」是合约日 = 北京自然日 (OKX 官方日线以 UTC+8 零点切日, 见 market_rules
+    选源约束), 不是服务器本地日期;
+  - 合约日 D = 北京墙钟 [D 00:00, D+1 00:00), 分钟 datetime 存北京墙钟 naive;
   - 无涨跌停/复权/股本 → price_limit 恒 None; 完整性阈值 1440 根/合约日;
   - crypto 实时链路 P4 才落地 → 本层不得发起任何上游请求 (fetch_minute_single /
     sync_daily_batch / 实时蜡烛注入都不能被调用)。
@@ -152,9 +153,9 @@ def _plain_transport(monkeypatch: pytest.MonkeyPatch):
 
 def test_minute_default_date_is_contract_day_without_session_probe(monkeypatch):
     """未传 date → 当前 UTC 合约日; 24x7 不做周末/休市探针回退, 也不实时补拉。"""
-    bars = _minute_rows(datetime(2026, 10, 12, 8, 0), 3)
-    repo = _Repo(minute_by_day={dt.date(2026, 10, 12): bars})
-    # 北京 10-13 06:00 → 合约日 10-12 (北京自然日与服务器本地日期都是 10-13)
+    bars = _minute_rows(datetime(2026, 10, 13, 0, 0), 3)
+    repo = _Repo(minute_by_day={dt.date(2026, 10, 13): bars})
+    # 北京 10-13 06:00 → 合约日 10-13 (服务器本地日期桩是 10-20, 证明不取本地日期)
     monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 13, 6, 0, tzinfo=CN_TZ))
     monkeypatch.setattr(kline, "cn_today", lambda: dt.date(2026, 10, 13))
     monkeypatch.setattr(kline.trading_day, "is_trading_day", _forbidden("crypto 不应做交易日探针"))
@@ -162,28 +163,24 @@ def test_minute_default_date_is_contract_day_without_session_probe(monkeypatch):
 
     resp = kline.get_minute(_request(repo), CRYPTO_SYMBOL, None, live=False)
 
-    assert resp["date"] == "2026-10-12"
+    assert resp["date"] == "2026-10-13"
     assert resp["asset_type"] == "crypto"
     assert resp["source"] == "crypto_local"
     assert [row["datetime"] for row in resp["rows"]] == [
-        datetime(2026, 10, 12, 8, 0) + timedelta(minutes=i) for i in range(3)
+        datetime(2026, 10, 13, 0, 0) + timedelta(minutes=i) for i in range(3)
     ]
-    # 连读合约日与其后一个北京日期 (合约日尾巴), 两次都带 asset_type="crypto"
-    assert repo.minute_calls == [
-        (CRYPTO_SYMBOL, dt.date(2026, 10, 12), CRYPTO),
-        (CRYPTO_SYMBOL, dt.date(2026, 10, 13), CRYPTO),
-    ]
+    # 日归属与仓储过滤同口径 (北京日) → 单次读取即可覆盖整日
+    assert repo.minute_calls == [(CRYPTO_SYMBOL, dt.date(2026, 10, 13), CRYPTO)]
 
 
 def test_minute_slices_rows_to_contract_day_window_and_reads_prev_close(monkeypatch):
-    """只回合约日窗口内的行: 前一个合约日的 00:00-08:00 混入行被裁掉, 本日尾巴保留。"""
-    prev_contract_day = _minute_rows(datetime(2026, 10, 12, 3, 0), 1)      # 北京 10-12 03:00 → 合约日 10-11
-    own_day = _minute_rows(datetime(2026, 10, 12, 23, 59), 1)              # 合约日 10-12
-    tail = _minute_rows(datetime(2026, 10, 13, 7, 59), 1)                  # 合约日 10-12 的尾巴
+    """只回合约日窗口内的行: 跨日混入的行被裁掉 (防御 provider 错日), 本日行保留。"""
+    stray = _minute_rows(datetime(2026, 10, 11, 23, 59), 1)   # 上一日 (错日混入)
+    own_day = _minute_rows(datetime(2026, 10, 12, 0, 0), 1)   # 合约日 10-12 起点
+    noon = _minute_rows(datetime(2026, 10, 12, 12, 0), 1)     # 合约日 10-12
     repo = _Repo(
         minute_by_day={
-            dt.date(2026, 10, 12): pl.concat([prev_contract_day, own_day]),
-            dt.date(2026, 10, 13): tail,
+            dt.date(2026, 10, 12): pl.concat([stray, own_day, noon]),
         },
         daily=_daily_frame([
             (dt.date(2026, 10, 8), 1.0),   # 窗口外 (D-5)
@@ -196,7 +193,7 @@ def test_minute_slices_rows_to_contract_day_window_and_reads_prev_close(monkeypa
     resp = kline.get_minute(_request(repo), CRYPTO_SYMBOL, dt.date(2026, 10, 12), live=False)
 
     assert [row["datetime"] for row in resp["rows"]] == [
-        datetime(2026, 10, 12, 23, 59), datetime(2026, 10, 13, 7, 59),
+        datetime(2026, 10, 12, 0, 0), datetime(2026, 10, 12, 12, 0),
     ]
     assert resp["prev_close"] == 3.0
     assert repo.crypto_daily_calls == [(CRYPTO_SYMBOL, dt.date(2026, 10, 9), dt.date(2026, 10, 11))]
@@ -232,21 +229,21 @@ def test_minute_expected_bars_use_1440_per_contract_day(monkeypatch):
     monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 13, 6, 0, tzinfo=CN_TZ))
     history = dt.date(2026, 10, 10)
 
-    partial = _Repo(minute_by_day={history: _minute_rows(datetime(2026, 10, 10, 8, 0), 100)})
+    partial = _Repo(minute_by_day={history: _minute_rows(datetime(2026, 10, 10, 0, 0), 100)})
     partial_resp = kline.get_minute(_request(partial), CRYPTO_SYMBOL, history, live=False)
     assert partial_resp["expected_bars"] == 1440
     assert partial_resp["is_complete"] is False
 
-    full = _Repo(minute_by_day={history: _minute_rows(datetime(2026, 10, 10, 8, 0), 1440)})
+    full = _Repo(minute_by_day={history: _minute_rows(datetime(2026, 10, 10, 0, 0), 1440)})
     full_resp = kline.get_minute(_request(full), CRYPTO_SYMBOL, history, live=False)
     assert full_resp["expected_bars"] == 1440
     assert full_resp["is_complete"] is True
 
-    # 当前合约日 (北京 10-13 06:00 → 合约日 10-12): 08:00 起已过 22h = 1320 分钟
-    current = _Repo(minute_by_day={dt.date(2026, 10, 12): _minute_rows(datetime(2026, 10, 12, 8, 0), 10)})
+    # 当前合约日 (北京 10-13 06:00 → 合约日 10-13): 从北京 00:00 起已过 6h = 360 分钟
+    current = _Repo(minute_by_day={dt.date(2026, 10, 13): _minute_rows(datetime(2026, 10, 13, 0, 0), 10)})
     current_resp = kline.get_minute(_request(current), CRYPTO_SYMBOL, None, live=False)
-    assert current_resp["date"] == "2026-10-12"
-    assert current_resp["expected_bars"] == 1320
+    assert current_resp["date"] == "2026-10-13"
+    assert current_resp["expected_bars"] == 360
     assert current_resp["is_complete"] is False
 
 
@@ -272,7 +269,7 @@ def test_daily_crypto_uses_contract_day_default_and_skips_live_path(monkeypatch)
     })
     repo = _Repo(daily=local)
     monkeypatch.setattr(kline, "date", _FrozenDate)  # 服务器本地日期 10-20
-    monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 15, 4, 0, tzinfo=CN_TZ))  # 合约日 10-14
+    monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 15, 4, 0, tzinfo=CN_TZ))  # 合约日 10-15
     monkeypatch.setattr(kline, "_compute_live_daily_rows", _forbidden("crypto 不应实时补拉日K"))
     monkeypatch.setattr(kline, "_maybe_inject_live_candle", _forbidden("crypto 不应注入实时蜡烛"))
     monkeypatch.setattr(kline.kline_sync, "sync_daily_batch", _forbidden("crypto 不应走 TickFlow 单票补拉"))
@@ -281,9 +278,9 @@ def test_daily_crypto_uses_contract_day_default_and_skips_live_path(monkeypatch)
 
     assert resp["source"] == "crypto_local"
     assert resp["rows"] == local.to_dicts()
-    # 默认窗口右端 = 合约日 10-14 (不是服务器本地日期 10-20, 也不是北京自然日 10-15)
+    # 默认窗口右端 = 合约日 10-15 (北京自然日), 不是服务器本地日期 10-20
     assert repo.daily_asset_calls == [
-        (CRYPTO, CRYPTO_SYMBOL, dt.date(2026, 10, 14) - timedelta(days=120), dt.date(2026, 10, 14))
+        (CRYPTO, CRYPTO_SYMBOL, dt.date(2026, 10, 15) - timedelta(days=120), dt.date(2026, 10, 15))
     ]
 
 
@@ -302,44 +299,45 @@ def test_daily_crypto_empty_local_returns_empty_rows_not_error(monkeypatch):
 
 def test_minute_range_groups_sessions_by_contract_day(monkeypatch):
     rows = pl.DataFrame({
-        "symbol": [CRYPTO_SYMBOL] * 5,
+        "symbol": [CRYPTO_SYMBOL] * 6,
         "datetime": [
             datetime(2026, 10, 10, 23, 0),   # 合约日 10-10 → 窗口外, 裁掉
-            datetime(2026, 10, 11, 8, 0),    # 合约日 10-11
-            datetime(2026, 10, 12, 3, 0),    # 合约日 10-11 的尾巴 (北京日期已是 10-12)
-            datetime(2026, 10, 12, 8, 0),    # 合约日 10-12
-            datetime(2026, 10, 13, 2, 0),    # 合约日 10-12 的尾巴
+            datetime(2026, 10, 12, 0, 0),    # 合约日 10-12 起点
+            datetime(2026, 10, 12, 12, 0),   # 合约日 10-12
+            datetime(2026, 10, 12, 23, 59),  # 合约日 10-12 终点
+            datetime(2026, 10, 13, 0, 0),    # 合约日 10-13 起点
+            datetime(2026, 10, 13, 2, 0),    # 合约日 10-13
         ],
-        "open": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "high": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "low": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "close": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "volume": [1.0] * 5,
-        "amount": [1.0] * 5,
+        "open": [1.0] * 6,
+        "high": [1.0] * 6,
+        "low": [1.0] * 6,
+        "close": [1.0] * 6,
+        "volume": [1.0] * 6,
+        "amount": [1.0] * 6,
     })
     repo = _Repo(
         minute_range_frame=rows,
         daily=_daily_frame([
-            (dt.date(2026, 10, 10), 7.0),   # 合约日 10-11 的上一合约日
-            (dt.date(2026, 10, 11), 8.0),   # 合约日 10-12 的上一合约日
+            (dt.date(2026, 10, 11), 7.0),   # 合约日 10-12 的上一合约日
+            (dt.date(2026, 10, 12), 8.0),   # 合约日 10-13 的上一合约日
         ]),
     )
-    monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 13, 3, 0, tzinfo=CN_TZ))  # 合约日 10-12
+    monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 13, 3, 0, tzinfo=CN_TZ))  # 合约日 10-13
 
     resp = kline.get_minute_range(_request(repo), CRYPTO_SYMBOL, 2)
 
     assert resp["asset_type"] == "crypto"
     assert resp["source"] == "local"
-    # 会话 = 合约日 (不是北京自然日): 每个合约日的 00:00-08:00 尾巴归前一天
-    assert [session["date"] for session in resp["sessions"]] == ["2026-10-11", "2026-10-12"]
+    # 会话 = 合约日 = 北京自然日 (与仓储过滤同口径, 无跨日补偿)
+    assert [session["date"] for session in resp["sessions"]] == ["2026-10-12", "2026-10-13"]
     assert [session["prev_close"] for session in resp["sessions"]] == [7.0, 8.0]
     assert [[row["datetime"] for row in session["rows"]] for session in resp["sessions"]] == [
-        [datetime(2026, 10, 11, 8, 0), datetime(2026, 10, 12, 3, 0)],
-        [datetime(2026, 10, 12, 8, 0), datetime(2026, 10, 13, 2, 0)],
+        [datetime(2026, 10, 12, 0, 0), datetime(2026, 10, 12, 12, 0), datetime(2026, 10, 12, 23, 59)],
+        [datetime(2026, 10, 13, 0, 0), datetime(2026, 10, 13, 2, 0)],
     ]
-    # 读取窗口: 北京日期跨度 [first, last+1] 覆盖合约日尾巴
+    # 读取窗口: 北京日期 [first, last] 即可覆盖 (同口径)
     assert repo.minute_range_calls == [
-        ([CRYPTO_SYMBOL], dt.date(2026, 10, 11), dt.date(2026, 10, 13), CRYPTO)
+        ([CRYPTO_SYMBOL], dt.date(2026, 10, 12), dt.date(2026, 10, 13), CRYPTO)
     ]
 
 
