@@ -41,8 +41,16 @@ _HISTORY_SYMBOL_BATCH_SIZE = 512
 
 
 def enriched_dirname(asset_type: str) -> str:
-    """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
-    return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
+    """asset_type → enriched parquet 目录名。
+
+    ETF 与 crypto 各走独立目录。crypto 必须有独立目录: 若落回 kline_daily_enriched,
+    非 A 股标的会被 A 股 enriched 管道(涨跌停/换手率/复权)按股票口径处理。
+    """
+    if asset_type == "etf":
+        return "kline_etf_enriched"
+    if asset_type == "crypto":
+        return "kline_crypto_enriched"
+    return "kline_daily_enriched"
 
 
 # 盘中递推状态的最长窗口 (交易日): MA60 部分和 tail(59)、60 日动量 tail(60)
@@ -93,12 +101,16 @@ class DataStore:
             "kline_etf_enriched",
             "kline_etf_minute",
             "kline_minute",
+            "kline_crypto_daily",
+            "kline_crypto_enriched",
+            "kline_crypto_minute",
             "adj_factor",
             "adj_factor_etf",
             "financials",
             "instruments",
             "instruments_index",
             "instruments_etf",
+            "instruments_crypto",
             "instruments_ext",
             "kline_ext",
             "pools",
@@ -367,9 +379,11 @@ class KlineRepository:
         self._etf_live_agg_cache: pl.DataFrame | None = None
         self._etf_live_agg_cache_date: date | None = None
         self._etf_instruments_cache: pl.DataFrame | None = None
+        self._crypto_instruments_cache: pl.DataFrame | None = None
         # symbol 集合 memo (随对应 instruments 缓存失效): 供每请求资产分流用
         self._index_symbol_set_cache: set[str] | None = None
         self._etf_symbol_set_cache: set[str] | None = None
+        self._crypto_symbol_set_cache: set[str] | None = None
         self._index_enriched_cache: pl.DataFrame | None = None
         self._index_enriched_cache_date: date | None = None
 
@@ -392,9 +406,12 @@ class KlineRepository:
         self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
         self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
+        self._crypto_daily_glob = str(store.data_dir / "kline_crypto_daily" / "**" / "*.parquet")
+        self._crypto_minute_glob = str(store.data_dir / "kline_crypto_minute" / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
+        self._crypto_inst_glob = str(store.data_dir / "instruments_crypto" / "**" / "*.parquet")
 
     def execute_all(self, sql: str, params: list | None = None) -> list[tuple]:
         """线程安全的 SELECT → fetchall。DuckDB 单 connection 非线程安全，所有读路径须走此方法。"""
@@ -554,8 +571,10 @@ class KlineRepository:
         self._etf_live_agg_cache = None
         self._etf_live_agg_cache_date = None
         self._etf_instruments_cache = None
+        self._crypto_instruments_cache = None
         self._index_symbol_set_cache = None
         self._etf_symbol_set_cache = None
+        self._crypto_symbol_set_cache = None
         self._name_map_cache = None
         self._index_enriched_cache = None
         self._index_enriched_cache_date = None
@@ -1399,6 +1418,18 @@ class KlineRepository:
             self._name_map_cache = None
             logger.info("ETF instruments 缓存已加载: %d 只", len(df_all))
 
+    def _refresh_crypto_instruments(self) -> None:
+        """加载永续合约类 instruments 到内存 (独立维表, 不与 A 股三所混存)。"""
+        try:
+            df = guarded_collect(pl.scan_parquet(self._crypto_inst_glob), priority="background")
+            if not df.is_empty():
+                self._crypto_instruments_cache = df
+                self._crypto_symbol_set_cache = None
+                self._name_map_cache = None
+                logger.info("crypto instruments 缓存已加载: %d 个", len(df))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("crypto instruments 缓存刷新跳过: %s", e)
+
     def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
         """返回缓存的 enriched 最新日 DataFrame + 日期。如无缓存则懒加载。
 
@@ -1666,6 +1697,14 @@ class KlineRepository:
             return pl.DataFrame()
         return self._etf_instruments_cache
 
+    def get_crypto_instruments(self) -> pl.DataFrame:
+        """返回缓存的永续合约类 instruments DataFrame。如无缓存则懒加载。"""
+        if self._crypto_instruments_cache is None:
+            self._refresh_crypto_instruments()
+        if self._crypto_instruments_cache is None:
+            return pl.DataFrame()
+        return self._crypto_instruments_cache
+
     def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
         """按资产类型返回 instruments；老 stock 路径保持原样。"""
         if asset_type == "stock":
@@ -1677,6 +1716,8 @@ class KlineRepository:
             return df
         if asset_type == "etf":
             return self.get_etf_instruments()
+        if asset_type == "crypto":
+            return self.get_crypto_instruments()
         return pl.DataFrame()
 
     def get_index_symbol_set(self) -> set[str]:
@@ -1697,12 +1738,27 @@ class KlineRepository:
             self._etf_symbol_set_cache = set(df["symbol"].cast(pl.Utf8).to_list())
         return self._etf_symbol_set_cache
 
+    def get_crypto_symbol_set(self) -> set[str]:
+        """返回已缓存 crypto symbol 集合 (memo, 随 instruments 缓存失效)。"""
+        if self._crypto_symbol_set_cache is None:
+            df = self.get_crypto_instruments()
+            if df.is_empty() or "symbol" not in df.columns:
+                return set()
+            self._crypto_symbol_set_cache = set(df["symbol"].cast(pl.Utf8).to_list())
+        return self._crypto_symbol_set_cache
+
     def resolve_asset_type(self, symbol: str) -> str:
-        """按 symbol 判定资产类型: etf / index / stock(默认)。
+        """按 symbol 判定资产类型: crypto / etf / index / stock(默认)。
 
         供 API 层对单标的查询做资产分流 (get_daily_asset 等)。
-        ETF/指数集合为 memo, 每请求查询成本可忽略。
+        三份集合均为 memo, 每请求查询成本可忽略。
+
+        顺序: crypto 先判 —— 未登记的 A 股代码会落到 stock 兜底 (历史行为),
+        而 crypto 代码形如 SOXLUSDT 不含 A 股后缀, 落进 stock 会吃满 A 股
+        涨跌停/板块/整手规则并产出静默错误结果, 因此显式兜底前必须先查维表。
         """
+        if symbol in self.get_crypto_symbol_set():
+            return "crypto"
         if symbol in self.get_etf_symbol_set():
             return "etf"
         if symbol in self.get_index_symbol_set():
@@ -1726,7 +1782,12 @@ class KlineRepository:
         # 若把过滤后的结果写入缓存, 后续不同 symbols 的查询会命中残缺缓存,
         # 导致新加入自选的标的查不到名称。
         name_map: dict[str, str] = {}
-        for df in (self.get_instruments(), self.get_etf_instruments(), self.get_instruments_asset("index")):
+        for df in (
+            self.get_instruments(),
+            self.get_etf_instruments(),
+            self.get_instruments_asset("index"),
+            self.get_crypto_instruments(),
+        ):
             if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
                 continue
             for symbol, name in df.select(["symbol", "name"]).iter_rows():
@@ -1938,11 +1999,22 @@ class KlineRepository:
             return self.get_index_daily(symbol, start, end, columns)
         if asset_type == "etf":
             return self.get_etf_daily(symbol, start, end, columns)
+        if asset_type == "crypto":
+            return self.get_crypto_daily(symbol, start, end, columns)
         return pl.DataFrame()
 
     def _minute_glob_for(self, asset_type: str) -> str:
-        """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
-        return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
+        """按资产类型选择分钟K parquet glob。ETF / crypto 分钟各存独立目录。
+
+        crypto 不得落回 kline_minute: 该目录被 A 股分钟链路(09:25-15:05 窗口、
+        240 根完整性折算)独占, 混入 24 小时分钟行会让 A 股完整性判定与前端
+        分时图同时失真。
+        """
+        if asset_type == "etf":
+            return self._etf_minute_glob
+        if asset_type == "crypto":
+            return self._crypto_minute_glob
+        return self._minute_glob
 
     def _maybe_adjust_minute(self, df: pl.DataFrame, asset_type: str) -> pl.DataFrame:
         """原始基准标记开启时应用读取时复权投影 (services/minute_adjust 三层架构)。
@@ -2228,6 +2300,34 @@ class KlineRepository:
             logger.debug("ETF 日K查询跳过: %s", e)
             return pl.DataFrame()
 
+    def get_crypto_daily(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        """永续合约类日K查询 (原始价, 无复权/无 enriched 列)。
+
+        A 股日K读路径会补 enriched 列(涨跌停/换手率/前复权), 那些列对无涨跌停、
+        无股本的资产无意义, 因此这里只读 kline_crypto_daily 原始日K。
+        """
+        try:
+            lf = scan_enriched_parquet(self._crypto_daily_glob,
+                                       cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
+                (pl.col("symbol") == symbol)
+                & (pl.col("date") >= start)
+                & (pl.col("date") <= end)
+            ).sort("date")
+            if columns:
+                schema_names = lf.collect_schema().names()
+                existing = [c for c in columns if c in schema_names]
+                lf = lf.select(existing)
+            return guarded_collect(lf)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("crypto 日K查询跳过: %s", e)
+            return pl.DataFrame()
+
     def _merge_cached_and_scan(
         self,
         cached: pl.DataFrame,
@@ -2459,6 +2559,12 @@ class KlineRepository:
         df_storage = self._dedupe_symbol_date(df.select(storage_cols), "append ETF enriched 入参")
         self._write_daily_partition(df_storage, "kline_etf_enriched")
 
+    def append_crypto_daily(self, df: pl.DataFrame) -> None:
+        """按日分区写入永续合约类日K (日期列已是 UTC 合约日, 见 market_rules)。"""
+        if df.is_empty():
+            return
+        self._write_daily_partition(df, "kline_crypto_daily")
+
     def append_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
         """按资产类型写入日K；stock/index 保持旧目录兼容。"""
         if asset_type == "stock":
@@ -2467,6 +2573,8 @@ class KlineRepository:
             self.append_index_daily(df)
         elif asset_type == "etf":
             self.append_etf_daily(df)
+        elif asset_type == "crypto":
+            self.append_crypto_daily(df)
 
     def append_enriched_asset(self, asset_type: str, df: pl.DataFrame) -> None:
         """按资产类型写入 enriched；stock/index 保持旧目录兼容。"""
@@ -2502,6 +2610,19 @@ class KlineRepository:
         self._name_map_cache = None
         self._refresh_etf_instruments()
 
+    def save_crypto_instruments(self, df: pl.DataFrame) -> None:
+        """保存永续合约类标的维表到独立目录。"""
+        if df.is_empty() or "symbol" not in df.columns:
+            return
+        if "asset_type" not in df.columns:
+            df = df.with_columns(pl.lit("crypto").alias("asset_type"))
+        out = self.store.data_dir / "instruments_crypto" / "instruments_crypto.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_parquet(df.unique(subset=["symbol"], keep="last").sort("symbol"), out)
+        self._crypto_instruments_cache = None
+        self._name_map_cache = None
+        self._refresh_crypto_instruments()
+
     def refresh_index_views(self) -> None:
         """刷新指数相关 DuckDB 视图。"""
         d = self.store.data_dir.as_posix()
@@ -2518,6 +2639,12 @@ class KlineRepository:
                 SELECT * FROM read_parquet('{d}/instruments_index/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW instruments_etf AS
                 SELECT * FROM read_parquet('{d}/instruments_etf/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_crypto_daily AS
+                SELECT * FROM read_parquet('{d}/kline_crypto_daily/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_crypto_minute AS
+                SELECT * FROM read_parquet('{d}/kline_crypto_minute/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW instruments_crypto AS
+                SELECT * FROM read_parquet('{d}/instruments_crypto/**/*.parquet', union_by_name=true)""",
         ]
         for sql in statements:
             try:
@@ -2550,6 +2677,10 @@ class KlineRepository:
             "instruments": f"{d}/instruments/**/*.parquet",
             "instruments_index": f"{d}/instruments_index/**/*.parquet",
             "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
+            "kline_crypto_daily": f"{d}/kline_crypto_daily/**/*.parquet",
+            "kline_crypto_enriched": f"{d}/kline_crypto_enriched/**/*.parquet",
+            "kline_crypto_minute": f"{d}/kline_crypto_minute/**/*.parquet",
+            "instruments_crypto": f"{d}/instruments_crypto/**/*.parquet",
         }
         for name, path in views.items():
             try:

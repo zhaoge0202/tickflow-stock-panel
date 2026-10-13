@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES, summarizeMinutes, type DailySummary } from '@/lib/intraday-chart'
+import { isCryptoAssetType, type MinuteKlineRow, type PriceLimitInfo } from '@/lib/api'
+import {
+  computeIntradayAverage,
+  formatIntradayVolume,
+  formatMinuteTime,
+  FULL_DAY_TIMES,
+  intradayAxisTimes,
+  intradayPriceDigits,
+  summarizeMinutes,
+  type DailySummary,
+} from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
@@ -22,6 +31,8 @@ interface Props {
   prevClose?: number
   date?: string
   dailySummary?: DailySummary
+  /** 资产类别; crypto 走数据驱动时轴与自适应 Y 轴 (无涨跌停), 缺省按 A 股/ETF/指数处理。 */
+  assetType?: string
   priceLimit?: PriceLimitInfo
   onPriceHover?: (price: number | null) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -42,12 +53,12 @@ function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
 
-function fullDayIndexFromAxisValue(value: unknown): number | null {
+function axisIndexFromValue(value: unknown, axisTimes: string[]): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return Math.round(value)
   }
   if (typeof value === 'string') {
-    const idx = FULL_DAY_TIMES.indexOf(value)
+    const idx = axisTimes.indexOf(value)
     return idx >= 0 ? idx : null
   }
   return null
@@ -75,25 +86,29 @@ function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
-  // 无涨跌幅标的 (注册制新股上市初期窗口, 后端 no_limit 标记): 不存在可信
-  // 涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称范围, 也不画涨跌停虚线
-  const limitLinesActive = showLimitLines && !priceLimit?.no_limit
-  // 将数据映射到全天时间轴上的正确位置
-  const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
-  const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const highs = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const lows = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const avgData = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
-  const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, assetType?: string, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+  const isCrypto = isCryptoAssetType(assetType)
+  // 无涨跌幅标的: crypto (后端 price_limit=null) 与注册制新股上市初期窗口 (后端
+  // no_limit 标记) 都不存在可信涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称
+  // 范围, 也不画涨跌停虚线
+  const limitLinesActive = showLimitLines && !isCrypto && !priceLimit?.no_limit
+  const priceDigits = intradayPriceDigits(assetType, data.map(row => row.high))
+  // crypto 时轴 = 数据自身时间点 (行序即轴序), A 股/ETF/指数 = 固定全天 242 槽
+  const axisTimes = intradayAxisTimes(assetType, data)
+  const timeIndexMap = isCrypto ? null : new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+  const closes = new Array(axisTimes.length).fill(null) as (number | null)[]
+  const highs = new Array(axisTimes.length).fill(null) as (number | null)[]
+  const lows = new Array(axisTimes.length).fill(null) as (number | null)[]
+  const avgData = new Array(axisTimes.length).fill(null) as (number | null)[]
+  const volumes = new Array(axisTimes.length).fill(null) as (any | null)[]
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   // 量柱着色基准: 前一分钟 close; 第一根用昨收。
   // 不用 row.open — 部分分钟源历史日无真实 open(为 null), close-vs-open 会全偏。
   let prevRef: number | null = prevClose ?? null
   for (let i = 0; i < data.length; i++) {
-    const timeKey = formatMinuteTime(data[i].datetime)
-    const idx = timeIndexMap.get(timeKey)
+    // 时轴槽位外的分钟只对 A 股/ETF/指数存在 (午休/非交易时段); crypto 数据自身即时轴, 不会丢
+    const idx = timeIndexMap === null ? i : timeIndexMap.get(formatMinuteTime(data[i].datetime))
     if (idx !== undefined) {
       closes[idx] = data[i].close
       highs[idx] = data[i].high
@@ -216,7 +231,9 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   }
 
   // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
-  // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签
+  // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签。
+  // 该槽位映射只对固定 242 槽的 A 股/ETF/指数成立; crypto 无固定时段,
+  // 按数据长度均匀取约 6 个时间标签, 直接用时轴上的真实时间。
   const xAxisLabelMap: Record<number, string> = {
     0: '9:30',
     60: '10:30',
@@ -224,7 +241,11 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     181: '14:00',
     241: '15:00',
   }
+  const cryptoLabelStep = Math.max(1, Math.ceil(axisTimes.length / 6))
   const xAxisLabelFormatter = (_value: string, idx: number) => {
+    if (isCrypto) {
+      return idx % cryptoLabelStep === 0 ? axisTimes[idx] : ''
+    }
     return xAxisLabelMap[idx] ?? ''
   }
 
@@ -263,7 +284,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     xAxis: [
       {
         type: 'category',
-        data: FULL_DAY_TIMES,
+        data: axisTimes,
         boundaryGap: false,
         axisPointer: {
           show: true,
@@ -299,7 +320,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       {
         type: 'category',
         gridIndex: 1,
-        data: FULL_DAY_TIMES,
+        data: axisTimes,
         boundaryGap: false,
         axisLine: { show: false },
         axisLabel: { show: false },
@@ -326,7 +347,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
           label: {
             formatter: (params: any) => {
               const v = params.value
-              return typeof v === 'number' ? v.toFixed(2) : ''
+              return typeof v === 'number' ? v.toFixed(priceDigits) : ''
             },
           },
         },
@@ -334,7 +355,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
           color: ct.text,
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
-          formatter: (v: number) => v.toFixed(2),
+          formatter: (v: number) => v.toFixed(priceDigits),
         },
       },
       {
@@ -421,6 +442,7 @@ export function EChartsIntraday({
   prevClose,
   date,
   dailySummary,
+  assetType,
   priceLimit,
   onPriceHover,
   onPriceDoubleClick,
@@ -444,16 +466,24 @@ export function EChartsIntraday({
   onPriceHoverRef.current = onPriceHover
   const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
   onPriceDoubleClickRef.current = onPriceDoubleClick
-  // 全日索引 → 数据数组索引 的映射 (ref 避免重建 chart)
-  const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
+  // 时轴索引 → 数据数组索引 的映射 (ref 避免重建 chart)
+  const axisIdxToDataIdx = useRef<Map<number, number>>(new Map())
   const lockedInfoIdxRef = useRef<number | null>(null)
   const infoIdxRef = useRef(data.length - 1)
 
   const [infoIdx, setInfoIdx] = useState(-1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
-  const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
   const summary = useMemo(() => summarizeMinutes(data), [data])
+  const isCrypto = isCryptoAssetType(assetType)
+  // crypto 无涨跌停价 (后端 price_limit=null): 不显示涨跌停/自适应切换; 无涨跌幅
+  // 新股仍保留切换 (buildOption 内退化处理), 与 A 股口径一致
+  const limitLines = showLimitLines && !isCrypto
+  const axisTimes = useMemo(() => intradayAxisTimes(assetType, data), [assetType, data])
+  const axisTimesRef = useRef(axisTimes)
+  axisTimesRef.current = axisTimes
+  const priceDigits = useMemo(() => intradayPriceDigits(assetType, data.map(row => row.high)), [assetType, data])
+  const avgPrices = useMemo(() => computeIntradayAverage(data, assetType), [data, assetType])
 
   // 分时线颜色：基于最新价 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -519,9 +549,9 @@ export function EChartsIntraday({
           if ((info as any)?.axisDim !== 'x') continue
           const val = (info as any)?.value
           if (val == null) continue
-          const fullDayIdx = fullDayIndexFromAxisValue(val)
-          if (fullDayIdx != null && fullDayIdx >= 0) {
-            const dataIdx = fullDayToDataIdx.current.get(fullDayIdx) ?? -1
+          const axisIdx = axisIndexFromValue(val, axisTimesRef.current)
+          if (axisIdx != null && axisIdx >= 0) {
+            const dataIdx = axisIdxToDataIdx.current.get(axisIdx) ?? -1
             if (dataIdx >= 0) {
               updateInfoIdx(dataIdx)
             } else {
@@ -561,8 +591,8 @@ export function EChartsIntraday({
           const converted = chart!.convertFromPixel({ xAxisIndex: inVolumeGrid ? 1 : 0 }, point)
           const xValue = Array.isArray(converted) ? converted[0] : converted
 
-          const fullDayIdx = fullDayIndexFromAxisValue(xValue)
-          const dataIdx = fullDayIdx == null ? infoIdxRef.current : fullDayToDataIdx.current.get(fullDayIdx)
+          const axisIdx = axisIndexFromValue(xValue, axisTimesRef.current)
+          const dataIdx = axisIdx == null ? infoIdxRef.current : axisIdxToDataIdx.current.get(axisIdx)
           // dataIdx < 0 = 无选中 (未命中分钟), 不作为锁定目标
           if (dataIdx == null || dataIdx < 0) return
 
@@ -592,24 +622,29 @@ export function EChartsIntraday({
     }
 
     if (data.length > 0) {
-      // 构建全日索引 → 数据索引 的映射
-      const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+      // 构建时轴索引 → 数据索引 的映射
       const mapping = new Map<number, number>()
-      for (let i = 0; i < data.length; i++) {
-        const timeKey = formatMinuteTime(data[i].datetime)
-        const fullDayIdx = timeIndexMap.get(timeKey)
-        if (fullDayIdx !== undefined) {
-          mapping.set(fullDayIdx, i)
+      if (isCrypto) {
+        // crypto 时轴由数据自身构成, 轴下标 = 数据下标
+        for (let i = 0; i < data.length; i++) mapping.set(i, i)
+      } else {
+        const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+        for (let i = 0; i < data.length; i++) {
+          const timeKey = formatMinuteTime(data[i].datetime)
+          const fullDayIdx = timeIndexMap.get(timeKey)
+          if (fullDayIdx !== undefined) {
+            mapping.set(fullDayIdx, i)
+          }
         }
       }
-      fullDayToDataIdx.current = mapping
+      axisIdxToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, assetType, priceLimit, showLimitLines, showAvgLine, priceLines), true)
     } else {
-      fullDayToDataIdx.current = new Map()
+      axisIdxToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, assetType, isCrypto, priceLimit, showLimitLines, showAvgLine, priceLines])
 
   useEffect(() => {
     return () => {
@@ -648,8 +683,8 @@ export function EChartsIntraday({
 
   return (
     <div className="w-full">
-      {/* 按钮行: 切换式按钮组, 居右 */}
-      {showLimitLines && <div className="flex items-center justify-end px-1 pb-0.5">
+      {/* 按钮行: 切换式按钮组, 居右 (crypto 无涨跌停价, 不显示) */}
+      {limitLines && <div className="flex items-center justify-end px-1 pb-0.5">
         <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}
@@ -685,11 +720,11 @@ export function EChartsIntraday({
               <span className="text-muted">开</span>
               <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(2) : '—'}</span>
               <span className="text-muted">高</span>
-              <span style={{ color: priceClr }}>{ohlc.high.toFixed(2)}</span>
+              <span style={{ color: priceClr }}>{ohlc.high.toFixed(priceDigits)}</span>
               <span className="text-muted">低</span>
-              <span style={{ color: priceClr }}>{ohlc.low.toFixed(2)}</span>
+              <span style={{ color: priceClr }}>{ohlc.low.toFixed(priceDigits)}</span>
               <span className="text-muted">收</span>
-              <span style={{ color: priceClr }} className="font-semibold">{ohlc.close.toFixed(2)}</span>
+              <span style={{ color: priceClr }} className="font-semibold">{ohlc.close.toFixed(priceDigits)}</span>
             </>
           )}
         </div>
@@ -699,14 +734,14 @@ export function EChartsIntraday({
             <>
               <span className="flex items-center gap-x-1">
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
-                <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
+                <span style={{ color: priceClr }}>{d.close.toFixed(priceDigits)}</span>
               </span>
               {showAvgLine && <span className="flex items-center gap-x-1">
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
-                <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(2) : '—'}</span>
+                <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(priceDigits) : '—'}</span>
               </span>}
               <span className="text-muted">{hovered ? '量' : '累计量'}</span>
-              <span className="text-secondary">{d.volume.toFixed(0)}</span>
+              <span className="text-secondary">{formatIntradayVolume(d.volume, assetType)}</span>
               <span className="text-muted">{hovered ? '额' : '累计额'}</span>
               <span className="text-secondary">{fmtAmt(d.amount)}</span>
             </>

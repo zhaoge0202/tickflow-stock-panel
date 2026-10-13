@@ -17,7 +17,7 @@ interface Props {
  * 复用 instrumentSearch 后端(代码 / 名称模糊匹配),单选即跳转该股财务详情。
  * 模式对齐 Watchlist.StockSearchBox:useQuery + 外部点击关闭 + 键盘导航。
  */
-export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
+export function StockFinancialSearch({ onSelect, assetTypes = 'stock' }: Props) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const [activeIdx, setActiveIdx] = useState(-1)
@@ -25,7 +25,7 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query, assetTypes ?? 'stock'),
+    queryKey: QK.instrumentSearch(query, assetTypes),
     queryFn: () => api.instrumentSearch(query, 20, assetTypes),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
