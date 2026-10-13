@@ -108,6 +108,50 @@ def test_get_minute_passes_historical_date_to_tdxapi(monkeypatch):
     assert calls == [{"code": "sh600722", "type": "minute1", "limit": "2400", "date": "20260818"}]
 
 
+def test_get_index_minute_uses_index_endpoint_and_preserves_positive_ohlc(monkeypatch):
+    calls = []
+
+    def fake(self, method, path, **kwargs):
+        calls.append((method, path, kwargs["params"]))
+        return {
+            "Count": 1,
+            "List": [{
+                "Time": "2026-08-18T09:31:00+08:00",
+                "Open": 3790000,
+                "High": 3795000,
+                "Low": 3788000,
+                "Close": 3792000,
+                "Volume": 1200,
+                "Amount": 456000000,
+            }],
+        }
+
+    monkeypatch.setattr(TDXAPIProvider, "_request", fake)
+    df = TDXAPIProvider().get_minute(
+        ["000001.SH"],
+        dt.datetime(2026, 8, 18, 9, 30),
+        dt.datetime(2026, 8, 18, 15, 0),
+        asset_type="index",
+    )
+
+    assert calls == [(
+        "GET",
+        "/api/index",
+        {
+            "code": "sh000001",
+            "type": "minute1",
+            "limit": "800",
+            "date": "20260818",
+        },
+    )]
+    assert df.height == 1
+    assert df["open"][0] == 3790.0
+    assert df["high"][0] == 3795.0
+    assert df["low"][0] == 3788.0
+    assert df["close"][0] == 3792.0
+    assert all(df[column][0] > 0 for column in ("open", "high", "low", "close"))
+
+
 def test_request_releases_shared_http_gate_on_error(monkeypatch):
     provider = TDXAPIProvider()
 
