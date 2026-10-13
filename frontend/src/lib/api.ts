@@ -41,6 +41,19 @@ export function friendlyStreamError(message: string | undefined | null): string 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 /** 同步计算型接口 (回测/筛选等) 的放宽超时: 合法耗时可能远超轮询类接口。 */
 const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
+// ===== 资产类别 (与后端 data_providers/base.py 的 AssetType 对齐) =====
+
+/** 资产类别枚举。crypto = 24x7 永续合约: 无涨跌停/无复权/无股本,
+ *  「日」为 UTC 合约日 (北京 08:00 切日)。前端按资产类别分支时统一引用本常量,
+ *  不再在组件里散落 'stock' / 'stock,etf,index' 字面量。 */
+export const ASSET_TYPE_OPTIONS = ['stock', 'etf', 'index', 'crypto'] as const
+export type AssetType = (typeof ASSET_TYPE_OPTIONS)[number]
+
+/** 是否 24x7 合约类资产 (与后端 market_rules.is_crypto 同口径)。 */
+export function isCryptoAssetType(assetType: string | null | undefined): boolean {
+  return String(assetType ?? '').toLowerCase() === 'crypto'
+}
+
 /** 扩展数据拉取类长请求: 跟随后端配置的单次超时 (timeoutSeconds, 默认 30s) + 10s 解析/写盘缓冲。
  *  浏览器端 fetch 默认 30s abort 会先于后端超时触发, 大响应接口 (如全量集合竞价
  *  /day, 后端超时 120s) 必须把这层同步放宽。 */
@@ -1421,7 +1434,7 @@ export interface MonitorRule {
   name: string
   enabled: boolean
   type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector' | 'abnormal' | 'volume_delta' | 'date'
-  asset_type?: 'stock' | 'etf' | 'index'
+  asset_type?: AssetType
   scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
   /** scope=watchlist_group 时绑定的自选分组 id (成员动态解析, 增删自选自动生效) */
@@ -3424,8 +3437,9 @@ export const api = {
       stock_info?: { name?: string; total_shares?: number; float_shares?: number }
       date: string | null
       rows: MinuteKlineRow[]
-      source?: 'local' | 'live' | 'none'
-      asset_type?: 'stock' | 'etf' | 'index'
+      /** crypto_local = 24x7 合约只读本地仓库 (实时链路未落地), 无实时补拉 */
+      source?: 'local' | 'live' | 'crypto_local' | 'none'
+      asset_type?: AssetType
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
     }>(
@@ -3466,7 +3480,7 @@ export const api = {
     request<{
       symbol: string
       name?: string
-      asset_type: 'stock' | 'etf' | 'index'
+      asset_type: AssetType
       requested_days: number
       sessions: MinuteKlineSession[]
       source: 'local' | 'none'

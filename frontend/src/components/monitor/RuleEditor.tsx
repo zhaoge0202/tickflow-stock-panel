@@ -123,7 +123,10 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     }
     return initial
   })
-  const assetType = draft.asset_type ?? 'stock'
+  // 资产类型 tab 只覆盖 股票/ETF/指数 —— crypto 是 P3 (后端策略引擎/监控评估未放行),
+  // 本编辑器不加 crypto 入口; 非本编辑器产生的 crypto 规则按默认 tab 展示,
+  // 不改写 draft.asset_type 本身 (保存时仍是原值)。
+  const assetType = draft.asset_type === 'crypto' ? 'stock' : (draft.asset_type ?? 'stock')
   // 策略列表跟随资产类型: ETF 只列技术类策略。
   const strategies = useQuery({
     queryKey: QK.screenerStrategies(assetType),

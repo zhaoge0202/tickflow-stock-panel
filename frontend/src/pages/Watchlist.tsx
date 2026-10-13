@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, FileUp, FolderOpen, FolderMinus, FolderPlus } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
+import { api, ASSET_TYPE_OPTIONS, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
 import { QK } from '@/lib/queryKeys'
@@ -63,6 +63,9 @@ type BoardType = typeof BOARDS[number]
 // 板块筛选选项 = 股票板块 + ETF（ETF 无 symbol 板块语义，按 asset_type 匹配）
 const ETF_BOARD = 'ETF'
 const BOARD_OPTIONS = [...BOARDS, ETF_BOARD]
+
+// 自选搜索的资产类型 (股票/ETF/指数/crypto 全量); crypto 标的不参与下面按代码判定的板块筛选
+const SEARCH_ASSET_TYPES = ASSET_TYPE_OPTIONS.join(',')
 
 function getBoardType(symbol: string): BoardType | null {
   if (/^(300|301)/.test(symbol)) return '创业板'
@@ -257,8 +260,8 @@ function StockSearchBox({
   const [activeIdx, setActiveIdx] = useState(-1)
 
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query, 'stock,etf,index'),
-    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index'),
+    queryKey: QK.instrumentSearch(query, SEARCH_ASSET_TYPES),
+    queryFn: () => api.instrumentSearch(query, 20, SEARCH_ASSET_TYPES),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
@@ -348,6 +351,9 @@ function StockSearchBox({
                       )}
                       {r.asset_type === 'index' && (
                         <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
+                      )}
+                      {r.asset_type === 'crypto' && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-amber-500/10 text-amber-400">合约</span>
                       )}
                       {(() => {
                         const b = boardTag(r.symbol)
