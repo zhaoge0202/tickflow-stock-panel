@@ -10,10 +10,14 @@ quote_service / market_time / 前端里 —— 交易日历、09:30-15:00 时段
 if asset_type == "crypto"。未知资产类别 fail-closed 抛错, 不静默回退 A 股规则
 (repository.resolve_asset_type 的 fail-open 正是要避免的反面教材)。
 
-合约日口径 (永续合约): 币安 K 线按 UTC 自然日收日线, 而项目内分钟时间戳契约是
-「北京墙钟 naive」。两者以固定 8 小时偏移换算 —— 合约日 D = 北京墙钟
-[D 08:00, D+1 08:00)。因此分钟 datetime 存北京墙钟 (前端时轴可读), 而日归属、
-分区日期用 to_contract_date() 得到 UTC 合约日 (K 线口径与交易所一致)。
+日归属口径 (永续合约): 采用**北京自然日**, 与项目内分钟时间戳契约 (北京墙钟 naive)
+和全站 CN_TZ 基准同一口径, 无需任何时区换算。这不是随意选的 —— 实际使用的 OKX
+官方日线就以 UTC+8 零点切日 (实测 1D 的 ts = UTC 16:00), 因此「口径与交易所一致」
+在这里恰好等于「与项目契约一致」。
+
+选源约束: 同一资产类别只能有一个日归属口径。币安/Gate 的日线以 UTC 零点切日
+(北京 08:00), 若要接入必须先统一口径, 否则同一张 kline_crypto_daily 会混两种
+日期口径 (页面能渲染但日期错位, 属静默错误)。
 """
 from __future__ import annotations
 
@@ -27,14 +31,9 @@ from app.market_time import CN_TZ, cn_now
 CRYPTO = "crypto"
 CN_ASSET_TYPES: tuple[str, ...] = ("stock", "etf", "index")
 
-# 合约日边界在北京墙钟里的偏移: 北京 08:00 = UTC 00:00
-_UTC_OFFSET_HOURS = 8
-
 # A 股连续竞价 240 分钟 / 24 小时品种 1440 分钟
 _CN_SESSION_MINUTES = 240
 _FULL_DAY_MINUTES = 1440
-
-ContractDayBasis = Literal["cn", "utc"]
 
 
 @dataclass(frozen=True)
@@ -58,8 +57,6 @@ class MarketRules:
     session_24x7: bool
     # 交易日历口径: cn = A 股交易日探针, none = 无休市概念
     calendar: Literal["cn", "none"]
-    # 「日」归属口径: cn = 北京自然日, utc = UTC 合约日
-    contract_day_basis: ContractDayBasis
     # 年化/夏普折算用的每自然年交易日数
     annual_days: int
     # 回测基准标的 (无合适基准时为 None, 不得默默套用 A 股指数)
@@ -77,7 +74,6 @@ def _cn_rules(asset_type: str) -> MarketRules:
         halt_filter=True,
         session_24x7=False,
         calendar="cn",
-        contract_day_basis="cn",
         annual_days=252,
         default_benchmark="000001.SH",
     )
@@ -94,7 +90,6 @@ def _crypto_rules() -> MarketRules:
         halt_filter=False,
         session_24x7=True,
         calendar="none",
-        contract_day_basis="utc",
         annual_days=365,
         default_benchmark=None,
     )
@@ -132,30 +127,28 @@ def _as_cn_wallclock(dt: datetime) -> datetime:
 
 
 def to_contract_date(dt: datetime, asset_type: str = "stock") -> date:
-    """北京墙钟 datetime → 该资产类别的「日」归属。"""
-    rules = get_rules(asset_type)
-    local = _as_cn_wallclock(dt)
-    if rules.contract_day_basis == "utc":
-        return (local - timedelta(hours=_UTC_OFFSET_HOURS)).date()
-    return local.date()
+    """北京墙钟 datetime → 该资产类别的「日」归属 (两类都是北京自然日)。
+
+    函数保留资产类别参数: 日归属是规则档案的一部分, 调用点不该假定与 stock 相同
+    (历史上 crypto 曾用过 UTC 零点切日的交易所口径, 见模块 docstring 的选源约束)。
+    """
+    get_rules(asset_type)  # fail-closed: 未知类别直接抛错, 不静默按北京日算
+    return _as_cn_wallclock(dt).date()
 
 
 def contract_today(asset_type: str = "stock", now: datetime | None = None) -> date:
-    """当前所属的「日」(A 股 = 北京自然日, 24x7 = UTC 合约日)。"""
+    """当前所属的「日」归属 (两类资产都是北京自然日, 口径见模块 docstring)。"""
     return to_contract_date(now or cn_now(), asset_type)
 
 
 def contract_day_start(d: date, asset_type: str = "stock") -> datetime:
-    """合约日 D 在北京墙钟中的起点 (naive)。"""
-    rules = get_rules(asset_type)
-    start = datetime.combine(d, dt_time(0, 0))
-    if rules.contract_day_basis == "utc":
-        return start + timedelta(hours=_UTC_OFFSET_HOURS)
-    return start
+    """「日」D 在北京墙钟中的起点 (naive): 北京 00:00。"""
+    get_rules(asset_type)
+    return datetime.combine(d, dt_time(0, 0))
 
 
 def contract_day_end(d: date, asset_type: str = "stock") -> datetime:
-    """合约日 D 在北京墙钟中的终点 (开区间上界, naive)。"""
+    """「日」D 在北京墙钟中的终点 (开区间上界, naive): 次日北京 00:00。"""
     return contract_day_start(d + timedelta(days=1), asset_type)
 
 
@@ -185,7 +178,7 @@ def is_trading_day_for(asset_type: str = "stock", now: datetime | None = None) -
 def elapsed_minutes(now: datetime | None = None, asset_type: str = "stock") -> float:
     """当日已交易分钟数 (量比与进度折算用)。
 
-    A 股复用 market_time 的两段式折算; 24x7 品种按当前合约日已过分钟数,
+    A 股复用 market_time 的两段式折算; 24x7 品种按当日已过分钟数,
     并对齐到 A 股的"非交易日视作全天"语义边界之外: 这里返回真实值,
     调用方据 is_trading_session 决定是否使用。
     """
