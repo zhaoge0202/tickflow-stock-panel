@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, MinuteKlineSession } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import {
+  computeIntradayAverage,
+  formatMinuteTime,
+  FULL_DAY_TIMES,
+  intradayAxisTimes,
+} from '@/lib/intraday-chart'
 import { useChartTheme } from '@/lib/theme'
 
 const COLORS = {
@@ -20,6 +25,8 @@ interface Props {
   height?: number
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   priceLines?: { value: number; label?: string; color?: string }[]
+  /** 资产类别; crypto 走数据驱动时轴与币/张成交量口径, 缺省按 A 股/ETF/指数处理。 */
+  assetType?: string
 }
 
 interface InfoPoint {
@@ -41,7 +48,7 @@ function priceColor(close: number, prevClose: number | null): string {
   return close > prevClose ? COLORS.up : COLORS.down
 }
 
-function buildModel(sessions: MinuteKlineSession[]) {
+function buildModel(sessions: MinuteKlineSession[], assetType?: string) {
   const categories: string[] = []
   const volumeData: ({ value: number; itemStyle: { color: string } } | null)[] = []
   const dayLabelByIndex = new Map<number, string>()
@@ -56,15 +63,21 @@ function buildModel(sessions: MinuteKlineSession[]) {
   const priceValues: number[] = []
 
   const labelStep = Math.max(1, Math.ceil(sessions.length / 10))
+  // 单「日」时轴长度: A 股/ETF/指数固定 242 槽 (含午休占位); crypto 24x7 无固定时段,
+  // 一天最多 1440 根, 按数据自身时轴排布 —— 套 242 槽会静默丢弃槽外分钟。
+  let singleDaySpan = FULL_DAY_TIMES.length
   for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex++) {
     const session = sessions[sessionIndex]
     const start = categories.length
+    const axisTimes = intradayAxisTimes(assetType, session.rows)
+    singleDaySpan = Math.max(1, axisTimes.length)
     dayStartIndexes.push(start)
     if (sessionIndex % labelStep === 0 || sessionIndex === sessions.length - 1) {
-      dayLabelByIndex.set(start + Math.floor(FULL_DAY_TIMES.length / 2), session.date.slice(5))
+      dayLabelByIndex.set(start + Math.floor(axisTimes.length / 2), session.date.slice(5))
     }
 
-    const averagePrices = computeIntradayAverage(session.rows)
+    // 均价口径随资产类别: A 股 volume 是「手」需 ×100, crypto 是币/张不得 ×100。
+    const averagePrices = computeIntradayAverage(session.rows, assetType)
     const rowsByTime = new Map<string, { row: MinuteKlineRow; average: number | null }>()
     session.rows.forEach((row, index) => {
       rowsByTime.set(formatMinuteTime(row.datetime), {
@@ -78,7 +91,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
     // 量柱着色基准: 前一分钟 close; 当日第一根用 session 昨收。
     // 不用 row.open — stock-sdk 历史日无真实分钟 open(为 null), close-vs-open 会全偏。
     let prevRef: number | null = session.prev_close
-    for (const time of FULL_DAY_TIMES) {
+    for (const time of axisTimes) {
       const point = rowsByTime.get(time)
       const index = categories.length
       categories.push(`${session.date} ${time}`)
@@ -136,6 +149,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
     pointByIndex,
     dayRanges,
     priceValues,
+    singleDaySpan,
     latest: pointByIndex.size > 0
       ? Array.from(pointByIndex.values())[pointByIndex.size - 1]
       : null,
@@ -147,6 +161,7 @@ export function EChartsMultiDayIntraday({
   height = 420,
   onPriceDoubleClick,
   priceLines = [],
+  assetType,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -154,7 +169,7 @@ export function EChartsMultiDayIntraday({
   const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
   const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
   onPriceDoubleClickRef.current = onPriceDoubleClick
-  const model = useMemo(() => buildModel(sessions), [sessions])
+  const model = useMemo(() => buildModel(sessions, assetType), [sessions, assetType])
   const modelRef = useRef(model)
   modelRef.current = model
   const [info, setInfo] = useState<InfoPoint | null>(model.latest)
@@ -374,7 +389,7 @@ export function EChartsMultiDayIntraday({
         xAxisIndex: [0, 1],
         start: 0,
         end: 100,
-        minValueSpan: FULL_DAY_TIMES.length,
+        minValueSpan: model.singleDaySpan,
         filterMode: 'none',
       }],
       series: [

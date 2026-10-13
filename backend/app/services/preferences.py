@@ -301,6 +301,21 @@ def get_realtime_data_provider() -> str:
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 
+def get_crypto_data_provider() -> str:
+    """crypto 资产类别的行情源。
+
+    与 A 股的 daily/minute/realtime 路由键互相独立: crypto 有专属注册表
+    (app.data_providers.crypto_registry), 不参与 custom_sources 数据集路由,
+    因此这里只校验 crypto 注册表, 合法值不会污染 A 股链路。
+    """
+    from app.data_providers import crypto_registry
+
+    provider = str(load().get("crypto_data_provider", "") or "").lower()
+    if provider and crypto_registry.has_provider(provider):
+        return provider
+    return crypto_registry.DEFAULT_CRYPTO_PROVIDER
+
+
 def get_financial_provider() -> str:
     provider = str(load().get("financial_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"

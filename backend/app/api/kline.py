@@ -14,6 +14,15 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.indicators.pipeline import compute_enriched
+from app.market_rules import (
+    CRYPTO,
+    contract_day_end,
+    contract_day_start,
+    contract_minutes_per_day,
+    contract_today,
+    elapsed_minutes,
+    to_contract_date,
+)
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
@@ -453,6 +462,91 @@ def _get_previous_closes(
     return result
 
 
+# ---------------------------------------------------------------------------
+# crypto (24x7 永续合约) 分支 — 实时链路 (P4) 未落地前只读本地仓库, 不对上游发请求。
+# A 股/ETF 的实时补拉、复权、涨跌停、240 根/午休完整性口径一律不适用 (CONTRIBUTING §3)。
+# ---------------------------------------------------------------------------
+
+
+def _crypto_minute_frame(repo, symbol: str, contract_day: date):
+    """读一个 UTC 合约日的本地分钟K (北京墙钟 naive, 已裁到合约日窗口)。
+
+    合约日 D = 北京墙钟 [D 08:00, D+1 08:00), 而 repo.get_minute 按北京日期过滤
+    `datetime.dt.date()`: 合约日尾巴 (次日北京 00:00-08:00) 的行带的是次日的北京日期。
+    因此连读 D 与 D+1 两个北京日期再按合约日窗口裁剪 —— 只查 D 会把上一个合约日的
+    00:00-08:00 混进来, 同时丢掉 D 自己的尾巴 (静默错误口径, CONTRIBUTING §3.3)。
+    仓储层的日期过滤口径待后续按 asset_type 参数化, 本轮不改 repository。
+    """
+    import polars as pl
+
+    parts = []
+    for beijing_day in (contract_day, contract_day + timedelta(days=1)):
+        part = repo.get_minute(symbol, beijing_day, asset_type=CRYPTO)
+        if part is not None and not part.is_empty() and "datetime" in part.columns:
+            parts.append(part)
+    if not parts:
+        return pl.DataFrame()
+    frame = parts[0] if len(parts) == 1 else pl.concat(parts, how="diagonal_relaxed")
+    return frame.filter(
+        (pl.col("datetime") >= contract_day_start(contract_day, CRYPTO))
+        & (pl.col("datetime") < contract_day_end(contract_day, CRYPTO))
+    ).sort("datetime")
+
+
+def _crypto_minute_range_frame(repo, symbol: str, days: int, last_contract_day: date):
+    """读最近 days 个合约日的本地分钟K (北京墙钟 naive, 已裁到 [first 08:00, last+1 08:00))。
+
+    与 _crypto_minute_frame 同源: repo.get_minute_range 同样按北京日期过滤, 而合约日的
+    尾巴落在下一个北京日期, 故北京日期跨度取 [first, last+1], 再按合约日窗口裁掉 first
+    之前 (上一个合约日) 的残留行。24x7: 合约日连续, 无需休市探针回退。
+    """
+    import polars as pl
+
+    first = last_contract_day - timedelta(days=days - 1)
+    frame = repo.get_minute_range(
+        [symbol], first, last_contract_day + timedelta(days=1), asset_type=CRYPTO,
+    )
+    if frame is None or frame.is_empty() or "datetime" not in frame.columns:
+        return pl.DataFrame()
+    return frame.filter(
+        (pl.col("datetime") >= contract_day_start(first, CRYPTO))
+        & (pl.col("datetime") < contract_day_end(last_contract_day, CRYPTO))
+    ).sort("datetime")
+
+
+def _crypto_expected_bars(contract_day: date, now: datetime) -> int:
+    """crypto 某合约日应有的分钟K根数 (整天 1440 根; 当前合约日按已过分钟折算)。"""
+    if contract_day != contract_today(CRYPTO, now):
+        return contract_minutes_per_day(CRYPTO)
+    return int(elapsed_minutes(now, CRYPTO))
+
+
+def _crypto_prev_close(repo, symbol: str, contract_day: date) -> float | None:
+    """上一合约日收盘 (分时基准线); 取不到返回 None, 不猜价格。
+
+    24x7 品种每个合约日都有日K, [D-3, D-1] 的最后一行即 D 的前一合约日, 不需要交易日历。
+    """
+    try:
+        daily = repo.get_crypto_daily(
+            symbol,
+            contract_day - timedelta(days=3),
+            contract_day - timedelta(days=1),
+            columns=["date", "close"],
+        )
+    except Exception as e:
+        logger.debug("crypto 上一合约日收盘读取失败 %s: %s", symbol, e)
+        return None
+    if daily is None or daily.is_empty() or "close" not in daily.columns:
+        return None
+    closes = daily["close"].drop_nulls().tail(1).to_list()
+    if not closes:
+        return None
+    try:
+        return float(closes[0])
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -466,24 +560,45 @@ def get_daily(
 
     - 若 QuoteService 有实时行情, 追加/覆盖今日实时蜡烛
     - Free 用户: 若 enriched 表里没有该股票, 实时拉取 + 本地算 enriched 返回
+    - crypto: 只回本地合约日K (source=crypto_local), 不走实时补拉/实时蜡烛注入
     - ext_columns: 可选，动态 LEFT JOIN 扩展数据表，结果平铺到 stock_info.ext 下
       (key 为 "{config_id}__{field_name}")，供日K信息条等场景展示自定义字段
     """
     repo = request.app.state.repo
     symbol = normalize_symbol(symbol, repo)
-    end = date.fromisoformat(end_date) if end_date else date.today()
+    asset_type = repo.resolve_asset_type(symbol)
+    # crypto 的「今天」是 UTC 合约日, 不是服务器本地日期 (CONTRIBUTING §3.3)
+    end = date.fromisoformat(end_date) if end_date else (
+        contract_today(CRYPTO, cn_now()) if asset_type == CRYPTO else date.today()
+    )
     if start_date:
         start = date.fromisoformat(start_date)
     else:
         start = end - timedelta(days=days)
     rows_limit = _daily_rows_limit(start, end, days, bool(start_date))
 
-    asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
 
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
     df = repo.get_daily_asset(asset_type, symbol, start, end)
+
+    if asset_type == CRYPTO:
+        # crypto 无 enriched/复权/涨跌停链路: 只回本地合约日K。
+        # 不走 A 股/ETF 的实时补拉 (_compute_live_daily_rows → kline_sync 单票拉取) 与
+        # 实时蜡烛注入 (_maybe_inject_live_candle), 那两条链路按 A 股口径结算, 且 crypto
+        # 的实时链路要到 P4 才落地。
+        return _gzip_payload(
+            request,
+            _attach_ext(
+                {
+                    "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                    "rows": df.to_dicts(), "source": "crypto_local",
+                },
+                repo, symbol, ext_columns,
+            ),
+            pref_key="daily_batch_compress",
+        )
 
     if _needs_live_daily_fill(df, start):
         try:
@@ -771,6 +886,9 @@ def get_minute_batch(request: Request, body: dict):
     - 本地优先: 先从 kline_minute parquet 读, 完整的直接用
     - 缺失补拉: 本地不完整的 symbol 用 sync_minute_batch 批量实时拉 (不落库)
     - 需 Pro+ 权限 (kline.minute.batch)
+    - crypto: 本端点是 A 股/ETF 专用口径 (09:25 集合竞价窗口 / 240 根完整度 / 午休
+      91min 洞判定 / 实时补拉), crypto 走不通 → 从本批剔除并在 unsupported_symbols
+      里显式列出, 对应 data[symbol] 回空 rows (不静默按 A 股口径结算)
     """
     from datetime import datetime
     import polars as pl
@@ -805,6 +923,25 @@ def get_minute_batch(request: Request, body: dict):
     # 权限守卫: 分钟K批量是 Pro+ 能力
     if not capset.has(Cap.KLINE_MINUTE_BATCH):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (kline.minute.batch)")
+
+    # crypto 实时链路 (P4) 未落地前 fail-closed: 不把 crypto 标的交给下面按 A 股口径
+    # 结算的路径 (240 根完整度/午休洞/09:25 窗口/实时补拉会产出静默错误结果, §3)。
+    # 不整批 400: 自选列表常 A 股与 crypto 混排, 整批失败会连坐同批 A 股/ETF 的分时图。
+    crypto_syms = [s for s in symbols if _resolve_asset_type(repo, s) == CRYPTO]
+    if crypto_syms:
+        crypto_set = set(crypto_syms)
+        symbols = [s for s in symbols if s not in crypto_set]
+        if not symbols:
+            return _gzip_payload(
+                request,
+                {
+                    "data": {sym: [] for sym in crypto_syms},
+                    "unsupported_symbols": crypto_syms,
+                    "full_minute_local": False,
+                    "incremental": since_dt is not None,
+                },
+                pref_key="minute_batch_compress",
+            )
 
     trade_date = date.fromisoformat(trade_date_str) if trade_date_str else cn_today()
 
@@ -976,6 +1113,10 @@ def get_minute_batch(request: Request, body: dict):
         if sym not in result:
             result[sym] = live.to_dicts()
 
+    # 被剔除的 crypto 标的显式回空 rows (与"本地无数据"区分: 见 unsupported_symbols)
+    for sym in crypto_syms:
+        result.setdefault(sym, [])
+
     # since 增量过滤: 只回 >= since 的K (含动态最后一根), 无新增的 symbol 不回
     if since_dt is not None:
         result = {
@@ -984,15 +1125,15 @@ def get_minute_batch(request: Request, body: dict):
         }
         result = {sym: rows for sym, rows in result.items() if rows}
 
-    return _gzip_payload(
-        request,
-        {
-            "data": result,
-            "full_minute_local": full_minute_healthy,
-            "incremental": since_dt is not None,
-        },
-        pref_key="minute_batch_compress",
-    )
+    payload = {
+        "data": result,
+        "full_minute_local": full_minute_healthy,
+        "incremental": since_dt is not None,
+    }
+    if crypto_syms:
+        # 只在真出现 crypto 标的中加入, A 股/ETF 响应字节不变
+        payload["unsupported_symbols"] = crypto_syms
+    return _gzip_payload(request, payload, pref_key="minute_batch_compress")
 
 
 @router.get("/minute-range")
@@ -1027,9 +1168,15 @@ def get_minute_range(
             pref_key="minute_batch_compress",
         )
 
-    end = cn_today()
-    start = end - timedelta(days=days * 3 + 20)
-    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    if asset_type == CRYPTO:
+        # 24x7: 读取窗口按合约日 (整天连续, 无需自然日折算), 会话按合约日逐日切分 ——
+        # 不套 A 股的 240 根/日与午休切分口径。
+        last_contract_day = contract_today(CRYPTO, cn_now())
+        minute = _crypto_minute_range_frame(repo, symbol, days, last_contract_day)
+    else:
+        end = cn_today()
+        start = end - timedelta(days=days * 3 + 20)
+        minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
     if minute.is_empty() or "datetime" not in minute.columns:
         return _gzip_payload(
             request,
@@ -1037,9 +1184,17 @@ def get_minute_range(
             pref_key="minute_batch_compress",
         )
 
-    minute = minute.with_columns(
-        pl.col("datetime").dt.date().alias("_trade_date"),
-    )
+    if asset_type == CRYPTO:
+        # 会话归属 = UTC 合约日 (北京墙钟换算), 不是北京自然日
+        minute = minute.with_columns(
+            pl.col("datetime")
+            .map_elements(lambda dt: to_contract_date(dt, CRYPTO), return_dtype=pl.Date)
+            .alias("_trade_date"),
+        )
+    else:
+        minute = minute.with_columns(
+            pl.col("datetime").dt.date().alias("_trade_date"),
+        )
     trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
     previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
     row_columns = [
@@ -1090,13 +1245,41 @@ def get_minute(
     - live=true 且当日连续竞价时段 → 跳过本地优先直接实时拉取:
       盘中分钟增量落盘的本地分区按 ≥60s 轮次更新, 90% 完整度启发式会让
       详情分时图停在上一增量轮, 与行情列表的节奏脱节
+    - crypto: 只读本地合约日分钟K (source=crypto_local), 不实时拉取 (`live` 参数对本
+      资产类别无效, 前端可能照传); 期望根数按 1440/日 折算, 无涨跌停 (price_limit=None)
     """
     repo = request.app.state.repo
     symbol = normalize_symbol(symbol, repo)
-    capset = request.app.state.capabilities
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
+
+    if asset_type == CRYPTO:
+        # 24x7: 默认看当前合约日, 不做周末/交易日探针回退 (合约日连续, 探针会把它当成
+        # 休市或取到上一个本地日期)。本资产类别没有本地优先/实时拉取之分, 故不读
+        # capabilities, 也不调 _fetch_minute_or_502 —— crypto 实时链路在 P4 落地。
+        now = cn_now()
+        day = trade_date if trade_date is not None else contract_today(CRYPTO, now)
+        rows = _crypto_minute_frame(repo, symbol, day)
+        expected = _crypto_expected_bars(day, now)
+        return _gzip_payload(
+            request,
+            {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(day), "rows": rows.to_dicts(),
+                "source": "crypto_local" if not rows.is_empty() else "none",
+                "asset_type": asset_type,
+                # 无涨跌停概念: 显式 None, 不回 0 / 空 dict 让前端误判
+                "price_limit": None,
+                "prev_close": _crypto_prev_close(repo, symbol, day),
+                # 本地完整度供前端/后续实时链路判断缺口 (阈值 = 1440 根/合约日)
+                "expected_bars": expected,
+                "is_complete": not rows.is_empty() and rows.height >= max(0, expected - 2),
+            },
+            pref_key="minute_batch_compress",
+        )
+
+    capset = request.app.state.capabilities
 
     if trade_date is None:
         # 默认看今天, 而不是本地落盘的最近日 (盘中后者是昨天)。
