@@ -358,6 +358,7 @@ class KlineRepository:
 
         # parquet glob 路径
         self._enriched_glob = str(store.data_dir / "kline_daily_enriched" / "**" / "*.parquet")
+        self._index_daily_glob = str(store.data_dir / "kline_index_daily" / "**" / "*.parquet")
         self._index_enriched_glob = str(store.data_dir / "kline_index_enriched" / "**" / "*.parquet")
         self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
@@ -1752,7 +1753,12 @@ class KlineRepository:
         end: date,
         columns: list[str] | None = None,
     ) -> pl.DataFrame:
-        """指数日K查询 — 从独立指数 enriched parquet 读取后即时计算通用指标。"""
+        """指数日K查询 — 从独立原始日K读取并即时计算通用指标。
+
+        实时行情会先把当日指数点位写入 kline_index_daily; 直接读取原始表
+        才能让收盘后的当日 K 与实时缓存保持一致。旧版 enriched 分区仍由
+        _scan_index_daily_symbol 在原始分区为空时兼容回退。
+        """
         from datetime import timedelta
 
         # 快路径: 若请求的列全部是 parquet 直接存储的列 (如迷你蜡烛图只要 OHLCV),
@@ -2026,12 +2032,24 @@ class KlineRepository:
 
     def _scan_index_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            lf = scan_enriched_parquet(self._index_enriched_glob,
-                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
-                (pl.col("symbol") == symbol)
-                & (pl.col("date") >= start)
-                & (pl.col("date") <= end)
-            ).sort("date")
+            def _scan(glob: str):
+                return scan_enriched_parquet(
+                    glob,
+                    cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+                ).filter(
+                    (pl.col("symbol") == symbol)
+                    & (pl.col("date") >= start)
+                    & (pl.col("date") <= end)
+                ).sort("date")
+
+            try:
+                lf = _scan(self._index_daily_glob)
+                has_rows = not lf.limit(1).collect().is_empty()
+            except Exception:
+                has_rows = False
+            if not has_rows:
+                # 兼容历史版本只写 kline_index_enriched 的指数数据。
+                lf = _scan(self._index_enriched_glob)
             if columns:
                 schema_names = lf.collect_schema().names()
                 existing = [c for c in columns if c in schema_names]

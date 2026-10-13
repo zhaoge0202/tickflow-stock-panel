@@ -112,6 +112,13 @@ def _write_index_enriched(repo, dates_rows):
         pl.DataFrame(rows).write_parquet(d / "part.parquet")
 
 
+def _write_index_daily(repo, dates_rows):
+    for ds, rows in dates_rows.items():
+        d = repo.store.data_dir / "kline_index_daily" / f"date={ds}"
+        d.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(rows).write_parquet(d / "part.parquet")
+
+
 def _index_rows(ds, close=3000.0):
     return [{
         "symbol": "000001.SH", "date": _dt.date.fromisoformat(ds),
@@ -129,6 +136,26 @@ def test_get_enriched_latest_asset_index(repo):
     assert str(dt) == "2026-07-24"
     assert df["symbol"].to_list() == ["000001.SH"]
     assert "ma5" in df.columns or "rsi_14" in df.columns  # 重算产出指标列
+
+
+def test_get_index_daily_prefers_live_raw_partition(repo):
+    """实时收盘写入 raw 日K后，指数详情不能继续停在旧 enriched 收盘。"""
+    _write_index_enriched(repo, {
+        "2026-07-24": _index_rows("2026-07-24", 3000.0),
+    })
+    _write_index_daily(repo, {
+        "2026-07-24": _index_rows("2026-07-24", 3000.0),
+        "2026-07-25": _index_rows("2026-07-25", 3010.0),
+    })
+
+    df = repo.get_index_daily(
+        "000001.SH",
+        _dt.date(2026, 7, 1),
+        _dt.date(2026, 7, 25),
+    )
+
+    assert df["date"].max() == _dt.date(2026, 7, 25)
+    assert df.filter(pl.col("date") == _dt.date(2026, 7, 25))["close"][0] == 3010.0
 
 
 def test_get_enriched_latest_asset_index_cold_no_refresh(repo):
