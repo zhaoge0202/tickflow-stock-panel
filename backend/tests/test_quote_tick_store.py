@@ -98,6 +98,28 @@ def test_quote_tick_store_appends_latest_bars_and_quality(tmp_path):
     assert quality["missing_symbols"] == ["300750.SZ"]
 
 
+def test_quality_empty_symbols_uses_cached_snapshot(monkeypatch, tmp_path):
+    key = str(tmp_path)
+    monkeypatch.setitem(quote_tick_store._quality, key, {
+        "source": "tdxapi",
+        "symbol_count": 12,
+        "quote_freshness": "live",
+    })
+
+    def fail_latest(*args, **kwargs):
+        raise AssertionError("空候选集不应扫描全市场 latest")
+
+    monkeypatch.setattr(quote_tick_store, "latest", fail_latest)
+
+    quality = quote_tick_store.quality(tmp_path, [], target_date=TRADE_DATE)
+
+    assert quality["source"] == "tdxapi"
+    assert quality["symbol_count"] == 12
+    assert quality["quote_freshness"] == "live"
+    assert quality["missing_symbols"] == []
+    assert quality["stale_symbols"] == []
+
+
 def test_auction_result_fields_ignore_reference_and_use_real_trade(tmp_path):
     base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
     base.mkdir(parents=True)

@@ -340,6 +340,20 @@ def quality(
 ) -> dict:
     """返回数据质量摘要, 供决策台顶部状态展示。"""
     key = str(data_dir)
+    # 决策队列明确传入空候选集时, 不应退化成全市场 latest 扫描。
+    # 空队列只需要最近一轮轮询写入的质量缓存; 全市场扫描会阻塞同步 API。
+    if symbols is not None and not symbols:
+        now_ms = int(time.time() * 1000)
+        base = dict(_quality.get(key) or {})
+        base.update({
+            "source": base.get("source") or "tdxapi",
+            "symbol_count": int(base.get("symbol_count") or 0),
+            "missing_symbols": [],
+            "stale_symbols": [],
+            "quote_freshness": base.get("quote_freshness") or "unknown",
+            "checked_at": now_ms,
+        })
+        return base
     latest_rows = latest(data_dir, symbols, target_date=target_date)
     now_ms = int(time.time() * 1000)
     missing = []

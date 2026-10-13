@@ -124,6 +124,19 @@ def test_request_releases_shared_http_gate_on_error(monkeypatch):
     tp._tdx_http_gate.release()
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 4), ("8", 8), ("16", 16), ("0", 1), ("999", 16), ("bad", 4)],
+)
+def test_tdx_http_concurrency_is_configurable_and_bounded(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("TDX_API_HTTP_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("TDX_API_HTTP_CONCURRENCY", raw)
+
+    assert tp._tdx_http_concurrency() == expected
+
+
 def test_get_minute_retries_transient_tdx_failure(monkeypatch):
     calls = 0
 
