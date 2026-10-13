@@ -1,12 +1,18 @@
 """OKX v5 公开市场 REST 客户端 — 只负责取数, 不做口径转换。
 
 为什么默认走 OKX 而不是币安: 生产机(Windows)实测币安不可用 —— fapi.binance.com 返回
-451(地区限制), fapi1/fapi2 被网络中间设备以 202+空 body 截断, 经 SOCKS5 代理出口访问
-仍被币安判为限制地区。OKX/Gate 从同一网络直连可达且为官方公开端点 (免费、无需 key)。
+451(地区限制), fapi1/fapi2 被网络中间设备以 202+空 body 截断, 经外部 SOCKS5 代理出口
+访问仍被币安判为限制地区。OKX 为官方公开端点 (免费、无需 key), 且在配置代理后可达。
+
+代理 (CRYPTO_HTTP_PROXY): 生产机对该域名的 DNS 被解析成 169.254.0.2(链路本地假地址),
+Python 直连必然超时, 而该机自身有本地代理端口可用。为避免把整站出站流量都塞进代理,
+这里只认 crypto 专用环境变量, 不读通用的 HTTPS_PROXY/ALL_PROXY。
+未配置时不传 proxy 参数, 保持 httpx 默认行为 (尊重系统环境变量)。
 """
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -16,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://www.okx.com"
 DEFAULT_TIMEOUT = 20.0
+
+# crypto 源专用代理 (留空 = 直连)。形如 http://127.0.0.1:10808
+PROXY_ENV = "CRYPTO_HTTP_PROXY"
 
 # candles 单次上限 300; history-candles 单次上限 100
 CANDLES_MAX_LIMIT = 300
@@ -29,14 +38,27 @@ class OkxClientError(RuntimeError):
 class OkxClient:
     """OKX v5 公开市场只读客户端。"""
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+        proxy: str | None = None,
+    ) -> None:
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.timeout = timeout
+        # 显式入参优先 (测试/多环境), 否则读 crypto 专用环境变量
+        self.proxy = (proxy or os.environ.get(PROXY_ENV) or "").strip() or None
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"timeout": self.timeout}
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
+        return kwargs
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> list:
         url = f"{self.base_url}{path}"
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(**self._client_kwargs()) as client:
                 resp = client.get(url, params=params or {})
                 resp.raise_for_status()
                 payload = resp.json()

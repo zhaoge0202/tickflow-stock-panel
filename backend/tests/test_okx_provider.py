@@ -205,3 +205,25 @@ def test_empty_daily_returns_empty_frame_not_raise():
     df = OkxProvider(client).get_daily([SYMBOL])
     assert isinstance(df, pl.DataFrame)
     assert df.is_empty()
+
+
+# ---------------- 代理配置 ----------------
+
+def test_client_reads_dedicated_proxy_env_only(monkeypatch):
+    """代理只认 crypto 专用变量: 通用 HTTPS_PROXY 不得被 crypto 源独占使用。"""
+    from app.data_providers.okx.client import PROXY_ENV, OkxClient
+
+    monkeypatch.delenv(PROXY_ENV, raising=False)
+    assert OkxClient().proxy is None
+    assert "proxy" not in OkxClient()._client_kwargs()
+
+    monkeypatch.setenv(PROXY_ENV, "http://127.0.0.1:10808")
+    assert OkxClient().proxy == "http://127.0.0.1:10808"
+    assert OkxClient()._client_kwargs()["proxy"] == "http://127.0.0.1:10808"
+
+    # 显式入参优先于环境变量 (测试/多环境)
+    assert OkxClient(proxy="http://127.0.0.1:9999").proxy == "http://127.0.0.1:9999"
+
+    # 空白值视为未配置, 不做成空串代理
+    monkeypatch.setenv(PROXY_ENV, "   ")
+    assert OkxClient().proxy is None
