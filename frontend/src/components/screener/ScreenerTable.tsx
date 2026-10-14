@@ -5,9 +5,14 @@
  * 策略页特有的单元格内容：symbol 列（含加自选按钮 + 失效行灰显）、strategies、
  * score、signals、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
  */
-import { useState, type CSSProperties, type ReactNode } from 'react'
-import { Check, Plus, Eye, EyeOff, RefreshCw, ListCollapse, ListTree } from 'lucide-react'
-import type { KlineRow, MinuteKlineRow } from '@/lib/api'
+import { useState, useMemo, type CSSProperties, type ReactNode } from 'react'
+import { Check, CheckCircle2, Plus, Eye, EyeOff, RefreshCw, ListCollapse, ListTree, Target } from 'lucide-react'
+import {
+  useMonitoredPositions,
+  addOrUpdateMonitoredPosition,
+  removeMonitoredPosition,
+} from '@/lib/stopLossStore'
+import type { KlineRow, MinuteKlineRow, StrategyPurchaseMark } from '@/lib/api'
 import { fmtPrice, formatExtNumber } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/screener-columns'
 import { getSignals, signalCls } from '@/lib/stock-table'
@@ -29,9 +34,24 @@ interface ScreenerTableProps {
   rows: any[]
   columns: ColumnConfig[]
   strategyIdToName: Record<string, string>
+  /** 当前策略标签的上下文状态，例如盘后预选。 */
+  strategyLabelSuffix?: string
   symbolStrategyMap: Map<string, string[]>
   activeStrategy: string | null
   watchlistSet: Set<string>
+  /** 当前策略/信号日的用户买入标记, key = strategyId::symbol::signalDate */
+  purchaseMarks?: Map<string, StrategyPurchaseMark>
+  purchaseSignalDate?: string
+  onTogglePurchaseMark?: (
+    strategyId: string,
+    symbol: string,
+    signalDate: string,
+    signalPrice: number | null,
+    signalScore: number | null,
+    signalChangePct: number | null,
+    marked: boolean,
+  ) => void
+  purchaseMarkPending?: boolean
   onPreview: (symbol: string, name?: string, navList?: NavItem[]) => void
   onAddToWatchlist: (symbol: string, groupId: string | null) => void
   onRemoveFromWatchlist: (symbol: string) => void
@@ -159,8 +179,10 @@ function renderExtValue(
 }
 
 export function ScreenerTable({
-  rows, columns, strategyIdToName, symbolStrategyMap, activeStrategy,
-  watchlistSet, onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
+  rows, columns, strategyIdToName, strategyLabelSuffix, symbolStrategyMap, activeStrategy,
+  watchlistSet, purchaseMarks, purchaseSignalDate, onTogglePurchaseMark,
+  purchaseMarkPending,
+  onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
@@ -169,6 +191,11 @@ export function ScreenerTable({
 }: ScreenerTableProps) {
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
+  const monitoredPositions = useMonitoredPositions()
+  const monitoredSymbols = useMemo(
+    () => new Set(monitoredPositions.map((p) => p.symbol.toUpperCase())),
+    [monitoredPositions],
+  )
 
   // 日k列渲染尺寸（按眼睛开关取开启/收起尺寸）
   const candleCol = columns.find(c => c.source.type === 'builtin' && c.source.key === 'candle' && c.visible)
@@ -243,6 +270,11 @@ export function ScreenerTable({
       case 'symbol': {
         const board = boardTag(r.symbol)
         const inWatchlist = watchlistSet.has(r.symbol)
+        const signalDate = purchaseSignalDate || String(r.date || '').slice(0, 10)
+        const purchaseKey = activeStrategy && signalDate
+          ? `${activeStrategy}::${r.symbol}::${signalDate}`
+          : null
+        const purchaseMark = purchaseKey ? purchaseMarks?.get(purchaseKey) : undefined
         return (
           <td key={col.id} className="px-4 py-2">
             <div className="flex items-center gap-2">
@@ -266,6 +298,25 @@ export function ScreenerTable({
                     {r.name}
                   </span>
                 )}
+                {Array.isArray(r.version_tags) && r.version_tags.map((tag: any, idx: number) => {
+                  const colorCls = tag.color === 'green'
+                    ? 'bg-bull/15 text-bull border-bull/30'
+                    : tag.color === 'orange'
+                      ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                      : tag.color === 'blue'
+                        ? 'bg-sky-500/15 text-sky-400 border-sky-500/30'
+                        : tag.color === 'red'
+                          ? 'bg-danger/15 text-danger border-danger/30'
+                          : 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                  return (
+                    <span
+                      key={idx}
+                      className={`shrink-0 inline-flex items-center px-1.5 py-px rounded text-[9px] font-medium leading-tight border ${colorCls}`}
+                    >
+                      {tag.label}
+                    </span>
+                  )
+                })}
               </button>
               {isExpired ? (
                 <span className="shrink-0 inline-flex items-center px-1.5 py-px rounded text-[9px] font-medium leading-tight bg-red-500/10 text-red-400/60 border border-red-500/15">
@@ -294,13 +345,70 @@ export function ScreenerTable({
                   </WatchlistAddMenu>
                 )
               )}
+              {activeStrategy && onTogglePurchaseMark && signalDate && (
+                <button
+                  type="button"
+                  disabled={purchaseMarkPending}
+                  onClick={() => onTogglePurchaseMark(
+                    activeStrategy,
+                    r.symbol,
+                    signalDate,
+                    Number.isFinite(Number(r.close)) ? Number(r.close) : null,
+                    Number.isFinite(Number(r.score)) ? Number(r.score) : null,
+                    Number.isFinite(Number(r.change_pct)) ? Number(r.change_pct) : null,
+                    !!purchaseMark,
+                  )}
+                  className={`shrink-0 inline-flex h-5 items-center gap-1 rounded-full border px-1.5 text-[9px] font-medium transition-colors ${
+                    purchaseMark
+                      ? 'border-bull/40 bg-bull/10 text-bull'
+                      : 'border-border text-muted hover:border-bull/40 hover:text-bull'
+                  }`}
+                  title={purchaseMark ? '取消已买入标记' : '标记为已买入并同步加入动态止损盯盘浮窗'}
+                  aria-label={purchaseMark ? `取消 ${r.symbol} 已买入标记` : `标记 ${r.symbol} 已买入`}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  {purchaseMark ? '已买' : '我已买'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  const isMonitored = monitoredSymbols.has(r.symbol.toUpperCase())
+                  if (isMonitored) {
+                    removeMonitoredPosition(r.symbol)
+                  } else {
+                    addOrUpdateMonitoredPosition({
+                      symbol: r.symbol,
+                      name: r.name || r.symbol,
+                      costPrice: Number.isFinite(Number(r.close)) ? Number(r.close) : 0,
+                      strategyId: activeStrategy || undefined,
+                      strategyName: activeStrategy ? (strategyIdToName[activeStrategy] || activeStrategy) : undefined,
+                      currentPrice: Number.isFinite(Number(r.close)) ? Number(r.close) : 0,
+                      todayHigh: Number.isFinite(Number(r.high)) ? Number(r.high) : undefined,
+                      ma5: Number.isFinite(Number(r.ma5)) ? Number(r.ma5) : undefined,
+                    })
+                  }
+                }}
+                className={`shrink-0 inline-flex h-5 items-center gap-1 rounded-full border px-1.5 text-[9px] font-medium transition-colors ${
+                  monitoredSymbols.has(r.symbol.toUpperCase())
+                    ? 'border-accent/40 bg-accent/15 text-accent shadow-sm'
+                    : 'border-border text-muted hover:border-accent/40 hover:text-accent'
+                }`}
+                title={monitoredSymbols.has(r.symbol.toUpperCase()) ? '从动态止损盯盘浮窗移出' : '加入动态止损置顶盯盘浮窗 (画中画/实时追踪)'}
+              >
+                <Target className="h-3 w-3" />
+                {monitoredSymbols.has(r.symbol.toUpperCase()) ? '盯盘中' : '盯盘'}
+              </button>
             </div>
           </td>
         )
       }
       case 'strategies': {
         const strats = symbolStrategyMap.get(r.symbol) ?? (activeStrategy ? [activeStrategy] : [])
-        const tags = strats.map(sid => strategyIdToName[sid] ?? sid)
+        const tags = strats.map(sid => {
+          const name = strategyIdToName[sid] ?? sid
+          return strategyLabelSuffix ? `${name} · ${strategyLabelSuffix}` : name
+        })
         const cellKey = `${r.symbol}::${col.id}`
         const expanded = expandedCells.has(cellKey)
         // 收起时每行显示前N个 + "+N" 计数 (跟随列设置"显示前N个", 未配置默认 3),

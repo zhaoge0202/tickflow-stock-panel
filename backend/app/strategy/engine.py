@@ -265,7 +265,10 @@ class StrategyEngine:
             if not d.exists():
                 continue
             for f in sorted(d.glob("*.py")):
-                if f.name.startswith("_"):
+                # macOS 复制到 Windows 时会生成 ``._策略名.py`` 的
+                # AppleDouble 二进制元数据文件。它不是策略源码，不能交给
+                # UTF-8 解析器；下划线辅助模块同样不应注册为策略。
+                if f.name.startswith((".", "_")):
                     continue
                 try:
                     s = self._load_file(f)
@@ -1687,20 +1690,36 @@ class StrategyEngine:
             exprs.append(pl.col("close") >= bf["price_min"])
         if bf.get("price_max") is not None:
             exprs.append(pl.col("close") <= bf["price_max"])
-        if bf.get("market_cap_min") is not None and "total_shares" in df.columns:
+        if (
+            bf.get("market_cap_min") is not None
+            and "total_shares" in df.columns
+            and df["total_shares"].is_not_null().any()
+        ):
             exprs.append(
                 pl.col("close") * pl.col("total_shares") >= bf["market_cap_min"]
             )
-        if bf.get("market_cap_max") is not None and "total_shares" in df.columns:
+        if (
+            bf.get("market_cap_max") is not None
+            and "total_shares" in df.columns
+            and df["total_shares"].is_not_null().any()
+        ):
             exprs.append(
                 pl.col("close") * pl.col("total_shares") <= bf["market_cap_max"]
             )
         # 流通市值
-        if bf.get("float_cap_min") is not None and "float_shares" in df.columns:
+        if (
+            bf.get("float_cap_min") is not None
+            and "float_shares" in df.columns
+            and df["float_shares"].is_not_null().any()
+        ):
             exprs.append(
                 pl.col("close") * pl.col("float_shares") >= bf["float_cap_min"]
             )
-        if bf.get("float_cap_max") is not None and "float_shares" in df.columns:
+        if (
+            bf.get("float_cap_max") is not None
+            and "float_shares" in df.columns
+            and df["float_shares"].is_not_null().any()
+        ):
             exprs.append(
                 pl.col("close") * pl.col("float_shares") <= bf["float_cap_max"]
             )
@@ -1709,9 +1728,17 @@ class StrategyEngine:
         if bf.get("amount_max") is not None:
             exprs.append(pl.col("amount") <= bf["amount_max"])
         # 换手率
-        if bf.get("turnover_min") is not None and "turnover_rate" in df.columns:
+        if (
+            bf.get("turnover_min") is not None
+            and "turnover_rate" in df.columns
+            and df["turnover_rate"].is_not_null().any()
+        ):
             exprs.append(pl.col("turnover_rate") >= bf["turnover_min"])
-        if bf.get("turnover_max") is not None and "turnover_rate" in df.columns:
+        if (
+            bf.get("turnover_max") is not None
+            and "turnover_rate" in df.columns
+            and df["turnover_rate"].is_not_null().any()
+        ):
             exprs.append(pl.col("turnover_rate") <= bf["turnover_max"])
         if bf.get("exclude_st") and "name" in df.columns:
             exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))

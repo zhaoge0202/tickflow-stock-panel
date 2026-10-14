@@ -39,6 +39,17 @@ def test_duplicate_strategy_id_reports_both_paths(tmp_path):
     assert all("duplicate strategy id" in item["error"] for item in errors)
 
 
+def test_appledouble_strategy_files_are_ignored(tmp_path):
+    (tmp_path / "valid.py").write_text(_strategy_code("valid"), encoding="utf-8")
+    # macOS AppleDouble 文件是二进制内容，即使扩展名为 .py 也不能读取。
+    (tmp_path / "._broken.py").write_bytes(b"AppleDouble\x00\xa3\xff")
+
+    engine = StrategyEngine(strategy_dirs=[tmp_path])
+
+    assert engine.has("valid")
+    assert engine.load_errors() == []
+
+
 def test_failed_reload_keeps_previous_registry(tmp_path):
     path = tmp_path / "stable.py"
     path.write_text(_strategy_code("stable"), encoding="utf-8")

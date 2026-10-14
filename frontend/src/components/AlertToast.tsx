@@ -117,10 +117,10 @@ export function AlertToastContainer() {
   }, [])
   useEffect(sub, [sub])
 
-  // 点击通知 → 跳转监控中心 + 关闭当前通知
-  const handleClick = (id: number) => {
+  // 点击通知 → 有标的进入决策卡, 无标的回监控中心
+  const handleClick = (id: number, symbol?: string) => {
     dismiss(id)
-    navigate('/monitor')
+    navigate(symbol ? `/decision?symbol=${encodeURIComponent(symbol)}` : '/monitor')
   }
 
   if (!items.length) return null
@@ -150,14 +150,14 @@ export function AlertToastContainer() {
               animate={{ opacity: 1, x: 0, scale: 1 }}
               exit={{ opacity: 0, x: 60, scale: 0.9 }}
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-              onClick={() => handleClick(item.id)}
+              onClick={() => handleClick(item.id, ev.symbol)}
               role="button"
               tabIndex={0}
               aria-label={`查看监控通知${ev.name ? ` ${ev.name}` : ''}${ev.symbol ? ` ${ev.symbol}` : ''}`}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault()
-                  handleClick(item.id)
+                  handleClick(item.id, ev.symbol)
                 }
               }}
               className="pointer-events-auto relative overflow-hidden rounded-xl border border-border/60 bg-surface/95 backdrop-blur-md shadow-2xl pl-3 pr-2 py-2.5 cursor-pointer hover:border-accent/40 hover:shadow-accent/10 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"

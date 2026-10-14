@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import time as _time
+from contextlib import suppress
 from datetime import date
 from pathlib import Path
 
@@ -80,7 +82,7 @@ class RuleModel(BaseModel):
     id: str
     name: str
     enabled: bool = True
-    type: str          # strategy | signal | price | market | sector | abnormal
+    type: str          # strategy | signal | price | market | level | ladder | sector | abnormal
     asset_type: str = "stock"   # stock | etf (etf: strategy 型走 ETF 历史加载器)
     scope: str = "symbols"   # symbols | all | sector | watchlist_group
     symbols: list[str] = []
@@ -104,7 +106,7 @@ class RuleModel(BaseModel):
     remind_date: str | None = None   # YYYY-MM-DD
     lead_days: int = 0               # 提前 N 天进入提醒窗口
     severity: str = "info"    # info | warn | critical
-    webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
+    webhook_url: str = ""     # Webhook 推送地址 (飞书/企微等外部通知)
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
     webhook_channels: list[str] = []  # 合法值: feishu | wecom | custom | email
     message: str = ""
@@ -173,6 +175,7 @@ def get_options(request: Request):
         "types": [
             {"key": "signal", "label": "信号"},
             {"key": "price", "label": "价格/涨跌"},
+            {"key": "level", "label": "关键价位"},
             {"key": "market", "label": "市场异动"},
             {"key": "strategy", "label": "策略监控"},
             {"key": "abnormal", "label": "异动监控"},
@@ -274,12 +277,11 @@ def save_rule(req: RuleModel, request: Request):
     # 连板梯队封单监控 (type=ladder) 依赖五档盘口数据, 需 Pro+ (DEPTH5_BATCH 能力)。
     # 无能力时拒绝创建, 避免规则存了却永远无法触发。
     if rule.get("type") == "ladder":
-        from app.tickflow.capabilities import Cap
-        capset = getattr(request.app.state, "capabilities", None)
-        if capset is None or not capset.has(Cap.DEPTH5_BATCH):
+        depth_svc = getattr(request.app.state, "depth_service", None)
+        if depth_svc is None or not depth_svc.is_available():
             raise HTTPException(
                 status_code=403,
-                detail="封单监控需要 Pro+ 套餐 (批量五档能力),请升级后在「设置」页配置",
+                detail="封单监控需要可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+",
             )
     if rule.get("type") == "strategy":
         from app.strategy.engine import StrategyDataContext
@@ -373,9 +375,6 @@ def delete_rule(rule_id: str, request: Request):
 
 # ── 演示数据生成 (仅 Dev 页用) ─────────────────────────
 
-import time as _time
-
-
 def _demo_rule(rule_id: str, name: str, rtype: str, scope: str, symbols: list[str],
                conditions: list[dict], logic: str = "or", cooldown: int = 3600,
                severity: str = "info", message: str = "",
@@ -432,7 +431,7 @@ def seed_demo_rules(request: Request):
     ts = int(_time.time() * 1000)
     created = []
     i = 0
-    for (name, rtype, scope, symbols, conditions, logic, severity, sev) in _DEMO_RULES_TEMPLATE:
+    for (name, rtype, scope, symbols, conditions, logic, _severity, sev) in _DEMO_RULES_TEMPLATE:
         rule_id = f"demo_{ts}_{i}"
         rule = _demo_rule(rule_id, name, rtype, scope, symbols, conditions, logic, 3600, sev)
         monitor_rules.save_one(_data_dir(request), rule)
@@ -618,7 +617,7 @@ def trigger_ladder(request: Request):
         inst = repo.get_instruments()
         if not inst.is_empty() and "name" in inst.columns:
             name_map = {r["symbol"]: r["name"] for r in inst.select(["symbol", "name"]).iter_rows(named=True) if r.get("name")}
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     for rule in engine.rules.values():
@@ -669,10 +668,8 @@ def trigger_ladder(request: Request):
         raise HTTPException(status_code=400, detail="当前无 ladder 规则满足触发条件 (封单均 > 阈值)")
 
     # 1. 落盘到 alerts.jsonl
-    try:
+    with suppress(Exception):
         alert_store.append_many(repo.store.data_dir, rule_events)
-    except Exception:  # noqa: BLE001
-        pass  # 落盘失败不阻断推送
 
     # 2. SSE 推送 (入 pending_alerts 队列)
     if quote_svc:
@@ -683,17 +680,13 @@ def trigger_ladder(request: Request):
             "signals": ev["signals"], "severity": ev["severity"],
             "conditions": ev["conditions"], "logic": ev["logic"],
         } for ev in rule_events]
-        try:
+        with suppress(Exception):
             quote_svc.push_alerts(sse_alerts)
-        except Exception:  # noqa: BLE001
-            pass
 
     # 3. 飞书推送
     if quote_svc:
-        try:
+        with suppress(Exception):
             quote_svc._maybe_send_webhook(rule_events, engine)
-        except Exception:  # noqa: BLE001
-            pass
 
     return {
         "ok": True,

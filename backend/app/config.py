@@ -125,8 +125,9 @@ class Settings(BaseSettings):
     backtest_range_guard: bool = False
     backtest_matrix_disk_cache_enabled: bool = True
     backtest_matrix_cache_max_mb: int = 512
-    backtest_matrix_cache_prewarm: bool = True
-    backtest_matrix_cache_prewarm_years: int = 5
+    # 启动自动预热会物化多年全市场矩阵, 和盘中行情争内存; 默认关, 首次回测时再按需构建。
+    backtest_matrix_cache_prewarm: bool = False
+    backtest_matrix_cache_prewarm_years: int = 2
 
     # polars collect 并发闸 — polars 共享执行器在多线程并发 collect 下存在死锁
     # (上游 #24448/#25754 同族), 限流并发是社区验证的缓解手段。background 限额
@@ -158,6 +159,19 @@ class Settings(BaseSettings):
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
+
+    # Trade ticks — TDX 逐笔成交 MySQL 持久化。留空/关闭时只走实时展示。
+    trade_ticks_mysql_url: str = ""
+    trade_ticks_persist_enabled: bool = False
+    trade_ticks_persist_interval_seconds: int = 30
+    trade_ticks_persist_timeout_seconds: int = 120
+
+    # Latest quote snapshot — 复用逐笔成交 MySQL URL, 每个 symbol 只保留最新一行。
+    quote_snapshot_mysql_enabled: bool = True
+
+    # quote_ticks 本地秒级事实层: 全市场落盘支撑动能气泡盘中/历史回放。
+    # 内存短序列仍只保留关注标的; 本地分区默认保留 30 天, 更早日期按需后台补数据。
+    quote_ticks_retention_days: int = 30
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"

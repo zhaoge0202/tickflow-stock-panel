@@ -9,7 +9,7 @@ from unittest.mock import patch
 import polars as pl
 
 from app.market_time import cn_today
-from app.services import quote_service
+from app.services import auction_confirmation, quote_service, strategy_cache
 from app.services.quote_service import QuoteService, QuoteSubscriber
 from app.strategy.engine import StrategyEngine
 from app.strategy.monitor import MonitorRuleEngine
@@ -217,3 +217,121 @@ def test_quote_service_skips_notification_without_strategy_result_update():
         service._evaluate_monitors(pl.DataFrame(), None)
 
     assert subscriber.pop()["strategy_results_updated"] is False
+
+
+def test_quote_service_refresh_auction_confirmation_returns_confirmed_without_mutating_cache(monkeypatch, tmp_path):
+    service = QuoteService()
+    service._repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+
+    cached = {
+        "as_of": "2026-08-10",
+        "results": {
+            "strategy_a": {
+                "as_of": "2026-08-10",
+                "total": 1,
+                "rows": [{"symbol": "000001.SZ", "score": 80.0}],
+            },
+        },
+        "updated_at": 1,
+    }
+    confirmed = {
+        "as_of": "2026-08-10",
+        "trade_date": "2026-08-11",
+        "gate_status": "confirmed",
+        "updated_at": 2,
+        "results": {
+            "strategy_a": {
+                "strategy": "strategy_a",
+                "as_of": "2026-08-10",
+                "trade_date": "2026-08-11",
+                "base_total": 1,
+                "total": 1,
+                "confirmed_total": 1,
+                "auction_covered_total": 1,
+                "trade_covered_total": 1,
+                "pending_auction_total": 0,
+                "pending_trade_total": 0,
+                "rows": [{"symbol": "000001.SZ", "score": 80.0, "open_confirm_price": 10.2}],
+            },
+        },
+    }
+    written = {}
+    notified = []
+
+    monkeypatch.setattr(strategy_cache, "read_cache", lambda *_args, **_kwargs: cached)
+    monkeypatch.setattr(
+        auction_confirmation,
+        "confirm_cached_strategy_results",
+        lambda *_args, **_kwargs: confirmed,
+    )
+    monkeypatch.setattr(
+        strategy_cache,
+        "write_cache",
+        lambda data_dir, as_of, results: written.update({
+            "data_dir": data_dir,
+            "as_of": as_of,
+            "results": results,
+        }),
+    )
+    monkeypatch.setattr(service, "notify_strategy_results_updated", lambda: notified.append(True))
+
+    payload = service.refresh_auction_confirmation()
+
+    assert payload == confirmed
+    assert written == {}
+    assert notified == []
+
+
+def test_quote_service_refresh_auction_confirmation_skips_pending_gate(monkeypatch, tmp_path):
+    service = QuoteService()
+    service._repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+
+    cached = {
+        "as_of": "2026-08-10",
+        "results": {
+            "strategy_a": {
+                "as_of": "2026-08-10",
+                "total": 1,
+                "rows": [{"symbol": "000001.SZ", "score": 80.0}],
+            },
+        },
+        "updated_at": 1,
+    }
+    pending = {
+        "as_of": "2026-08-10",
+        "trade_date": "2026-08-11",
+        "gate_status": "pending_gate",
+        "updated_at": 2,
+        "results": {
+            "strategy_a": {
+                "strategy": "strategy_a",
+                "as_of": "2026-08-10",
+                "trade_date": "2026-08-11",
+                "base_total": 1,
+                "total": 0,
+                "confirmed_total": 0,
+                "auction_covered_total": 0,
+                "trade_covered_total": 0,
+                "pending_auction_total": 1,
+                "pending_trade_total": 1,
+                "rows": [],
+            },
+        },
+    }
+    writes = []
+    notified = []
+
+    monkeypatch.setattr(strategy_cache, "read_cache", lambda *_args, **_kwargs: cached)
+    monkeypatch.setattr(
+        auction_confirmation,
+        "confirm_cached_strategy_results",
+        lambda *_args, **_kwargs: pending,
+    )
+    monkeypatch.setattr(strategy_cache, "write_cache", lambda *args, **kwargs: writes.append((args, kwargs)))
+    monkeypatch.setattr(service, "notify_strategy_results_updated", lambda: notified.append(True))
+
+    payload = service.refresh_auction_confirmation()
+
+    assert payload == pending
+    assert writes == []
+    assert notified == []

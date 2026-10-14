@@ -6,6 +6,7 @@ import { klineDailyQueryOptions, klineMinuteQueryOptions, klineMinuteRangeQueryO
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, toOHLC } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
+import { StockTradeTicksPanel } from '@/components/StockTradeTicksPanel'
 import { financialMetricsQueryOptions, useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
 import { scheduleNeighborPrefetch } from '@/lib/neighborPrefetch'
@@ -57,6 +58,25 @@ interface Props {
 
 export { getDefaultRange }
 
+type SelectedDateSource = 'auto' | 'user'
+
+function todayLocalISO() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function defaultIntradayDate(rows: KlineRow[], rangeEnd: string): string | null {
+  // 今日分时/分笔走实时源；即使日 K 缓存尚未生成今日 K 线，也应默认看今天。
+  // 周末没有"今日"行情: 数据源会拿上一交易日快照冒充今天 (产生 2026-08-30 假分笔
+  // 这类错日期数据), 回退到日 K 最后一根 (即上一交易日)。
+  const weekday = new Date().getDay()
+  if (rangeEnd === todayLocalISO() && weekday >= 1 && weekday <= 5) return rangeEnd
+  return rows[rows.length - 1]?.date ?? null
+}
+
 export function StockPanel({
   symbol,
   height = 520,
@@ -85,6 +105,7 @@ export function StockPanel({
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedDateSource, setSelectedDateSource] = useState<SelectedDateSource>('auto')
   const [intradayDismissed, setIntradayDismissed] = useState(false)
   // 信息条指标配置提升到此层：同时供 StockInfoBar 渲染与 StockDailyKChart 请求 ext 数据
   const [fields, setFields] = useState<ColumnConfig[]>(loadInfoFields)
@@ -122,6 +143,7 @@ export function StockPanel({
   const name = kline.data?.name
 
   const handleDateClick = useCallback((date: string) => {
+    setSelectedDateSource('user')
     setSelectedDate(date)
     setIntradayDismissed(false)
     onSelectDate?.(date)
@@ -164,15 +186,19 @@ export function StockPanel({
     if (prevSymbol.current === symbol) return
     prevSymbol.current = symbol
     setSelectedDate(null)
+    setSelectedDateSource('auto')
+    setIntradayDismissed(false)
     setLinkedPrice(null)
   }, [symbol])
 
-  // 当分时开启、无选中日期时，自动选中最新日期
+  // 当分时开启且日期未被用户手选时，自动跟随默认分时日期。
   useEffect(() => {
-    if (showIntraday && !selectedDate && rows.length > 0) {
-      setSelectedDate(rows[rows.length - 1].date)
+    if (!showIntraday || selectedDateSource === 'user') return
+    const next = defaultIntradayDate(rows, dateRange.end)
+    if (next && selectedDate !== next) {
+      setSelectedDate(next)
     }
-  }, [showIntraday, selectedDate, rows])
+  }, [dateRange.end, rows, selectedDate, selectedDateSource, showIntraday])
 
   const selectedIdx = selectedDate ? rows.findIndex(r => r.date === selectedDate) : -1
   const selectedRow = selectedIdx >= 0 ? rows[selectedIdx] : undefined
@@ -246,6 +272,7 @@ export function StockPanel({
               priceLines={priceLines}
               refetchIntervalMs={refetchIntervalMs}
             />
+            <StockTradeTicksPanel symbol={symbol} date={selectedDate} />
           </div>
         )}
       </div>

@@ -19,6 +19,12 @@ export function summarizeMinutes(data: MinuteKlineRow[]): MinuteKlineRow | null 
 
 /** 从 datetime 串取 HH:MM。契约: 分钟K datetime 已在后端入口统一为北京墙钟, 前端不做时区换算。 */
 export function formatMinuteTime(datetime: string): string {
+  if (/[Zz]|[+-]\d{2}:\d{2}$/.test(datetime)) {
+    const parsed = new Date(datetime)
+    if (!Number.isNaN(parsed.getTime())) {
+      return `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`
+    }
+  }
   const match = datetime.match(/(\d{2}):(\d{2})/)
   if (!match) return datetime.slice(11, 16)
   return `${match[1]}:${match[2]}`
