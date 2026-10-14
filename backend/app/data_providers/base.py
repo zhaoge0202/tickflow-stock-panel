@@ -14,7 +14,7 @@ from typing import Literal, Protocol
 import polars as pl
 
 # 资产类别。crypto = 24x7 永续合约类资产, 其交易规则(无涨跌停/无复权/可小数仓位/
-# UTC 合约日)见 app.market_rules; 存储走独立目录, 不与 A 股链路混用。
+# 日归属 = 北京自然日)见 app.market_rules; 存储走独立目录, 不与 A 股链路混用。
 AssetType = Literal["stock", "index", "etf", "crypto"]
 
 

@@ -2560,7 +2560,7 @@ class KlineRepository:
         self._write_daily_partition(df_storage, "kline_etf_enriched")
 
     def append_crypto_daily(self, df: pl.DataFrame) -> None:
-        """按日分区写入永续合约类日K (日期列已是 UTC 合约日, 见 market_rules)。"""
+        """按日分区写入永续合约类日K (日期列已是合约日 = 北京自然日, 见 market_rules)。"""
         if df.is_empty():
             return
         self._write_daily_partition(df, "kline_crypto_daily")

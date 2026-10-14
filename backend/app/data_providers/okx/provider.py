@@ -321,7 +321,7 @@ class OkxProvider:
                 return {"provider": NAME, "dataset": dataset, "rows": len(rows), "preview": rows[:5]}
             else:
                 return {"provider": NAME, "dataset": dataset, "error": f"未支持的数据集: {dataset}"}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 自检入口: 异常转成 error 字段回显给设置页, 不吞
             return {"provider": NAME, "dataset": dataset, "error": str(e)}
         return {
             "provider": NAME,
