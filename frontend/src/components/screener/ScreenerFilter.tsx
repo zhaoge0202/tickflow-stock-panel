@@ -15,7 +15,7 @@ export interface ScreenerFilter {
   marketCapMax: string   // 市值最大(亿)
   floatCapMin: string    // 流通市值最小(亿)
   floatCapMax: string    // 流通市值最大(亿)
-  volRatioMin: string    // 量比最小
+  volRatioMin: string    // 5日放量最小
   rsiMin: string
   rsiMax: string
   boards: string[]       // 板块筛选: 空数组=不筛选, 否则只保留选中的板块
@@ -94,7 +94,7 @@ export function applyFilter(rows: any[], f: ScreenerFilter): any[] {
     const fcap = close * (r.float_shares ?? 0) / 1e8
     if (v(f.floatCapMin) != null && fcap < v(f.floatCapMin)!) return false
     if (v(f.floatCapMax) != null && fcap > v(f.floatCapMax)!) return false
-    // 量比
+    // 5日放量倍数
     if (v(f.volRatioMin) != null && (r.vol_ratio_5d ?? 0) < v(f.volRatioMin)!) return false
     // RSI
     const rsi = r.rsi_14 ?? 0
@@ -134,7 +134,7 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
     { label: '成交额',    min: 'amountMin',      max: 'amountMin',     unit: '亿', step: '0.5' },
     { label: '总市值',    min: 'marketCapMin',   max: 'marketCapMax',  unit: '亿', step: '10' },
     { label: '流通市值',  min: 'floatCapMin',    max: 'floatCapMax',   unit: '亿', step: '10' },
-    { label: '量比',      min: 'volRatioMin',    max: 'volRatioMin',   unit: '', step: '0.1' },
+    { label: '5日放量',   min: 'volRatioMin',    max: 'volRatioMin',   unit: '', step: '0.1' },
     { label: 'RSI14',     min: 'rsiMin',         max: 'rsiMax',        unit: '', step: '1' },
   ]
 
