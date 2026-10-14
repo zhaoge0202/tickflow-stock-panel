@@ -5,6 +5,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import pytest
 
 from app.services import (
     alert_store,
@@ -37,6 +38,16 @@ class FakeRepo:
 
 def _ms(hour: int, minute: int) -> int:
     return int(datetime(2026, 7, 8, hour, minute, tzinfo=CN).timestamp() * 1000)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_alert_prune_counter(monkeypatch):
+    """隔离 alert_store 的模块级 prune 计数。
+
+    append 累计 PRUNE_EVERY 次后会按保留期 (MAX_DAYS=7 天) 重写文件; 计数是
+    进程级全局, 其他测试写满后本文件再用固定历史交易日造数据就会被清理掉。
+    """
+    monkeypatch.setattr(alert_store, "_write_count", 0)
 
 
 def test_decision_queue_merges_alerts_position_and_journal(tmp_path):

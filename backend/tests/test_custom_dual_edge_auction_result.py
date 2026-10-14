@@ -1,3 +1,9 @@
+"""双刃策略的 09:25 竞价口径回归。
+
+策略源文件位于 data/strategies/custom (用户数据目录, 不入库; 见 CONTRIBUTING
+「不提交用户策略」), 干净检出/CI 上没有该目录 ⇒ 本文件整体 skip; 带本地数据
+目录的开发环境照常执行。
+"""
 from __future__ import annotations
 
 import importlib
@@ -7,6 +13,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.backtest.matrix import build_market_data_matrix
 
@@ -17,15 +24,25 @@ STRATEGY_IDS = (
 )
 
 
+STRATEGY_DIR = Path(__file__).resolve().parents[2] / "data" / "strategies" / "custom"
+
+pytestmark = pytest.mark.skipif(
+    not STRATEGY_DIR.is_dir(),
+    reason=(
+        "data/strategies/custom 不存在 (干净检出/CI): 用户策略不入库"
+        " (CONTRIBUTING「不提交用户策略」), 本组用例仅在有本地数据目录时运行"
+    ),
+)
+
+
 def _load_strategy_module(strategy_id: str):
-    strategy_dir = Path(__file__).resolve().parents[2] / "data" / "strategies" / "custom"
-    sys.path.insert(0, str(strategy_dir))
+    sys.path.insert(0, str(STRATEGY_DIR))
     try:
         sys.modules.pop(strategy_id, None)
         return importlib.import_module(strategy_id)
     finally:
         with suppress(ValueError):
-            sys.path.remove(str(strategy_dir))
+            sys.path.remove(str(STRATEGY_DIR))
 
 
 def _panel(include_auction_result: bool, last_open: float = 9.8) -> pl.DataFrame:

@@ -67,7 +67,7 @@ def test_fetch_full_market_quotes_uses_tdxapi_without_tickflow(monkeypatch):
         lambda: (_ for _ in ()).throw(AssertionError("不应调用 TickFlow")),
     )
 
-    def fake_process(self, records, *, t0, now_ts):
+    def fake_process(self, records, *, t0, now_ts, **kwargs):
         captured["records"] = records
 
     monkeypatch.setattr(QuoteService, "_process_full_market_records", fake_process)
@@ -164,7 +164,7 @@ def test_fetch_full_market_quotes_supplements_manual_positions_for_tdxapi(monkey
         lambda: (_ for _ in ()).throw(AssertionError("不应调用 TickFlow")),
     )
 
-    def fake_process(self, records, *, t0, now_ts):
+    def fake_process(self, records, *, t0, now_ts, **kwargs):
         captured["records"] = records
 
     monkeypatch.setattr(QuoteService, "_process_full_market_records", fake_process)
@@ -210,7 +210,7 @@ def test_fetch_full_market_quotes_supplements_enabled_etfs_for_tdxapi(monkeypatc
         lambda: (_ for _ in ()).throw(AssertionError("不应调用 TickFlow")),
     )
 
-    def fake_process(self, records, *, t0, now_ts):
+    def fake_process(self, records, *, t0, now_ts, **kwargs):
         captured["records"] = records
 
     monkeypatch.setattr(QuoteService, "_process_full_market_records", fake_process)

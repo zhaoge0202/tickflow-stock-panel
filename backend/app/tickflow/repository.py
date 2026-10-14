@@ -2677,7 +2677,11 @@ class KlineRepository:
         """
         def _merge(existing: pl.DataFrame) -> pl.DataFrame:
             if existing.is_empty():
-                return incoming.sort(["symbol", "date"])
+                # 分区尚不存在时也要去重入参: 否则坏入参 (同 symbol/date 多行)
+                # 会被原样落盘, 后续 join 按 symbol/date 放大。
+                return incoming.unique(
+                    subset=["symbol", "date"], keep="last"
+                ).sort(["symbol", "date"])
             return pl.concat([existing, incoming], how="diagonal_relaxed").unique(
                 subset=["symbol", "date"], keep="last"
             ).sort(["symbol", "date"])
