@@ -9,11 +9,17 @@ universe 里的自选静默丢弃.
 """
 from __future__ import annotations
 
-from datetime import date
-from types import SimpleNamespace
+import sys
+from datetime import date, datetime
+from types import ModuleType, SimpleNamespace
 
 import polars as pl
 import pytest
+
+_tickflow_stub = ModuleType("tickflow")
+_tickflow_stub.TickFlow = type("TickFlow", (), {"free": classmethod(lambda cls: cls())})
+_tickflow_stub.AsyncTickFlow = type("AsyncTickFlow", (), {"free": classmethod(lambda cls: cls())})
+sys.modules.setdefault("tickflow", _tickflow_stub)
 
 from app.api import watchlist as wl_api
 
@@ -22,7 +28,7 @@ class _FakeRepo:
     """最小化 repo mock: 只实现 watchlist_enriched 调用到的方法."""
 
     def __init__(self, enriched_df, enriched_date, etf_df=None, etf_date=None,
-                 instruments_df=None, name_map=None, etf_set=None,
+                 instruments_df=None, name_map=None, etf_set=None, prev5_volume_avg=None,
                  index_df=None, index_date=None, index_set=None,
                  history_span=None, hist_df=None, history_raises=False):
         self._enriched = enriched_df
@@ -34,6 +40,7 @@ class _FakeRepo:
         self._instruments = instruments_df or pl.DataFrame()
         self._name_map = name_map or {}
         self._etf_set = etf_set or set()
+        self._prev5_volume_avg = prev5_volume_avg or {}
         self._index_set = index_set or set()
         # 加入后涨跌幅基准价所需的内存历史缓存 (未注入时端点按 null 降级)
         self._history_span = history_span
@@ -77,6 +84,10 @@ class _FakeRepo:
 
     def get_name_map(self, symbols):
         return {s: n for s, n in self._name_map.items() if s in (symbols or [])}
+
+    def execute_all(self, sql, params=None):  # noqa: ARG002
+        symbols = params[:-1] if params else self._prev5_volume_avg.keys()
+        return [(s, self._prev5_volume_avg[s]) for s in symbols if s in self._prev5_volume_avg]
 
 
 def _make_request(repo):
@@ -180,6 +191,37 @@ def test_etf_not_in_enriched_still_returned(monkeypatch):
 
     row_missing = next(r for r in res["rows"] if r["symbol"] == "599999")
     assert row_missing["close"] is None
+
+
+def test_watchlist_enriched_adds_realtime_vol_ratio(monkeypatch):
+    """自选页量比展示用盘中归一化值, 不改 vol_ratio_5d 的策略口径."""
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols",
+                        lambda: [{"symbol": "000725.SZ"}])
+    monkeypatch.setattr(wl_api, "cn_today", lambda: date(2026, 7, 9))
+    monkeypatch.setattr(wl_api, "cn_now", lambda: datetime(2026, 7, 9, 10, 30))
+
+    repo = _FakeRepo(
+        enriched_df=pl.DataFrame([{
+            "symbol": "000725.SZ",
+            "close": 7.8,
+            "change_pct": 0.01,
+            "amount": 1000.0,
+            "turnover_rate": 1.0,
+            "volume": 120.0,
+            "vol_ratio_5d": 0.5,
+        }]),
+        enriched_date=date(2026, 7, 9),
+        name_map={"000725.SZ": "京东方A"},
+        prev5_volume_avg={"000725.SZ": 240.0},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    row = res["rows"][0]
+
+    # 10:30 已交易 60 分钟, 占全天 240 分钟的 25%;
+    # 盘中展示量比 = 今日累计量 / (前 5 日全日均量 * 25%) = 120 / 60 = 2。
+    assert row["realtime_vol_ratio"] == 2.0
+    assert row["vol_ratio_5d"] == 0.5
 
 
 def test_all_etf_watchlist_missing_from_enriched(monkeypatch):

@@ -457,6 +457,9 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 > Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
 
+如需使用 `tdx-api` 通达信代理池数据源,把 SOCKS5 配置写入
+`docs/zhihu/tdx-api/.env`,启动后在 **设置 → 数据源** 选择
+`tdx-api(通达信代理池)`。
 
 </details>
 
