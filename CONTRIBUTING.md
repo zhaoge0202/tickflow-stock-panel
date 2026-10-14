@@ -218,6 +218,7 @@
 ## 8. 安全、兼容与用户数据
 
 - 不提交 `data/`、密钥、Token、Webhook、用户策略、日志、数据库、Parquet 样本和机器绝对路径。
+- 用户策略源码只放 `data/strategies/custom/`（整个 `data/` 不入库），研究/优化脚本放 `data/local_scripts/`；`backend/app/`、`backend/scripts/` 内不得出现策略模块（顶层 `META`、`backtest_defaults`、成批 `custom_*` 策略 ID 等特征，判定与白名单见 `backend/tests/test_repo_hygiene_no_user_strategies.py`）。commit message 与 PR 描述里同样不得粘贴策略源码或参数表——仓库是公开的，入库即等于公开。
 - 日志和异常响应不得包含授权信息、完整配置或用户敏感数据。
 - 文件删除、覆盖、迁移和批量回算属于高风险操作：限制目标目录、验证路径、提供清晰失败原因，并保持 fail-closed。
 - 不用不安全的字符串拼接执行 SQL、Shell 或动态 Python。

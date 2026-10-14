@@ -284,7 +284,7 @@
 ## 待确认清单（给 #4 复审）
 
 - ① api.ts `screenerRunAll` 采用上游签名 (asOf, strategyIds, assetType, timeframe), 本地 ext_columns 实参已删（backend /run_all 三个版本都不读 ext_columns, 行为等价); Screener.tsx 调用点已同步
-- ② 去内置化(上游): 25 个公共策略从 `app/strategy/builtin/` 迁到用户数据 `data/strategies/custom/`, 内置目录只剩兼容垫片。本地新增的 `adaptive_relative_momentum.py` 仍在 builtin 目录 → 引擎不再扫描该目录, 属「死文件」(其单测仍绿, 因为直接 import)。需决定: 迁到新机制 or 保留
+- ② 去内置化(上游): 25 个公共策略从 `app/strategy/builtin/` 迁到用户数据 `data/strategies/custom/`, 内置目录只剩兼容垫片。本地新增的 `adaptive_relative_momentum.py` 仍在 builtin 目录 → 引擎不再扫描该目录, 属「死文件」(其单测仍绿, 因为直接 import)。需决定: 迁到新机制 or 保留 → 已处理(任务板 #14): 迁到新机制 `data/strategies/custom/` 并从仓库出库, 其单测改为「从 data 加载 + 缺文件 skipif」
 - ③ 前端内置信号标签: 本地 signals.ts 的 4 条(signal_auction / signal_fenqi / signal_volume_contraction_reversal / signal_oscillation_reversal)与 _SIGNAL_CN 的 22 条内置信号在合并后都不再兜底, 中文名全靠 /api/custom-signals 用户定义; 若老 data 目录未迁移这些定义, 告警文案会显示原始列名
 - ④ 侧栏/菜单: /decision、/sector-flow 未加入上游基准 `lib/navOrder.DEFAULT_NAV_PATHS`(该文件有 19 项断言单测), 未保存过排序的环境里这两页会排在已知页之后; ARCH_CLASS 也未登记 → 架构徽章落到默认 ext
 - ⑤ 压支开关 a11y: 改用上游 ChartPill 后丢了本地 role=switch / aria-checked（与同排另两个 pill 一致）
@@ -317,3 +317,19 @@
 验证: 前端 `npx tsc -b` 干净 + `npx vitest run` 146 passed(navOrder 8); 后端相关用例全绿
 (`test_strategy_safety_validation` 44 / `test_quote_service_boot_check` 4+1xfail / 策略与监控批 80)。
 `uv.lock` 按 #4 结论不动; `data/` 未清删; 未合并 main。
+
+## 重放检查清单（防策略源码回流, 任务板 #14）
+
+仓库是 PUBLIC: 用户策略源码一旦随重放提交入库就等于公开(历史上
+`adaptive_relative_momentum.py` 等文件即因此暴露)。以后每次重放(批次直放 /
+3-way 解冲突 / cherry-pick)按此清单核对:
+
+1. **落盘前·排除策略源码**: 本地私有策略及其研究/优化脚本不参与重放 —— 策略文件归
+   `data/strategies/custom/`, 研究/优化脚本归 `data/local_scripts/`, 整个 `data/` 不入库;
+   重放的 `git add` 清单里不得出现这些文件。
+2. **落盘前·冲突取侧**: 冲突文件本身是私有策略/研究脚本时, 取上游侧并删除本地版本,
+   不要「保留本地」。
+3. **提交后·卫生门**: 跑 `pytest tests/test_repo_hygiene_no_user_strategies.py`
+   (扫 `backend/app` 与 `backend/scripts` 的入库文件, 命中 `META`/`backtest_defaults`/
+   成批 `custom_*` ID 等特征且不在 allowlist 即 fail, 提示「用户策略请放 data/」)。
+4. **收尾·不留痕**: commit message 与 PR 描述不得粘贴策略源码或参数表。
