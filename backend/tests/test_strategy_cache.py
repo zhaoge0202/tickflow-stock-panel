@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
+
 from app.services import strategy_cache
 
 
@@ -47,3 +49,23 @@ def test_new_date_resets_results_and_ever_rows(tmp_path):
     assert cached["as_of"] == "2026-07-21"
     assert set(cached["results"]) == {"strategy_b"}
     assert set(cached["today_ever_rows"]) == {"strategy_b"}
+
+
+def test_after_cutoff_rebuild_does_not_keep_intraday_ever_rows(tmp_path, monkeypatch):
+    cn_tz = timezone(timedelta(hours=8))
+    now = datetime(2026, 7, 20, 15, 30, tzinfo=cn_tz)
+    cutoff_ms = now.timestamp() * 1000
+    timestamps = iter([cutoff_ms - 1_000, cutoff_ms + 1_000])
+    monkeypatch.setattr("app.market_time.cn_now", lambda: now)
+    monkeypatch.setattr(strategy_cache.time, "time", lambda: next(timestamps) / 1000)
+
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {
+        "strategy_a": _result("intraday.SZ"),
+    })
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {
+        "strategy_a": _result("formal.SZ"),
+    })
+
+    cached = strategy_cache.read_cache(tmp_path)
+
+    assert set(cached["today_ever_rows"]["strategy_a"]) == {"formal.SZ"}

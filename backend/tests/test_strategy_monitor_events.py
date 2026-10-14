@@ -116,6 +116,20 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
     assert normalized["webhook_channels"] == ["feishu", "custom", "email"]
 
 
+def test_strategy_monitor_migration_creates_buy_and_sell_events(tmp_path):
+    touched = monitor_rules.migrate_strategy_monitors(
+        tmp_path,
+        ["custom_oscillation_reversal"],
+        {"custom_oscillation_reversal": "震荡超跌反转"},
+    )
+
+    assert len(touched) == 1
+    rule = monitor_rules.load_one(tmp_path, "mr_strategy_custom_oscillation_reversal")
+    assert rule is not None
+    assert rule["enabled"] is True
+    assert rule["notify_events"] == ["buy_signal", "sell_signal"]
+
+
 def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()
@@ -214,6 +228,20 @@ def test_strategy_sell_and_pool_exit_are_independent_events():
         ("sell_signal", "B"),
         ("pool_exit", "B"),
     }
+
+
+def test_strategy_sell_signal_ignores_untracked_market_exit():
+    day = date(2026, 7, 24)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(day, pool=("A",)),
+        _result(day, pool=("A",), sells=("B",)),
+    ]))
+    engine.set_rules([_rule("sell_signal")])
+
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
+        assert engine.evaluate(_quotes()) == []
+        assert engine.evaluate(_quotes()) == []
 
 
 def test_strategy_rule_reload_preserves_state_and_semantic_edit_resets_it():
