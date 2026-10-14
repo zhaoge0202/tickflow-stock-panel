@@ -18,6 +18,9 @@ from app.services.quote_service import QuoteService
 
 _SUNDAY = date(2026, 8, 30)
 _FRIDAY = date(2026, 8, 28)
+# 2026-08-28 14:30 北京: 快照 timestamp 必须落在 _FRIDAY 当日, 否则
+# _build_daily 的「非当日快照」过滤会剔除该行, 落盘断言恒为空。
+_FRIDAY_TS_MS = 1787898600000
 
 
 def test_is_trading_weekday_rejects_weekend():
@@ -74,7 +77,7 @@ def test_sync_daily_by_quotes_flushes_on_trading_weekday(monkeypatch):
 _RECORD = {
     "symbol": "002491.SZ", "name": "测试股", "last_price": 22.23,
     "prev_close": 22.23, "open": 23.08, "high": 23.55, "low": 22.16,
-    "volume": 2477541, "amount": 5647315456.0, "timestamp": 1787960100000,
+    "volume": 2477541, "amount": 5647315456.0, "timestamp": _FRIDAY_TS_MS,
     "source": "tdxapi",
 }
 
@@ -119,6 +122,7 @@ def _run_process(monkeypatch, flush_daily_today: bool) -> _GuardRepo:
 
     monkeypatch.setattr("app.services.quote_service._persist_last_fetch", lambda fetched_at: None)
     monkeypatch.setattr("app.services.quote_service.is_trading_weekday", lambda d=None: flush_daily_today)
+    monkeypatch.setattr("app.services.quote_service.cn_today", lambda: _FRIDAY)
     monkeypatch.setattr(preferences, "get_realtime_index_symbols", lambda: [])
 
     svc._process_full_market_records([dict(_RECORD)], t0=0.0, now_ts=0.0)
@@ -146,7 +150,7 @@ class _FakeTFQuotes:
         return [{
             "symbol": "002491.SZ", "name": "测试股", "last_price": 22.23,
             "prev_close": 22.23, "open": 23.08, "high": 23.55, "low": 22.16,
-            "volume": 2477541, "amount": 5647315456.0, "timestamp": 1787960100000,
+            "volume": 2477541, "amount": 5647315456.0, "timestamp": _FRIDAY_TS_MS,
             "session": "close",
         }]
 
@@ -197,6 +201,7 @@ def _run_watchlist_fetch(monkeypatch, flush_daily_today: bool) -> _WatchRepo:
     monkeypatch.setattr(
         "app.services.quote_service.is_trading_weekday", lambda d=None: flush_daily_today
     )
+    monkeypatch.setattr("app.services.quote_service.cn_today", lambda: _FRIDAY)
     monkeypatch.setattr("app.tickflow.client.get_paid_realtime_client", lambda: _FakeTF())
     monkeypatch.setattr("app.tickflow.policy.detect_capabilities", lambda: object())
     monkeypatch.setattr(
