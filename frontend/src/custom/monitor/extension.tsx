@@ -25,6 +25,7 @@ import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import type { FrontendExtension } from '@/extensions/types'
 import { IconMonitor } from '@/components/BrandIcons'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
@@ -159,12 +160,15 @@ export function Monitor() {
     return parts.length > 0 ? parts.join(',') : undefined
   }, [monitorExtFields])
 
+  const alertsPollingInterval = useSmartPollingInterval(15_000)
   const alertsQuery = useQuery({
     queryKey: [...QK.alerts(filter === 'all' ? undefined : filter), extColumnsParam ?? ''],
     queryFn: () => api.alertsList({ days: 7, limit: 500, source: filter === 'all' ? undefined : filter, extColumns: extColumnsParam }),
-    // 10s 轮询仅作 SSE strategy_alert 事件的兜底; 后台标签页不再拉 500 条全量。
+    // 智能轮询: SSE 正常连接时由 strategy_alert 事件触发 invalidate, 保留 60s 兜底;
+    // 断开连接时退化为 15s 轮询兜底, 且后台标签页不拉取。
     // 非交易时段无新告警可拉, 降为 120s 探活; is_trading_hours 字段缺失时保持原频率
-    refetchInterval: () => (quoteStatus?.is_trading_hours === false ? 120_000 : 10_000),
+    refetchInterval: () => (quoteStatus?.is_trading_hours === false ? 120_000 : alertsPollingInterval),
+    refetchIntervalInBackground: false,
     // 切筛选 tab 沿用上一份同 source 记录, 整表不闪没 (跨 source 不透传)
     placeholderData: (prev: any, prevQuery: any) => {
       const prevKey = prevQuery?.queryKey as readonly unknown[] | undefined

@@ -1,8 +1,16 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal, Info, History, ChevronLeft, ChevronRight, Target, AlertTriangle, Activity } from 'lucide-react'
+import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
+import {
+  addOrUpdateMonitoredPosition,
+  removeMonitoredPosition,
+  togglePipOpen,
+  useIsPipOpen,
+  useMonitoredPositions,
+} from '@/lib/stopLossStore'
 import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
@@ -26,6 +34,7 @@ import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
 import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
+import { Modal } from '@/components/Modal'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -38,10 +47,95 @@ import {
   type ColumnConfig,
 } from '@/lib/screener-columns'
 
+const AUCTION_GATE_MINUTES = 9 * 60 + 25
+const AUCTION_PREWARM_MINUTES = 9 * 60 + 24
+const AUCTION_CLOSE_MINUTES = 9 * 60 + 30
+const AUCTION_CONFIRM_GRACE_MINUTES = 9 * 60 + 35
+const CN_TZ = 'Asia/Shanghai'
+
+function getCnNowMinutes(now = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: CN_TZ,
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now)
+  const hour = Number(parts.find(p => p.type === 'hour')?.value ?? '0')
+  const minute = Number(parts.find(p => p.type === 'minute')?.value ?? '0')
+  return hour * 60 + minute
+}
+
+function getCnTodayIso(now = new Date()): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: CN_TZ }).format(now)
+}
+
+function formatHistoryTime(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '—'
+  return new Date(ts).toLocaleTimeString('zh-CN', {
+    timeZone: CN_TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
+function historyEventTimestamp(event: StrategyHistoryEvent): number {
+  if (event.event_type === 'auction_confirmed' || event.event_type === 'auction_rejected') {
+    const metadata = event.metadata ?? {}
+    const observedTs = metadata.open_confirm_event_ts ?? metadata.auction_event_ts
+    if (typeof observedTs === 'number') return observedTs
+  }
+  return event.ts
+}
+
+function nextBusinessDateIso(dateIso: string): string {
+  const [year, month, day] = dateIso.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day + 1))
+  while (date.getUTCDay() === 0 || date.getUTCDay() === 6) {
+    date.setUTCDate(date.getUTCDate() + 1)
+  }
+  return date.toISOString().slice(0, 10)
+}
+
+function isBusinessDateIso(dateIso: string): boolean {
+  const [year, month, day] = dateIso.split('-').map(Number)
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+  return weekday !== 0 && weekday !== 6
+}
+
+function resolveAuctionTradeDate(asOf: string, now = new Date()): string {
+  const today = getCnTodayIso(now)
+  if (!asOf || asOf < today) return isBusinessDateIso(today) ? today : nextBusinessDateIso(today)
+  if (asOf > today || getCnNowMinutes(now) >= 15 * 60) return nextBusinessDateIso(asOf)
+  return today
+}
+
 // 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
 const SHOW_STRATEGY_STORE = false
 
+// 盘后预选目前只针对双刃合竞价观察算法，普通策略必须展示自己的正式结果。
+const PRESELECT_STRATEGY_IDS = new Set([
+  'custom_dual_edge',
+  'custom_dual_edge_focus',
+  'custom_dual_edge_v3',
+])
+
+const HISTORY_PAGE_SIZE = 10
+const HISTORY_EVENT_LABELS: Record<StrategyHistoryEvent['event_type'], string> = {
+  selected: '策略选出',
+  preselect: '盘后预选',
+  auction_confirmed: '竞价确认',
+  auction_rejected: '竞价淘汰',
+  buy_signal: '买入信号',
+  sell_signal: '卖出信号',
+  pool_entry: '进入策略池',
+  pool_exit: '移出策略池',
+}
+
 export function Screener() {
+  const isPipOpen = useIsPipOpen()
+  const monitoredPositions = useMonitoredPositions()
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   // 周期显示筛选: 全部 / 日线 / 分钟 — 只过滤卡片显示, 不影响池和执行;
   // 执行按每个策略自己声明的 timeframes 路由 (日线走盘后缓存, 分钟走本地分钟K分区)
@@ -65,6 +159,8 @@ export function Screener() {
   const [showStore, setShowStore] = useState(false)
   const [showDefaultParams, setShowDefaultParams] = useState(false)
   const [showComposite, setShowComposite] = useState(false)
+  const [showHistoryDialog, setShowHistoryDialog] = useState(false)
+  const [historyPage, setHistoryPage] = useState(0)
   const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
@@ -103,6 +199,10 @@ export function Screener() {
   const runAllDateRef = useRef<string | null>(null)
   const minuteRunDateRef = useRef<string | null>(null)
   const qc = useQueryClient()
+
+  // Focus 策略三版本专属视图状态: 'final' (收盘正式版) | 'preview' (14:50 尾盘初选) | 'preselect' (次日竞价预选)
+  const [focusActiveVersion, setFocusActiveVersion] = useState<'final' | 'preview' | 'preselect'>('final')
+  const [showDroppedList, setShowDroppedList] = useState(false)
 
   // 结果列配置 — 默认内置列，异步合并后端/localStorage 偏好
   const [columns, setColumns] = useState<ColumnConfig[]>([...SCREENER_BUILTIN_COLUMNS])
@@ -151,6 +251,7 @@ export function Screener() {
 
   const { data: prefs } = usePreferences()
   const screenerAutoRun = prefs?.screener_auto_run ?? true
+  const dataStatus = useDataStatus({ staleTime: 0 })
 
   // 统一列表: 不按周期过滤, 日线+分钟策略合并返回, 分钟策略带 timeframes 标识
   const strategies = useQuery({
@@ -193,13 +294,11 @@ export function Screener() {
       && summaryQuery.data?.results[activeStrategy]?.as_of === asOf,
   })
 
-  const dataStatus = useDataStatus({ staleTime: 0 })
-
-  // 默认日期 = enriched 最新日期（始终跟随最新）
+  // 默认日期 = 最近已完成的正式策略日期；盘中不跟随 enriched 当天半成品。
   useEffect(() => {
-    const latest = dataStatus.data?.enriched?.latest_date
+    const latest = dataStatus.data?.latest_strategy_date
     if (latest) setAsOf(latest)
-  }, [dataStatus.data?.enriched?.latest_date])
+  }, [dataStatus.data?.latest_strategy_date])
 
   const strategyPresets = useMemo(
     () => (strategies.data?.presets ?? []).filter(s => s.asset_types.includes(assetType)),
@@ -233,6 +332,122 @@ export function Screener() {
     [strategyPresets],
   )
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
+  const auctionTradeDate = resolveAuctionTradeDate(asOf)
+  const auctionStrategyIdsKey = useMemo(() => visiblePool.join(','), [visiblePool])
+  const isLatestStockDate = assetType === 'stock'
+    && !!asOf
+    && asOf === dataStatus.data?.latest_strategy_date
+  const preselectQuery = useQuery({
+    queryKey: QK.screenerPreselect(asOf, auctionTradeDate, auctionStrategyIdsKey, 5, extColumnsParam || undefined),
+    queryFn: () => api.screenerPreselect(
+      asOf,
+      auctionTradeDate,
+      visiblePool,
+      5,
+      extColumnsParam || undefined,
+      assetType,
+    ),
+    enabled: isLatestStockDate && visiblePool.length > 0,
+    staleTime: 300_000,
+  })
+  const auctionConfirmationQuery = useQuery({
+    queryKey: QK.screenerAuctionConfirmation(asOf, auctionTradeDate, auctionStrategyIdsKey, extColumnsParam || undefined),
+    queryFn: () => api.screenerAuctionConfirmation(
+      asOf,
+      auctionTradeDate,
+      visiblePool,
+      extColumnsParam || undefined,
+      assetType,
+    ),
+    enabled: isLatestStockDate && visiblePool.length > 0,
+    staleTime: 0,
+    refetchInterval: () => {
+      const nowMinutes = getCnNowMinutes()
+      if (nowMinutes < AUCTION_GATE_MINUTES) return 5_000
+      if (nowMinutes < AUCTION_CLOSE_MINUTES) return 3_000
+      if (nowMinutes < AUCTION_CONFIRM_GRACE_MINUTES) return 10_000
+      return false
+    },
+    refetchIntervalInBackground: true,
+  })
+  const auctionNowMinutes = getCnNowMinutes()
+  const auctionIsToday = auctionTradeDate === getCnTodayIso()
+  const auctionDynamicQuery = useQuery({
+    queryKey: QK.screenerAuctionReplay(asOf, auctionTradeDate, auctionStrategyIdsKey, 'live', 'recompute'),
+    queryFn: () => api.auctionReplay({
+      asOf,
+      tradeDate: auctionTradeDate,
+      strategyIds: visiblePool,
+      asOfTs: Date.now(),
+      mode: 'recompute',
+      includeFrames: false,
+      includeCandidates: true,
+      maxFrames: 1,
+      assetType,
+    }),
+    enabled: isLatestStockDate
+      && visiblePool.length > 0
+      && auctionIsToday
+      && auctionNowMinutes >= AUCTION_PREWARM_MINUTES
+      && auctionNowMinutes < AUCTION_CONFIRM_GRACE_MINUTES,
+    staleTime: 0,
+    refetchInterval: () => {
+      const nowMinutes = getCnNowMinutes()
+      if (nowMinutes < AUCTION_PREWARM_MINUTES) return false
+      if (nowMinutes < AUCTION_GATE_MINUTES) return 5_000
+      if (nowMinutes < AUCTION_CLOSE_MINUTES) return 1_000
+      if (nowMinutes < AUCTION_CONFIRM_GRACE_MINUTES) return 5_000
+      return false
+    },
+    refetchIntervalInBackground: true,
+  })
+  const auctionDynamicPayload = auctionDynamicQuery.data
+  const auctionDynamicFrame = auctionDynamicPayload?.frame ?? auctionDynamicPayload?.final_frame ?? null
+  const auctionDynamicActive = (
+    assetType === 'stock'
+    && auctionDynamicPayload?.mode === 'auction_dynamic'
+    && auctionDynamicPayload?.as_of === asOf
+    && auctionDynamicPayload?.trade_date === auctionTradeDate
+    && auctionNowMinutes >= AUCTION_GATE_MINUTES
+    && !!auctionDynamicFrame
+  )
+  const auctionDynamicDisplayResults = useMemo<Record<string, any> | null>(() => {
+    if (!auctionDynamicActive || !auctionDynamicFrame) return null
+    const finalized = auctionDynamicPayload?.status === 'ready'
+    const entries = Object.entries(auctionDynamicFrame.results)
+      .filter(([, item]) => item.as_of === asOf)
+      .map(([sid, item]) => {
+        const rows = finalized
+          ? item.rows ?? []
+          : item.candidates ?? item.dual_rows ?? item.rows ?? []
+        return [sid, {
+          ...item,
+          as_of: asOf,
+          rows,
+          total: finalized
+            ? item.final_total ?? item.confirmed_total ?? item.total ?? rows.length
+            : item.candidate_total ?? item.base_total ?? item.total ?? rows.length,
+        }]
+      })
+    return Object.fromEntries(entries)
+  }, [auctionDynamicActive, auctionDynamicFrame, auctionDynamicPayload?.status, asOf])
+  const auctionDynamicHasResults = !!auctionDynamicDisplayResults
+    && Object.values(auctionDynamicDisplayResults).some(item => item.total > 0)
+  const auctionDynamicFinalReady = auctionDynamicActive && auctionDynamicPayload?.status === 'ready'
+
+  // Focus 策略三版本查询
+  const isFocusStrategy = activeStrategy === 'custom_dual_edge_focus'
+  const focusVersionsQuery = useQuery({
+    queryKey: ['screenerFocusVersions', activeStrategy, asOf, extColumnsParam],
+    queryFn: () => api.screenerFocusVersions(activeStrategy!, asOf, 5, extColumnsParam || undefined),
+    enabled: isFocusStrategy && !!asOf,
+    staleTime: 30_000,
+  })
+
+  // Focus 策略三版本数据（严格限制在当前选中日期，防止跨天读取历史缓存）
+  const focusDataValid = isFocusStrategy && focusVersionsQuery.data?.as_of === asOf
+    ? focusVersionsQuery.data
+    : null
 
   // 卡片显示: 按周期筛选 (all=全部, 1d=仅日线, 1m=仅分钟); 未声明 timeframes 视为日线
   const displayPool = useMemo(() => visiblePool.filter(id => {
@@ -335,6 +550,9 @@ export function Screener() {
         toast(`已跳过 ${data.skipped_unknown.length} 个不存在的策略，并从策略池移除`, 'success')
       }
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
     },
   })
 
@@ -400,6 +618,14 @@ export function Screener() {
           next[id] = prev[id]
         }
       }
+      // 聚焦策略 (custom_dual_edge_focus) 的命中数以 focus 明细为准, 覆盖摘要缓存,
+      // 版本切换后卡片数字立即同步; 取不到时保留上面已回填的旧值
+      if (isFocusStrategy && activeStrategy && focusDataValid) {
+        const curVerTotal = focusDataValid.versions[focusActiveVersion]?.total
+        if (curVerTotal != null) {
+          next[activeStrategy] = curVerTotal
+        }
+      }
       return next
     })
     setExpiredCounts(expired)
@@ -416,7 +642,7 @@ export function Screener() {
         setPendingRun(rest.length ? { ...pendingRun, ids: rest } : null)
       }
     }
-  }, [summaryQuery.data, asOf, pendingRun, strategyMap])
+  }, [summaryQuery.data, asOf, pendingRun, strategyMap, isFocusStrategy, activeStrategy, focusDataValid, focusActiveVersion])
 
   // 渐进式兜底: 后台计算最长等 8 分钟, 防止异常时无限轮询
   useEffect(() => {
@@ -435,6 +661,70 @@ export function Screener() {
     }
   }, [singleCachedQuery.data, showAll, activeStrategy, asOf])
 
+  useEffect(() => {
+    if (showAll || !activeStrategy) return
+    const confirmed = auctionConfirmationQuery.data
+    if (!confirmed || confirmed.gate_status !== 'confirmed' || confirmed.as_of !== asOf || confirmed.trade_date !== auctionTradeDate) return
+    const next = confirmed.results[activeStrategy]
+    if (!next) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      if (!base) {
+        return {
+          as_of: confirmed.as_of ?? asOf ?? '',
+          strategy: activeStrategy,
+          rows: next.rows,
+          total: next.total,
+          elapsed_ms: 0,
+        }
+      }
+      if (base.total === next.total && base.rows === next.rows) return base
+      return {
+        ...base,
+        rows: next.rows,
+        total: next.total,
+      }
+    })
+  }, [auctionConfirmationQuery.data, auctionTradeDate, showAll, activeStrategy, asOf, singleCachedQuery.data?.result])
+
+  useEffect(() => {
+    if (showAll || !activeStrategy || !auctionDynamicActive || !auctionDynamicFrame) return
+    if (!auctionDynamicHasResults && !auctionDynamicFinalReady) return
+    const confirmed = auctionConfirmationQuery.data
+    if (confirmed?.gate_status === 'confirmed' && confirmed.as_of === asOf && confirmed.trade_date === auctionTradeDate) return
+    const next = auctionDynamicFrame.results[activeStrategy]
+    if (!next) return
+    const rows = next.candidates ?? next.dual_rows ?? next.rows ?? []
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      return {
+        ...(base ?? {
+          as_of: asOf,
+          strategy: activeStrategy,
+          elapsed_ms: 0,
+        }),
+        rows,
+        total: next.candidate_total ?? next.base_total ?? next.total ?? rows.length,
+        elapsed_ms: next.elapsed_ms ?? auctionDynamicFrame.elapsed_ms ?? base?.elapsed_ms ?? 0,
+      }
+    })
+  }, [
+    auctionDynamicActive,
+    auctionDynamicHasResults,
+    auctionDynamicFinalReady,
+    auctionDynamicFrame,
+    auctionConfirmationQuery.data,
+    auctionTradeDate,
+    showAll,
+    activeStrategy,
+    asOf,
+    singleCachedQuery.data?.result,
+  ])
+
   const effectiveResults = useMemo(() => {
     if (fullCachedQuery.data?.as_of !== asOf) return null
     const entries = Object.entries(fullCachedQuery.data.results)
@@ -442,11 +732,191 @@ export function Screener() {
     return Object.fromEntries(entries)
   }, [fullCachedQuery.data, asOf])
 
+  const auctionConfirmationPayload = auctionConfirmationQuery.data
+  const auctionConfirmationReady = auctionConfirmationPayload?.gate_status === 'confirmed'
+  const auctionConfirmationActive = (
+    assetType === 'stock'
+    && auctionConfirmationReady
+    && auctionConfirmationPayload?.as_of === asOf
+    && auctionConfirmationPayload?.trade_date === auctionTradeDate
+  )
+  const auctionDynamicTotals = useMemo(() => {
+    if (!auctionDynamicActive || !auctionDynamicFrame) return { final: 0, candidates: 0 }
+    return Object.values(auctionDynamicFrame.results).reduce((acc, item) => {
+      acc.final += item.final_total ?? item.confirmed_total ?? item.total ?? 0
+      acc.candidates += item.candidate_total ?? item.base_total ?? item.total ?? 0
+      return acc
+    }, { final: 0, candidates: 0 })
+  }, [auctionDynamicActive, auctionDynamicFrame])
+  const strictPoolTotal = useMemo(() => {
+    if (!cacheCoversPool) return null
+    return visiblePool.reduce((sum, id) => sum + (summaryQuery.data?.results[id]?.total ?? 0), 0)
+  }, [cacheCoversPool, visiblePool, summaryQuery.data])
+  // preselect 结果
+  const preselectPayload = preselectQuery.data
+  const preselectResults = useMemo<Record<string, any> | null>(() => {
+    if (
+      !preselectPayload
+      || preselectPayload.mode !== 'preselect'
+      || preselectPayload.as_of !== asOf
+      || preselectPayload.trade_date !== auctionTradeDate
+    ) return null
+    const entries = Object.entries(preselectPayload.results)
+      .filter(([, item]) => item.as_of === asOf)
+      .map(([sid, item]) => [sid, {
+        ...item,
+        rows: item.rows ?? [],
+        total: item.preselect_total ?? item.total ?? item.rows?.length ?? 0,
+      }])
+    return Object.fromEntries(entries)
+  }, [preselectPayload, asOf, auctionTradeDate])
+
+  // Focus 策略三版本数据（严格限制在当前选中日期，防止跨天读取历史缓存）
+  const focusFinalCount = focusDataValid?.versions.final.total ?? (
+    summaryQuery.data?.results[activeStrategy!]?.as_of === asOf
+      ? summaryQuery.data?.results[activeStrategy!]?.total ?? 0
+      : 0
+  )
+  const focusPreviewCount = focusDataValid?.versions.preview.total ?? 0
+  const focusPreselectCount = focusDataValid?.versions.preselect.total ?? (
+    preselectResults?.[activeStrategy!]?.as_of === asOf
+      ? preselectResults?.[activeStrategy!]?.total ?? 0
+      : 0
+  )
+  const preselectTotal = useMemo(() => {
+    if (!preselectResults) return 0
+    return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
+  }, [preselectResults])
+  const activeStrategySupportsPreselect = !!activeStrategy && PRESELECT_STRATEGY_IDS.has(activeStrategy)
+  const activePreselectRows = useMemo(() => {
+    if (showAll || !activeStrategy || !preselectResults) return []
+    return preselectResults[activeStrategy]?.rows ?? []
+  }, [showAll, activeStrategy, preselectResults])
+  const activeStrategyStrictTotal = useMemo(() => {
+    if (!activeStrategy) return 0
+    return hitCounts[activeStrategy] ?? summaryQuery.data?.results[activeStrategy]?.total ?? 0
+  }, [activeStrategy, hitCounts, summaryQuery.data])
+  const preselectActive = (
+    assetType === 'stock'
+    && !isFocusStrategy
+    && activeStrategySupportsPreselect
+    && (showAll ? strictPoolTotal === 0 : activeStrategyStrictTotal === 0)
+    && !auctionConfirmationActive
+    && !!preselectResults
+  )
+  const displayMode: 'confirmed' | 'dynamic' | 'preselect' | 'cached' = auctionConfirmationActive
+    ? 'confirmed'
+    : auctionDynamicFinalReady || (auctionDynamicActive && auctionDynamicHasResults)
+      ? 'dynamic'
+      : preselectActive
+        ? 'preselect'
+        : 'cached'
+  const displayHitCounts = useMemo(() => {
+    if (displayMode === 'confirmed' && auctionConfirmationPayload) {
+      const next = { ...hitCounts }
+      for (const [sid, item] of Object.entries(auctionConfirmationPayload.results)) {
+        if (item.as_of === asOf) next[sid] = item.total
+      }
+      return next
+    }
+    if (displayMode === 'dynamic' && auctionDynamicDisplayResults) {
+      const next = { ...hitCounts }
+      for (const [sid, item] of Object.entries(auctionDynamicDisplayResults)) {
+        if (item.as_of === asOf) next[sid] = item.total
+      }
+      return next
+    }
+    const next = { ...hitCounts }
+    if (preselectResults) {
+      for (const [sid, item] of Object.entries(preselectResults)) {
+        if (sid !== 'custom_dual_edge_focus' && item.as_of === asOf && (hitCounts[sid] ?? 0) === 0 && (item.total ?? 0) > 0) {
+          next[sid] = item.total
+        }
+      }
+    }
+    return next
+  }, [displayMode, auctionConfirmationPayload, auctionDynamicDisplayResults, preselectResults, hitCounts, asOf])
+  const displayAllResults = useMemo<Record<string, any> | null>(() => {
+    if (!showAll) return effectiveResults
+    if (displayMode === 'confirmed' && auctionConfirmationPayload) {
+      const entries = Object.entries(auctionConfirmationPayload.results)
+        .filter(([, item]) => item.as_of === asOf)
+      return Object.fromEntries(entries)
+    }
+    if (displayMode === 'dynamic' && auctionDynamicDisplayResults) return auctionDynamicDisplayResults
+    if (displayMode === 'preselect' && preselectResults) return preselectResults
+    if (!auctionConfirmationActive || !auctionConfirmationPayload) return effectiveResults
+    const entries = Object.entries(auctionConfirmationPayload.results)
+      .filter(([, item]) => item.as_of === asOf)
+    return Object.fromEntries(entries)
+  }, [showAll, effectiveResults, displayMode, auctionConfirmationPayload, auctionDynamicDisplayResults, preselectResults, auctionConfirmationActive, asOf])
+
+  useEffect(() => {
+    if (showAll || !activeStrategy || displayMode !== 'preselect' || !preselectResults) return
+    const next = preselectResults[activeStrategy]
+    if (!next) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      return {
+        ...(base ?? {
+          as_of: asOf,
+          strategy: activeStrategy,
+          elapsed_ms: 0,
+        }),
+        rows: next.rows ?? [],
+        total: next.total ?? next.preselect_total ?? next.rows?.length ?? 0,
+        elapsed_ms: base?.elapsed_ms ?? 0,
+      }
+    })
+  }, [showAll, activeStrategy, displayMode, preselectResults, asOf, singleCachedQuery.data?.result])
+
+  // Focus 策略三版本专属同步逻辑: 用户切换版本 Tab 时即时展示该版本结果
+  useEffect(() => {
+    if (!isFocusStrategy || !focusVersionsQuery.data || showAll) return
+    const vData = focusVersionsQuery.data
+    if (vData.as_of !== asOf) return
+    const curVerInfo = vData.versions[focusActiveVersion]
+    if (!curVerInfo) return
+    setResult((prev) => {
+      const base = prev && prev.strategy === activeStrategy && prev.as_of === asOf
+        ? prev
+        : singleCachedQuery.data?.result
+      return {
+        ...(base ?? {
+          as_of: asOf,
+          strategy: activeStrategy,
+          elapsed_ms: 0,
+        }),
+        rows: curVerInfo.rows ?? [],
+        total: curVerInfo.total ?? curVerInfo.rows?.length ?? 0,
+        elapsed_ms: base?.elapsed_ms ?? 0,
+      }
+    })
+    setHitCounts(prev => ({ ...prev, [activeStrategy]: curVerInfo.total ?? 0 }))
+  }, [isFocusStrategy, focusVersionsQuery.data, focusActiveVersion, asOf, activeStrategy, showAll, singleCachedQuery.data?.result])
+
+  // 盘中 14:50 到 15:00 之间，若 Focus 尾盘初选已就绪且用户未手动切换过版本，自动切到 preview
+  const focusUserSelectedVersion = useRef(false)
+  useEffect(() => {
+    focusUserSelectedVersion.current = false
+  }, [activeStrategy, asOf])
+
+  useEffect(() => {
+    if (!isFocusStrategy || !focusDataValid || focusUserSelectedVersion.current) return
+    if (focusDataValid.current_stage === 'preview' && focusActiveVersion !== 'preview') {
+      setFocusActiveVersion('preview')
+    } else if (focusDataValid.current_stage === 'final' && focusActiveVersion === 'preview') {
+      setFocusActiveVersion('final')
+    }
+  }, [isFocusStrategy, focusDataValid, focusActiveVersion])
+
   // symbol → 所属策略列表。单策略接口同时返回轻量归属映射，保留策略列原有展示。
   const symbolStrategyMap = useMemo(() => {
     const map = new Map<string, string[]>()
     if (showAll) {
-      for (const [sid, r] of Object.entries(effectiveResults ?? {})) {
+      for (const [sid, r] of Object.entries(displayAllResults ?? {})) {
         for (const row of r.rows) {
           const arr = map.get(row.symbol)
           if (arr) arr.push(sid)
@@ -464,14 +934,14 @@ export function Screener() {
       }
     }
     return map
-  }, [showAll, effectiveResults, singleCachedQuery.data, activeStrategy, result])
+  }, [showAll, displayAllResults, singleCachedQuery.data, activeStrategy, result])
 
   // "全部" 模式: 合并所有策略的去重个股
   const allRows = useMemo(() => {
-    if (!effectiveResults) return []
+    if (!displayAllResults) return []
     const seen = new Set<string>()
     const merged: any[] = []
-    for (const r of Object.values(effectiveResults)) {
+    for (const r of Object.values(displayAllResults)) {
       for (const row of r.rows) {
         if (!seen.has(row.symbol)) {
           seen.add(row.symbol)
@@ -480,17 +950,18 @@ export function Screener() {
       }
     }
     return merged
-  }, [effectiveResults])
+  }, [displayAllResults])
 
   // 计算当前策略的失效行: 今日曾命中但当前已不命中。
   const expiredRows = useMemo(() => {
+    if (displayMode !== 'cached') return []
     const everRows = singleCachedQuery.data?.today_ever_rows
     if (!everRows || !result || result.as_of !== asOf) return []
     const currentSymbols = new Set(result.rows.map((row: any) => row.symbol))
     return Object.entries(everRows)
       .filter(([symbol]) => !currentSymbols.has(symbol))
       .map(([, row]) => ({ ...row, _expired: true }))
-  }, [singleCachedQuery.data, result, asOf])
+  }, [displayMode, singleCachedQuery.data, result, asOf])
 
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
@@ -620,6 +1091,11 @@ export function Screener() {
     }
     // 未覆盖: 受系统开关控制
     if (!screenerAutoRun) return
+    const isTodayUnclosed = asOf === todayIso && (!dataStatus.data?.latest_strategy_date || asOf > dataStatus.data.latest_strategy_date)
+    if (isTodayUnclosed) {
+      runAllDateRef.current = runKey
+      return
+    }
     runAllDateRef.current = runKey
     requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
   }, [asOf, strategyPresets.length, summaryQuery.isSuccess, dailyPoolIds, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, tfFilter, runAll.isPending, runAllMinute.isPending, requestRunAll])
@@ -649,6 +1125,9 @@ export function Screener() {
       setHitCounts(prev => ({ ...prev, [vars.id]: data.total }))
       // 单策略重跑后刷新摘要和当前按需明细，避免参数保存后回退到旧缓存。
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
     },
   })
 
@@ -666,6 +1145,11 @@ export function Screener() {
     }
     // 摘要命中时由 singleCachedQuery 按需加载明细；缺失时才单独计算。
     if (summaryQuery.data?.results[s.id]?.as_of === asOf || runAll.isPending) return
+    const isTodayUnclosed = asOf === todayIso && (!dataStatus.data?.latest_strategy_date || asOf > dataStatus.data.latest_strategy_date)
+    if (isTodayUnclosed && s.id !== 'custom_dual_edge_focus') {
+      toast('今日尚未收盘，正式日线策略将在 15:35 盘后管道完成后定版生成')
+      return
+    }
     run.mutate({ id: s.id, date: asOf, timeframe: tf })
   }
 
@@ -677,7 +1161,10 @@ export function Screener() {
   }
 
   const minDate = dataStatus.data?.enriched?.earliest_date ?? ''
-  const maxDate = dataStatus.data?.enriched?.latest_date ?? ''
+  const todayIso = getCnTodayIso()
+  const maxDate = isBusinessDateIso(todayIso)
+    ? todayIso
+    : (dataStatus.data?.latest_strategy_date ?? dataStatus.data?.enriched?.latest_date ?? '')
 
   const batchAdd = useWatchlistBatchAdd()
 
@@ -691,6 +1178,144 @@ export function Screener() {
     const symbols = watchlist.data?.symbols ?? []
     return new Set(symbols.map((s: any) => s.symbol))
   }, [watchlist.data])
+
+  // 策略结果页的用户买入标记: 以 strategy + signal_date 隔离, 避免同一股票
+  // 在不同策略或不同交易日的标记互相覆盖。
+  const purchaseMarksQuery = useQuery({
+    queryKey: QK.strategyPurchaseMarks,
+    queryFn: api.strategyPurchaseMarks,
+  })
+  const purchaseMarks = useMemo(() => {
+    const map = new Map<string, StrategyPurchaseMark>()
+    for (const mark of purchaseMarksQuery.data?.marks ?? []) {
+      map.set(`${mark.strategy_id}::${mark.symbol.toUpperCase()}::${mark.signal_date}`, mark)
+    }
+    return map
+  }, [purchaseMarksQuery.data])
+
+  // 策略候选生命周期: 即使今日动态结果归零,仍展示此前候选的竞价确认/淘汰节点。
+  const strategyHistoryQuery = useQuery({
+    queryKey: QK.strategyHistory(activeStrategy ?? '', 180),
+    queryFn: () => api.strategyHistory({
+      strategyId: activeStrategy ?? undefined,
+      days: 180,
+      limit: 1000,
+    }),
+    enabled: assetType === 'stock' && !!activeStrategy,
+    staleTime: 60_000,
+  })
+
+  // 后台静默预热历史淘汰节点，不阻塞前台策略渲染
+  const backfilledRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeStrategy || backfilledRef.current.has(activeStrategy)) return
+    backfilledRef.current.add(activeStrategy)
+    api.strategyHistoryBackfill([activeStrategy]).then(() => {
+      qc.invalidateQueries({ queryKey: QK.strategyHistory(activeStrategy, 180) })
+    }).catch(() => {})
+  }, [activeStrategy, qc])
+  const strategyHistoryEvents = strategyHistoryQuery.data?.events ?? []
+  const recommendationHistoryEvents = useMemo(() => {
+    const recommendationTypes = new Set<StrategyHistoryEvent['event_type']>([
+      'selected',
+      'preselect',
+      'auction_confirmed',
+      'auction_rejected',
+      'buy_signal',
+    ])
+    const monitorTypes = new Set<StrategyHistoryEvent['event_type']>([
+      'sell_signal',
+      'pool_entry',
+      'pool_exit',
+    ])
+    const recommendationMarks = new Map<string, { signalDate: string; ts: number }[]>()
+    for (const event of strategyHistoryEvents) {
+      if (!recommendationTypes.has(event.event_type)) continue
+      const symbol = event.symbol.toUpperCase()
+      recommendationMarks.set(symbol, [
+        ...(recommendationMarks.get(symbol) ?? []),
+        { signalDate: event.signal_date, ts: event.ts },
+      ])
+    }
+    return strategyHistoryEvents.filter(event =>
+      recommendationTypes.has(event.event_type)
+      || (monitorTypes.has(event.event_type)
+        && (recommendationMarks.get(event.symbol.toUpperCase()) ?? []).some(
+          mark => mark.signalDate < event.signal_date
+            || (mark.signalDate === event.signal_date && mark.ts <= event.ts),
+        )),
+    )
+  }, [strategyHistoryEvents])
+  const intradayBuyCount = useMemo(
+    () => recommendationHistoryEvents.filter(event =>
+      event.event_type === 'buy_signal' && event.signal_date === asOf,
+    ).length,
+    [recommendationHistoryEvents, asOf],
+  )
+  const historyPageCount = Math.max(1, Math.ceil(recommendationHistoryEvents.length / HISTORY_PAGE_SIZE))
+  const historyPageEvents = recommendationHistoryEvents.slice(
+    historyPage * HISTORY_PAGE_SIZE,
+    (historyPage + 1) * HISTORY_PAGE_SIZE,
+  )
+
+  useEffect(() => {
+    setHistoryPage(0)
+  }, [activeStrategy, strategyHistoryQuery.data])
+
+  useEffect(() => {
+    if (historyPage >= historyPageCount) setHistoryPage(Math.max(historyPageCount - 1, 0))
+  }, [historyPage, historyPageCount])
+
+  const togglePurchaseMark = useMutation({
+    mutationFn: ({
+      strategyId,
+      symbol,
+      signalDate,
+      signalPrice,
+      signalScore,
+      signalChangePct,
+      marked,
+    }: {
+      strategyId: string
+      symbol: string
+      signalDate: string
+      signalPrice: number | null
+      signalScore: number | null
+      signalChangePct: number | null
+      marked: boolean
+    }) => marked
+      ? api.strategyPurchaseMarkDelete(strategyId, symbol, signalDate)
+      : api.strategyPurchaseMarkSave({
+          strategy_id: strategyId,
+          strategy_name: strategyIdToName[strategyId] ?? strategyId,
+          symbol,
+          signal_date: signalDate,
+          signal_price: signalPrice,
+          signal_score: signalScore,
+          signal_change_pct: signalChangePct,
+          note: '策略页用户手动标记已买入',
+        }),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: QK.strategyPurchaseMarks })
+      if (!variables.marked) {
+        const foundRow = displayRows.find((r: any) => r.symbol === variables.symbol)
+        const realName = foundRow?.name || variables.symbol
+        addOrUpdateMonitoredPosition({
+          symbol: variables.symbol,
+          name: realName,
+          costPrice: variables.signalPrice || 0,
+          buyDate: variables.signalDate,
+          strategyId: variables.strategyId,
+          strategyName: strategyIdToName[variables.strategyId] ?? variables.strategyId,
+          currentPrice: variables.signalPrice || 0,
+        })
+        toast('已标记买入，并加入「动态止损置顶盯盘浮窗」', 'success')
+      } else {
+        removeMonitoredPosition(variables.symbol)
+        toast('已取消买入标记', 'success')
+      }
+    },
+  })
 
   // 单只股票加入/移出自选
   const toggleWatchlist = useMutation({
@@ -716,6 +1341,9 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+      qc.invalidateQueries({ queryKey: ['screener-auction-replay'] })
+      qc.invalidateQueries({ queryKey: ['screener-preselect'] })
       if (asOf) requestRunAll({ date: asOf })
       // 分钟策略: 重置去重 key, 策略列表失效重取后 effect 重新触发批量计算
       minuteRunDateRef.current = null
@@ -780,6 +1408,17 @@ export function Screener() {
     })
   }
 
+  const resultPanelVisible = showAll
+    ? allRows.length > 0 || displayMode !== 'cached'
+    : !!result
+  const resultLabel = displayMode === 'preselect'
+    ? '盘后预选'
+    : displayMode === 'confirmed'
+      ? '竞价确认'
+      : displayMode === 'dynamic'
+        ? '动态竞价'
+        : '正式命中'
+  const auctionWaitingHint = `已生成盘后预选，等待 ${auctionTradeDate} 09:25 竞价确认`
 
   return (
     <>
@@ -851,6 +1490,25 @@ export function Screener() {
                 max={maxDate}
               />
             )}
+            {/* 动态止损盯盘悬浮窗快捷开关 */}
+            <button
+              type="button"
+              onClick={() => togglePipOpen()}
+              title="打开/关闭动态止损置顶悬浮盯盘窗"
+              className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-btn border transition-colors cursor-pointer text-xs font-medium ${
+                isPipOpen
+                  ? 'border-bull/50 bg-bull/15 text-bull'
+                  : 'border-border bg-surface text-muted hover:text-foreground hover:border-bull/40'
+              }`}
+            >
+              <Target className={`h-3.5 w-3.5 ${isPipOpen ? 'text-bull animate-pulse' : 'text-muted'}`} />
+              <span>动态盯盘</span>
+              {monitoredPositions.length > 0 && (
+                <span className="rounded-full bg-bull/20 px-1 py-0.2 text-[9px] font-mono font-bold text-bull">
+                  {monitoredPositions.length}
+                </span>
+              )}
+            </button>
             {/* 全部切换 */}
             <button
               onClick={() => setShowAll(v => { if (!v) setActiveStrategy(null); return !v })}
@@ -993,8 +1651,15 @@ export function Screener() {
                   description={s.description}
                   source={s.source}
                   active={activeStrategy === s.id}
-                  count={hitCounts[id]}
-                  expiredCount={expiredCounts[id]}
+                  count={displayHitCounts[id] ?? hitCounts[id]}
+                  countLabel={
+                    PRESELECT_STRATEGY_IDS.has(id)
+                      && (hitCounts[id] ?? 0) === 0
+                      && (displayHitCounts[id] ?? 0) > 0
+                      ? '预选'
+                      : undefined
+                  }
+                  expiredCount={displayMode !== 'cached' ? 0 : (expiredCounts[id] ?? 0)}
                   loading={runAll.isPending}
                   computing={pendingRunIds.has(id) || selfRunning || minuteRunning}
                   awaitRun={hitCounts[id] == null && isMinute && !selfRunning && !minuteRunning}
@@ -1020,7 +1685,7 @@ export function Screener() {
             </div>
           )}
 
-          {(showAll ? allRows.length > 0 : !!result) && (
+          {resultPanelVisible && (
             <motion.div
               key={showAll ? `all-${asOf}` : `${result!.as_of}-${result!.strategy}`}
               initial={{ opacity: 0, y: 8 }}
@@ -1028,22 +1693,67 @@ export function Screener() {
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="space-y-3"
             >
+              {displayMode === 'preselect' && preselectTotal > 0 && !isFocusStrategy && (
+                <div className="flex items-start gap-2 rounded-btn border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs text-amber-200">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+                  <div>
+                    <div className="font-medium">当前显示的是盘后预选，不是正式双刃合命中</div>
+                    <div className="mt-0.5 text-[11px] text-amber-200/70">
+                      这些结果仅供次交易日 09:25 前观察，正式结果会在竞价确认后单独切换。
+                    </div>
+                  </div>
+                </div>
+              )}
+              {isFocusStrategy && focusActiveVersion === 'preselect' && (
+                <div className="flex items-start gap-2 rounded-btn border border-sky-500/25 bg-sky-500/8 px-3 py-2 text-xs text-sky-200">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-300" />
+                  <div>
+                    <div className="font-medium">当前查看的是【次日竞价前置预选池】（非正式收盘买入信号）</div>
+                    <div className="mt-0.5 text-[11px] text-sky-200/70">
+                      此列表为双刃合竞价前置放宽观察池，仅供次日 09:23~09:25 集合竞价盯盘与高开确认使用。若要看严格正式选股，请切换到【收盘正式版】。
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-medium text-foreground flex items-center gap-2">
                   {!showAll && activeStrategy && (
                     <span className="text-secondary">{strategyIdToName[activeStrategy] ?? ''}</span>
                   )}
                   <TrendingUp className="h-4 w-4 text-accent" />
-                  {showAll ? '全部' : ''}命中 <span className="text-accent num">{displayRows.length}</span> 只
+                  {showAll ? '全部' : ''}{resultLabel} <span className="text-accent num">{displayRows.length}</span> 只
                   {filterActive(filter) && displayRows.length !== (showAll ? allRows.length : result!.total) && (
                     <span className="text-muted text-xs">/ {showAll ? allRows.length : result!.total}</span>
                   )}
                   <span className="text-[11px] text-muted font-normal">
                     · {displayPool.length} 策略
                     {!showAll && displayPool.length > 0 && (
-                      <> · 共 {displayPool.reduce((sum, id) => sum + (hitCounts[id] ?? 0), 0)} 只</>
+                      <> · 共 {displayPool.reduce((sum, id) => sum + (displayHitCounts[id] ?? hitCounts[id] ?? 0), 0)} 只</>
                     )}
                   </span>
+                  {!showAll && intradayBuyCount > 0 && (
+                    <span className="text-[11px] text-secondary font-normal">
+                      · 盘中买点 {intradayBuyCount}
+                    </span>
+                  )}
+                  {displayMode === 'dynamic' ? (
+                    <span className="text-[11px] text-secondary">
+                      · 动态竞价 {auctionDynamicTotals.final} / 双刃合 {auctionDynamicTotals.candidates}
+                      {auctionDynamicFrame?.as_of_time ? ` · ${auctionDynamicFrame.as_of_time}` : ''}
+                    </span>
+                  ) : displayMode === 'preselect' ? (
+                    <span className="text-[11px] text-secondary">
+                      · 预选 {preselectTotal} · 等待 {auctionTradeDate} 09:25 竞价确认
+                    </span>
+                  ) : auctionConfirmationQuery.data && (
+                    <span className="text-[11px] text-secondary">
+                      · 竞价确认 {auctionConfirmationQuery.data.gate_status === 'confirmed'
+                        ? `${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.total ?? 0), 0)} / ${Object.values(auctionConfirmationQuery.data.results).reduce((sum, item) => sum + (item.base_total ?? 0), 0)}`
+                        : auctionConfirmationQuery.data.gate_status === 'pending_gate'
+                          ? '等待 09:25'
+                          : `等待 ${auctionTradeDate} 09:25 竞价确认`}
+                    </span>
+                  )}
                   {runAll.isPending && (
                     <span className="text-[11px] text-muted animate-pulse">扫描中…</span>
                   )}
@@ -1139,6 +1849,109 @@ export function Screener() {
                 </div>
               </div>
 
+              {/* Focus 策略专属: 三版本切换栏与尾盘变脸淘汰参考 */}
+              {isFocusStrategy && !showAll && (
+                <div className="mt-2.5 mb-2 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-1.5 bg-elevated/40 border border-border/80 rounded-lg">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs text-muted font-medium px-2">出票版本:</span>
+                      <button
+                        type="button"
+                        onClick={() => { focusUserSelectedVersion.current = true; setFocusActiveVersion('final') }}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'final'
+                            ? 'bg-bull/15 text-bull border border-bull/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-bull" />
+                        收盘正式版 ({focusFinalCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { focusUserSelectedVersion.current = true; setFocusActiveVersion('preview') }}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'preview'
+                            ? 'bg-amber-500/15 text-amber-400 border border-amber-500/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        14:50 尾盘初选 ({focusPreviewCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { focusUserSelectedVersion.current = true; setFocusActiveVersion('preselect') }}
+                        className={`h-7 px-3 rounded text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                          focusActiveVersion === 'preselect'
+                            ? 'bg-sky-500/15 text-sky-400 border border-sky-500/40 shadow-xs'
+                            : 'text-secondary hover:text-foreground hover:bg-surface border border-transparent'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                        次日竞价预选 ({focusPreselectCount})
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 pr-1">
+                      {focusDataValid && (
+                        <div className="flex items-center gap-2 text-[11px] text-muted pr-1">
+                          <span className="text-bull/90 font-medium">初选确认 {focusDataValid.summary.confirmed_count}</span>
+                          <span>·</span>
+                          <span className="text-amber-400/90 font-medium">尾盘突击 {focusDataValid.summary.late_entrant_count}</span>
+                          <span>·</span>
+                          <span className="text-red-400/90 font-medium">变脸淘汰 {focusDataValid.summary.dropped_count}</span>
+                        </div>
+                      )}
+                      <Link
+                        to="/data"
+                        className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-surface border border-border/80 text-muted hover:text-accent hover:border-accent/40 transition-colors"
+                        title="查看数据全景与 Focus 实时链路监控大盘"
+                      >
+                        <Activity className="h-3 w-3 text-secondary" />
+                        数据链路监控
+                      </Link>
+                    </div>
+                  </div>
+
+                  {/* 尾盘变脸淘汰折叠提示 */}
+                  {focusDataValid && focusDataValid.dropped_from_preview.length > 0 && (
+                    <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs">
+                      <div
+                        className="flex items-center justify-between cursor-pointer text-warning/90 font-medium select-none"
+                        onClick={() => setShowDroppedList(v => !v)}
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0" />
+                          <span>尾盘变脸淘汰参考：共 {focusDataValid.dropped_from_preview.length} 只标的在 14:50 初选入选，但收盘被淘汰</span>
+                        </span>
+                        <span className="text-[11px] text-warning/70 hover:text-warning underline ml-2 shrink-0">
+                          {showDroppedList ? '收起明细' : '展开查看原因'}
+                        </span>
+                      </div>
+                      {showDroppedList && (
+                        <div className="mt-2 pt-2 border-t border-warning/20 space-y-1.5 text-muted">
+                          {focusDataValid.dropped_from_preview.map(item => (
+                            <div key={item.symbol} className="flex flex-wrap items-center justify-between gap-2 py-0.5 border-b border-warning/10 last:border-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-secondary font-medium">{item.symbol}</span>
+                                <span className="text-foreground">{item.name}</span>
+                                <span className="px-1.5 py-0.2 rounded text-[9px] bg-red-500/15 text-red-400 border border-red-500/30">
+                                  已淘汰
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 text-[11px]">
+                                <span className="text-warning/90">{item.reason}</span>
+                                <span className="font-mono text-muted">14:50现价 {item.preview_close}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 筛选面板: 只要原始结果有数据就显示 (哪怕筛完后为空, 用户才能改条件) */}
               {showFilter && (showAll ? allRows.length > 0 : !!result?.rows.length) && (
                 <FilterPanel
@@ -1155,10 +1968,50 @@ export function Screener() {
               {displayRows.length === 0 ? (
                 <EmptyState
                   icon={ScanSearch}
-                  title={filterActive(filter) ? '筛选后无命中' : '今日无命中'}
-                  hint={filterActive(filter)
-                    ? '当前筛选条件过严, 试试放宽或重置筛选。'
-                    : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
+                  title={
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                      ? (focusDataValid.versions[focusActiveVersion].empty_title || '今日无命中')
+                      : displayMode === 'preselect' && preselectTotal > 0
+                        ? auctionWaitingHint
+                        : displayMode === 'preselect'
+                          ? '今日无预选'
+                      : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
+                        ? `等待 ${auctionTradeDate} 09:25 竞价确认`
+                        : auctionDynamicActive
+                          ? '动态竞价暂无命中'
+                          : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
+                        ? `等待 ${auctionTradeDate} 09:25 竞价确认`
+                        : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                          ? `等待 ${auctionTradeDate} 09:25 竞价确认`
+                          : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
+                            ? '筛选后无命中'
+                            : auctionConfirmationActive
+                              ? '竞价确认后无命中'
+                              : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
+                  }
+                  hint={
+                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                      ? (focusDataValid.versions[focusActiveVersion].empty_hint || '暂无数据')
+                      : displayMode === 'preselect' && preselectTotal > 0
+                        ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
+                        : displayMode === 'preselect'
+                          ? '严格策略和盘后放宽预选都没有候选，可等盘后管道完成后重载。'
+                    : auctionDynamicActive && auctionDynamicPayload?.status === 'awaiting_trade'
+                      ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
+                      : auctionDynamicActive
+                        ? '当前秒的双刃合动态候选和竞价确认条件都没有留下结果。'
+                        : auctionConfirmationQuery.data?.gate_status === 'pending_gate'
+                      ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
+                      : auctionConfirmationQuery.data?.gate_status === 'awaiting_trade'
+                        ? '盘后候选已就绪，09:25 后会自动切到竞价确认结果。'
+                        : (filterActive(filter) && (showAll ? allRows.length > 0 : !!result?.rows.length))
+                          ? '当前筛选条件过严, 试试放宽或重置筛选。'
+                          : auctionConfirmationActive
+                            ? '候选已做竞价 / 开盘确认，但没有保留下来的结果。'
+                            : (filterActive(filter)
+                              ? '当前筛选条件过严, 试试放宽或重置筛选。'
+                              : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。')
+                  }
                 />
               ) : (
                 <>
@@ -1166,10 +2019,24 @@ export function Screener() {
                     rows={displayRows}
                     columns={columns}
                     strategyIdToName={strategyIdToName}
+                    strategyLabelSuffix={displayMode === 'preselect' ? '盘后预选' : undefined}
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
                     activeSymbol={previewSymbol}
                     watchlistSet={watchlistSet}
+                    purchaseMarks={purchaseMarks}
+                    purchaseSignalDate={!showAll && activeStrategy ? (result?.as_of || asOf) : undefined}
+                    purchaseMarkPending={togglePurchaseMark.isPending}
+                    onTogglePurchaseMark={(strategyId, symbol, signalDate, signalPrice, signalScore, signalChangePct, marked) =>
+                      togglePurchaseMark.mutate({
+                        strategyId,
+                        symbol,
+                        signalDate,
+                        signalPrice,
+                        signalScore,
+                        signalChangePct,
+                        marked,
+                      })}
                     onPreview={(symbol, name, navList) => { setPreviewSymbol(symbol); setPreviewName(name ?? ''); setPreviewNavList(navList ?? []) }}
                     onAddToWatchlist={(symbol, groupId) => toggleWatchlist.mutate({ symbol, action: 'add', groupId })}
                     onRemoveFromWatchlist={symbol => toggleWatchlist.mutate({ symbol, action: 'remove' })}
@@ -1189,6 +2056,40 @@ export function Screener() {
                     onSortToggle={toggle}
                   />
                 </>
+              )}
+              {activePreselectRows.length > 0 && displayMode !== 'preselect' && (
+                <section className="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/15 px-4 py-2.5">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-medium text-amber-200">盘后预选</span>
+                      <span className="num text-amber-300">{activePreselectRows.length} 只</span>
+                      <span className="text-[10px] text-amber-200/60">非正式命中 · 等待 {auctionTradeDate} 09:25 竞价确认</span>
+                    </div>
+                    <span className="text-[10px] text-amber-200/60">仅作次日观察</span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                    {activePreselectRows.map((row: any) => (
+                      <button
+                        key={row.symbol}
+                        type="button"
+                        onClick={() => { setPreviewSymbol(row.symbol); setPreviewName(row.name ?? '') }}
+                        className="rounded-lg border border-border/50 bg-surface/50 px-3 py-2 text-left transition hover:border-amber-400/40 hover:bg-amber-500/10"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-xs font-medium text-foreground">{row.name || row.symbol}</span>
+                          <span className="shrink-0 text-[10px] text-amber-200">观察</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
+                          <span className="font-mono">{row.symbol}</span>
+                          <span className="num">价 {row.close != null ? Number(row.close).toFixed(2) : '—'}</span>
+                          <span className={`num ${Number(row.change_pct) >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {row.change_pct != null ? `${(Number(row.change_pct) * 100).toFixed(2)}%` : '—'}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
               )}
             </motion.div>
           )}
@@ -1341,6 +2242,129 @@ export function Screener() {
         open={showStore}
         onClose={() => setShowStore(false)}
       />
+
+      {activeStrategy && (
+        <button
+          type="button"
+          onClick={() => setShowHistoryDialog(true)}
+          title={`查看${strategyIdToName[activeStrategy] ?? activeStrategy}推荐历史`}
+          className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-surface/95 px-4 py-2.5 text-xs font-medium text-foreground shadow-xl shadow-black/20 backdrop-blur-md transition hover:border-accent/60 hover:bg-accent/10"
+        >
+          <History className="h-3.5 w-3.5 text-accent" />
+          <span>推荐历史</span>
+          <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent num">
+            {strategyHistoryQuery.data?.total ?? 0}
+          </span>
+        </button>
+      )}
+
+      {showHistoryDialog && activeStrategy && (
+        <Modal
+          onClose={() => setShowHistoryDialog(false)}
+          labelledBy="strategy-history-title"
+          panelClassName="w-[min(920px,94vw)] max-h-[82vh] bg-surface/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+        >
+          <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <History className="h-4 w-4 shrink-0 text-accent" />
+              <div className="min-w-0">
+                <div id="strategy-history-title" className="truncate text-sm font-semibold text-foreground">
+                  {strategyIdToName[activeStrategy] ?? activeStrategy} · 推荐历史
+                </div>
+                <div className="mt-0.5 text-[10px] text-muted">
+                  仅展示当前策略推荐事件及其关联操作 · 盘中买卖信号不等同正式命中 · 最近 {recommendationHistoryEvents.length} 条
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭"
+              onClick={() => setShowHistoryDialog(false)}
+              className="rounded-lg p-1.5 transition hover:bg-elevated"
+            >
+              <X className="h-4 w-4 text-muted" />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            {strategyHistoryQuery.isLoading ? (
+              <div className="flex items-center justify-center py-16 text-xs text-muted">历史加载中…</div>
+            ) : historyPageEvents.length === 0 ? (
+              <div className="flex items-center justify-center py-16 text-xs text-muted">当前策略暂无历史记录</div>
+            ) : (
+              <div className="space-y-2">
+                {historyPageEvents.map(event => {
+                  const isRejected = event.event_type === 'auction_rejected'
+                  const isConfirmed = event.event_type === 'auction_confirmed'
+                  const isBuy = event.event_type === 'buy_signal'
+                  const isSell = event.event_type === 'sell_signal'
+                  const hasEventTime = isBuy || isSell
+                    || isConfirmed || isRejected
+                    || event.event_type === 'pool_entry'
+                    || event.event_type === 'pool_exit'
+                  const tone = isRejected || isSell
+                    ? 'text-danger bg-danger/10 border-danger/20'
+                    : isConfirmed || isBuy
+                      ? 'text-success bg-success/10 border-success/20'
+                      : 'text-accent bg-accent/10 border-accent/20'
+                  return (
+                    <div key={event.event_key} className="rounded-xl border border-border/40 bg-elevated/30 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${tone}`}>
+                          {HISTORY_EVENT_LABELS[event.event_type] ?? event.event_type}
+                        </span>
+                        <span className="font-medium text-foreground">{event.name || event.symbol}</span>
+                        <span className="font-mono text-[10px] text-muted">{event.symbol}</span>
+                        <span className="text-[10px] text-muted">
+                          {event.signal_date}{event.trade_date && event.trade_date !== event.signal_date ? ` → ${event.trade_date}` : ''}
+                        </span>
+                        {hasEventTime && (
+                          <span className="font-mono text-[10px] text-secondary">
+                            时间 {formatHistoryTime(historyEventTimestamp(event))}
+                          </span>
+                        )}
+                        {event.price != null && <span className="num text-secondary">价 {event.price.toFixed(2)}</span>}
+                        {event.change_pct != null && (
+                          <span className={`num ${event.change_pct >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {(event.change_pct * 100).toFixed(2)}%
+                          </span>
+                        )}
+                      </div>
+                      {(event.reason || event.signals?.length) && (
+                        <div className="mt-1 text-[11px] leading-5 text-secondary">
+                          {event.reason || event.signals?.join('、')}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between border-t border-border/50 px-5 py-3 text-[11px] text-muted">
+            <span>第 {Math.min(historyPage + 1, historyPageCount)} / {historyPageCount} 页</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setHistoryPage(page => Math.max(page - 1, 0))}
+                disabled={historyPage <= 0}
+                className="inline-flex items-center gap-1 rounded-btn border border-border px-2.5 py-1.5 transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />上一页
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryPage(page => Math.min(page + 1, historyPageCount - 1))}
+                disabled={historyPage >= historyPageCount - 1}
+                className="inline-flex items-center gap-1 rounded-btn border border-border px-2.5 py-1.5 transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                下一页<ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </>
   )
 }

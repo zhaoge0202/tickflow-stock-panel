@@ -20,6 +20,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 import type { FrontendExtension } from '@/extensions/types'
 import { IconAlert } from '@/components/BrandIcons'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 /**
  * 异动监控 — 全时段异动中心, 按交易时间线分三个 tab:
@@ -51,8 +52,6 @@ const STATUS_META: Record<AbnormalStatus, { label: string; cls: string; bar: str
 }
 
 const BOARDS = ['主板', '创业板', '科创板', '北交所'] as const
-
-const REFRESH_MS = 60_000
 
 type AbnormalTab = 'auction' | 'intraday' | 'deviation'
 
@@ -387,14 +386,17 @@ function IntradayView({ onPreview }: {
   const [boardFilter, setBoardFilter] = useState<'all' | (typeof BOARDS)[number]>('all')
   const [query, setQuery] = useState('')
   const [excludeSt, setExcludeSt] = useState(true)
+  const abnormalPollingInterval = useSmartPollingInterval(15_000)
 
   // 交易时段感知 (共享 Layout 的同 key 缓存, 无额外请求): 非交易时段停轮询
   const { data: quoteStatus } = useQuoteStatus()
   const q = useQuery({
     queryKey: QK.abnormalIntraday(500),
     queryFn: () => api.abnormalIntraday(500),
-    // 非交易时段盘中信号不变, 60s → 5min 兜底 (开盘后自动恢复); 字段缺失保持原频率
-    refetchInterval: () => (quoteStatus?.is_trading_hours === false ? 300_000 : REFRESH_MS),
+    // 非交易时段盘中信号不变, 60s → 5min 兜底 (开盘后自动恢复); 字段缺失保持原频率。
+    // SSE 正常连接时事件触发 invalidate, 智能轮询保留 60s 兜底。
+    refetchInterval: () =>
+      quoteStatus?.is_trading_hours === false ? 300_000 : abnormalPollingInterval,
   })
   const data = q.data
   const counts = data?.counts ?? {}
@@ -630,6 +632,7 @@ function DeviationView({ onPreview }: {
   const [watchlistOnly, setWatchlistOnly] = useState(false)
   // 默认过滤 ST/*ST 风险警示股票 (口径与后端 is_st_name 一致: 名称含 ST)
   const [excludeSt, setExcludeSt] = useState(true)
+  const overviewPollingInterval = useSmartPollingInterval(30_000)
 
   const { data: quoteStatus } = useQuoteStatus()
   const overview = useQuery({
@@ -637,7 +640,10 @@ function DeviationView({ onPreview }: {
     queryFn: () => api.abnormalOverview(minCloseness, 300),
     enabled, // 关闭时零计算
     // 非交易时段偏离快照不变, 60s → 5min 兜底 (开盘后自动恢复); 字段缺失保持原频率
-    refetchInterval: () => (enabled && quoteStatus?.is_trading_hours !== false ? REFRESH_MS : 300_000),
+    refetchInterval: () =>
+      enabled
+        ? (quoteStatus?.is_trading_hours === false ? 300_000 : overviewPollingInterval)
+        : false,
     // 拖动 closeness 滑杆换 key 时沿用上一份结果, 不整表闪空
     placeholderData: (prev: any) => prev,
   })
