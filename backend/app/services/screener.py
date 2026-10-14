@@ -88,7 +88,25 @@ class ScreenerService:
 
         清除数据后调用, 避免内存里的旧历史窗口残留导致策略/看板仍命中旧数据。
         """
-        _history_cache.clear()
+        # 与历史窗口计算共用同一把锁, 防止清理与慢计算并发时旧结果在清理后
+        # 又被写回缓存。管道刷新宁可等待当前计算结束, 也不能继续消费旧快照。
+        with _history_compute_lock:
+            _history_cache.clear()
+
+    @staticmethod
+    def _crop_history_cache(
+        frame: pl.DataFrame,
+        lookback_days: int,
+    ) -> pl.DataFrame | None:
+        """从更大的历史窗口裁剪出调用方需要的交易日范围。"""
+        if frame.is_empty() or "date" not in frame.columns:
+            return None
+        dates = frame.get_column("date").drop_nulls().unique().sort()
+        if dates.is_empty():
+            return None
+        keep_count = min(len(dates), max(1, lookback_days) + 1)
+        start_date = dates[-keep_count]
+        return frame.filter(pl.col("date") >= start_date)
 
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
@@ -331,13 +349,38 @@ class ScreenerService:
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
         cache_key = (self.asset_type, target_date, lookback_days)
         now = time.monotonic()
+        expired = [
+            key for key, (ts, _) in _history_cache.items()
+            if now - ts >= _HISTORY_CACHE_TTL
+        ]
+        for key in expired:
+            del _history_cache[key]
+
         ttl_cached = _history_cache.get(cache_key)
         if ttl_cached is not None:
-            ts, cached_df = ttl_cached
-            if now - ts < _HISTORY_CACHE_TTL:
-                logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-                return cached_df
-            del _history_cache[cache_key]
+            logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
+            return ttl_cached[1]
+
+        # 监控规则经常只差 lookback_days (例如 41/61/71/81), 大窗口已经包含
+        # 小窗口所需的全部交易日。裁剪复用避免同一交易日重复 scan + 指标计算,
+        # 也避免为每个规则再保留一份完整 DataFrame。
+        reusable = [
+            (key[2], frame)
+            for key, (_, frame) in _history_cache.items()
+            if key[0] == self.asset_type
+            and key[1] == target_date
+            and key[2] > lookback_days
+        ]
+        if reusable:
+            _, larger_frame = min(reusable, key=lambda item: item[0])
+            cropped = self._crop_history_cache(larger_frame, lookback_days)
+            if cropped is not None:
+                logger.debug(
+                    "history reusable cache hit: %s lookback=%d",
+                    target_date,
+                    lookback_days,
+                )
+                return cropped
 
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
@@ -405,13 +448,12 @@ class ScreenerService:
 
         # 完整指标历史体积较大，只保留最近一次 run_all 的结果。repository 不再
         # 常驻 300 天历史，这里也不能累积多个大 DataFrame 抵消内存优化。
-        expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-        for k in expired:
-            del _history_cache[k]
         if cache_key not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
             oldest_key = min(_history_cache, key=lambda k: _history_cache[k][0])
             del _history_cache[oldest_key]
-        _history_cache[cache_key] = (now, df_full)
+        # 长计算期间不应消耗 TTL; 从计算完成时开始计时, 保证刚算好的窗口有完整
+        # 的复用周期。
+        _history_cache[cache_key] = (time.monotonic(), df_full)
 
         return df_full
 
