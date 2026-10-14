@@ -9,6 +9,8 @@ import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
+import { StopLossPiPHost } from '@/components/stop-loss/StopLossPiPHost'
+import { useMonitoredPositions, togglePipOpen, useIsPipOpen } from '@/lib/stopLossStore'
 import {
   useCapabilityMatrix,
   useSettings,
@@ -36,7 +38,9 @@ import {
   Sun,
   Moon,
   X,
+  Target,
   WifiOff,
+  LineChart,
   Menu,
   PanelLeft,
   PanelLeftClose,
@@ -85,9 +89,11 @@ type CoreIndex = (typeof CORE_INDEXES)[number]
 const nav = [
   { to: '/',                 label: '看板',     icon: IconDashboard },
   { to: '/watchlist',        label: '自选',     icon: IconWatchlist },
+  { to: '/decision',         label: '决策台',   icon: Target },
   { to: '/screener',         label: '策略',     icon: IconStrategy },
   { to: '/factors',          label: '因子',     icon: IconFactors },
   { to: '/backtest',         label: '回测',     icon: IconBacktest },
+  { to: '/sector-flow',      label: '板块强度', icon: LineChart },
   { to: '/regime',           label: '市场环境', icon: IconRegime },
   { to: '/indices',          label: '指数',     icon: IconIndices },
   { to: '/data',             label: '数据',     icon: IconData },
@@ -482,6 +488,8 @@ export function Layout() {
 
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const monitoredPositions = useMonitoredPositions()
+  const isPipOpen = useIsPipOpen()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -1052,7 +1060,25 @@ export function Layout() {
         </div>
         )}
 
-        <div className={cn('border-t border-border py-3 shrink-0', railMode ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
+        <div className={cn('border-t border-border py-2.5 shrink-0 flex flex-col gap-1.5', railMode ? 'px-1' : 'px-2')}>
+          <button
+            type="button"
+            onClick={() => togglePipOpen()}
+            title={isPipOpen ? '关闭动态止损盯盘浮窗' : '打开动态止损置顶盯盘浮窗'}
+            className={cn(
+              'group relative flex items-center rounded-btn text-xs font-medium transition-all duration-150 cursor-pointer',
+              railMode ? 'justify-center p-2' : 'w-full gap-2 px-2.5 py-1.5',
+              isPipOpen
+                ? 'bg-bull/15 text-bull border border-bull/30 shadow-sm'
+                : 'bg-elevated/70 text-foreground/80 hover:bg-elevated hover:text-foreground',
+            )}
+          >
+            <Target className={cn('h-3.5 w-3.5 shrink-0', isPipOpen ? 'text-bull animate-pulse' : 'text-muted group-hover:text-accent')} />
+            {!railMode && <span>动态盯盘</span>}
+            <span className="ml-auto rounded-full bg-elevated px-1.5 py-0.2 text-[9px] font-mono font-bold text-secondary">
+              {monitoredPositions.length}
+            </span>
+          </button>
           <div className={railMode ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
             <ThemeToggle />
             <NavLink
@@ -1150,6 +1176,7 @@ export function Layout() {
       <AiReportBubble />
       <StockAnalysisHost />
       <StockAnalysisBubble />
+      <StopLossPiPHost />
 
       {/* 开启实时行情 + 排队中的挖掘任务 → 冲突确认 */}
       {miningQueuedWarning != null && (
