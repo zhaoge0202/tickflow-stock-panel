@@ -39,7 +39,7 @@ def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
     `.tmp` 后缀不匹配 `*.parquet` glob, 不会被视图误读。Windows 下目标正被并发读取时
     由 `replace_with_retry` 短退避穿过。
     """
-    from app.tickflow.repository import replace_with_retry  # 惰性导入, 避免模块级环
+    from app.parquet import replace_with_retry  # 惰性导入, 避免模块级环
 
     tmp = path.with_name(path.name + ".tmp")
     df.write_parquet(tmp)

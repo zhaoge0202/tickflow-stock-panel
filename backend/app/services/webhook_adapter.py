@@ -1,7 +1,7 @@
-"""Webhook 推送适配器 — 把告警事件推送到外部 IM / 量化软件。
+"""Webhook 推送适配器 — 把告警事件推送到外部 IM。
 
 职责: 把后端产生的告警事件, 通过用户配置的 Webhook 地址推送到外部。
-     目前支持飞书、企业微信和通用第三方 JSON Webhook。
+     目前支持飞书、企业微信和通用第三方 JSON Webhook; 本项目不接券商委托。
 
 飞书自定义机器人接入:
   1. 飞书群 → 群设置 → 群推送 Webhook → 添加「自定义机器人」
@@ -345,8 +345,6 @@ def send_wecom_markdown(webhook_url: str, title: str, body_md: str) -> bool:
 
     payload: dict = {"msgtype": "markdown", "markdown": {"content": content}}
     return _post_wecom(webhook_url, payload)
-
-
 # ================================================================
 # 通用第三方 JSON Webhook
 # ================================================================
