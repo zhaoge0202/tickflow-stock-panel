@@ -45,6 +45,7 @@ backend/data/**
 !backend/data/.gitkeep
 data/**
 !data/.gitkeep
+mysql-data/
 # data/ 下所有内容(含 ext_data 概念/行业)均不入库:
 #   - 用户运行时数据 (K线/财务/自选/回测等) 本就不该进 git
 #   - 概念/行业改为「首次启动自动从远程接口拉取」(见 app/services/ext_presets.py)
@@ -109,3 +110,6 @@ TickFlowStockPanel.app/
 TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
 reports/cursor_tickflow_pro_rate_limit_p0.bundle
+.bce-tool/
+# 运维手册含服务器密码, 禁止提交
+docs/windows-server-ops.md

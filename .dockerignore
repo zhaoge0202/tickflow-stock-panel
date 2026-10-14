@@ -11,6 +11,7 @@
 # ===== 用户运行时数据(绝不应进镜像) =====
 data
 backend/data
+mysql-data
 
 # ===== 前端构建产物 / 依赖(镜像内会重新 build, 带进来反而污染) =====
 frontend/node_modules
