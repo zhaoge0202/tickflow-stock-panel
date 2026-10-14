@@ -503,7 +503,7 @@ def _get_previous_closes(
 
 
 def _crypto_minute_frame(repo, symbol: str, contract_day: date):
-    """读一个 UTC 合约日的本地分钟K (北京墙钟 naive, 已裁到合约日窗口)。
+    """读一个合约日 (北京自然日) 的本地分钟K (北京墙钟 naive, 已裁到合约日窗口)。
 
     日归属 = 北京自然日 (OKX 官方日线切日口径, 见 market_rules 选源约束), 与
     repo.get_minute 的过滤口径 `datetime.dt.date()` 完全一致 → 单次读取即覆盖整日,
@@ -522,7 +522,7 @@ def _crypto_minute_frame(repo, symbol: str, contract_day: date):
 
 
 def _crypto_minute_range_frame(repo, symbol: str, days: int, last_contract_day: date):
-    """读最近 days 个合约日的本地分钟K (北京墙钟 naive, 已裁到 [first 08:00, last+1 08:00))。
+    """读最近 days 个合约日 (北京自然日) 的本地分钟K (北京墙钟 naive, 已裁到 [first 00:00, last+1 00:00))。
 
     与 _crypto_minute_frame 同源: 日归属与仓储的北京日期过滤同口径, 直接按
     [first, last] 读取即可。24x7: 合约日连续, 无需休市探针回退。
@@ -560,7 +560,7 @@ def _crypto_prev_close(repo, symbol: str, contract_day: date) -> float | None:
             contract_day - timedelta(days=1),
             columns=["date", "close"],
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 上一合约日缺日K (新标的/本地未同步) 属正常路径, 记 debug 后按无基准线处理
         logger.debug("crypto 上一合约日收盘读取失败 %s: %s", symbol, e)
         return None
     if daily is None or daily.is_empty() or "close" not in daily.columns:
@@ -1230,7 +1230,8 @@ def get_minute_range(
         )
 
     if asset_type == CRYPTO:
-        # 会话归属 = UTC 合约日 (北京墙钟换算), 不是北京自然日
+        # 会话归属 = 合约日: to_contract_date 按 market_rules 换算 (两类资产都是北京自然日),
+        # 不写 datetime.date() 是为了让日归属始终由单一权威决定, 不在调用点硬编换算
         minute = minute.with_columns(
             pl.col("datetime")
             .map_elements(lambda dt: to_contract_date(dt, CRYPTO), return_dtype=pl.Date)

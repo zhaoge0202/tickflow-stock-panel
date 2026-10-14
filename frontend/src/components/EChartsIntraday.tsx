@@ -716,9 +716,9 @@ export function EChartsIntraday({
           {ohlc && (
             <>
               {date && <span className="text-muted">{date}</span>}
-              <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 分钟` : daily ? '日K（前复权）' : '分时汇总'}</span>
+              <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 分钟` : daily ? (isCrypto ? '日K' : '日K（前复权）') : '分时汇总'}</span>
               <span className="text-muted">开</span>
-              <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(2) : '—'}</span>
+              <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(priceDigits) : '—'}</span>
               <span className="text-muted">高</span>
               <span style={{ color: priceClr }}>{ohlc.high.toFixed(priceDigits)}</span>
               <span className="text-muted">低</span>

@@ -14,13 +14,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 
 from app.data_providers import crypto_registry
-from app.market_rules import CRYPTO, contract_day_start, to_contract_date
+from app.market_rules import CRYPTO, contract_day_start, contract_today, to_contract_date
 from app.parquet import atomic_write_parquet
 from app.services import preferences
 
@@ -55,7 +55,7 @@ def sync_crypto_daily(
     symbols: list[str] | None = None,
     days: int = DEFAULT_DAILY_DAYS,
 ) -> int:
-    """同步日K (UTC 合约日)。返回写入行数。
+    """同步日K (合约日 = 北京自然日)。返回写入行数。
 
     symbols 缺省取本地 crypto 维表; 维表为空时返回 0, 不猜标的池。
     """
@@ -63,7 +63,7 @@ def sync_crypto_daily(
     if not target:
         logger.warning("crypto 日K同步跳过: 标的池为空 (需先同步维表)")
         return 0
-    end_date = datetime.now(UTC).date()
+    end_date = contract_today(CRYPTO)
     start_date = end_date - timedelta(days=max(1, int(days)))
     df = _provider().get_daily(target, start_date=start_date, end_date=end_date)
     if df.is_empty():
@@ -77,11 +77,11 @@ def sync_crypto_daily(
 
 
 def write_crypto_minute_partitions(repo, df: pl.DataFrame) -> int:
-    """按 UTC 合约日分区写入分钟K (merge-upsert on [symbol, datetime])。
+    """按合约日 (北京自然日) 分区写入分钟K (merge-upsert on [symbol, datetime])。
 
     返回写入行数。datetime 按项目契约是北京墙钟 naive, 分区键由
-    market_rules.to_contract_date 换算, 不直接取 datetime.date() ——
-    后者会把北京 00:00-08:00 的分钟错分到下一个合约日。
+    market_rules.to_contract_date 换算 —— 当前口径 (北京自然日) 下结果与
+    datetime.date() 同值, 但日归属只由 market_rules 决定, 不在此处硬编换算。
     """
     if df is None or df.is_empty():
         return 0
@@ -113,7 +113,7 @@ def write_crypto_minute_partitions(repo, df: pl.DataFrame) -> int:
                 payload = pl.concat([existing, payload], how="diagonal_relaxed").unique(
                     subset=["symbol", "datetime"], keep="last"
                 ).sort(["symbol", "datetime"])
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 单个分区合并失败不阻断其余分区, 记 warning 后覆盖写入
                 logger.warning("crypto 分钟分区 %s 合并失败, 覆盖写入: %s", day, e)
         atomic_write_parquet(payload, out_path)
         written += payload.height
@@ -127,8 +127,8 @@ def sync_crypto_minute(
 ) -> int:
     """同步当前合约日的分钟K。返回写入行数。
 
-    窗口取 [合约日 08:00 北京, 下一合约日 08:00 北京) —— 与分区键同源,
-    避免 08:00 边界上的分钟重复入库或丢行。
+    窗口取 [合约日北京 00:00, 次日北京 00:00) —— 与分区键同源,
+    避免 00:00 边界上的分钟重复入库或丢行。
     """
     target = [str(s) for s in (symbols or sorted(repo.get_crypto_symbol_set())) if s]
     if not target:

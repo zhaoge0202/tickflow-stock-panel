@@ -44,7 +44,7 @@ const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
 // ===== 资产类别 (与后端 data_providers/base.py 的 AssetType 对齐) =====
 
 /** 资产类别枚举。crypto = 24x7 永续合约: 无涨跌停/无复权/无股本,
- *  「日」为 UTC 合约日 (北京 08:00 切日)。前端按资产类别分支时统一引用本常量,
+ *  「日」为北京自然日 (与后端 app/market_rules 同口径)。前端按资产类别分支时统一引用本常量,
  *  不再在组件里散落 'stock' / 'stock,etf,index' 字面量。 */
 export const ASSET_TYPE_OPTIONS = ['stock', 'etf', 'index', 'crypto'] as const
 export type AssetType = (typeof ASSET_TYPE_OPTIONS)[number]

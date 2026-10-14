@@ -78,7 +78,7 @@ export const FULL_DAY_TIMES = generateFullDayTimes()
  * 分时图 x 轴时间点。
  *
  * A 股/ETF/指数: 固定 242 槽 (含午休占位), 槽位与交易时段一一对应, 非交易时段留空。
- * crypto: 24x7 无固定时段 (一个合约日最多 1440 根, 北京 08:00 切日), 242 槽表达不了
+ * crypto: 24x7 无固定时段 (一个合约日最多 1440 根, 日归属 = 北京自然日), 242 槽表达不了
  * 且会静默丢弃槽外数据, 因此直接用数据自身的时间点作为时轴, 一根都不丢。
  */
 export function intradayAxisTimes(assetType: string | null | undefined, rows: MinuteKlineRow[]): string[] {
