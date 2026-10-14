@@ -22,12 +22,13 @@ import polars as pl
 
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
-from app.market_time import CN_TZ, cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today, is_trading_weekday
+from app.parquet import atomic_update_parquet, atomic_write_parquet
 from app.services import minute_adjust, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
-from app.tickflow.repository import KlineRepository, replace_with_retry
+from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
@@ -80,21 +81,16 @@ def _sdk_call_with_deadline(fn: Callable[[], Any], *, timeout_s: float = _SDK_CA
     if "error" in outcome:
         raise outcome["error"]
     return outcome.get("result")
+class MinuteFetchError(RuntimeError):
+    """单票分钟 K 数据源请求失败，与「成功返回空数据」区分。"""
 
 
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
-    与 repository._atomic_write_parquet 同语义。adj_factor 的 all.parquet 是全市场
-    单文件、每次「读→concat→原地写」, 直接 write_parquet(out) 在进程被 kill
-    (dev.sh 清端口用 kill -9)、reap 超时或断电时会留下半截文件, 之后复权视图
-    scan_parquet 整条链路报错、enriched 全市场重算不出。临时文件后缀 .tmp 不匹配
-    *.parquet glob, 不会被扫描误读。Windows 下目标正被并发读取时由
-    replace_with_retry 短退避穿过。
+    统一委托给 app.parquet.atomic_write_parquet 保证进程安全。
     """
-    tmp = out.with_name(out.name + ".tmp")
-    df.write_parquet(tmp)
-    replace_with_retry(tmp, out)
+    atomic_write_parquet(df, out)
 
 
 # 标准列(无论 SDK 返回什么形状,我们把它规范成这套)
@@ -463,7 +459,12 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
     返回写入的行数。
     """
-    from datetime import date as _date
+    today = cn_today()
+    if not is_trading_weekday(today):
+        # 数据源在周末仍返回以上一交易日快照冒充的"当日"行情,
+        # 落盘会产生日期错误的假日K (如周日分区复制周五)。
+        logger.info("sync_daily_by_quotes: %s 为周末非交易日, 跳过当日快照写盘", today)
+        return 0
 
     from app.tickflow.client import get_client
 
@@ -501,7 +502,6 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
 
     # 分区日期用北京交易日 (与 quote_service._build_daily 的 cn_today 一致),
     # 避免 UTC 服务器在盘中把日分区写成服务器本地日期。
-    today = cn_today()
     daily_df = df.with_columns(pl.lit(today).cast(pl.Date).alias("date"))
 
     # 过滤停牌 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)
@@ -933,26 +933,25 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     for day_df in df.partition_by("_trade_date"):
         trade_date = day_df["_trade_date"][0]
         out = minute_dir / f"date={trade_date}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.exists():
-            existing = pl.read_parquet(out)
+        incoming = day_df.drop("_trade_date")
+
+        def merge(existing: pl.DataFrame, incoming: pl.DataFrame = incoming) -> pl.DataFrame:
+            if existing.is_empty():
+                return incoming.sort(["symbol", "datetime"])
             if "datetime" in existing.columns:
                 existing = existing.filter(pl.col("datetime").is_not_null())
-            new_rows = day_df.drop("_trade_date")
             # 只对本次触及的 symbol 合并去重, 未触及行原样保留: 单股补齐时避免
             # 为合并几行数据把全市场分区整体 unique 的写放大 (issue #305)。
-            touched = new_rows["symbol"].unique().to_list()
+            touched = incoming["symbol"].unique().to_list()
             same = existing.filter(pl.col("symbol").is_in(touched))
             other = existing.filter(~pl.col("symbol").is_in(touched))
-            merged = pl.concat([same, new_rows]).unique(
+            merged = pl.concat([same, incoming]).unique(
                 subset=["symbol", "datetime"], keep="last",
             )
-            day_df = pl.concat([other, merged])
-        else:
-            day_df = day_df.drop("_trade_date")
-        day_df = day_df.sort("symbol", "datetime")
-        _atomic_write_parquet(day_df, out)
-        written += day_df.height
+            return pl.concat([other, merged]).sort(["symbol", "datetime"])
+
+        _, after = atomic_update_parquet(out, merge)
+        written += after
     return written
 
 
@@ -1656,6 +1655,7 @@ def sync_and_persist_minute(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
     force_full_days: bool = False,
+    target_date: date | None = None,
 ) -> int:
     """同步分钟 K 并存到 Parquet。返回写入行数。
 
@@ -1690,7 +1690,17 @@ def sync_and_persist_minute(
     # 本地时间会让窗口整体错位 (UTC 容器上起点晚于终点, 增量补拉一个请求都发不出)。
     now = cn_now()
 
-    if extend_backward:
+    if target_date is not None:
+        # 个股详情的“重新获取”必须只补选中的交易日，不能误补当前日期。
+        start_time = datetime(
+            target_date.year, target_date.month, target_date.day,
+            9, 25, tzinfo=CN_TZ,
+        )
+        end_time = datetime(
+            target_date.year, target_date.month, target_date.day,
+            15, 5, tzinfo=CN_TZ,
+        )
+    elif extend_backward:
         # 向前扩展模式: 从本地最早数据往前补, 叠加已有数据避免缺口。
         earliest_dt = _earliest_minute_datetime(repo)
         # 按交易日换算自然日 (7/5 系数)。>41 交易日时 +10 天余量覆盖节假日。

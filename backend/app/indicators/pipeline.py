@@ -20,6 +20,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Callable
+from datetime import date, datetime
 from datetime import timedelta as _timedelta
 from pathlib import Path
 
@@ -108,11 +109,24 @@ def invalidate_custom_signals() -> None:
     _custom_prev_fields_cache = None
 
 
-# enriched parquet 仅存储的列 (14 列)
+# enriched parquet 仅存储的列
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
     "volume", "amount",
+    "auction_result_price",                   # 09:25 开盘竞价最终成交价, 非竞价过程
+    "auction_result_volume",                  # 09:25 最终成交量
+    "auction_result_amount",                  # 09:25 最终成交额
+    "auction_tick_count",                     # 09:15-09:25 真实竞价成交快照数
+    "auction_tick_seconds",                   # 竞价真实成交覆盖秒数
+    "auction_trade_price_change",             # 首末真实竞价成交价变化
+    "auction_trade_price_range",              # 竞价真实成交价振幅
+    "auction_trade_volume_delta",             # 累计撮合量首末差
+    "auction_trade_volume_per_second",        # 累计撮合量每秒增量
+    "auction_trade_unmatched_ratio",          # 最后一笔未匹配比例
+    "auction_trade_pressure_score",           # 最后一笔竞价压力
+    "auction_trade_depth_imbalance",          # 最后一笔盘口不平衡
+    "auction_trade_spread_pct",               # 最后一笔盘口价差
     "raw_close", "raw_high", "raw_low",       # 不复权原始价
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
@@ -136,6 +150,19 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "close":                   "前复权收盘价",
     "volume":                  "成交量",
     "amount":                  "成交额",
+    "auction_result_price":    "09:25开盘竞价最终成交价",
+    "auction_result_volume":   "09:25开盘竞价最终成交量",
+    "auction_result_amount":   "09:25开盘竞价最终成交额",
+    "auction_tick_count":      "09:15-09:25真实竞价成交快照数",
+    "auction_tick_seconds":    "竞价真实成交覆盖秒数",
+    "auction_trade_price_change": "竞价首末真实成交价变化",
+    "auction_trade_price_range": "竞价真实成交价振幅",
+    "auction_trade_volume_delta": "竞价累计撮合量首末差",
+    "auction_trade_volume_per_second": "竞价撮合量每秒增量",
+    "auction_trade_unmatched_ratio": "竞价最后未匹配比例",
+    "auction_trade_pressure_score": "竞价最后压力分数",
+    "auction_trade_depth_imbalance": "竞价最后盘口不平衡",
+    "auction_trade_spread_pct": "竞价最后盘口价差",
     "raw_close":               "原始收盘价(未复权)",
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
@@ -296,7 +323,11 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
 
     is_ex = pl.col("trade_date") == pl.col("date")
     ratio = pl.col("cum_factor").fill_null(1.0) / pl.col("total_factor").fill_null(1.0)
-    price_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+    price_cols = [
+        c for c in (
+            "open", "high", "low", "close", "auction_result_price",
+        ) if c in df.columns
+    ]
 
     df = df.with_columns(
         [pl.col(c) * ratio for c in price_cols]
@@ -1075,10 +1106,179 @@ def compute_enriched(
     return df
 
 
+def attach_auction_result_fields(
+    df: pl.DataFrame,
+    data_dir: Path,
+) -> pl.DataFrame:
+    """将本地 quote_ticks 的竞价结果和秒级过程特征附着到日K输入帧。
+
+    竞价结果是独立的事实层，不属于日K供应商的 OHLCV 响应。按日期读取
+    quote_ticks 的窄列派生表，再按 ``symbol/date`` 左连接；已有值只有在本地
+    事实层提供新值时才覆盖。09:25 最终成交结果与 09:15-09:25 过程特征
+    分开计算，过程特征缺失时保留 null，实验策略按参数决定是否回退。
+    """
+    from app.services.quote_tick_store import AUCTION_TICK_FEATURE_COLUMNS
+
+    fields = (
+        "auction_result_price",
+        "auction_result_volume",
+        "auction_result_amount",
+        *AUCTION_TICK_FEATURE_COLUMNS,
+    )
+    if df.is_empty() or "symbol" not in df.columns or "date" not in df.columns:
+        return df
+
+    missing_exprs = [
+        pl.lit(None, dtype=pl.Float64).alias(field)
+        for field in fields
+        if field not in df.columns
+    ]
+    base = df.with_columns(missing_exprs) if missing_exprs else df
+
+    from app.services import quote_tick_store
+
+    frames: list[pl.DataFrame] = []
+    for value in base["date"].drop_nulls().unique().to_list():
+        target_date = value.date() if isinstance(value, datetime) else value
+        if not isinstance(target_date, date):
+            continue
+        # 只扫描存在事实分区的日期；历史日线重算不应为每个交易日反复遍历
+        # quote_ticks 目录。
+        tick_dir = Path(data_dir) / "quote_ticks" / f"date={target_date.isoformat()}"
+        if not tick_dir.exists():
+            continue
+        symbols = (
+            base.filter(pl.col("date") == value)["symbol"]
+            .cast(pl.Utf8)
+            .unique()
+            .to_list()
+        )
+        result = quote_tick_store.auction_result_fields(
+            data_dir,
+            target_date=target_date,
+            symbols=symbols,
+        )
+        tick_features = quote_tick_store.auction_tick_features(
+            data_dir,
+            target_date=target_date,
+            symbols=symbols,
+        )
+        if result.is_empty():
+            combined = tick_features
+        elif tick_features.is_empty():
+            combined = result
+        else:
+            combined = result.join(tick_features, on=["symbol", "date"], how="left")
+        if not combined.is_empty():
+            frames.append(combined)
+    if not frames:
+        return base
+    auction = pl.concat(frames, how="diagonal_relaxed").unique(
+        subset=["symbol", "date"], keep="last",
+    )
+    joined = base.join(auction, on=["symbol", "date"], how="left", suffix="_auction")
+    updates = []
+    drops = []
+    for field in fields:
+        right = f"{field}_auction"
+        if right not in joined.columns:
+            continue
+        updates.append(pl.coalesce([pl.col(right), pl.col(field)]).alias(field))
+        drops.append(right)
+    return joined.with_columns(updates).drop(drops)
+
+
+def apply_auction_result_fields_to_enriched(
+    data_dir: Path,
+    target_date: date,
+) -> dict[str, int | bool | str]:
+    """把当天 quote_ticks 的真实竞价结果补进 enriched 分区。"""
+    from app.services import quote_tick_store
+
+    result = quote_tick_store.auction_result_fields(
+        data_dir,
+        target_date=target_date,
+    )
+    tick_features = quote_tick_store.auction_tick_features(
+        data_dir,
+        target_date=target_date,
+    )
+    if result.is_empty():
+        result = tick_features
+    elif not tick_features.is_empty():
+        result = result.join(tick_features, on=["symbol", "date"], how="left")
+    path = Path(data_dir) / "kline_daily_enriched" / f"date={target_date.isoformat()}" / "part.parquet"
+    if result.is_empty() or not path.exists():
+        return {"rows": 0, "populated": 0, "changed": False}
+    try:
+        original = pl.read_parquet(path)
+        base = original
+        from app.services.quote_tick_store import AUCTION_TICK_FEATURE_COLUMNS
+
+        auction_fields = (
+            "auction_result_price",
+            "auction_result_volume",
+            "auction_result_amount",
+            *AUCTION_TICK_FEATURE_COLUMNS,
+        )
+        missing_exprs = [
+            pl.lit(None, dtype=pl.Float64).alias(field)
+            for field in auction_fields
+            if field not in base.columns
+        ]
+        if missing_exprs:
+            base = base.with_columns(missing_exprs)
+        joined = base.join(
+            result,
+            on=["symbol", "date"],
+            how="left",
+            suffix="_raw",
+        )
+        if {"close", "raw_close"}.issubset(joined.columns):
+            adjustment = (
+                pl.when(
+                    pl.col("raw_close").is_not_null()
+                    & (pl.col("raw_close") > 0)
+                )
+                .then(pl.col("close") / pl.col("raw_close"))
+                .otherwise(1.0)
+            )
+        else:
+            adjustment = pl.lit(1.0)
+        updates = []
+        drops = []
+        for field in auction_fields:
+            right = f"{field}_raw"
+            if right not in joined.columns:
+                continue
+            right_expr = pl.col(right)
+            if field == "auction_result_price":
+                right_expr = right_expr * adjustment
+            updates.append(pl.coalesce([right_expr, pl.col(field)]).alias(field))
+            drops.append(right)
+        merged = joined.with_columns(updates).drop(drops).sort("symbol")
+        changed = not original.equals(merged)
+        if changed:
+            publication = EnrichedPublication(data_dir, "stock", recover=True)
+            publication.write_parquet(merged, path)
+            publication.commit()
+        return {
+            "rows": merged.height,
+            "populated": int(merged["auction_result_price"].is_not_null().sum()),
+            "changed": changed,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("竞价结果附着 enriched 失败(%s): %s", path, exc)
+        return {"rows": 0, "populated": 0, "changed": False, "error": str(exc)}
+
+
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (14 列)。"""
+    """写入 parquet 前裁剪到存储列。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
-    return df.select(cols)
+    result = df.select(cols)
+    if {"symbol", "date"}.issubset(result.columns):
+        result = result.unique(subset=["symbol", "date"], keep="last")
+    return result
 
 
 # ================================================================
@@ -1587,11 +1787,17 @@ def run_pipeline(data_dir: Path | None = None,
             if not hist_df.is_empty():
                 # 只取基础行情列做历史前缀
                 hist_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "auction_result_price",
+                                         "auction_result_volume", "auction_result_amount",
+                                         "raw_close", "raw_high", "raw_low"]
                              if c in hist_df.columns]
                 raw_full = pl.concat([hist_df.select(hist_cols), raw_new], how="diagonal_relaxed")
             else:
                 raw_full = raw_new
+
+            # 竞价结果来自当天 quote_ticks 的真实 09:25 成交行，不能从日K open
+            # 反推。没有事实的历史/停牌标的保留 null，交给策略按数据质量拒绝。
+            raw_full = attach_auction_result_fields(raw_full, d)
 
             enriched_new = _compute_storage_batches(
                 raw_full,
@@ -1633,6 +1839,7 @@ def run_pipeline(data_dir: Path | None = None,
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
             raw_sym = raw_sym.collect(streaming=True)
             if not raw_sym.is_empty():
+                raw_sym = attach_auction_result_fields(raw_sym, d)
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
                 shares_sym = historical_shares.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_shares.is_empty() else historical_shares
@@ -1730,6 +1937,8 @@ def run_pipeline(data_dir: Path | None = None,
 
             if raw.is_empty():
                 continue
+
+            raw = attach_auction_result_fields(raw, d)
 
             # 本批的 factors / instruments
             batch_factors = (
@@ -1945,12 +2154,17 @@ def compute_enriched_today(
     ])
     if "_adj_factor" in df.columns:
         af = pl.col("_adj_factor").fill_null(1.0)
-        df = df.with_columns([
+        price_updates = [
             (pl.col("open") * af).alias("open"),
             (pl.col("high") * af).alias("high"),
             (pl.col("low") * af).alias("low"),
             (pl.col("close") * af).alias("close"),
-        ])
+        ]
+        if "auction_result_price" in df.columns:
+            price_updates.append(
+                (pl.col("auction_result_price") * af).alias("auction_result_price")
+            )
+        df = df.with_columns(price_updates)
 
     # ---- volume 统一 Float64 ----
     df = df.with_columns(pl.col("volume").cast(pl.Float64))
