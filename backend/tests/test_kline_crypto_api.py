@@ -28,6 +28,10 @@ from app.market_time import CN_TZ
 CRYPTO_SYMBOL = "SOXLUSDT"
 STOCK_SYMBOL = "600519.SH"
 
+# get_minute 入口会读 repo.store.data_dir 判定分钟口径 (raw_basis, 新主干行为)。
+# 桩给一个不存在的目录 = 未迁移口径, 与存量 A 股库现状一致。
+_STUB_DATA_DIR = Path("/nonexistent/tickflow-crypto-api-stub-data")
+
 
 class _FrozenDate(dt.date):
     """服务器本地日期桩 (与合约日/北京日期都不同, 用于证明默认窗口不取本地日期)。"""
@@ -56,6 +60,7 @@ class _Repo:
         self._minute_range_frame = minute_range_frame
         self._daily = daily
         self._instruments = instruments if instruments is not None else pl.DataFrame()
+        self.store = SimpleNamespace(data_dir=_STUB_DATA_DIR)
         self.minute_calls: list[tuple[str, dt.date, str]] = []
         self.minute_batch_calls: list[tuple[list[str], dt.date, str]] = []
         self.minute_range_calls: list[tuple[list[str], dt.date, dt.date, str]] = []
@@ -105,9 +110,12 @@ class _Repo:
 
 
 def _request(repo: _Repo, *, capabilities=None):
-    state = SimpleNamespace(repo=repo)
-    if capabilities is not None:
-        state.capabilities = capabilities
+    # 真实 app.state 恒有 capabilities (get_minute 入口读它); 默认给空集, 需要断言
+    # 具体能力时由用例显式传入。
+    state = SimpleNamespace(
+        repo=repo,
+        capabilities=capabilities if capabilities is not None else SimpleNamespace(),
+    )
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
@@ -441,7 +449,9 @@ def test_minute_stock_path_keeps_240_bars_and_price_limit(monkeypatch):
     assert resp["asset_type"] == "stock"
     assert len(resp["rows"]) == 240
     assert resp["prev_close"] == 9.9
-    assert resp["price_limit"] == {"rate": 0.10, "limit_up": None, "limit_down": None, "source": "rule"}
+    assert resp["price_limit"] == {
+        "rate": 0.10, "limit_up": None, "limit_down": None, "no_limit": False, "source": "rule",
+    }
     # crypto 分支的字段不出现在 A 股响应里
     assert "expected_bars" not in resp and "is_complete" not in resp
     assert repo.minute_calls == [(STOCK_SYMBOL, dt.date(2026, 10, 12), "stock")]
