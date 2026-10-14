@@ -107,11 +107,19 @@ export interface CapabilityLimits {
 export interface CapabilitiesResponse {
   label: string
   capabilities: Record<string, CapabilityLimits>
+  business_capabilities?: {
+    sealed_depth?: {
+      available: boolean
+      source: string | null
+      requires: string | null
+    }
+  }
 }
 
 // ===== Financials =====
 export interface FinancialStatus {
   available: boolean
+  source?: string | null
   tables: Record<string, { rows: number; symbols: number }>
   last_sync: Record<string, string>
   /** 服务端是否正在同步(手动触发)——驱动"同步中"UI 并防重复点击 */
@@ -176,15 +184,6 @@ export interface FinancialCashFlowRecord {
   net_financing_cash_flow?: number | null
   capex?: number | null
   net_cash_change?: number | null
-  [key: string]: any
-}
-
-export interface FinancialSharesRecord {
-  symbol?: string
-  period_end: string
-  announce_date?: string | null
-  total_shares?: number | null
-  float_shares?: number | null
   [key: string]: any
 }
 
@@ -256,6 +255,15 @@ export interface MinuteKlineRow {
   amount: number | null
 }
 
+export interface FinancialSharesRecord {
+  symbol?: string
+  period_end: string
+  announce_date?: string | null
+  total_shares?: number | null
+  float_shares?: number | null
+  [key: string]: any
+}
+
 export interface MinuteKlineSession {
   date: string
   prev_close: number | null
@@ -269,6 +277,59 @@ export interface PriceLimitInfo {
   /** 注册制新股上市初期无涨跌幅窗口内为 true: 不画涨跌停带, y 轴按实际数据自适应 */
   no_limit?: boolean
   source: 'rule' | 'instrument'
+}
+
+export interface TradeTickRow {
+  symbol: string
+  trade_date: string
+  datetime: string
+  seq_in_day: number
+  price: number
+  volume: number
+  amount: number
+  side: 'buy' | 'sell' | 'neutral' | 'unknown'
+  side_label: string
+  order_count?: number | null
+  raw_status?: number | null
+  source?: string
+  ingested_at?: string | null
+  updated_at?: string | null
+}
+
+export interface TradeTicksResponse {
+  symbol: string
+  date: string
+  source: string
+  mode: string
+  order: string
+  time_precision?: 'minute' | 'second' | string
+  sequence_field?: string
+  count: number
+  rows: TradeTickRow[]
+  warning?: string | null
+}
+
+export interface TradeTickPersistStatus {
+  status: string
+  symbol: string
+  date: string
+  rows?: number | null
+  message?: string | null
+  error?: string | null
+  queued_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  elapsed_seconds?: number | null
+  timeout_seconds?: number | null
+  queue_size?: number | null
+  pending_count?: number | null
+  worker_alive?: boolean | null
+  mysql?: {
+    rows?: number
+    last_ingested_at?: string | null
+    last_updated_at?: string | null
+    error?: string
+  } | null
 }
 
 export interface KlineRow {
@@ -371,6 +432,7 @@ export interface IndexInstrument {
 export interface IndexQuote {
   symbol: string
   name?: string | null
+  source?: 'realtime' | 'index_daily'
   last_price?: number | null
   close?: number | null
   prev_close?: number | null
@@ -408,6 +470,19 @@ export interface ScreenerResult {
   elapsed_ms: number
 }
 
+/** 策略结果页的用户买入标记，不等同于券商真实成交或手动持仓。 */
+export interface StrategyPurchaseMark {
+  strategy_id: string
+  strategy_name?: string
+  symbol: string
+  signal_date: string
+  signal_price?: number | null
+  signal_score?: number | null
+  signal_change_pct?: number | null
+  marked_at: number
+  note?: string
+}
+
 export interface ScreenerResultSummary {
   total: number
   as_of: string
@@ -420,6 +495,98 @@ export interface ScreenerCachedSummary {
   results: Record<string, ScreenerResultSummary>
   today_ever_counts: Record<string, number>
   updated_at: number | null
+}
+
+export interface ScreenerAuctionConfirmationResult {
+  strategy: string
+  as_of: string
+  trade_date: string
+  base_total: number
+  total: number
+  confirmed_total: number
+  auction_covered_total: number
+  trade_covered_total: number
+  pending_auction_total: number
+  pending_trade_total: number
+  rows: any[]
+  [key: string]: any
+}
+
+export interface ScreenerAuctionConfirmationResponse {
+  as_of: string | null
+  cache_as_of?: string | null
+  trade_date: string | null
+  gate_status: 'pending_gate' | 'awaiting_trade' | 'confirmed' | 'empty_candidates' | 'no_cache' | 'stale_as_of'
+  updated_at: number | null
+  auction_window?: { start: string; end: string }
+  confirm_window?: { start: string; end: string }
+  auction_rows_total?: number
+  trade_rows_total?: number
+  results: Record<string, ScreenerAuctionConfirmationResult>
+}
+
+export interface ScreenerPreselectResult {
+  strategy: string
+  as_of: string
+  trade_date: string
+  total: number
+  preselect_total: number
+  rows: any[]
+  [key: string]: any
+}
+
+export interface ScreenerPreselectResponse {
+  mode: 'preselect'
+  as_of: string | null
+  trade_date: string | null
+  updated_at: number | null
+  results: Record<string, ScreenerPreselectResult>
+}
+
+export interface FocusVersionTag {
+  type: 'confirmed' | 'late_entrant' | 'preselect' | 'dropped' | 'final_selected' | 'preview_seen'
+  label: string
+  color: 'green' | 'orange' | 'blue' | 'red' | 'purple'
+}
+
+export interface FocusVersionDetail {
+  label: string
+  time: string
+  status: 'ready' | 'pending' | 'unclosed'
+  total: number
+  rows: any[]
+  empty_title?: string
+  empty_hint?: string
+}
+
+export interface FocusVersionsResponse {
+  as_of: string
+  strategy_id: string
+  strategy_name: string
+  current_stage: 'preview' | 'final' | 'waiting_preview'
+  is_unclosed: boolean
+  versions: {
+    preview: FocusVersionDetail
+    final: FocusVersionDetail
+    preselect: FocusVersionDetail
+  }
+  dropped_from_preview: Array<{
+    symbol: string
+    name: string
+    preview_close: number
+    preview_change_pct: number
+    preview_score: number
+    reason: string
+    version_tags: FocusVersionTag[]
+  }>
+  summary: {
+    preview_total: number
+    final_total: number
+    preselect_total: number
+    confirmed_count: number
+    dropped_count: number
+    late_entrant_count: number
+  }
 }
 
 /** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
@@ -442,7 +609,94 @@ export interface ScreenerCachedResult {
   result: ScreenerResult | null
   today_ever_rows: Record<string, any> | null
   strategy_ids_by_symbol: Record<string, string[]>
+}
+
+export type StrategyHistoryEventType =
+  | 'selected'
+  | 'preselect'
+  | 'auction_confirmed'
+  | 'auction_rejected'
+  | 'buy_signal'
+  | 'sell_signal'
+  | 'pool_entry'
+  | 'pool_exit'
+
+export interface StrategyHistoryEvent {
+  ts: number
+  event_key: string
+  event_type: StrategyHistoryEventType
+  status?: string | null
+  strategy_id: string
+  strategy_name?: string
+  symbol: string
+  name?: string | null
+  signal_date: string
+  trade_date?: string | null
+  phase?: string | null
+  price?: number | null
+  change_pct?: number | null
+  score?: number | null
+  signals?: string[]
+  reason_code?: string | null
+  reason?: string
+  metadata?: Record<string, any>
+}
+
+export interface StrategyHistoryResponse {
+  events: StrategyHistoryEvent[]
+  total: number
+}
+
+export interface AuctionReplayStrategyResult {
+  strategy: string
+  as_of: string
+  dynamic_as_of?: string
+  trade_date: string
+  base_total: number
+  candidate_total?: number
+  final_total?: number
+  total: number
+  confirmed_total: number
+  auction_covered_total: number
+  trade_covered_total: number
+  pending_auction_total: number
+  pending_trade_total: number
+  rows: any[]
+  dual_rows?: any[]
+  candidates?: any[]
+  elapsed_ms?: number
+  run_meta?: Record<string, any>
+  [key: string]: any
+}
+
+export interface AuctionReplayFrame {
+  as_of_ts: number | null
+  as_of_time: string | null
+  phase: string
+  auction_snapshot_time?: string | null
+  trade_snapshot_time?: string | null
+  auction_symbols?: number
+  trade_symbols?: number
+  snapshot_symbols?: number
+  elapsed_ms?: number
+  results: Record<string, AuctionReplayStrategyResult>
+  final_symbols?: Record<string, string[]>
+  [key: string]: any
+}
+
+export interface AuctionReplayResponse {
+  status: string
+  mode: string
+  as_of: string | null
+  trade_date: string | null
+  strategy_as_of?: string | null
   updated_at: number | null
+  frame: AuctionReplayFrame | null
+  final_frame: AuctionReplayFrame | null
+  frames: AuctionReplayFrame[]
+  data_quality?: Record<string, any>
+  frame_mode?: string
+  [key: string]: any
 }
 
 export interface MarketSnapshotRow {
@@ -454,12 +708,117 @@ export interface MarketSnapshotRow {
   volume?: number | null
   turnover_rate?: number | null
   vol_ratio_5d?: number | null
+  realtime_vol_ratio?: number | null
   total_shares?: number | null
   float_shares?: number | null
   market_cap?: number | null
   float_market_cap?: number | null
   consecutive_limit_ups?: number | null
   [key: string]: any
+}
+
+export type MarketSnapshotMode = 'intraday' | 'eod' | 'eod_fallback' | 'empty' | string
+
+export interface MarketSnapshotResponse {
+  as_of: string | null
+  as_of_ts?: number | null
+  mode?: MarketSnapshotMode
+  replay_status?: string | null
+  rows: MarketSnapshotRow[]
+  count?: number
+  available_dates?: string[]
+  backfill?: QuoteTickBackfillStatus | null
+}
+
+export interface MarketDatesResponse {
+  dates: string[]
+  latest: string | null
+  count: number
+}
+
+export interface MarketIntradayTimelineResponse {
+  as_of: string
+  points: number[]
+  start_ts: number | null
+  end_ts: number | null
+  step_seconds?: number
+  has_ticks: boolean
+  count?: number
+  symbol_count?: number
+  sources?: string[]
+  backfill_status?: string | null
+  backfill?: QuoteTickBackfillStatus | null
+  message?: string
+  error?: string
+}
+
+export interface SectorFlowSeriesItem {
+  key: string
+  name: string
+  source_field?: string | null
+  value?: string | null
+  level?: number | null
+  member_count: number
+  valid_count: number
+  coverage_ratio: number
+  flow_values: (number | null)[]
+  strength_values: (number | null)[]
+  latest_flow: number | null
+  latest_strength: number | null
+  flow_source: string
+  classification_method: string
+  is_proxy: boolean
+  rank?: number
+}
+
+export interface SectorFlowSeriesResponse {
+  as_of: string
+  kind: 'concept' | 'industry'
+  metric: 'strength' | 'main_flow'
+  points: number[]
+  sectors: SectorFlowSeriesItem[]
+  index: {
+    symbol: string
+    name: string
+    values: (number | null)[]
+  }
+  data_quality: {
+    status: string
+    has_ticks: boolean
+    symbol_count: number
+    sources: string[]
+    flow_source?: string | null
+    is_proxy?: boolean
+    expected_point_count?: number
+    observed_point_count?: number
+    missing_point_count?: number
+    point_coverage_ratio?: number
+    max_gap_seconds?: number
+  }
+}
+
+export interface QuoteTickBackfillStatus {
+  status?: string
+  date?: string
+  reason?: string
+  source?: string
+  rows?: number
+  symbols?: number
+  min_symbols?: number
+  hours?: number
+  points?: number
+  error?: string | null
+  queued_at?: string
+  started_at?: string
+  finished_at?: string
+  elapsed_seconds?: number
+  coalesced?: boolean
+  progress?: {
+    current?: number
+    total?: number
+    symbols_done?: number
+    symbols_total?: number
+  }
 }
 
 export interface OverviewDimensionRankItem {
@@ -476,6 +835,29 @@ export interface OverviewDimensionRankItem {
     name?: string | null
     change_pct?: number | null
   } | null
+}
+
+export interface EquityPremium {
+  value: number | null
+  pe: number | null
+  earnings_yield: number | null
+  bond_yield_10y: number | null
+  bond_as_of?: string | null
+  sample_count: number
+  label: string
+  tone: 'bull' | 'lean_bull' | 'neutral' | 'lean_bear' | 'bear' | string
+  hint?: string
+  formula?: string
+  stale_bond?: boolean
+  /** eod=最新交易日收盘价; live=盘中全市场最新价覆盖 */
+  price_source?: 'eod' | 'live' | string
+  /** 股价对应交易日 YYYY-MM-DD */
+  price_as_of?: string | null
+  quote_age_ms?: number | null
+  /** live | eod | stale | unavailable */
+  freshness?: 'live' | 'eod' | 'stale' | 'unavailable' | string
+  /** 财务口径异常等质量警告, 有则前端必须展示 */
+  quality_warning?: string | null
 }
 
 export interface OverviewMarket {
@@ -508,6 +890,8 @@ export interface OverviewMarket {
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
   radar: { key: string; label: string; value: number }[]
   emotion: { score: number; label: string }
+  /** 股权溢价指数: 盈利收益率 − 10Y 国债收益率 */
+  equity_premium?: EquityPremium
   top_gainers: MarketSnapshotRow[]
   top_losers: MarketSnapshotRow[]
   turnover_leaders: MarketSnapshotRow[]
@@ -801,6 +1185,25 @@ export interface StrategyParamDef {
   max?: number
   step?: number
   options?: string[]
+}
+
+export interface ScreenerResultSummary {
+  total: number
+  as_of: string
+}
+
+export interface ScreenerCachedSummary {
+  as_of: string | null
+  results: Record<string, ScreenerResultSummary>
+  today_ever_counts: Record<string, number>
+  updated_at: number | null
+}
+
+export interface ScreenerCachedResult {
+  result: ScreenerResult | null
+  today_ever_rows: Record<string, any> | null
+  strategy_ids_by_symbol: Record<string, string[]>
+  updated_at: number | null
 }
 
 export interface CompositeChildInfo {
@@ -1260,6 +1663,7 @@ export interface VDBasicFilter {
   exclude_st?: boolean                      // 剔除 ST
 }
 
+
 export interface MonitorRuleOptions {
   threshold_fields: { key: string; label: string }[]
   builtin_signals: { key: string; label: string }[]
@@ -1278,6 +1682,7 @@ export interface MonitorRuleOptions {
   }
   sector_targets: Record<SectorKind, SectorMonitorTarget[]>
 }
+
 
 export interface AlertEvent {
   ts: number
@@ -1317,6 +1722,260 @@ export interface AlertEvent {
   [key: string]: unknown
 }
 
+// ===== Decision Desk =====
+export type DecisionStatus = 'pending' | 'waiting' | 'planned' | 'manual_done' | 'ignored'
+export type DecisionSide = 'watch' | 'buy_watch' | 'sell_risk' | 'risk'
+
+export interface ManualPosition {
+  symbol: string
+  shares: number
+  cost_price: number
+  stop_loss_price?: number | null
+  take_profit_price?: number | null
+  target_position_pct?: number | null
+  opened_at?: number | string | null
+  updated_at?: number | string | null
+  note?: string
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  unrealized_pnl_pct?: number | null
+  distance_to_stop_pct?: number | null
+  distance_to_take_profit_pct?: number | null
+  risk_amount?: number | null
+  risk_level?: string
+  position_action_hint?: string
+}
+
+export interface OrderBookLevel {
+  level: number
+  price?: number | null
+  volume?: number | null
+  amount?: number | null
+}
+
+export interface OrderBookSnapshot {
+  bids: OrderBookLevel[]
+  asks: OrderBookLevel[]
+}
+
+export interface MicrostructureSnapshot {
+  status?: 'ready' | 'missing' | string
+  order_book?: OrderBookSnapshot
+  spread?: number | null
+  spread_pct?: number | null
+  depth_imbalance?: number | null
+  bid_depth_vol?: number | null
+  ask_depth_vol?: number | null
+  bid_depth_amount?: number | null
+  ask_depth_amount?: number | null
+  best_bid_amount?: number | null
+  best_ask_amount?: number | null
+  limit_seal_amount?: number | null
+  seal_strength?: number | null
+  nearest_sell_wall_price?: number | null
+  sell_wall_distance?: number | null
+  nearest_buy_wall_price?: number | null
+  buy_wall_distance?: number | null
+  current_volume?: number | null
+  inside_volume?: number | null
+  outside_volume?: number | null
+  outside_inside_ratio?: number | null
+  active_net_volume?: number | null
+  speed_rate?: number | null
+  active1?: number | null
+  active2?: number | null
+  microstructure_score?: number | null
+  [key: string]: any
+}
+
+export interface SignalFrame {
+  symbol: string
+  name?: string | null
+  ts: number
+  price: number
+  latest_price: number
+  change_pct?: number | null
+  amount?: number | null
+  volume?: number | null
+  volume_ratio?: number | null
+  vwap?: number | null
+  vwap_intraday?: number | null
+  price_vs_vwap?: number | null
+  vwap_distance?: number | null
+  open_range_position?: number | null
+  ret_1m?: number | null
+  ret_3m?: number | null
+  ret_5m?: number | null
+  ret_15m?: number | null
+  amount_1m?: number | null
+  amount_5m?: number | null
+  amount_ratio_5m?: number | null
+  open_range_high?: number | null
+  open_range_low?: number | null
+  intraday_high?: number | null
+  intraday_low?: number | null
+  day_high_distance?: number | null
+  day_low_distance?: number | null
+  auction_price?: number | null
+  auction_change_pct?: number | null
+  auction_matched_volume?: number | null
+  auction_unmatched_side?: 'buy' | 'sell' | null
+  auction_unmatched_volume?: number | null
+  auction_unmatched_ratio?: number | null
+  auction_pressure_score?: number | null
+  nearest_support?: number | null
+  nearest_resistance?: number | null
+  support_distance?: number | null
+  resistance_distance?: number | null
+  microstructure?: MicrostructureSnapshot
+  order_book?: OrderBookSnapshot
+  spread_pct?: number | null
+  depth_imbalance?: number | null
+  bid_depth_amount?: number | null
+  ask_depth_amount?: number | null
+  seal_strength?: number | null
+  sell_wall_distance?: number | null
+  buy_wall_distance?: number | null
+  outside_inside_ratio?: number | null
+  active_net_volume?: number | null
+  speed_rate?: number | null
+  current_volume?: number | null
+  inside_volume?: number | null
+  outside_volume?: number | null
+  microstructure_score?: number | null
+  market_context?: MarketBreadthSnapshot & {
+    market_risk_level?: string
+    text?: string
+  }
+  market_status?: string
+  market_temperature?: string
+  market_risk_level?: string
+  market_up_count?: number | null
+  market_down_count?: number | null
+  market_up_down_ratio?: number | null
+  major_index_change_pct?: number | null
+  market_context_text?: string
+  active_signals: string[]
+  risk_flags: string[]
+  decision_score: number
+  reason_text: string
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  source: string
+  position?: ManualPosition | null
+  levels?: Record<string, PriceLevel[]>
+  bars_5s?: any[]
+  bars_1m?: any[]
+  bars_3m?: any[]
+  bars_5m?: any[]
+  bars_15m?: any[]
+  tick_buy_amount?: number | null
+  tick_sell_amount?: number | null
+  tick_net_amount?: number | null
+  large_buy_amount?: number | null
+  large_sell_amount?: number | null
+  aggressive_buy_ratio?: number | null
+  large_order_count?: number | null
+  tick_sample_count?: number | null
+}
+
+export interface DecisionTimelineEvent {
+  kind: 'alert' | 'journal'
+  ts: number
+  symbol: string
+  title: string
+  message?: string | null
+  source?: string
+  type?: string
+  action?: string
+  status?: DecisionStatus
+  side?: string | null
+  price?: number | null
+  severity?: string
+  signals?: string[]
+}
+
+export interface DecisionItem {
+  id: string
+  trade_date: string
+  symbol: string
+  name?: string | null
+  side: DecisionSide
+  priority: number
+  status: DecisionStatus
+  source_tags: string[]
+  latest_price?: number | null
+  change_pct?: number | null
+  amount?: number | null
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  reasons: string[]
+  signals: string[]
+  risk_flags: string[]
+  position?: ManualPosition | null
+  risk?: Record<string, any> | null
+  last_event_ts?: number | null
+  signal_frame?: SignalFrame | null
+  alert_count: number
+  timeline?: DecisionTimelineEvent[]
+}
+
+export interface QuoteTickQuality {
+  source: string
+  source_latency_ms?: number | null
+  ingest_lag_ms?: number | null
+  symbol_count: number
+  missing_symbols: string[]
+  stale_symbols: string[]
+  duplicate_count?: number
+  quote_freshness: 'live' | 'stale' | 'snapshot' | 'unknown'
+  checked_at?: number
+}
+
+export interface MarketBreadthSnapshot {
+  source: string
+  status?: string
+  error?: string
+  event_ts?: number | null
+  ingest_ts?: number | null
+  up_count?: number | null
+  down_count?: number | null
+  flat_count?: number | null
+  total_count?: number | null
+  up_down_ratio?: number | null
+  market_temperature?: string
+  major_index_change_pct?: number | null
+  major_indices?: Array<{
+    symbol: string
+    name?: string | null
+    last_price?: number | null
+    change_pct?: number | null
+    trend_15m?: string | null
+  }>
+}
+
+export interface DecisionQueueResponse {
+  trade_date: string
+  items: DecisionItem[]
+  total: number
+  pending: number
+  done: number
+  quality: QuoteTickQuality
+}
+
+export interface DecisionSummaryResponse {
+  trade_date: string
+  total: number
+  pending: number
+  done: number
+  quality: QuoteTickQuality
+}
+
+export interface DecisionActionPayload {
+  action: 'mark_wait' | 'mark_plan' | 'mark_manual_done' | 'mark_ignore' | 'note' | 'position_update'
+  side?: string | null
+  price?: number | null
+  note?: string
+}
+
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
 export function genRuleId(): string {
   const ts = Date.now().toString(36)
@@ -1340,6 +1999,7 @@ export interface LimitLadderStock {
   /** 最终状态为涨跌停且当天开高低收四价相同 */
   is_one_word?: boolean
 }
+
 
 export interface LimitLadderTier {
   boards: number
@@ -2022,6 +2682,33 @@ export interface DataSourceTestResult {
   preview: Record<string, unknown>[]
 }
 
+export interface DimensionMembersResult {
+  id: string
+  label: string
+  date: string | null
+  field: string
+  value: string
+  total: number
+  limit: number
+  rows: Record<string, any>[]
+}
+
+export interface DimensionIntradayPoint {
+  time: string
+  sector: number | null
+  market: number | null
+}
+
+export interface DimensionIntradayResult {
+  status: 'ok' | 'no_data' | 'empty'
+  reason?: string | null
+  date?: string | null
+  basis?: 'prev_close' | 'first_close' | 'mixed' | null
+  member_count?: number
+  members_with_minute?: number
+  points: DimensionIntradayPoint[]
+}
+
 /** 插件 Key 保存结果 (先探后存: 无效 Key 返回 ok=false 且不落盘) */
 export interface PluginKeyResult {
   ok: boolean
@@ -2047,6 +2734,7 @@ export interface DatasetConfig {
   freq_param?: string | null
   timeout?: number | null
 }
+
 
 export interface AuthConfig {
   type: string
@@ -2083,6 +2771,8 @@ export interface ApiTokenRecord {
 
 export interface Preferences {
   realtime_quotes_enabled: boolean
+  realtime_allowed?: boolean
+  indices_nav_pinned: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
@@ -2527,7 +3217,7 @@ export const api = {
     ),
   intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
   indexQuotes: (symbols?: string[]) =>
-    request<{ rows: IndexQuote[]; count: number }>(
+    request<{ rows: IndexQuote[]; count: number; source: 'realtime' | 'index_daily' }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
   updateRealtimeMonitorConfig: (cfg: {
@@ -2741,6 +3431,37 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
+  tradeTicks: (
+    symbol: string,
+    date?: string,
+    source: 'auto' | 'live' | 'mysql' = 'auto',
+    mode: 'recent' | 'all' = 'recent',
+    limit = 300,
+    order: 'asc' | 'desc' = 'desc',
+    cacheBust?: number,
+  ) => {
+    const params = new URLSearchParams({
+      symbol,
+      source,
+      mode,
+      limit: String(limit),
+      order,
+    })
+    if (date) params.set('date', date)
+    if (cacheBust != null) params.set('_', String(cacheBust))
+    return request<TradeTicksResponse>(`/api/trade-ticks?${params.toString()}`)
+  },
+  tradeTicksPersist: (symbol: string, date?: string, force = false) =>
+    request<{ status: string; symbol: string; date: string; message?: string; coalesced?: boolean }>('/api/trade-ticks/persist', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, date, force }),
+    }),
+  tradeTickPersistStatus: (symbol: string, date?: string) =>
+    request<TradeTickPersistStatus>(
+      `/api/trade-ticks/persist-status?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
+    ),
+  tradeTickMysqlStatus: () =>
+    request<{ configured: boolean; enabled: boolean; ok: boolean; table_ready?: boolean; database?: string; message?: string }>('/api/trade-ticks/mysql/status'),
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
       symbol: string
@@ -2779,7 +3500,7 @@ export const api = {
   syncIndexDaily: (days = 365) =>
     request<{ status: string; index_count: number; rows_written: number }>(
       `/api/index/sync_daily?days=${days}`,
-      { method: 'POST' },
+      { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS },
     ),
   syncSymbol: (symbol: string, days = 250) =>
     request<{ symbol: string; rows_written: number }>(
@@ -2791,10 +3512,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
     }),
-  syncMinuteSingle: (symbol: string, days?: number) =>
+  syncMinuteSingle: (symbol: string, days?: number, date?: string) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
-      body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
+      body: JSON.stringify({
+        symbol,
+        ...(days != null ? { days } : {}),
+        ...(date ? { date } : {}),
+      }),
     }),
   clearMinute: () =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
@@ -2955,22 +3680,137 @@ export const api = {
     request<ScreenerRunAllSummary>(
       '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true }) },
     ),
-  screenerCachedSummary: () =>
-    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
-  screenerCachedResult: (strategyId: string, extColumns?: string) =>
-    request<ScreenerCachedResult>(
-      extColumns
-        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
-        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
-    ),
   screenerCached: (extColumns?: string) =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
       extColumns
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
     ),
-  marketSnapshot: () =>
-    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
+  screenerCachedSummary: () =>
+    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
+
+  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+    request<ScreenerCachedResult>(
+      extColumns
+        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
+        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
+    ),
+  screenerAuctionConfirmation: (
+    asOf?: string,
+    tradeDate?: string,
+    strategyIds?: string[],
+    extColumns?: string,
+    assetType: 'stock' | 'etf' = 'stock',
+  ) =>
+    request<ScreenerAuctionConfirmationResponse>('/api/screener/auction-confirmation', {
+      method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      body: JSON.stringify({
+        as_of: asOf ?? null,
+        trade_date: tradeDate ?? null,
+        strategy_ids: strategyIds ?? null,
+        ext_columns: extColumns || null,
+        asset_type: assetType,
+      }),
+    }),
+  screenerPreselect: (
+    asOf?: string,
+    tradeDate?: string,
+    strategyIds?: string[],
+    limitPerStrategy = 5,
+    extColumns?: string,
+    assetType: 'stock' | 'etf' = 'stock',
+  ) =>
+    request<ScreenerPreselectResponse>('/api/screener/preselect', {
+      method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      body: JSON.stringify({
+        as_of: asOf ?? null,
+        trade_date: tradeDate ?? null,
+        strategy_ids: strategyIds ?? null,
+        limit_per_strategy: limitPerStrategy,
+        ext_columns: extColumns || null,
+        asset_type: assetType,
+      }),
+    }),
+  screenerFocusVersions: (
+    strategyId = 'custom_dual_edge_focus',
+    asOf?: string,
+    preselectLimit = 5,
+    extColumns?: string,
+  ) => {
+    const params = new URLSearchParams()
+    if (strategyId) params.append('strategy_id', strategyId)
+    if (asOf) params.append('as_of', asOf)
+    if (preselectLimit) params.append('preselect_limit', String(preselectLimit))
+    if (extColumns) params.append('ext_columns', extColumns)
+    return request<FocusVersionsResponse>(`/api/screener/focus-versions?${params.toString()}`, {
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    })
+  },
+  auctionReplay: (opts: {
+    asOf?: string | null
+    tradeDate?: string | null
+    strategyIds?: string[]
+    asOfTs?: number | null
+    mode?: 'cache_replay' | 'recompute'
+    includeFrames?: boolean
+    includeCandidates?: boolean
+    maxFrames?: number
+    assetType?: 'stock' | 'etf'
+  }) =>
+    request<AuctionReplayResponse>('/api/replay/auction', {
+      method: 'POST',
+      body: JSON.stringify({
+        as_of: opts.asOf ?? null,
+        trade_date: opts.tradeDate ?? null,
+        strategy_ids: opts.strategyIds ?? null,
+        as_of_ts: opts.asOfTs ?? null,
+        mode: opts.mode ?? 'cache_replay',
+        include_frames: opts.includeFrames ?? false,
+        include_candidates: opts.includeCandidates ?? true,
+        max_frames: opts.maxFrames ?? 1,
+        asset_type: opts.assetType ?? 'stock',
+        timeframe: '1d',
+      }),
+    }),
+
+  marketDates: (limit = 120) =>
+    request<MarketDatesResponse>(`/api/screener/market-dates?limit=${limit}`),
+
+  marketSnapshot: (opts?: { asOf?: string | null; asOfTs?: number | null }) => {
+    const params = new URLSearchParams()
+    if (opts?.asOf) params.set('as_of', opts.asOf)
+    if (opts?.asOfTs != null) params.set('as_of_ts', String(opts.asOfTs))
+    const suffix = params.toString()
+    return request<MarketSnapshotResponse>(`/api/screener/market-snapshot${suffix ? `?${suffix}` : ''}`)
+  },
+
+  marketIntradayTimeline: (opts?: { asOf?: string | null; stepSeconds?: number }) => {
+    const params = new URLSearchParams()
+    if (opts?.asOf) params.set('as_of', opts.asOf)
+    if (opts?.stepSeconds) params.set('step_seconds', String(opts.stepSeconds))
+    const suffix = params.toString()
+    return request<MarketIntradayTimelineResponse>(`/api/screener/market-intraday-timeline${suffix ? `?${suffix}` : ''}`)
+  },
+  sectorFlowSeries: (opts: {
+    kind: 'concept' | 'industry'
+    metric: 'strength' | 'main_flow'
+    date?: string | null
+    stepSeconds?: number
+    limit?: number
+    level?: number | null
+  }) => {
+    const params = new URLSearchParams({
+      kind: opts.kind,
+      metric: opts.metric,
+      step_seconds: String(opts.stepSeconds ?? 60),
+      limit: String(opts.limit ?? 32),
+    })
+    if (opts.date) params.set('date', opts.date)
+    if (opts.level != null) params.set('level', String(opts.level))
+    return request<SectorFlowSeriesResponse>(`/api/sector-flow/series?${params.toString()}`)
+  },
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
@@ -3271,7 +4111,7 @@ export const api = {
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
     entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
+    exit_fill?: 'close_t' | 'open_t+1' | null
     fees_pct?: number
     commission_pct?: number
     stamp_tax_pct?: number
@@ -3304,6 +4144,15 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  focusReadiness: (asOf?: string) =>
+    request<FocusReadinessResponse>(
+      `/api/data/focus-readiness${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`,
+    ),
+  fastReconstructToday: (asOf?: string) =>
+    request<FastReconstructResponse>(
+      `/api/data/fast-reconstruct-today${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`,
+      { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS },
+    ),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -3343,6 +4192,13 @@ export const api = {
   extDataList: () =>
     request<{ items: ExtDataConfig[] }>('/api/ext-data'),
 
+  dimensionMembers: (id: string, opts: { field: string; value: string; date?: string; limit?: number }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    if (opts.limit) qs.set('limit', String(opts.limit))
+    return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
+  },
+
   extDataRows: (id: string, opts?: { date?: string; limit?: number; columns?: string[] }) => {
     const qs = new URLSearchParams()
     if (opts?.date) qs.set('date', opts.date)
@@ -3350,13 +4206,6 @@ export const api = {
     if (opts?.columns?.length) qs.set('columns', opts.columns.join(','))
     const suffix = qs.toString()
     return request<ExtDataRowsResult>(`/api/ext-data/${encodeURIComponent(id)}/rows${suffix ? `?${suffix}` : ''}`)
-  },
-
-  dimensionMembers: (id: string, opts: { field: string; value: string; date?: string; limit?: number }) => {
-    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
-    if (opts.date) qs.set('date', opts.date)
-    if (opts.limit) qs.set('limit', String(opts.limit))
-    return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
   },
 
   // ===== 板块切换 (盘中轮动) =====
@@ -3378,7 +4227,6 @@ export const api = {
     if (opts.date) qs.set('date', opts.date)
     return request<DimensionIntradayResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-intraday?${qs.toString()}`)
   },
-
   analysisMenus: () =>
     request<{ items: AnalysisMenu[] }>('/api/analysis-menus'),
 
@@ -3570,12 +4418,12 @@ export const api = {
       `/api/financials/cash-flow${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
+  /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
   financialShares: (symbol?: string) =>
     request<{ data: FinancialSharesRecord[] }>(
       `/api/financials/shares${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
-  /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
   financialSync: (table: string) =>
     request<{ status: string; synced: { started: boolean; reason?: string } }>(
       `/api/financials/sync/${table}`, { method: 'POST' },
@@ -4086,6 +4934,159 @@ export const api = {
   alertSeed: (count = 12, recent = true) =>
     request<{ ok: boolean; generated: number }>(`/api/alerts/seed?count=${count}&recent=${recent}`, { method: 'POST' }),
 
+  // ===== Decision Desk =====
+  decisionQueue: (params?: { date?: string; status?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.date) qs.set('date', params.date)
+    if (params?.status) qs.set('status', params.status)
+    const s = qs.toString()
+    return request<DecisionQueueResponse>(`/api/decision/queue${s ? `?${s}` : ''}`)
+  },
+
+  decisionSummary: (params?: { date?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.date) qs.set('date', params.date)
+    const s = qs.toString()
+    return request<DecisionSummaryResponse>(`/api/decision/summary${s ? `?${s}` : ''}`)
+  },
+
+  decisionItem: (symbol: string, date?: string) => {
+    const qs = new URLSearchParams()
+    if (date) qs.set('date', date)
+    const s = qs.toString()
+    return request<DecisionItem>(`/api/decision/items/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`)
+  },
+
+  decisionAction: (symbol: string, payload: DecisionActionPayload) =>
+    request<{ ok: boolean; event: DecisionTimelineEvent }>(
+      `/api/decision/items/${encodeURIComponent(symbol)}/action`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+
+  decisionTimeline: (symbol: string, date?: string) => {
+    const qs = new URLSearchParams()
+    if (date) qs.set('date', date)
+    const s = qs.toString()
+    return request<{ symbol: string; events: DecisionTimelineEvent[] }>(
+      `/api/decision/timeline/${encodeURIComponent(symbol)}${s ? `?${s}` : ''}`,
+    )
+  },
+
+  manualPositions: () =>
+    request<{ positions: ManualPosition[] }>('/api/manual-positions'),
+
+  strategyPurchaseMarks: () =>
+    request<{ marks: StrategyPurchaseMark[] }>('/api/strategy-purchase-marks'),
+
+  strategyPurchaseMarkSave: (mark: Omit<StrategyPurchaseMark, 'marked_at'>) =>
+    request<{ ok: boolean; mark: StrategyPurchaseMark }>('/api/strategy-purchase-marks', {
+      method: 'PUT',
+      body: JSON.stringify(mark),
+    }),
+
+  strategyPurchaseMarkDelete: (strategyId: string, symbol: string, signalDate: string) => {
+    const qs = new URLSearchParams({
+      strategy_id: strategyId,
+      symbol,
+      signal_date: signalDate,
+    })
+    return request<{ ok: boolean }>(`/api/strategy-purchase-marks?${qs.toString()}`, { method: 'DELETE' })
+  },
+
+  strategyHistory: (params?: {
+    strategyId?: string
+    symbol?: string
+    signalDate?: string
+    tradeDate?: string
+    eventType?: string
+    status?: string
+    days?: number
+    limit?: number
+  }) => {
+    const qs = new URLSearchParams()
+    if (params?.strategyId) qs.set('strategy_id', params.strategyId)
+    if (params?.symbol) qs.set('symbol', params.symbol)
+    if (params?.signalDate) qs.set('signal_date', params.signalDate)
+    if (params?.tradeDate) qs.set('trade_date', params.tradeDate)
+    if (params?.eventType) qs.set('event_type', params.eventType)
+    if (params?.status) qs.set('status', params.status)
+    if (params?.days) qs.set('days', String(params.days))
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<StrategyHistoryResponse>(`/api/strategy-history${suffix ? `?${suffix}` : ''}`)
+  },
+
+  strategyHistoryBackfill: (strategyIds?: string[], maxCycles = 5) =>
+    request<{ cycles: number; written: number }>('/api/strategy-history/backfill', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_ids: strategyIds ?? null, max_cycles: maxCycles, asset_type: 'stock' }),
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      quiet: true,
+    }),
+
+  marketBreadthLatest: () =>
+    request<MarketBreadthSnapshot>('/api/market-breadth/latest'),
+
+  manualPositionSave: (symbol: string, position: Partial<ManualPosition>) =>
+    request<{ ok: boolean; position: ManualPosition }>(
+      `/api/manual-positions/${encodeURIComponent(symbol)}`,
+      { method: 'PUT', body: JSON.stringify({ ...position, symbol }) },
+    ),
+
+  manualPositionDelete: (symbol: string) =>
+    request<{ ok: boolean }>(`/api/manual-positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
+
+  quoteTicksLatest: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<{ rows: any[]; count: number }>(`/api/quote-ticks/latest${qs}`)
+  },
+
+  quoteTicksBars: (symbol: string, params?: { freq?: string; date?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.freq) qs.set('freq', params.freq)
+    if (params?.date) qs.set('date', params.date)
+    qs.set('symbol', symbol)
+    return request<{ symbol: string; freq: string; rows: any[]; count: number }>(`/api/quote-ticks/bars?${qs}`)
+  },
+
+  quoteTicksQuality: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<QuoteTickQuality>(`/api/quote-ticks/quality${qs}`)
+  },
+
+  signalFrameLatest: (symbols?: string[]) => {
+    const qs = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''
+    return request<{ frames: SignalFrame[]; count: number }>(`/api/signal-frame/latest${qs}`)
+  },
+
+  signalFrameDetail: (symbol: string) =>
+    request<SignalFrame>(`/api/signal-frame/detail/${encodeURIComponent(symbol)}`),
+
+  alertOutcomes: (params?: { days?: number; strategy_id?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.days) qs.set('days', String(params.days))
+    if (params?.strategy_id) qs.set('strategy_id', params.strategy_id)
+    const s = qs.toString()
+    return request<{ outcomes: any[]; total: number }>(`/api/alert-outcomes${s ? `?${s}` : ''}`)
+  },
+
+  alertOutcomeSummary: (params?: { group_by?: string; days?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.group_by) qs.set('group_by', params.group_by)
+    if (params?.days) qs.set('days', String(params.days))
+    const s = qs.toString()
+    return request<{ group_by: string; items: any[]; total: number }>(`/api/alert-outcomes/summary${s ? `?${s}` : ''}`)
+  },
+
+  alertOutcomeTrack: () =>
+    request<{ ok: boolean; updated: number }>('/api/alert-outcomes/track', { method: 'POST' }),
+
+  intradayReplay: (payload: { date: string; symbols: string[]; start_time?: string; end_time?: string }) =>
+    request<any>('/api/replay/intraday', { method: 'POST', body: JSON.stringify(payload) }),
+
+  intradayReplayTask: (taskId: string) =>
+    request<any>(`/api/replay/intraday/${encodeURIComponent(taskId)}`),
+
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>
     request<{ configured: boolean; has_key: boolean; has_model: boolean; provider?: string }>('/api/strategies/ai/status'),
@@ -4287,11 +5288,53 @@ export interface DataStatus {
     total_size_mb: number
   }
   next_pipeline_run: string | null
+  next_minute_run: string | null
   next_instruments_run: string | null
   last_pipeline_run: string | null
   last_instruments_run: string | null
+  latest_strategy_date: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface FocusReadinessResponse {
+  as_of: string
+  health: 'healthy' | 'can_reconstruct' | 'degraded' | 'missing'
+  health_message: string
+  total_universe: number
+  can_fast_reconstruct: boolean
+  layers: {
+    instruments: { count: number; status: string }
+    quote_ticks: { status: string; count: number }
+    minute: { count: number; rows: number; pct: number; max_time?: string | null; status: string }
+    daily: { count: number; pct: number; status: string }
+    enriched: { count: number; fields: number; pct: number; status: string }
+  }
+  focus_stages: {
+    auction_0925: { status: string; label: string }
+    preview_1450: { status: string; total?: number; label: string }
+    close_1500: { status: string; count?: number; label: string }
+    final_1535: { status: string; final_total?: number; preselect_total?: number; label: string }
+  }
+  scheduler: {
+    next_pipeline_run: string | null
+    last_pipeline_run: string | null
+  }
+}
+
+export interface FastReconstructResponse {
+  ok: boolean
+  target_date: string
+  symbols_reconstructed: number
+  elapsed_seconds: number
+  focus_summary?: {
+    preview_total: number
+    final_total: number
+    preselect_total: number
+    confirmed_count: number
+    dropped_count: number
+    late_entrant_count: number
+  } | null
 }
 
 export interface EnrichedField {
@@ -4445,17 +5488,6 @@ export interface ExtDataRowsResult {
   total: number
   limit: number
   fields: ExtDataField[]
-  rows: Record<string, any>[]
-}
-
-export interface DimensionMembersResult {
-  id: string
-  label: string
-  date: string | null
-  field: string
-  value: string
-  total: number
-  limit: number
   rows: Record<string, any>[]
 }
 

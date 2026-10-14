@@ -18,6 +18,9 @@ const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.S
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
 const Factors = lazy(() => import('./pages/Factors').then(m => ({ default: m.Factors })))
 const Data = lazy(() => import('./pages/Data').then(m => ({ default: m.Data })))
+const Decision = lazy(() => import('./pages/Decision').then(m => ({ default: m.Decision })))
+const Trading = lazy(() => import('./pages/Trading').then(m => ({ default: m.Trading })))
+const SectorFlow = lazy(() => import('./pages/SectorFlow').then(m => ({ default: m.SectorFlow })))
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail').then(m => ({ default: m.AnalysisDetail })))
 const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Indices })))
@@ -132,12 +135,15 @@ export const router = createBrowserRouter([
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
       { path: 'analysis/:menuId', element: <AnalysisDetail /> },
+      { path: 'sector-flow', element: <SectorFlow /> },
       { path: 'watchlist', element: <Watchlist /> },
+      { path: 'decision', element: <Decision /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'factors', element: <Factors /> },
       { path: 'mining', element: <MiningRedirect /> },
       { path: 'data', element: <Data /> },
+      { path: 'trading', element: <Trading /> },
       { path: 'indices', element: <Indices /> },
     { path: 'regime', element: <Regime /> },
       { path: 'branding', element: <Branding /> },

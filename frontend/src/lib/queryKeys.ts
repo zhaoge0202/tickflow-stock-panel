@@ -46,8 +46,22 @@ export const QK = {
   screenerCachedSummary: ['screener-cached', 'summary'] as const,
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
+  screenerAuctionConfirmation: (asOf?: string, tradeDate?: string, strategyIds?: string, ext?: string) =>
+    ['screener-auction-confirmation', asOf ?? '', tradeDate ?? '', strategyIds ?? '', ext ?? ''] as const,
+  screenerPreselect: (asOf?: string, tradeDate?: string, strategyIds?: string, limitPerStrategy?: number, ext?: string) =>
+    ['screener-preselect', asOf ?? '', tradeDate ?? '', strategyIds ?? '', limitPerStrategy ?? 5, ext ?? ''] as const,
+  screenerAuctionReplay: (asOf?: string, tradeDate?: string, strategyIds?: string, asOfTs?: number | 'live', mode?: string) =>
+    ['screener-auction-replay', asOf ?? '', tradeDate ?? '', strategyIds ?? '', asOfTs ?? 'live', mode ?? 'cache_replay'] as const,
+  strategyHistory: (strategyId?: string, days: number = 180) =>
+    ['strategy-history', strategyId ?? '', days] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
-  marketSnapshot:       ['market-snapshot'] as const,
+  marketSnapshot:       (asOf?: string | null, asOfTs?: number | 'live' | null) =>
+                           ['market-snapshot', asOf ?? 'latest', asOfTs ?? 'latest'] as const,
+  marketDates:          (limit?: number) => ['market-dates', limit ?? 120] as const,
+  marketIntradayTimeline: (asOf?: string | null, stepSeconds?: number) =>
+                           ['market-intraday-timeline', asOf ?? 'today', stepSeconds ?? 60] as const,
+  sectorFlowSeries: (kind: 'concept' | 'industry', metric: 'strength' | 'main_flow', asOf?: string | null, stepSeconds?: number, level?: number | null) =>
+                           ['sector-flow-series', kind, metric, asOf ?? 'today', stepSeconds ?? 60, level ?? 'all'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
 
   // Backtest
@@ -66,6 +80,7 @@ export const QK = {
     ? ['strategy-link-options', assetType] as const
     : ['strategy-link-options'] as const,
   strategyDetail:       (id: string) => ['strategy-detail', id] as const,
+  strategyPurchaseMarks: ['strategy-purchase-marks'] as const,
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
@@ -86,6 +101,11 @@ export const QK = {
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
+  tradeTicks:           (symbol: string, date: string, source: string, mode: string, limit: number, order: string) =>
+                             ['trade-ticks', symbol, date, source, mode, limit, order] as const,
+  tradeTickPersistStatus: (symbol: string, date: string) =>
+                             ['trade-tick-persist-status', symbol, date] as const,
+  tradeTickMysqlStatus: ['trade-tick-mysql-status'] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
                              ['kline-minute-range', symbol, days] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
@@ -120,6 +140,17 @@ export const QK = {
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
+
+  // Decision Desk
+  decisionQueue:         (date?: string, status?: string) => ['decision', 'queue', date ?? 'today', status ?? 'all'] as const,
+  decisionSummary:       (date?: string) => ['decision', 'summary', date ?? 'today'] as const,
+  decisionItem:          (symbol: string, date?: string) => ['decision', 'item', symbol, date ?? 'today'] as const,
+  decisionTimeline:      (symbol: string, date?: string) => ['decision', 'timeline', symbol, date ?? 'today'] as const,
+  manualPositions:       ['manual-positions'] as const,
+  marketBreadth:         ['market-breadth'] as const,
+  quoteTickQuality:      (symbols?: string) => ['quote-tick-quality', symbols ?? 'all'] as const,
+  alertOutcomes:         (days?: number) => ['alert-outcomes', days ?? 7] as const,
+  intradayReplayTask:    (taskId: string) => ['replay', 'intraday', taskId] as const,
 
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,
@@ -165,4 +196,9 @@ export const SSE_INVALIDATE_PREFIXES = [
   // 概念/行业分析的全市场快照 (#419): 后端读最新日内缓存, 行情更新后需重取,
   // 否则停留页面时板块聚合数值一直停留旧值。仅两页打开时才实际发请求。
   'market-snapshot',
+  // 本地增量页面依赖行情推送重取 (决策台/异动/市场宽度/板块资金流)
+  'decision',
+  'abnormal',
+  'market-breadth',
+  'sector-flow',
 ] as const
