@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date as _date, timedelta as _td
 from pathlib import Path
 
 import polars as pl
@@ -22,7 +23,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import filter_halt_days, run_pipeline
-from app.market_time import cn_today
+from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now, cn_today
 from app.services import index_sync, instrument_sync, kline_sync
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -32,6 +33,7 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[..., None]
+_DAILY_BATCH_READY_TIME = DAILY_STRATEGY_READY_TIME
 
 
 def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> list[str]:
@@ -71,6 +73,31 @@ def _prune_partial_enriched_partitions(daily_dir: Path, enriched_dir: Path) -> l
             shutil.rmtree(part, ignore_errors=True)
             pruned.append(part.stem.split("=")[1])
     return pruned
+
+
+def _missing_active_enriched_symbols(data_dir: Path, target: _date) -> list[str]:
+    """返回目标日有真实成交日K但 enriched 缺失的股票。"""
+    daily_path = data_dir / "kline_daily" / f"date={target.isoformat()}" / "part.parquet"
+    enriched_path = data_dir / "kline_daily_enriched" / f"date={target.isoformat()}" / "part.parquet"
+    if not daily_path.exists() or not enriched_path.exists():
+        return []
+    try:
+        daily = pl.read_parquet(
+            daily_path,
+            columns=["symbol", "open", "high", "volume", "amount"],
+        )
+        enriched = pl.read_parquet(enriched_path, columns=["symbol"])
+        active = daily.filter(
+            (pl.col("open") > 0)
+            & (pl.col("high") > 0)
+            & ((pl.col("volume") > 0) | (pl.col("amount") > 0))
+        )
+        daily_symbols = set(active["symbol"].cast(pl.Utf8).to_list())
+        enriched_symbols = set(enriched["symbol"].cast(pl.Utf8).to_list())
+        return sorted(daily_symbols - enriched_symbols)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("enriched 覆盖检查失败(%s): %s", target, exc)
+        return []
 
 
 def _prune_stale_price_partitions(
@@ -138,6 +165,19 @@ def _invalidate(table: str | None = None) -> None:
     invalidate_data_cache(table)
 
 
+def _daily_batch_end_date(today: _date | None = None) -> _date:
+    """批量日K的安全结束日期。
+
+    盘中当天行情由 QuoteService 实时写入。15:30 前使用批量日K接口覆盖今天,
+    容易把数据源的非实时日K快照写成昨收口径,导致看板涨跌幅全 0。
+    """
+    now = cn_now()
+    today = today or cn_today()
+    if now.weekday() < 5 and now.date() == today and now.time() < _DAILY_BATCH_READY_TIME:
+        return today - _td(days=1)
+    return today
+
+
 def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
     """解析标的池 — 本地 instruments 维表 + 自选 (单一来源, 无池兜底)。
 
@@ -185,6 +225,8 @@ def run_now(
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
     override_start_date: _date | None = None,
+    *,
+    include_minute: bool = False,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
@@ -193,6 +235,8 @@ def run_now(
 
     override_start_date: 传入时强制走 batch 拉取分支,用该日期作为日K/除权/指数的
         拉取起点(到今天),用于「数据修正/补数据」场景。None 时走原有自动判定逻辑。
+    include_minute: 是否在本次任务中同步分钟 K。默认关闭，避免分钟 K 阻塞日线
+        enriched 和正式策略结果；分钟 K 由独立调度任务或分钟同步接口负责。
     """
     emit = on_progress or _noop
     skipped: list[str] = []
@@ -213,17 +257,17 @@ def run_now(
     emit("resolve_universe", 10, f"标的池规模:{len(universe)} 只")
 
     # Step 1: 日 K 同步
-    #   override_start_date 传入 → 强制 batch 拉取 [override_start_date ~ today] (数据修正)
+    #   override_start_date 传入 → 强制 batch 拉取 [override_start_date ~ safe_end] (数据修正)
     #   付费档 + 今天有数据 → 实时行情接口拉一次覆写（1请求全市场）
     #   有历史数据 → batch K-line API 补齐缺口
     #   无任何数据 → batch K-line API 拉首次 1 年
-    from datetime import date as _date
     from datetime import datetime as _dt
-    from datetime import timedelta as _td
+
     latest_daily = repo.latest_daily_date()
     # 管道「今天」必须是北京日期: 美西主机 15:35 北京时间仍是本地昨天,
     # date.today() 会把昨日日K当成已齐, 当日官方收盘价永远拉不进来。
     today = cn_today()
+    daily_batch_end = _daily_batch_end_date(today)
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
 
@@ -264,23 +308,27 @@ def run_now(
     elif override_start_date:
         # 数据修正: 强制用传入日期作起点 batch 拉取, 忽略实时行情覆写分支。
         start_date = override_start_date
-        daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] repair/override", start_date, today)
+        if start_date > daily_batch_end:
+            emit("sync_daily", 45, f"已跳过日K同步(盘中保护, 批量接口暂不覆盖 {today})")
+            logger.info("sync_daily: skipped repair/override, start=%s > safe_end=%s", start_date, daily_batch_end)
+        else:
+            daily_range_start = start_date
+            emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+            logger.info("sync_daily: [%s ~ %s] repair/override", start_date, daily_batch_end)
 
-        def _daily_chunk_progress(cur: int, tot: int) -> None:
-            emit("sync_daily", 12 + int(33 * cur / tot),
-                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-        written_daily = kline_sync.sync_and_persist_daily_batch(
-            universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
-            on_chunk_done=_daily_chunk_progress,
-        )
-        gap_days = (today - start_date).days
-        new_daily_days = gap_days
-        emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
-        logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
+            def _daily_chunk_progress(cur: int, tot: int) -> None:
+                emit("sync_daily", 12 + int(33 * cur / tot),
+                     f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+            written_daily = kline_sync.sync_and_persist_daily_batch(
+                universe, repo, capset,
+                start_date=_dt.combine(start_date, _dt.min.time()),
+                end_date=_dt.combine(daily_batch_end, _dt.min.time()),
+                on_chunk_done=_daily_chunk_progress,
+            )
+            gap_days = (daily_batch_end - start_date).days
+            new_daily_days = gap_days
+            emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
+            logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, daily_batch_end, gap_days)
     elif (
         today_exists
         and stale_day is None
@@ -299,35 +347,38 @@ def run_now(
         logger.info("sync_daily: [%s ~ %s] live quotes, %d symbols", today, today, written_daily)
     elif latest_daily or stale_day:
         # 有历史 → batch 补齐缺口。
-        # 也覆盖"今天已有数据但无实时行情权限(free/none)"的降级场景:
-        #   此时 start_date = latest_daily = today,batch 刷新当天日K。
-        # 完整性修复场景: start_date = min(本地最新日, 最早坏日) —
-        #   today_exists 时 latest_daily=今天, 不取 min 会漏掉坏日。
+        # 盘中 safe_end 会回退到昨天,避免 batch 日K 覆盖 QuoteService 写入的今天实时数据。
+        # 完整性修复场景: start_date = min(本地最新日, 最早坏日);
+        # today_exists 时如果不取 min, 会漏掉停机留下的坏分区。
         start_date = min(d for d in (latest_daily, stale_day) if d is not None)
-        daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] %s", start_date, today,
-                    "refresh today" if today_exists else "gap fill")
+        if start_date > daily_batch_end:
+            emit("sync_daily", 45, f"已跳过日K同步(盘中保护, 批量接口暂不覆盖 {today})")
+            logger.info("sync_daily: skipped, latest=%s > safe_end=%s", start_date, daily_batch_end)
+        else:
+            daily_range_start = start_date
+            emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+            logger.info("sync_daily: [%s ~ %s] %s", start_date, daily_batch_end,
+                        "repair safe end" if stale_day else ("refresh safe end" if today_exists else "gap fill"))
 
-        def _daily_chunk_progress(cur: int, tot: int) -> None:
-            emit("sync_daily", 12 + int(33 * cur / tot),
-                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-        written_daily = kline_sync.sync_and_persist_daily_batch(
-            universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
-            on_chunk_done=_daily_chunk_progress,
-        )
-        gap_days = (today - start_date).days
-        new_daily_days = gap_days
-        emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
-        logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
+            def _daily_chunk_progress(cur: int, tot: int) -> None:
+                emit("sync_daily", 12 + int(33 * cur / tot),
+                     f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+            written_daily = kline_sync.sync_and_persist_daily_batch(
+                universe, repo, capset,
+                start_date=_dt.combine(start_date, _dt.min.time()),
+                end_date=_dt.combine(daily_batch_end, _dt.min.time()),
+                on_chunk_done=_daily_chunk_progress,
+            )
+            gap_days = (daily_batch_end - start_date).days
+            new_daily_days = gap_days
+            emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
+            logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, daily_batch_end, gap_days)
     else:
         # 首次：无任何数据 → batch 拉 1 年
-        start_date = today - _td(days=365)
+        start_date = daily_batch_end - _td(days=365)
         daily_range_start = start_date
-        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
-        logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, today)
+        emit("sync_daily", 12, f"获取日K [{start_date} ~ {daily_batch_end}]…")
+        logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, daily_batch_end)
 
         def _daily_chunk_progress(cur: int, tot: int) -> None:
             emit("sync_daily", 12 + int(33 * cur / tot),
@@ -335,12 +386,12 @@ def run_now(
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
             start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            end_date=_dt.combine(daily_batch_end, _dt.min.time()),
             on_chunk_done=_daily_chunk_progress,
         )
         new_daily_days = 365
         emit("sync_daily", 45, "日K 完成")
-        logger.info("sync_daily: [%s ~ %s] done", start_date, today)
+        logger.info("sync_daily: [%s ~ %s] done", start_date, daily_batch_end)
     _invalidate("daily")
 
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
@@ -504,8 +555,71 @@ def run_now(
     else:
         written_enriched = 0
         logger.info("compute_enriched: skip (no new daily, no adj_factor changes)")
+
+    # 覆盖修复只针对有真实成交的日K。停牌/零成交记录保留在 daily 事实层，
+    # 但不进入 enriched，避免它们污染均线和策略截面。
+    coverage_repaired: list[str] = []
+    coverage_remaining: list[str] = []
+    latest_data_date = repo.latest_daily_date()
+    if latest_data_date is not None:
+        missing_active = _missing_active_enriched_symbols(
+            repo.store.data_dir,
+            latest_data_date,
+        )
+        if missing_active:
+            logger.warning(
+                "enriched 最新日覆盖缺口: %d 只有效成交标的, 尝试局部重算 (样例: %s)",
+                len(missing_active), missing_active[:10],
+            )
+            run_pipeline(
+                data_dir=repo.store.data_dir,
+                symbols=missing_active,
+                on_batch_done=_enriched_batch_progress,
+            )
+            coverage_repaired = missing_active
+            coverage_remaining = _missing_active_enriched_symbols(
+                repo.store.data_dir,
+                latest_data_date,
+            )
+            if coverage_remaining:
+                stage_errors.append(
+                    f"enriched coverage missing: {coverage_remaining[:10]}"
+                )
+
+    auction_result_summary: dict = {}
+    if latest_data_date is not None and latest_data_date.weekday() < 5:
+        try:
+            from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+
+            applied = apply_auction_result_fields_to_enriched(
+                repo.store.data_dir,
+                latest_data_date,
+            )
+            auction_result_summary.update({
+                "enriched_rows": int(applied.get("rows", 0)),
+                "enriched_populated": int(applied.get("populated", 0)),
+            })
+            if applied.get("error"):
+                stage_errors.append(f"auction result: {applied['error']}")
+            logger.info(
+                "auction_result: enriched %s/%s 行已附着",
+                applied.get("populated", 0), applied.get("rows", 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("竞价结果附着 enriched 失败: %s", e)
+            stage_errors.append(f"auction result: {e}")
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
+    # enriched 竞价字段可能刚刚补入磁盘; 清掉消费侧的历史窗口缓存,
+    # 避免策略/动态回放继续持有旧字段。
+    try:
+        from app.services.auction_replay import invalidate_dynamic_history_cache
+        from app.services.screener import ScreenerService
+
+        ScreenerService.clear_history_cache()
+        invalidate_dynamic_history_cache(repo.store.data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("清理竞价消费缓存失败: %s", exc)
 
     # Step 2.1: 数据充足性可见化 (#303) — 空库首跑/仅当日实时覆写 1 天的库,
     # 均线/动量/量比等指标暖机不足, 管道各 stage 都"成功"但策略会静默全 0。
@@ -632,35 +746,15 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
-    from app.services import preferences
-    minute_on = preferences.get_minute_sync_enabled()
-    minute_days = preferences.get_minute_sync_days()
     written_minute = 0
-    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        minute_start = today - _td(days=minute_days)
-        emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
-        logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
-        minute_symbols = _resolve_minute_symbols(capset, repo)
-        def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
-            emit("sync_minute", 90 + int(3 * cur / tot),
-                 f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
-                 stage_pct=int(100 * cur / tot), skip_log=True)
-        written_minute = kline_sync.sync_and_persist_minute(
-            minute_symbols, repo, capset, days=minute_days,
-            on_chunk_done=_minute_chunk_progress,
-        )
-        minute_dir = repo.store.data_dir / "kline_minute"
-        minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
-        emit("sync_minute", 93, f"分钟K完成,覆盖 {minute_cover_days} 天")
-        logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
-        _invalidate("minute")
+    # Step 2.5: 分钟 K 默认拆为独立任务，避免全市场分钟数据拖住日线结果。
+    if include_minute:
+        minute_result = run_minute_sync(repo, capset, on_progress=emit)
+        written_minute = int(minute_result.get("minute_rows") or 0)
+        skipped.extend(minute_result.get("skipped_stages") or [])
     else:
         skipped.append("sync_minute")
-        if minute_on:
-            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
-        else:
-            logger.info("sync_minute skipped: user disabled")
+        logger.info("sync_minute skipped: independent task")
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
@@ -783,6 +877,10 @@ def run_now(
         "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
+        "auction_result_symbols": int(auction_result_summary.get("enriched_populated", 0)),
+        "auction_result_missing": int(auction_result_summary.get("enriched_rows", 0)) - int(auction_result_summary.get("enriched_populated", 0)),
+        "enriched_coverage_repaired": len(coverage_repaired),
+        "enriched_coverage_remaining": len(coverage_remaining),
     }
 
     # 有阶段软失败: 进度协议已走完(done/100, 前端进度条正常收尾), 但数据可能陈旧,
@@ -938,6 +1036,58 @@ def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
     return _resolve_universe(capset, repo)
 
 
+def run_minute_sync(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    on_progress: ProgressCb | None = None,
+) -> dict:
+    """独立执行分钟 K 同步，不参与日线 enriched 计算。"""
+    from app.services import preferences
+
+    emit = on_progress or _noop
+    minute_on = preferences.get_minute_sync_enabled()
+    minute_days = preferences.get_minute_sync_days()
+    if not minute_on:
+        logger.info("sync_minute skipped: user disabled")
+        return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
+    if not capset.has(Cap.KLINE_MINUTE_BATCH):
+        logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
+        return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
+
+    today = cn_today()
+    minute_start = today - _td(days=minute_days)
+    emit("sync_minute", 5, f"获取分钟K [{minute_start} ~ {today}]…")
+    logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
+    minute_symbols = _resolve_minute_symbols(capset, repo)
+
+    def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+        emit(
+            "sync_minute",
+            5 + int(90 * cur / max(tot, 1)),
+            f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+            stage_pct=int(100 * cur / max(tot, 1)),
+            skip_log=True,
+        )
+
+    written = kline_sync.sync_and_persist_minute(
+        minute_symbols,
+        repo,
+        capset,
+        days=minute_days,
+        on_chunk_done=_minute_chunk_progress,
+    )
+    minute_dir = repo.store.data_dir / "kline_minute"
+    minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
+    emit("sync_minute", 95, f"分钟K完成,覆盖 {minute_cover_days} 天")
+    logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
+    _invalidate("minute")
+    return {
+        "minute_rows": written,
+        "universe_size": len(minute_symbols),
+        "minute_cover_days": minute_cover_days,
+    }
+
+
 def _refresh_instruments_view(repo: KlineRepository) -> None:
     """单独刷新 instruments 视图。"""
     d = repo.store.data_dir.as_posix()
@@ -977,7 +1127,7 @@ def _push_phase_change_alert(data_dir) -> None:
     logger.info("phase change alert: %s (severity=%s)", msg, severity)
 
 
-def _run_tracked(fn, job_label: str) -> bool:
+def _run_tracked(fn, job_label: str, *, long_running: bool = False) -> bool:
     """调度触发时包装 JobStore 跟踪，确保同步历史有记录。
 
     单飞: 若已有活跃(pending∨running)任务(手动同步中), 本次调度直接跳过, 不并发。
@@ -992,7 +1142,7 @@ def _run_tracked(fn, job_label: str) -> bool:
         try_acquire_run_slot,
     )
 
-    job_id, is_new = job_store.create()
+    job_id, is_new = job_store.create(long_running=long_running)
     if not is_new:
         logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
         return False
@@ -1033,6 +1183,20 @@ def _scheduled_pipeline_task(pipeline_fn) -> None:
         logger.info("scheduled mining result: %s", result)
     except Exception:
         logger.exception("scheduled mining enqueue failed; daily pipeline remains succeeded")
+
+    # 盘后自动预生成 Focus/双刃合策略三版本快照 (收盘正式版、14:50初选对比、次日预选池)
+    try:
+        from app.services.focus_versions import FOCUS_STRATEGY_IDS, build_focus_three_versions
+        app_state = _get_app_state()
+        engine = getattr(app_state, "strategy_engine", None)
+        active_repo = getattr(app_state, "repo", None)
+        if engine and active_repo:
+            for sid in FOCUS_STRATEGY_IDS:
+                if engine.has(sid):
+                    build_focus_three_versions(active_repo, engine, sid)
+            logger.info("scheduled focus three versions snapshot generated successfully")
+    except Exception as e:
+        logger.warning("scheduled focus three versions snapshot failed (soft): %s", e)
 
 
 # ================================================================
@@ -1322,12 +1486,45 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             repo.refresh_cache()
         return result
 
+    def _minute_then_refresh(on_progress=None):
+        # 分钟任务同样读取热更新后的能力集，并暂停实时写入，避免与分钟分区
+        # 的读改写并发。run_minute_sync 自身不触碰日线/enriched。
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        qs = getattr(app_state, "quote_service", None)
+        if qs:
+            with qs.paused():
+                return run_minute_sync(repo, capset_live, on_progress=on_progress)
+        return run_minute_sync(repo, capset_live, on_progress=on_progress)
+
+    def _scheduled_minute_task():
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        if not preferences.get_minute_sync_enabled() or not capset_live.has(Cap.KLINE_MINUTE_BATCH):
+            logger.info("scheduled minute_sync skipped: disabled or capability unavailable")
+            return
+        _run_tracked(_minute_then_refresh, "minute_sync", long_running=True)
+
     scheduler.add_job(
         lambda: _scheduled_pipeline_task(_pipeline_then_refresh),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),
         id="daily_pipeline",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
+    # 分钟 K 在日线任务启动后 30 分钟单独执行。日线任务只负责日K/enriched，
+    # 其 job 已可在日线完成后立即结束；分钟 K 另有长任务超时和进度记录。
+    minute_total = sched["hour"] * 60 + sched["minute"] + 30
+    minute_hour, minute_minute = divmod(minute_total, 60)
+    minute_hour %= 24
+    scheduler.add_job(
+        _scheduled_minute_task,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=minute_hour, minute=minute_minute,
+                            timezone="Asia/Shanghai"),
+        id="minute_pipeline",
         misfire_grace_time=3600,
         replace_existing=True,
     )
@@ -1347,6 +1544,49 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
                             timezone="Asia/Shanghai"),
         id="depth_finalize",
         misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
+    # 盘后: 清理过期 quote_ticks 分区 (默认保留 30 天; 更早日期可按需补回放帧)
+    def _cleanup_quote_ticks():
+        from app.services import quote_tick_store
+
+        result = quote_tick_store.cleanup_old_partitions(repo.store.data_dir)
+        removed = result.get("removed") or []
+        if removed:
+            logger.info(
+                "scheduled quote_ticks cleanup: removed=%d kept=%d",
+                len(removed),
+                len(result.get("kept") or []),
+            )
+        return result
+
+    scheduler.add_job(
+        _cleanup_quote_ticks,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Shanghai"),
+        id="quote_ticks_cleanup",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
+    # 盘中: 14:50:05 自动预生成 Focus 尾盘初选快照，供尾盘 10 分钟秒级查阅 (<5ms)
+    def _focus_preview_snapshot():
+        app_state = _get_app_state()
+        engine = getattr(app_state, "strategy_engine", None) if app_state else None
+        if engine and repo:
+            try:
+                from app.services.focus_versions import build_focus_three_versions
+                logger.info("自动触发 14:50 Focus 尾盘初选快照生成...")
+                build_focus_three_versions(repo, engine, "custom_dual_edge_focus", force_refresh=True)
+                logger.info("14:50 Focus 尾盘初选快照生成完毕")
+            except Exception as e:
+                logger.warning("自动生成 Focus 尾盘初选失败: %s", e)
+
+    scheduler.add_job(
+        _focus_preview_snapshot,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=14, minute=50, second=5, timezone="Asia/Shanghai"),
+        id="focus_preview_snapshot",
+        misfire_grace_time=600,
         replace_existing=True,
     )
 
@@ -1391,9 +1631,11 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
                     review_sched["hour"], review_sched["minute"])
 
     scheduler.start()
-    logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
-                inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
-                depth_sched["hour"], depth_sched["minute"])
+    logger.info(
+        "scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d, quote_ticks_cleanup@15:40 mon-fri",
+        inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
+        depth_sched["hour"], depth_sched["minute"],
+    )
     return scheduler
 
 

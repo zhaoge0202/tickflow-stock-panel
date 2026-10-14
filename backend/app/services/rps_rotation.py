@@ -49,8 +49,22 @@ def invalidate_cache() -> None:
 
 def _latest_enriched_date(repo) -> date | None:
     """取 enriched 缓存里的最新交易日(矩阵的右端=最新日期)。"""
-    cache = repo._enriched_history_cache  # noqa: SLF001 —— 缓存字段无公开 getter
+    cache = getattr(repo, "_enriched_history_cache", None)  # noqa: SLF001 —— 缓存字段无公开 getter
     if cache is None or cache.is_empty() or "date" not in cache.columns:
+        # 内存历史缓存冷(预热中/未重建)时退回仓库最新日期, 避免矩阵整体返回空
+        latest_getter = getattr(repo, "enriched_latest_date", None)
+        latest = latest_getter() if callable(latest_getter) else None
+        if latest is not None:
+            return latest
+        execute_one = getattr(repo, "execute_one", None)
+        if callable(execute_one):
+            try:
+                row = execute_one("SELECT max(date) FROM kline_enriched")
+                if row and row[0]:
+                    value = row[0]
+                    return value if isinstance(value, date) else date.fromisoformat(str(value))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("rps_rotation latest date lookup failed: %s", exc)
         return None
     latest = cache["date"].max()
     # 盘中实时缓存可能已进入新交易日, 而历史缓存还停在上次重建时
@@ -62,17 +76,39 @@ def _latest_enriched_date(repo) -> date | None:
 
 _PCT_COLS = ["symbol", "date", "change_pct"]
 
+# 窄读路径只取 close(按日期+列下推), 涨跌幅在 Polars 内即时计算
+_CLOSE_SCAN_COLS = ["symbol", "date", "close"]
+
+
+def _narrow_read(repo, start: date, end: date, columns: list[str]) -> pl.DataFrame | None:
+    """按列窄读区间 enriched; 读取器不提供该列(旧实现/测试替身)时返回 None。"""
+    try:
+        return repo.get_enriched_range(start, end, columns=columns)
+    except (pl.exceptions.ColumnNotFoundError, pl.exceptions.SchemaError) as exc:
+        logger.debug("rps_rotation range read without %s: %s", columns, exc)
+        return None
+
 
 def _change_pct_range(repo, start: date, end: date) -> pl.DataFrame | None:
     """区间内个股涨跌幅(小数制)。
 
-    交易时段实时 enriched 每个 tick 落盘都会换 generation, get_enriched_range
-    的按代校验因此在盘中几乎总返回 None。轮动只读涨跌幅, 校验失败时退回内存
-    历史缓存, 并用当日实时缓存覆盖今天的行(历史缓存里的今天是重建时的旧快照)。
+    ① 优先窄读 close 列, 在 Polars 内按 symbol 即时算涨跌幅(不依赖全量历史内存缓存);
+    ② 读取器不提供 close 列时退回直接读 change_pct 列;
+    ③ 两条读取路径都不可用(缓存预热中 / 盘中实时落盘换了 generation 导致按代校验失配)时,
+       退回内存历史缓存直接取 change_pct, 并用当日实时缓存覆盖今天的行
+       (历史缓存里的今天是上次重建时的旧快照)。
     """
-    df = repo.get_enriched_range(start, end, columns=_PCT_COLS)
-    if df is not None and not df.is_empty():
-        return df
+    df = _narrow_read(repo, start, end, _CLOSE_SCAN_COLS)
+    if df is not None and not df.is_empty() and set(_CLOSE_SCAN_COLS) <= set(df.columns):
+        return (
+            df.sort(["symbol", "date"])
+            .with_columns(pl.col("close").pct_change().over("symbol").alias("change_pct"))
+            .select(_PCT_COLS)
+        )
+
+    df = _narrow_read(repo, start, end, _PCT_COLS)
+    if df is not None and not df.is_empty() and set(_PCT_COLS) <= set(df.columns):
+        return df.select(_PCT_COLS)
 
     hist = repo._enriched_history_cache
     if hist is None or hist.is_empty() or not set(_PCT_COLS) <= set(hist.columns):
@@ -155,7 +191,7 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     """构建维度涨幅轮动矩阵(概念或行业)。
 
     Args:
-        repo: KlineRepository(含 _enriched_history_cache 内存历史)。
+        repo: KlineRepository。
         days: 取最近 N 个交易日, 范围 [7, 30], 默认 12。
         kind: "concept"(概念) 或 "industry"(行业), 决定维度映射来源。
         level: 行业层级(仅 kind=industry 有效, 1/2/3 级)。None 表示用原始全路径名。
@@ -194,7 +230,7 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
         logger.info("rps_rotation: no %s data (ext dimension not fetched yet)", kind)
         return {"dates": [], "columns": {}, "concept_count": 0}
 
-    # 2. 取最近 N 交易日的个股 change_pct(命中内存缓存)
+    # 2. 取最近 N 交易日的个股 change_pct(内存缓存 / Parquet 按列下推)
     start = latest - timedelta(days=days * 2 + 10)  # 日历天 ≈ 2/3 交易日, 多取余量
     df = _change_pct_range(repo, start, latest)
     if df is None or df.is_empty():
