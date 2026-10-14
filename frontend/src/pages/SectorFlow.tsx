@@ -539,7 +539,9 @@ export function SectorFlow() {
   })
 
   const fetchMutation = useMutation({
-    mutationFn: () => api.extDataPresetFetch(meta.presetId),
+    // 上游 v0.3.7 移除 /api/ext-data/presets/{id}/fetch, 内置预设改走通用拉取端点
+    // (与概念/行业分析扩展的 PresetFetchState 同一路径)。
+    mutationFn: () => api.extDataPullRun(meta.presetId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.extData })
       queryClient.invalidateQueries({ queryKey: QK.extDataRows(meta.presetId, selectedDate || undefined, PAGE_LIMIT) })

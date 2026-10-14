@@ -18,6 +18,7 @@ import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { fmtPrice, fmtIndexPct, fmtStockPct, pctClass, scoreColor as scoreColorValue, SectionTitle } from './shared'
+import { useSmartPollingInterval } from '@/lib/useQuoteStream'
 
 // 切股导航列表构建 (与列表展示行一致: StockList 只显示前 8)
 export function stockListNav(rows: MarketSnapshotRow[]): NavItem[] {
@@ -381,11 +382,15 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
   activeSymbol?: string
 }) {
   const navigate = useNavigate()
+  // 智能轮询: SSE 正常连接时由 strategy_alert 事件触发 invalidate, 保留 60s 兜底;
+  // 断开连接时退化为 15s 轮询兜底, 且后台标签页不拉取 (本地 fork 口径)。
+  const alertsPollingInterval = useSmartPollingInterval(15_000)
   const customNames = useCustomSignalNames()
   const alerts = useQuery({
     queryKey: ['alerts', ''],
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
-    refetchInterval: 10000,
+    refetchInterval: alertsPollingInterval,
+    refetchIntervalInBackground: false,
   })
   const events: AlertEvent[] = alerts.data?.alerts ?? []
   // 切股导航列表: 有 symbol 的触发记录

@@ -231,8 +231,10 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
       qc.invalidateQueries({ queryKey: ['kline', symbol] })
     } else {
       qc.invalidateQueries({ queryKey: ['kline-minute-range', symbol] })
-      qc.invalidateQueries({ queryKey: ['kline-minute', symbol!] })
     }
+    qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
+    qc.invalidateQueries({ queryKey: ['trade-ticks', symbol] })
+    qc.invalidateQueries({ queryKey: ['trade-tick-persist-status', symbol] })
   }
 
   const selectIntradayDays = (days: number) => {
