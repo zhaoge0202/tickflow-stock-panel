@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -1206,8 +1206,10 @@ class KlineRepository:
         """从 Parquet 读取有限历史窗口并计算最新递推状态。"""
         from app.indicators.pipeline import compute_indicators
 
+        # 多读一段自然日, 再由 _live_agg_window_start 按交易日计数定位窗口起点
+        # (长假前后 90 个自然日不足 60 个交易日, MA60/60 日窗口不满会整体为 None)
         lf = scan_enriched_parquet(self._enriched_glob).filter(
-            (pl.col("date") >= start_60d) & (pl.col("date") <= latest)
+            (pl.col("date") >= start_60d - timedelta(days=60)) & (pl.col("date") <= latest)
         )
 
         read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close", "volume",

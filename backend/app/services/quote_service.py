@@ -1543,7 +1543,9 @@ class QuoteService:
         # enriched 内部统一存百分数值(5 = 5%), 后续页面/筛选直接展示和比较。
         if "turnover_rate" in out.columns:
             out = out.with_columns((pl.col("turnover_rate").cast(pl.Float64, strict=False) * 100).alias("turnover_rate"))
-        return out.unique(subset=["symbol"], keep="last").sort("symbol")
+        # 同 symbol 去重保留最后一条 (轮询批次可能重复); 不排序: 调用方按 symbol
+        # join, 行序无依赖, 保留数据源原始顺序便于对账 (上游同口径)。
+        return out.unique(subset=["symbol"], keep="last", maintain_order=True)
 
     @staticmethod
     def _build_index_quotes(records: list[dict]) -> pl.DataFrame:
@@ -2441,7 +2443,10 @@ class QuoteService:
                     logger.warning("增量计算结果为空, 回退到全量计算")
                     use_incremental = False
 
-            if not use_incremental and not _background:
+            # 全量重建转后台是本地 single-flight 优化(股票全市场体量才值得);
+            # ETF/指数没有 live_agg, 每轮本就走同步全量回退, 不能被转后台吞掉
+            # (上游契约: 同一轮内完成 flush)。
+            if not use_incremental and not _background and asset_type == "stock":
                 self._schedule_full_enriched_rebuild(
                     daily_df,
                     quote_extra,
@@ -2485,13 +2490,20 @@ class QuoteService:
 
                 today_parts: list[pl.DataFrame] = []
                 hist_lf = scan_daily_parquet(daily_glob).filter(
-                    (pl.col("date") >= cutoff) & (pl.col("date") != today)
+                    # 多读一段自然日, 再按交易日计数确定窗口起点
+                    # (长假前后 90 个自然日不足 60 个交易日)
+                    (pl.col("date") >= cutoff - timedelta(days=60)) & (pl.col("date") != today)
                 )
                 hist_schema = set(hist_lf.collect_schema().names())
                 hist_cols = [c for c in ohlcv_cols if c in hist_schema]
                 if not hist_cols:
                     return
                 hist_lf = hist_lf.select(hist_cols)
+                # 交易日口径定位窗口起点: 窗口不满 60 个交易日时 rolling_mean(60)/
+                # shift(60) 会让 ETF/指数盘中 MA60、60 日极值、60 日动量为空。
+                hist_dates = hist_lf.select("date").unique().collect(engine="streaming")["date"]
+                window_start = _live_agg_window_start(hist_dates, today, cutoff)
+                hist_lf = hist_lf.filter(pl.col("date") >= window_start)
 
                 for offset in range(0, len(symbols), batch_size):
                     batch = symbols[offset:offset + batch_size]
