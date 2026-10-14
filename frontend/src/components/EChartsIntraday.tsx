@@ -42,6 +42,17 @@ function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
 
+function fullDayIndexFromAxisValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value)
+  }
+  if (typeof value === 'string') {
+    const idx = FULL_DAY_TIMES.indexOf(value)
+    return idx >= 0 ? idx : null
+  }
+  return null
+}
+
 /** 计算实际涨跌停价 (四舍五入到2位小数) 和实际涨跌停幅度 */
 function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   limitUp: number      // 涨停价 (四舍五入)
@@ -422,6 +433,8 @@ export function EChartsIntraday({
   const chartRef = useRef<ECharts | null>(null)
   const roRef = useRef<ResizeObserver | null>(null)
   const moRef = useRef<MutationObserver | null>(null)
+  const chartClickHandlerRef = useRef<((event: MouseEvent) => void) | null>(null)
+  const clickLockTimerRef = useRef<number | null>(null)
   const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
   const dataRef = useRef(data)
   dataRef.current = data
@@ -433,6 +446,8 @@ export function EChartsIntraday({
   onPriceDoubleClickRef.current = onPriceDoubleClick
   // 全日索引 → 数据数组索引 的映射 (ref 避免重建 chart)
   const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
+  const lockedInfoIdxRef = useRef<number | null>(null)
+  const infoIdxRef = useRef(data.length - 1)
 
   const [infoIdx, setInfoIdx] = useState(-1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
@@ -447,9 +462,30 @@ export function EChartsIntraday({
   const lineColor = lineIsFlat ? '#A1A1AA' : lineIsUp ? '#C74040' : '#2D9B65'
   const areaFill = lineIsFlat ? 'rgba(180,180,190,0.40)' : lineIsUp ? 'rgba(199,64,64,0.40)' : 'rgba(34,197,94,0.40)'
 
+  const updateInfoIdx = (next: number) => {
+    infoIdxRef.current = next
+    setInfoIdx(next)
+  }
+
   useEffect(() => {
+    // 换日: 清掉点击锁定的分钟, 回到「无选中」态 (-1 → 信息条显示分时汇总/日K)
+    lockedInfoIdxRef.current = null
     setInfoIdx(-1)
   }, [date])
+
+  // 数据更新: 被点击锁定的分钟索引越界时自动解锁, 避免跨日/截断后指向错位
+  useEffect(() => {
+    const lockedIdx = lockedInfoIdxRef.current
+    if (lockedIdx != null && lockedIdx >= data.length) {
+      lockedInfoIdxRef.current = null
+      updateInfoIdx(-1)
+    }
+  }, [data.length])
+
+  useEffect(() => {
+    const current = infoIdx >= 0 && infoIdx < data.length ? data[infoIdx] : null
+    onPriceHover?.(current?.close ?? null)
+  }, [data, infoIdx, onPriceHover])
 
   useEffect(() => {
     const el = containerRef.current
@@ -476,21 +512,21 @@ export function EChartsIntraday({
       roRef.current.observe(el)
 
       chart.on('updateAxisPointer', (event: any) => {
+        if (lockedInfoIdxRef.current != null) return
         const axesInfo = event.axesInfo
         if (!axesInfo) return
         for (const info of Object.values(axesInfo)) {
           if ((info as any)?.axisDim !== 'x') continue
           const val = (info as any)?.value
           if (val == null) continue
-          const fullDayIdx = typeof val === 'number' ? val : -1
-          if (fullDayIdx >= 0) {
+          const fullDayIdx = fullDayIndexFromAxisValue(val)
+          if (fullDayIdx != null && fullDayIdx >= 0) {
             const dataIdx = fullDayToDataIdx.current.get(fullDayIdx) ?? -1
-            setInfoIdx(dataIdx)
-            const d = dataRef.current
-            if (dataIdx >= 0 && dataIdx < d.length) {
-              onPriceHoverRef.current?.(d[dataIdx].close)
+            if (dataIdx >= 0) {
+              updateInfoIdx(dataIdx)
             } else {
-              onPriceHoverRef.current?.(null)
+              // 命中分钟空洞: 回落「无选中」(显示汇总); 不写 ref, 免得点击锁定位错乱
+              setInfoIdx(-1)
             }
             return
           }
@@ -498,11 +534,50 @@ export function EChartsIntraday({
       })
 
       chart.on('globalout', () => {
-        setInfoIdx(-1)
-        onPriceHoverRef.current?.(null)
+        // 点击锁定期间鼠标移出不移除选中
+        if (lockedInfoIdxRef.current != null) return
+        updateInfoIdx(-1)
       })
 
+      const handleChartClick = (event: MouseEvent) => {
+        if (clickLockTimerRef.current != null) {
+          window.clearTimeout(clickLockTimerRef.current)
+          clickLockTimerRef.current = null
+        }
+        const rect = el.getBoundingClientRect()
+        const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top]
+        clickLockTimerRef.current = window.setTimeout(() => {
+          clickLockTimerRef.current = null
+          if (lockedInfoIdxRef.current != null) {
+            lockedInfoIdxRef.current = null
+            updateInfoIdx(-1)
+            return
+          }
+
+          const inMainGrid = chart!.containPixel({ gridIndex: 0 }, point)
+          const inVolumeGrid = chart!.containPixel({ gridIndex: 1 }, point)
+          if (!inMainGrid && !inVolumeGrid) return
+
+          const converted = chart!.convertFromPixel({ xAxisIndex: inVolumeGrid ? 1 : 0 }, point)
+          const xValue = Array.isArray(converted) ? converted[0] : converted
+
+          const fullDayIdx = fullDayIndexFromAxisValue(xValue)
+          const dataIdx = fullDayIdx == null ? infoIdxRef.current : fullDayToDataIdx.current.get(fullDayIdx)
+          // dataIdx < 0 = 无选中 (未命中分钟), 不作为锁定目标
+          if (dataIdx == null || dataIdx < 0) return
+
+          lockedInfoIdxRef.current = dataIdx
+          updateInfoIdx(dataIdx)
+        }, 180)
+      }
+      chartClickHandlerRef.current = handleChartClick
+      el.addEventListener('click', handleChartClick)
+
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
+        if (clickLockTimerRef.current != null) {
+          window.clearTimeout(clickLockTimerRef.current)
+          clickLockTimerRef.current = null
+        }
         const pixel: [number, number] = [event.offsetX, event.offsetY]
         if (!chart!.containPixel({ gridIndex: 0 }, pixel)) return
         const coordinate = chart!.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, pixel)
@@ -538,6 +613,13 @@ export function EChartsIntraday({
 
   useEffect(() => {
     return () => {
+      if (clickLockTimerRef.current != null) {
+        window.clearTimeout(clickLockTimerRef.current)
+        clickLockTimerRef.current = null
+      }
+      if (containerRef.current && chartClickHandlerRef.current) {
+        containerRef.current.removeEventListener('click', chartClickHandlerRef.current)
+      }
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
       if (priceDoubleClickHandlerRef.current) {
@@ -549,6 +631,8 @@ export function EChartsIntraday({
       chartRef.current = null
       moRef.current = null
       roRef.current = null
+      chartClickHandlerRef.current = null
+      priceDoubleClickHandlerRef.current = null
     }
   }, [])
 
