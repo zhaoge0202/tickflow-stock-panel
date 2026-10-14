@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal", "volume_delta", "date"}
+RULE_TYPES = {
+    "strategy", "signal", "price", "market", "level", "ladder", "sector", "abnormal", "date",
+    "volume_delta",
+}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
@@ -355,7 +358,7 @@ def normalize(rule: dict) -> dict:
         r.setdefault("score_min", None)
         r.setdefault("score_max", None)
         if r.get("notify_events") is None:
-            # 兼容统一监控上线后的旧规则: 当时实际行为是同时通知进入和移出。
+            # 兼容旧规则: 未显式配置时保留历史的选股池通知语义。
             r["notify_events"] = ["pool_entry", "pool_exit"]
         else:
             r["notify_events"] = list(dict.fromkeys(r["notify_events"]))
@@ -405,7 +408,7 @@ def normalize(rule: dict) -> dict:
         r["webhook_channels"] = [
             c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email")
         ]
-    r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    r.setdefault("created_at", datetime.now(UTC).isoformat())
     return r
 
 
@@ -455,8 +458,8 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
                 "type": "strategy",
                 "scope": "all",
                 "strategy_id": sid,
-                "direction": "entry",
-                "notify_events": ["pool_entry", "pool_exit"],
+                "direction": "both",
+                "notify_events": ["buy_signal", "sell_signal"],
                 "conditions": [],
                 "cooldown_seconds": 3600,
                 "enabled": True,
@@ -467,7 +470,12 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
             rule["strategy_id"] = sid
             rule["name"] = f"策略监控 · {name}"
             rule.setdefault("scope", "all")
-            rule.setdefault("direction", "entry")
+            rule["notify_events"] = list(dict.fromkeys([
+                "buy_signal",
+                "sell_signal",
+                *(rule.get("notify_events") or []),
+            ]))
+            rule["direction"] = "both"
         save_one(data_dir, rule)
         touched.append(rule)
 

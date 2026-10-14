@@ -20,13 +20,24 @@ def health() -> dict:
     }
 
 
+def _business_capabilities(request: Request) -> dict:
+    depth_svc = getattr(request.app.state, "depth_service", None)
+    if depth_svc:
+        sealed_depth = depth_svc.capability_status()
+    else:
+        from app.services.depth_service import DepthService
+        sealed_depth = DepthService().capability_status()
+    return {"sealed_depth": sealed_depth}
+
+
 @router.get("/api/capabilities")
-def capabilities() -> dict:
+def capabilities(request: Request) -> dict:
     """前端用来决定哪些功能可用、哪些灰显。"""
     capset = detect_capabilities()
     return {
         "label": tier_label(),
         "capabilities": capset.to_dict(),
+        "business_capabilities": _business_capabilities(request),
     }
 
 
@@ -42,4 +53,5 @@ def redetect(request: Request) -> dict:
     return {
         "label": tier_label(),
         "capabilities": capset.to_dict(),
+        "business_capabilities": _business_capabilities(request),
     }
