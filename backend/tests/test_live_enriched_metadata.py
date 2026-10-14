@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -61,7 +61,11 @@ def test_live_enriched_cache_keeps_instrument_metadata_without_persisting_it(tmp
     assert "float_shares" not in persisted.columns
 
 
-def test_history_strategy_monitor_keeps_live_row_with_exclude_st_enabled(tmp_path):
+def test_history_strategy_monitor_keeps_live_row_with_exclude_st_enabled(tmp_path, monkeypatch):
+    # 监控侧 as_of 用 cn_today(); 测试数据固定在 2026-07-20, 必须冻结“今天”
+    # 否则跨日跑会因 as_of 与 current.date 不一致把结果滤成 0。
+    monkeypatch.setattr("app.strategy.monitor.cn_today", lambda: date(2026, 7, 20))
+
     strategy_dir = tmp_path / "strategies"
     strategy_dir.mkdir()
     (strategy_dir / "history_strategy.py").write_text(
@@ -80,12 +84,14 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
         encoding="utf-8",
     )
     repo = _repo(tmp_path / "data")
+    target_date = date(2026, 7, 20)
     live = _live_row("600000.SH", 10.0).with_columns(
+        pl.lit(target_date).alias("date"),
         pl.lit(30_000_000.0).alias("amount")
     )
     repo.flush_live_enriched_asset("stock", live)
     current, _ = repo.get_enriched_latest()
-    history = current.with_columns(pl.lit(cn_today() - timedelta(days=3)).alias("date"))
+    history = current.with_columns(pl.lit(target_date - timedelta(days=3)).alias("date"))
 
     monitor = MonitorRuleEngine()
     monitor.set_strategy_engine(StrategyEngine([Path(strategy_dir)]))

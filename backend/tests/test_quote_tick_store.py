@@ -1,0 +1,941 @@
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import polars as pl
+
+from app.services import quote_tick_store
+from app.services.quote_service import QuoteService
+
+CN = ZoneInfo("Asia/Shanghai")
+TRADE_DATE = date(2026, 7, 8)
+
+
+def _ms(hour: int, minute: int, second: int = 0) -> int:
+    return int(datetime(2026, 7, 8, hour, minute, second, tzinfo=CN).timestamp() * 1000)
+
+
+def _ms_on(day: int, hour: int, minute: int, second: int = 0) -> int:
+    return int(datetime(2026, 7, day, hour, minute, second, tzinfo=CN).timestamp() * 1000)
+
+
+def _clear_hot_rows(data_dir) -> None:
+    key = str(data_dir)
+    with quote_tick_store._lock:
+        quote_tick_store._latest.pop(key, None)
+        quote_tick_store._series.pop(key, None)
+        quote_tick_store._buffers.pop(key, None)
+
+
+def test_quote_tick_store_appends_latest_bars_and_quality(tmp_path):
+    rows = [
+        {
+            "symbol": "002491.SZ",
+            "name": "通鼎互联",
+            "last_price": 10.0,
+            "prev_close": 9.8,
+            "open": 9.9,
+            "high": 10.1,
+            "low": 9.8,
+            "volume": 100,
+            "amount": 100_000,
+            "timestamp": _ms(9, 30, 0),
+        },
+        {
+            "symbol": "002491.SZ",
+            "name": "通鼎互联",
+            "last_price": 10.2,
+            "prev_close": 9.8,
+            "open": 9.9,
+            "high": 10.2,
+            "low": 9.8,
+            "volume": 130,
+            "amount": 132_000,
+            "timestamp": _ms(9, 30, 5),
+            "bid1_price": 10.19,
+            "bid1_vol": 200,
+            "bid2_price": 10.18,
+            "bid2_vol": 150,
+            "ask1_price": 10.21,
+            "ask1_vol": 80,
+            "ask2_price": 10.22,
+            "ask2_vol": 60,
+            "spread_pct": 0.00196,
+            "bid_depth_amount": 356_500,
+            "ask_depth_amount": 143_000,
+            "depth_imbalance": 0.427,
+            "inside_volume": 300,
+            "outside_volume": 600,
+            "outside_inside_ratio": 2.0,
+            "active_net_volume": 300,
+            "current_volume": 88,
+            "speed_rate": 0.8,
+        },
+    ]
+
+    summary = quote_tick_store.append_many(tmp_path, rows, source="tdxapi", force_flush=True)
+    latest = quote_tick_store.latest(tmp_path, ["002491.SZ"], target_date=TRADE_DATE)
+    bars = quote_tick_store.bars(tmp_path, "002491.SZ", freq="5s", target_date=TRADE_DATE)
+    quality = quote_tick_store.quality(tmp_path, ["002491.SZ", "300750.SZ"], target_date=TRADE_DATE)
+
+    assert summary["source"] == "tdxapi"
+    assert latest[0]["symbol"] == "002491.SZ"
+    assert latest[0]["last_price"] == 10.2
+    assert latest[0]["source"] == "tdxapi"
+    assert latest[0]["bid1"] == 10.19
+    assert latest[0]["bid1_price"] == 10.19
+    assert latest[0]["ask2_price"] == 10.22
+    assert latest[0]["depth_imbalance"] == 0.427
+    assert latest[0]["outside_inside_ratio"] == 2.0
+    raw = json.loads(latest[0]["raw"]) if latest[0].get("raw") else {}
+    assert "bid1_price" not in raw
+    assert "outside_inside_ratio" not in raw
+    assert bars
+    assert bars[-1]["close"] == 10.2
+    assert quality["source"] == "tdxapi"
+    assert quality["missing_symbols"] == ["300750.SZ"]
+
+
+def test_quality_empty_symbols_uses_cached_snapshot(monkeypatch, tmp_path):
+    key = str(tmp_path)
+    monkeypatch.setitem(quote_tick_store._quality, key, {
+        "source": "tdxapi",
+        "symbol_count": 12,
+        "quote_freshness": "live",
+    })
+
+    def fail_latest(*args, **kwargs):
+        raise AssertionError("空候选集不应扫描全市场 latest")
+
+    monkeypatch.setattr(quote_tick_store, "latest", fail_latest)
+
+    quality = quote_tick_store.quality(tmp_path, [], target_date=TRADE_DATE)
+
+    assert quality["source"] == "tdxapi"
+    assert quality["symbol_count"] == 12
+    assert quality["quote_freshness"] == "live"
+    assert quality["missing_symbols"] == []
+    assert quality["stale_symbols"] == []
+
+
+def test_auction_result_fields_ignore_reference_and_use_real_trade(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 0),
+            "ingest_ts": _ms(9, 25, 1),
+            "last_price": 8.30,
+            "volume": 637.0,
+            "amount": None,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "ingest_ts": _ms(9, 25, 3),
+            "last_price": 8.26,
+            "volume": 1102.0,
+            "amount": 910372.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 26, 0),
+            "ingest_ts": _ms(9, 26, 1),
+            "last_price": 8.27,
+            "volume": 1200.0,
+            "amount": 992400.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"]
+    )
+
+    assert result.height == 1
+    row = result.row(0, named=True)
+    assert row["auction_result_price"] == 8.26
+    assert row["auction_result_volume"] == 1102.0
+    assert row["auction_result_amount"] == 910372.0
+
+
+def test_auction_result_cache_invalidates_after_new_tick(tmp_path):
+    quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE,
+    )
+    quote_tick_store.append_many(
+        tmp_path,
+        [{
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "last_price": 8.26,
+            "volume": 1102.0,
+            "amount": 910372.0,
+            "price_type": "trade",
+            "market_phase": "open_confirm",
+        }],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    result = quote_tick_store.auction_result_fields(
+        tmp_path, target_date=TRADE_DATE,
+    )
+
+    assert result.height == 1
+    assert result["auction_result_price"].item() == 8.26
+
+
+def test_auction_tick_features_aggregate_auction_snapshots(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 20, 0),
+            "ingest_ts": _ms(9, 20, 1),
+            "last_price": 8.00,
+            "volume": 100.0,
+            "price_type": "trade",
+            "market_phase": None,
+            "auction_unmatched_ratio": 0.6,
+            "auction_pressure_score": -0.1,
+            "depth_imbalance": -0.2,
+            "spread_pct": 0.01,
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 24, 0),
+            "ingest_ts": _ms(9, 24, 1),
+            "last_price": 8.16,
+            "volume": 160.0,
+            "price_type": "trade",
+            "market_phase": None,
+            "auction_unmatched_ratio": 0.3,
+            "auction_pressure_score": 0.25,
+            "depth_imbalance": 0.4,
+            "spread_pct": 0.005,
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 24, 2),
+            "ingest_ts": _ms(9, 24, 3),
+            "last_price": 8.30,
+            "volume": 200.0,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.auction_tick_features(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"]
+    )
+
+    assert result.height == 1
+    row = result.row(0, named=True)
+    assert row["auction_tick_count"] == 3.0
+    assert row["auction_tick_seconds"] == 242.0
+    assert row["auction_trade_price_change"] == 8.30 / 8.0 - 1.0
+    assert row["auction_trade_price_range"] == 8.30 / 8.0 - 1.0
+    assert row["auction_trade_volume_delta"] == 100.0
+    assert row["auction_trade_volume_per_second"] == 100.0 / 242.0
+    assert row["auction_trade_pressure_score"] == 0.25
+    assert row["auction_trade_depth_imbalance"] == 0.4
+
+
+def test_apply_auction_result_uses_enriched_adjustment_ratio(tmp_path):
+    from app.indicators.pipeline import apply_auction_result_fields_to_enriched
+
+    target = TRADE_DATE
+    enriched_path = (
+        tmp_path / "kline_daily_enriched" / f"date={target.isoformat()}" / "part.parquet"
+    )
+    enriched_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600177.SH"],
+        "date": [target],
+        "open": [9.0],
+        "high": [9.5],
+        "low": [8.5],
+        "close": [9.0],
+        "raw_close": [10.0],
+        "raw_high": [10.5],
+        "raw_low": [8.5],
+        "volume": [1000.0],
+        "amount": [900000.0],
+    }).write_parquet(enriched_path)
+    quote_tick_store.append_many(
+        tmp_path,
+        [{
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 2),
+            "last_price": 8.0,
+            "volume": 100.0,
+            "amount": 80000.0,
+            "price_type": "trade",
+            "market_phase": "open_confirm",
+        }],
+        source="tdxapi",
+        force_flush=True,
+    )
+
+    result = apply_auction_result_fields_to_enriched(tmp_path, target)
+    saved = pl.read_parquet(enriched_path)
+
+    assert result["changed"] is True
+    assert saved["auction_result_price"].item() == 7.2
+    assert saved["auction_result_volume"].item() == 100.0
+
+
+def test_minute_bars_from_ticks_keeps_session_opening_buckets(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 25, 0),
+            "ingest_ts": _ms(9, 25, 1),
+            "last_price": 8.20,
+            "volume": 100.0,
+            "amount": 82000.0,
+            "price_type": "auction_reference",
+            "market_phase": "preopen_auction",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 30, 0),
+            "ingest_ts": _ms(9, 30, 1),
+            "last_price": 8.21,
+            "volume": 120.0,
+            "amount": 98520.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 31, 1),
+            "last_price": 8.22,
+            "volume": 150.0,
+            "amount": 123300.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(13, 0, 0),
+            "ingest_ts": _ms(13, 0, 1),
+            "last_price": 8.23,
+            "volume": 200.0,
+            "amount": 164600.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(13, 1, 0),
+            "ingest_ts": _ms(13, 1, 1),
+            "last_price": 8.24,
+            "volume": 260.0,
+            "amount": 197760.0,
+            "price_type": "trade",
+            "source": "tdxapi",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=True,
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 30),
+        datetime(2026, 7, 8, 9, 31),
+        datetime(2026, 7, 8, 13, 0),
+        datetime(2026, 7, 8, 13, 1),
+    ]
+    assert result["volume"].to_list() == [20.0, 30.0, 50.0, 60.0]
+
+
+def test_minute_bars_from_ticks_uses_older_snapshot_as_cumulative_baseline(
+    tmp_path, monkeypatch,
+):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    baseline = base / "baseline.parquet"
+    selected = base / "selected.parquet"
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 5),
+            "ingest_ts": _ms(9, 31, 6),
+            "last_price": 8.20,
+            "volume": 90.0,
+            "amount": 738000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(baseline)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 32, 5),
+            "ingest_ts": _ms(9, 32, 6),
+            "last_price": 8.21,
+            "volume": 100.0,
+            "amount": 821000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 33, 5),
+            "ingest_ts": _ms(9, 33, 6),
+            "last_price": 8.22,
+            "volume": 130.0,
+            "amount": 1068600.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(selected)
+
+    def fake_recent(_base, *, max_files):
+        return [selected] if max_files == 160 else [selected, baseline]
+
+    monkeypatch.setattr(quote_tick_store, "_recent_partition_paths", fake_recent)
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=False
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 32),
+        datetime(2026, 7, 8, 9, 33),
+    ]
+    assert result["volume"].to_list() == [10.0, 30.0]
+    assert result["amount"].to_list() == [83000.0, 247600.0]
+
+
+def test_minute_bars_from_ticks_aligns_stale_event_time_to_ingest_time(tmp_path):
+    base = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    base.mkdir(parents=True)
+    pl.DataFrame([
+        {
+            "symbol": "600177.SH",
+            # 两次快照的 TDX 事件时间相同，但实际由 09:45/09:46 轮次采到。
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 45, 1),
+            "last_price": 8.20,
+            "volume": 90.0,
+            "amount": 738000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+        {
+            "symbol": "600177.SH",
+            "event_ts": _ms(9, 31, 0),
+            "ingest_ts": _ms(9, 46, 1),
+            "last_price": 8.21,
+            "volume": 110.0,
+            "amount": 902000.0,
+            "source": "tdxapi",
+            "price_type": "trade",
+        },
+    ]).write_parquet(base / "part.parquet")
+
+    result = quote_tick_store.minute_bars_from_ticks(
+        tmp_path, target_date=TRADE_DATE, symbols=["600177.SH"], full=True
+    )
+
+    assert result["datetime"].to_list() == [
+        datetime(2026, 7, 8, 9, 45),
+        datetime(2026, 7, 8, 9, 46),
+    ]
+    assert result["volume"].to_list() == [90.0, 20.0]
+
+
+def test_latest_can_read_historical_date_without_duplicate_rows(tmp_path):
+    quote_tick_store.append_many(tmp_path, [
+        {"symbol": "002491.SZ", "last_price": 9.9, "timestamp": _ms_on(7, 14, 50)},
+        {"symbol": "002491.SZ", "last_price": 10.1, "timestamp": _ms_on(8, 9, 35)},
+    ], source="tdxapi", force_flush=True)
+
+    latest_7 = quote_tick_store.latest(tmp_path, ["002491.SZ"], target_date=datetime(2026, 7, 7, tzinfo=CN).date())
+    ticks_8 = quote_tick_store.read_ticks(tmp_path, target_date=datetime(2026, 7, 8, tzinfo=CN).date(), symbols=["002491.SZ"])
+
+    assert latest_7[0]["last_price"] == 9.9
+    assert [row["last_price"] for row in ticks_8] == [10.1]
+
+
+def test_latest_uses_mysql_hot_cache_when_memory_ring_is_empty(tmp_path, monkeypatch):
+    _clear_hot_rows(tmp_path)
+    monkeypatch.setattr(
+        quote_tick_store,
+        "_mysql_latest",
+        lambda target_date, symbols=None: [{
+            "symbol": "002491.SZ",
+            "trade_date": target_date.isoformat(),
+            "event_ts": _ms(9, 30),
+            "last_price": 10.3,
+            "source": "tdxapi",
+        }],
+    )
+
+    rows = quote_tick_store.latest(
+        tmp_path,
+        ["002491.SZ"],
+        target_date=TRADE_DATE,
+    )
+
+    assert rows[0]["last_price"] == 10.3
+
+
+def test_quote_tick_store_writes_when_late_numeric_columns_appear(tmp_path):
+    rows = [
+        {
+            "symbol": f"000{i:03d}.SZ",
+            "last_price": 10 + i / 100,
+            "timestamp": _ms(10, 0, min(i % 60, 59)),
+            "amount": None,
+            "bid_depth_amount": None,
+        }
+        for i in range(120)
+    ]
+    rows.append({
+        "symbol": "300750.SZ",
+        "last_price": 319.1,
+        "timestamp": _ms(10, 3, 0),
+        "amount": 319_108_120.0,
+        "bid_depth_amount": 319_108_120.0,
+    })
+
+    quote_tick_store.append_many(tmp_path, rows, source="tdxapi", force_flush=True)
+
+    latest = quote_tick_store.latest(tmp_path, ["300750.SZ"], target_date=TRADE_DATE)
+    assert latest[0]["amount"] == 319_108_120.0
+    assert latest[0]["bid_depth_amount"] == 319_108_120.0
+
+
+def test_append_many_keeps_full_market_on_disk_but_limits_series(tmp_path):
+    rows = [
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.0,
+            "prev_close": 9.8,
+            "change_pct": 0.0204,
+            "timestamp": _ms(9, 30, 0),
+        },
+        {
+            "symbol": "300750.SZ",
+            "last_price": 319.1,
+            "prev_close": 318.0,
+            "change_pct": 0.00345,
+            "timestamp": _ms(9, 30, 1),
+        },
+    ]
+
+    quote_tick_store.append_many(
+        tmp_path,
+        rows,
+        source="tdxapi",
+        force_flush=True,
+        series_symbols={"002491.SZ"},
+    )
+
+    key = str(tmp_path)
+    assert set(quote_tick_store._latest[key]) == {"002491.SZ", "300750.SZ"}
+    assert set(quote_tick_store._series[key]) == {"002491.SZ"}
+    assert quote_tick_store._latest[key]["300750.SZ"]["change_pct"] == 0.00345
+
+    _clear_hot_rows(tmp_path)
+    disk_rows = quote_tick_store.read_all_ticks(tmp_path, target_date=TRADE_DATE)
+    assert {row["symbol"] for row in disk_rows} == {"002491.SZ", "300750.SZ"}
+    assert {row["symbol"] for row in quote_tick_store.snapshot_as_of(tmp_path, target_date=TRADE_DATE)[0]} == {
+        "002491.SZ",
+        "300750.SZ",
+    }
+
+
+def test_event_timestamps_and_snapshot_as_of_use_full_partition(tmp_path):
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "002491.SZ", "last_price": 10.0, "timestamp": _ms(9, 30)},
+            {"symbol": "002491.SZ", "last_price": 10.5, "timestamp": _ms(9, 32)},
+            {"symbol": "300750.SZ", "last_price": 319.0, "timestamp": _ms(9, 31)},
+            {"symbol": "300750.SZ", "last_price": 320.0, "timestamp": _ms(9, 33)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+        series_symbols=set(),
+    )
+    _clear_hot_rows(tmp_path)
+
+    assert quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE) == [
+        _ms(9, 30),
+        _ms(9, 31),
+        _ms(9, 32),
+        _ms(9, 33),
+    ]
+
+    rows, actual_ts = quote_tick_store.snapshot_as_of(
+        tmp_path,
+        target_date=TRADE_DATE,
+        as_of_ts=_ms(9, 32),
+    )
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert actual_ts == _ms(9, 32)
+    assert by_symbol["002491.SZ"]["last_price"] == 10.5
+    assert by_symbol["300750.SZ"]["last_price"] == 319.0
+
+
+def test_replay_filters_non_trading_ticks_and_skips_lunch_break(tmp_path):
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "OUT-00", "last_price": 1.0, "timestamp": _ms(0, 0)},
+            {"symbol": "OUT-07", "last_price": 1.0, "timestamp": _ms(7, 50)},
+            {"symbol": "OUT-09", "last_price": 1.0, "timestamp": _ms(9, 15)},
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(9, 27)},
+            {"symbol": "A", "last_price": 10.1, "timestamp": _ms(9, 29)},
+            {"symbol": "A", "last_price": 10.2, "timestamp": _ms(11, 30)},
+            {"symbol": "A", "last_price": 10.3, "timestamp": _ms(13, 0)},
+            {"symbol": "A", "last_price": 10.4, "timestamp": _ms(15, 5)},
+            {"symbol": "OUT-15", "last_price": 1.0, "timestamp": _ms(15, 6)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    timestamps = quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE)
+    assert timestamps == [
+        _ms(9, 27),
+        _ms(9, 29),
+        _ms(11, 30),
+        _ms(13, 0),
+        _ms(15, 5),
+    ]
+
+    timeline = quote_tick_store.timeline_points(tmp_path, target_date=TRADE_DATE)
+    points = timeline["points"]
+    assert points[0] == _ms(9, 27)
+    assert points[-1] == _ms(15, 5)
+    assert _ms(9, 28) in points
+    assert _ms(11, 30) in points
+    assert _ms(11, 31) not in points
+    assert _ms(12, 59) not in points
+    assert _ms(13, 0) in points
+    assert _ms(15, 5) in points
+
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    assert {row["symbol"] for row in sampled} == {"A"}
+
+
+def test_read_sampled_ticks_can_align_full_market_snapshot_by_ingest_time(monkeypatch, tmp_path):
+    monkeypatch.setattr(quote_tick_store.time, "time", lambda: _ms(14, 13) / 1000)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(13, 0)},
+            {"symbol": "B", "last_price": 20.0, "timestamp": _ms(14, 12)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    by_event_ts = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    by_ingest_ts = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+        align_by_ingest=True,
+    )
+
+    assert {row["event_ts"] for row in by_event_ts} == {_ms(13, 0), _ms(14, 12)}
+    assert {row["event_ts"] for row in by_ingest_ts} == {_ms(14, 12), _ms(14, 13)}
+    assert {row["symbol"] for row in by_ingest_ts} == {"A", "B"}
+    assert next(row["event_ts"] for row in by_ingest_ts if row["symbol"] == "A") == _ms(14, 13)
+    assert next(row["event_ts"] for row in by_ingest_ts if row["symbol"] == "B") == _ms(14, 12)
+
+
+def test_replay_readers_ignore_event_time_after_ingest_time(tmp_path):
+    target_dir = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=15"
+    target_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["BAD.SZ", "OK.SZ"],
+        "event_ts": [_ms(15, 34), _ms(14, 58)],
+        "ingest_ts": [_ms(0, 26), _ms(14, 58, 10)],
+        "trade_date": [TRADE_DATE.isoformat(), TRADE_DATE.isoformat()],
+        "hour": ["15", "14"],
+        "last_price": [10.0, 20.0],
+        "source": ["tdxapi", "tdxapi"],
+    }).write_parquet(target_dir / "part.parquet")
+
+    timestamps = quote_tick_store.event_timestamps(tmp_path, target_date=TRADE_DATE)
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+    )
+    snapshot, actual_ts = quote_tick_store.snapshot_as_of(
+        tmp_path,
+        target_date=TRADE_DATE,
+        as_of_ts=_ms(15, 40),
+    )
+
+    assert timestamps == [_ms(14, 58)]
+    assert {row["symbol"] for row in sampled} == {"OK.SZ"}
+    assert {row["symbol"] for row in snapshot} == {"OK.SZ"}
+    assert actual_ts == _ms(14, 58)
+
+
+def test_read_sampled_ticks_keeps_fresh_event_minutes_when_aligning_by_ingest(monkeypatch, tmp_path):
+    clock = {"now": _ms(9, 32) / 1000}
+
+    def now():
+        return clock["now"]
+
+    monkeypatch.setattr(quote_tick_store.time, "time", now)
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.0, "timestamp": _ms(9, 30)},
+            {"symbol": "B", "last_price": 20.0, "timestamp": _ms(9, 30)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    clock["now"] = _ms(9, 33) / 1000
+    quote_tick_store.append_many(
+        tmp_path,
+        [
+            {"symbol": "A", "last_price": 10.2, "timestamp": _ms(9, 31)},
+            {"symbol": "B", "last_price": 20.2, "timestamp": _ms(9, 31)},
+        ],
+        source="tdxapi",
+        force_flush=True,
+    )
+    _clear_hot_rows(tmp_path)
+
+    sampled = quote_tick_store.read_sampled_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        step_seconds=60,
+        align_by_ingest=True,
+    )
+
+    assert {row["event_ts"] for row in sampled} == {_ms(9, 30), _ms(9, 31)}
+
+
+def test_sample_tick_rows_aligns_only_after_stale_threshold():
+    exact_threshold_rows = quote_tick_store._sample_tick_rows(
+        [
+            {
+                "symbol": "A",
+                "event_ts": _ms(9, 30),
+                "ingest_ts": _ms(9, 40),
+                "last_price": 10.0,
+            },
+        ],
+        step_seconds=60,
+        align_by_ingest=True,
+        target_date=TRADE_DATE,
+    )
+    stale_rows = quote_tick_store._sample_tick_rows(
+        [
+            {
+                "symbol": "A",
+                "event_ts": _ms(9, 30),
+                "ingest_ts": _ms(9, 40) + 1,
+                "last_price": 10.0,
+            },
+        ],
+        step_seconds=60,
+        align_by_ingest=True,
+        target_date=TRADE_DATE,
+    )
+
+    assert exact_threshold_rows[0]["event_ts"] == _ms(9, 30)
+    assert stale_rows[0]["event_ts"] == _ms(9, 40)
+
+
+def test_symbol_queries_use_lazy_scan_without_caching_whole_partition(tmp_path, monkeypatch):
+    quote_tick_store.append_many(tmp_path, [
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.0,
+            "volume": 100,
+            "amount": 100_000,
+            "timestamp": _ms(9, 30, 0),
+        },
+        {
+            "symbol": "300750.SZ",
+            "last_price": 319.1,
+            "volume": 1_000,
+            "amount": 319_100,
+            "timestamp": _ms(9, 30, 1),
+        },
+        {
+            "symbol": "002491.SZ",
+            "last_price": 10.2,
+            "volume": 130,
+            "amount": 132_000,
+            "timestamp": _ms(9, 30, 5),
+        },
+    ], source="tdxapi", force_flush=True)
+    legacy_dir = tmp_path / "quote_ticks" / f"date={TRADE_DATE.isoformat()}" / "hour=09"
+    pl.DataFrame({
+        "symbol": ["002491.SZ"],
+        "event_ts": [_ms(9, 30, 10)],
+        "ingest_ts": [_ms(9, 30, 11)],
+        "trade_date": [TRADE_DATE.isoformat()],
+        "hour": ["09"],
+        "last_price": [10.3],
+    }).write_parquet(legacy_dir / "legacy-schema.parquet")
+    _clear_hot_rows(tmp_path)
+
+    scan_paths = []
+    seen_symbols = []
+    original_scan_parquet = quote_tick_store.pl.scan_parquet
+    original_json_safe = quote_tick_store._json_safe
+
+    def tracking_scan_parquet(path, *args, **kwargs):
+        scan_paths.append(str(path))
+        return original_scan_parquet(path, *args, **kwargs)
+
+    def reject_eager_read(*args, **kwargs):
+        raise AssertionError("指定 symbol 查询不应使用 eager read_parquet")
+
+    def tracking_json_safe(row):
+        if row.get("symbol"):
+            seen_symbols.append(row["symbol"])
+        return original_json_safe(row)
+
+    monkeypatch.setattr(quote_tick_store.pl, "scan_parquet", tracking_scan_parquet)
+    monkeypatch.setattr(quote_tick_store.pl, "read_parquet", reject_eager_read)
+    monkeypatch.setattr(quote_tick_store, "_json_safe", tracking_json_safe)
+
+    ticks = quote_tick_store.read_ticks(
+        tmp_path,
+        target_date=TRADE_DATE,
+        symbols=["002491.SZ"],
+    )
+    latest = quote_tick_store.latest(
+        tmp_path,
+        ["002491.SZ"],
+        target_date=TRADE_DATE,
+    )
+    bars = quote_tick_store.bars(
+        tmp_path,
+        "002491.SZ",
+        freq="5s",
+        target_date=TRADE_DATE,
+    )
+
+    assert scan_paths
+    assert [row["last_price"] for row in ticks] == [10.0, 10.2, 10.3]
+    assert {row["symbol"] for row in ticks} == {"002491.SZ"}
+    assert latest[0]["symbol"] == "002491.SZ"
+    assert latest[0]["last_price"] == 10.3
+    assert bars[-1]["close"] == 10.3
+    assert set(seen_symbols) == {"002491.SZ"}
+
+
+def test_cleanup_old_partitions_removes_illegal_and_stale_dates(tmp_path, monkeypatch):
+    monkeypatch.setattr(quote_tick_store, "cn_today", lambda: date(2026, 7, 21))
+    base = tmp_path / "quote_ticks"
+    for ds in ["1970-06-10", "2263-03-03", "2026-07-10", "2026-07-21"]:
+        part = base / f"date={ds}" / "hour=09"
+        part.mkdir(parents=True)
+        (part / "x.parquet").write_bytes(b"ok")
+
+    result = quote_tick_store.cleanup_old_partitions(tmp_path, keep_days=3)
+    remaining = sorted(p.name for p in base.iterdir())
+
+    assert "1970-06-10" in result["removed"]
+    assert "2263-03-03" in result["removed"]
+    assert "2026-07-10" in result["removed"]
+    assert remaining == ["date=2026-07-21"]
+
+
+def test_compact_partition_keeps_only_focused_symbols(tmp_path):
+    quote_tick_store.append_many(tmp_path, [
+        {"symbol": "002491.SZ", "last_price": 10.0, "timestamp": _ms(9, 30, 0)},
+        {"symbol": "300750.SZ", "last_price": 319.1, "timestamp": _ms(9, 30, 1)},
+        {"symbol": "000001.SZ", "last_price": 11.0, "timestamp": _ms(9, 30, 2)},
+    ], source="tdxapi", force_flush=True)
+
+    result = quote_tick_store.compact_partition(
+        tmp_path,
+        target_date=TRADE_DATE,
+        symbols={"002491.SZ"},
+    )
+    # compact 改的是磁盘分区; 清掉热缓存后再读, 验证磁盘侧只剩关注标的
+    _clear_hot_rows(tmp_path)
+    rows = quote_tick_store.read_ticks(tmp_path, target_date=TRADE_DATE, symbols=["002491.SZ", "300750.SZ", "000001.SZ"])
+
+    assert result["symbols"] == 1
+    assert result["rows"] >= 1
+    assert {r["symbol"] for r in rows} == {"002491.SZ"}
+
+
+def test_quote_service_realtime_frames_write_late_numeric_columns():
+    records = [
+        {
+            "symbol": f"000{i:03d}.SZ",
+            "name": f"测试{i}",
+            "last_price": 10 + i / 100,
+            "open": None,
+            "high": None,
+            "low": None,
+            "volume": None,
+            "amount": None,
+            "prev_close": None,
+            "change_pct": None,
+            "change_amount": None,
+            "amplitude": None,
+            "turnover_rate": None,
+        }
+        for i in range(120)
+    ]
+    records.append({
+        "symbol": "300750.SZ",
+        "name": "宁德时代",
+        "last_price": 319.1,
+        "open": 318.0,
+        "high": 321.0,
+        "low": 317.0,
+        "volume": 1_000_000.0,
+        "amount": 319_108_120.0,
+        "prev_close": 318.0,
+        "change_pct": 0.00345,
+        "change_amount": 1.1,
+        "amplitude": 0.0125,
+        "turnover_rate": 0.8,
+    })
+
+    daily = QuoteService._build_daily(records)
+    extra = QuoteService._build_quote_extra(records)
+
+    daily_row = daily.filter(pl.col("symbol") == "300750.SZ").row(0, named=True)
+    extra_row = extra.filter(pl.col("symbol") == "300750.SZ").row(0, named=True)
+    assert daily_row["amount"] == 319_108_120.0
+    assert extra_row["change_amount"] == 1.1
