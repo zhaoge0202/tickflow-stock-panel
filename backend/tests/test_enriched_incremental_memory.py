@@ -51,8 +51,11 @@ def sample(tmp_path, monkeypatch):
 @pytest.mark.parametrize("adjustment_only", [False, True])
 def test_incremental_batches_preserve_values_and_generation(sample, tmp_path, monkeypatch, adjustment_only):
     raw, instruments, factors, shares = sample
+    # 管道入口先附着竞价事实层 (tmp_path 无 quote_ticks → 整列为 null), 期望值
+    # 必须走同一条入参变换, 否则增量结果多出的竞价列会被判为不一致。
+    pipeline_raw = pipeline.attach_auction_result_fields(raw, tmp_path)
     expected = pipeline._select_storage_cols(pipeline.compute_enriched(
-        raw, instruments=instruments, factors=factors, historical_shares=shares,
+        pipeline_raw, instruments=instruments, factors=factors, historical_shares=shares,
     )).sort("symbol", "date")
     if adjustment_only:
         for frame in raw.partition_by("date"):
