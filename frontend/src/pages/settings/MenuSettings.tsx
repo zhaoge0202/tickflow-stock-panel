@@ -37,6 +37,7 @@ interface NavEntry {
 const BUILTIN_PAGES: NavEntry[] = [
   { id: '/', label: '看板', type: 'builtin', visible: true },
   { id: '/watchlist', label: '自选', type: 'builtin', visible: true },
+  { id: '/decision', label: '决策台', type: 'builtin', visible: true },
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/factors', label: '因子', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
@@ -54,9 +55,11 @@ type ArchKind = 'core' | 'ext'
 const ARCH_CLASS: Record<string, { kind: ArchKind; reason: string }> = {
   '/':               { kind: 'core', reason: '总览页 — 聚合核心数据的多维视图' },
   '/watchlist':      { kind: 'core', reason: '订阅锚点 — 监控/提醒/看板的数据范围基准' },
+  '/decision':       { kind: 'core', reason: '盘中决策台 — 监控告警到人工确认的处理闭环, 与推送管道同层' },
   '/screener':       { kind: 'core', reason: '策略引擎 — 策略/评分/信号定义' },
   '/factors':        { kind: 'core', reason: '因子平台 — 因子检验与回测联动' },
   '/backtest':       { kind: 'core', reason: '回测引擎 — 矩阵回测与优化' },
+  '/sector-flow':    { kind: 'core', reason: '板块强度与资金流 — 板块级资金口径的聚合出口' },
   '/regime':         { kind: 'core', reason: '环境数据生产 — 回测/挖掘/归因共用的市场状态口径' },
   '/indices':        { kind: 'core', reason: '行情数据底座 — 指数日K/分时出口' },
   '/data':           { kind: 'core', reason: '数据底座 — 同步管道与数据源路由' },

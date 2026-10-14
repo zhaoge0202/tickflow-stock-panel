@@ -1,7 +1,10 @@
 /**
  * 侧栏默认排序基准 — 扩展域页面迁移 (custom/) 的老用户升级兼容。
  *
- * 迁移前这 19 个路径按此顺序构成内置侧栏 (Layout 核心导航数组)。
+ * 迁移前这 21 个路径按此顺序构成内置侧栏 (Layout 核心导航数组 +
+ * 迁移到 custom/ 的扩展域页面)。其中 /decision、/sector-flow 是本仓
+ * 独有的两个核心页, 位序按迁移前 Layout nav 常量的第 3 / 第 9 位保留,
+ * 否则它们不在基准内会被判为未知路径而整体沉底。
  * 页面迁往 custom/<ns>/extension.tsx 后, 无保存排序的环境 (新装或
  * 从未调整过菜单的用户) 若按「核心在前、扩展追加」拼接, 11 个页面会
  * 整体沉底, 老用户升级即感知错位。因此默认顺序统一按本基准排序,
@@ -11,8 +14,8 @@
  * 修改本清单需同步回归 navOrder.test.ts。
  */
 export const DEFAULT_NAV_PATHS = [
-  '/', '/watchlist', '/screener', '/factors', '/backtest',
-  '/stock-analysis', '/limit-ladder', '/concept-analysis', '/industry-analysis', '/financials',
+  '/', '/watchlist', '/decision', '/screener', '/factors', '/backtest',
+  '/stock-analysis', '/limit-ladder', '/sector-flow', '/concept-analysis', '/industry-analysis', '/financials',
   '/monitor', '/regime', '/abnormal', '/lots', '/paper', '/signals', '/review',
   '/indices', '/data',
 ] as const

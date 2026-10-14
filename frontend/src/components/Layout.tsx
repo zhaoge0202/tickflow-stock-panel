@@ -576,7 +576,7 @@ export function Layout() {
   // 合并内置页面 + 可见的扩展分析菜单
   type NavIcon = (props: BrandIconProps) => ReactNode
   // arch: 'ext' = 扩展域页面 (官方扩展/自定义分析), 核心域 nav 常量不带标。
-  // 与菜单设置 ARCH_CLASS 同口径: nav 常量 8 项全部核心, 其余两个来源全部扩展。
+  // 与菜单设置 ARCH_CLASS 同口径: nav 常量 10 项全部核心, 其余两个来源全部扩展。
   type NavItem = { to: string; label: string; icon: NavIcon; badge?: string; arch?: 'core' | 'ext' }
   const analysisNav: NavItem[] = (analysisMenus?.items ?? [])
     .filter(m => m.visible)
