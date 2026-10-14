@@ -3,7 +3,9 @@
  *
  * 日线信号布尔列 (csg_* 与迁移自内置、沿用 signal_* 列名的定义) 全部由
  * /api/custom-signals 的用户定义驱动, 中文名经 cnSignal 第二参数
- * (useCustomSignalNames 的列名→命名映射) 传入; 此处不再内置信号清单。
+ * (useCustomSignalNames 的列名→命名映射) 传入; 此处只内置盘中信号与
+ * 策略内部信号码 (非 DSL 定义, 见 STRATEGY_SIGNAL_LABELS), 不再内置
+ * 信号定义清单。
  * 信号 ID 语义与后端 backtest/strategy.py:_build_signal_mask 对齐。
  */
 
@@ -18,8 +20,24 @@ export const MONITOR_INTRADAY_SIGNAL_LABELS: Record<string, string> = {
 
 export const MONITOR_INTRADAY_SIGNAL_OPTIONS = Object.keys(MONITOR_INTRADAY_SIGNAL_LABELS)
 
+/**
+ * 策略内部信号码 → 中文标签。这些 ID 由 custom/*.py 矩阵策略在
+ * compute_signals 里直接产出 (entry_signal_ids/exit_signal_ids), 不是
+ * /api/custom-signals 的用户定义 ⇒ 后端种子与命名映射都覆盖不到,
+ * 在此保留与后端 monitor.py `_SIGNAL_CN` 对齐的展示名。
+ */
+export const STRATEGY_SIGNAL_LABELS: Record<string, string> = {
+  signal_auction: '竞价强势',
+  signal_fenqi: '分歧转一致',
+  signal_volume_contraction_reversal: '缩量止跌反转',
+  signal_oscillation_reversal: '震荡超跌反转',
+}
+
 /** 盘中信号 → 中文标签 (日线信号标签由用户定义提供, 不在此表) */
-export const SIGNAL_LABELS: Record<string, string> = { ...MONITOR_INTRADAY_SIGNAL_LABELS }
+export const SIGNAL_LABELS: Record<string, string> = {
+  ...MONITOR_INTRADAY_SIGNAL_LABELS,
+  ...STRATEGY_SIGNAL_LABELS,
+}
 
 /** 常用技术指标/字段 → 中文 (阈值条件展示用, 与后端 ENRICHED_COLUMNS 对齐) */
 const FIELD_LABELS: Record<string, string> = {

@@ -35,6 +35,12 @@ logger = logging.getLogger(__name__)
 # 此处只保留技术指标/行情字段与盘中信号。
 _SIGNAL_CN: dict[str, str] = {
     **INTRADAY_SIGNAL_LABELS,
+    # 策略内部信号码: 由 custom/*.py 矩阵策略在 compute_signals 里直接产出
+    # (entry_signal_ids), 不是可编辑的 DSL 信号定义 ⇒ 不进种子/用户定义,
+    # 仅在此保留展示名 (去内置化后信号名统一由用户定义驱动, 这 4 条例外)。
+    "signal_auction": "竞价强势", "signal_fenqi": "分歧转一致",
+    "signal_volume_contraction_reversal": "缩量止跌反转",
+    "signal_oscillation_reversal": "震荡超跌反转",
     # 涨跌停判定价 (运行时列)
     "limit_up_price": "涨停判定价", "limit_down_price": "跌停判定价",
     # 行情字段
