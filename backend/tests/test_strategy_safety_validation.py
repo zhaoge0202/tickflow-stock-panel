@@ -138,7 +138,15 @@ def test_legitimate_code_still_passes(code):
 
 
 def test_existing_strategies_in_repo_all_pass():
-    """仓库内全部现有策略文件必须仍通过加固后的校验 (兼容性回归)。"""
+    """仓库内全部现有策略文件必须仍通过加固后的校验 (兼容性回归)。
+
+    ⚠️ 本仓适配: 引擎加载层 (StrategyEngine._load_file) 会用
+    ``path.parent.glob("_*.py")`` 把同目录 ``_*.py`` 辅助模块作为
+    ``extra_allowed_import_modules`` 放行 (本仓 data/strategies/custom 下有
+    ``_market_regime`` / ``_auction_result_fields`` 两个辅助模块); 本用例按
+    加载层同一口径校验, 否则会把合法辅助模块导入误判为越权。上游 CI 无
+    data/ 目录 (本用例跳过), 该差异只在本地存在数据目录时显现。
+    """
     from pathlib import Path
 
     backend_dir = Path(__file__).resolve().parents[1]
@@ -156,7 +164,13 @@ def test_existing_strategies_in_repo_all_pass():
         pytest.skip("no strategy files present")
 
     for path in files:
-        AIStrategyGenerator._validate_safety(path.read_text(encoding="utf-8"))
+        deps = frozenset(
+            candidate.stem for candidate in path.parent.glob("_*.py") if candidate != path
+        )
+        AIStrategyGenerator._validate_safety(
+            path.read_text(encoding="utf-8"),
+            extra_allowed_import_modules=deps,
+        )
 
 
 # ================================================================
