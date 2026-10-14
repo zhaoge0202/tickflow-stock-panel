@@ -8,7 +8,7 @@
 
 数据流:
   盘中轮询线程(交易时段, 独立 sleep, 不绑行情轮询):
-    读 enriched 内存缓存(线程安全) → 涨跌停名单 → tf.depth.batch
+    读 enriched 内存缓存(线程安全) → 涨跌停名单 → depth 来源(TickFlow/TDX)
     → 算 sealed → 更新内存缓存(不落盘) → sealed_ready=True
   盘后定版 job(可配置时间, 默认15:02):
     最后拉一次 → 落盘 depth5 parquet(定版)
@@ -55,6 +55,8 @@ DEFAULT_RANGE = (10.0, 120.0)
 # 间隔硬下限/上限(任何套餐)
 INTERVAL_HARD_MIN = 10.0
 INTERVAL_HARD_MAX = 300.0
+TDX_DEPTH_BATCH_SIZE = 50
+TDX_DEPTH_RPM = 60
 
 
 class DepthService:
@@ -99,20 +101,65 @@ class DepthService:
     # ================================================================
 
     def boot_check(self) -> None:
-        """启动补跑: 当天 depth5 文件不存在则 finalize 一次; 已存在则恢复内存缓存。"""
+        """启动补跑: 当天 depth5 缺失或明显残缺则 finalize; 否则恢复内存缓存。
+
+        残缺判定: 已落盘条数明显少于当前 enriched 涨跌停数 (例如旧文件只覆盖
+        部分涨停, 前端会大量显示「待确认」)。此时强制重拉并覆盖定版。
+        """
         if not self._has_capability():
             logger.info("depth sealed: %s 不可用, 跳过启动补跑", self._capability_label())
             return
         today = cn_today()
-        if self._persisted_for_date(today):
-            # parquet 已存在: 恢复内存缓存(避免重启后每次查询都读 parquet)
+        if self._persisted_for_date(today) and not self._depth5_incomplete(today):
+            # parquet 已存在且覆盖完整: 恢复内存缓存(避免重启后每次查询都读 parquet)
             self._restore_from_parquet(today)
             return
-        logger.info("depth sealed: 启动补跑今天定版")
+        if self._persisted_for_date(today):
+            logger.info("depth sealed: 当天定版残缺, 启动补跑重拉")
+        else:
+            logger.info("depth sealed: 启动补跑今天定版")
         try:
             self.finalize()
         except Exception as e:  # noqa: BLE001
             logger.warning("depth sealed 启动补跑失败: %s", e)
+            # 重拉失败时尽量回退到已有 parquet, 避免完全无封单数据
+            if self._persisted_for_date(today):
+                self._restore_from_parquet(today)
+
+    def _depth5_incomplete(self, d: date) -> bool:
+        """当天 depth5 是否明显少于当前涨跌停名单。"""
+        if not self._repo:
+            return False
+        out = self._repo.store.data_dir / "depth5" / f"date={d.isoformat()}" / "part.parquet"
+        if not out.exists():
+            return True
+        try:
+            persisted = pl.read_parquet(out)
+            persisted_n = len(persisted)
+        except Exception:  # noqa: BLE001
+            return True
+
+        expected = 0
+        try:
+            enriched, enriched_date = self._repo.get_enriched_latest()
+            if enriched_date == d and not enriched.is_empty():
+                if "signal_limit_up" in enriched.columns:
+                    expected += int(enriched.filter(pl.col("signal_limit_up").fill_null(False)).height)
+                if "signal_limit_down" in enriched.columns:
+                    expected += int(enriched.filter(pl.col("signal_limit_down").fill_null(False)).height)
+        except Exception:  # noqa: BLE001
+            return False
+
+        # 无涨跌停信号可比时不强制重拉; 覆盖率 < 80% 视为残缺
+        if expected <= 0:
+            return False
+        incomplete = persisted_n < max(1, int(expected * 0.8))
+        if incomplete:
+            logger.info(
+                "depth sealed 覆盖不足: persisted=%d expected_limit=%d date=%s",
+                persisted_n, expected, d,
+            )
+        return incomplete
 
     def _restore_from_parquet(self, d: date) -> None:
         """从 parquet 恢复内存缓存(服务重启后)。"""
@@ -248,7 +295,7 @@ class DepthService:
             logger.debug("depth sealed: 当日无涨跌停股, 跳过")
             return None
 
-        # 拉 depth(涨跌停一次拉, 按 capset batch 切片)
+        # 拉 depth(涨跌停一次拉, 按来源 batch 切片)
         depth_data = self._call_depth_batch(all_syms)
         if not depth_data:
             logger.warning("depth sealed: depth.batch 返回空")
@@ -301,7 +348,10 @@ class DepthService:
             self._persist(enriched_date)
 
     def _call_depth_batch(self, symbols: list[str]) -> dict:
-        """按独立五档路由取数; 所有 provider 共用分片限速且失败不跨源回退。"""
+        """按独立五档路由取数; 支持 tdxapi 与所有 provider 共用分片限速且失败不跨源回退。"""
+        if self._can_use_tdx_depth():
+            return self._call_tdx_depth_batch(symbols)
+
         from app.services import preferences
 
         provider_name = preferences.get_depth5_data_provider()
@@ -352,6 +402,30 @@ class DepthService:
                     e,
                 )
                 # 单批失败不影响其他批
+        return result
+
+    def _call_tdx_depth_batch(self, symbols: list[str]) -> dict:
+        """用 tdxapi 实时快照中的 BuyLevel/SellLevel 字段生成 depth 数据。"""
+        try:
+            from app.data_providers import custom as custom_sources
+
+            provider = custom_sources.get_provider("tdxapi")
+            rows = provider.get_realtime(symbols=symbols) or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tdxapi depth 拉取失败(%d 只): %s", len(symbols), e)
+            return {}
+
+        result: dict[str, dict] = {}
+        for row in rows:
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            result[sym] = {
+                "ask_volumes": [row.get(f"ask{i}_vol") for i in range(1, 6)],
+                "bid_volumes": [row.get(f"bid{i}_vol") for i in range(1, 6)],
+                "timestamp": row.get("timestamp"),
+                "source": "tdxapi",
+            }
         return result
 
     def finalize(self) -> None:
@@ -552,10 +626,15 @@ class DepthService:
         from app.services import preferences
         from app.tickflow.policy import tier_label
 
-        capset = self._get_capset()
-        lim = capset.limits(__import__("app.tickflow.capabilities", fromlist=["Cap"]).Cap.DEPTH5_BATCH)
-        batch_size = (lim.batch if lim and lim.batch else 100)
-        rpm = (lim.rpm if lim and lim.rpm else 30)
+        source = self._depth_source()
+        if source == "tdxapi":
+            batch_size = TDX_DEPTH_BATCH_SIZE
+            rpm = TDX_DEPTH_RPM
+        else:
+            capset = self._get_capset()
+            lim = capset.limits(__import__("app.tickflow.capabilities", fromlist=["Cap"]).Cap.DEPTH5_BATCH)
+            batch_size = (lim.batch if lim and lim.batch else 100)
+            rpm = (lim.rpm if lim and lim.rpm else 30)
 
         # ① 套餐范围 clamp
         tier = tier_label().split()[0].split("+")[0].strip().lower()
@@ -646,6 +725,39 @@ class DepthService:
         from app.data_providers.capabilities import capability_gate
         _, label = capability_gate("depth5")
         return label
+
+    def is_available(self) -> bool:
+        """当前是否有业务可用的五档盘口来源。"""
+        return self._has_capability()
+
+    def capability_status(self) -> dict:
+        """给 API/UI 暴露业务能力, 不混入 TickFlow 套餐 capability。"""
+        source = self._depth_source()
+        return {
+            "available": source is not None,
+            "source": source,
+            "requires": None if source else "TickFlow Pro+ 或 tdxapi 实时源",
+        }
+
+    def _depth_source(self) -> str | None:
+        """优先使用当前选择的 tdxapi 实时源, 否则回退 TickFlow depth5.batch。"""
+        if self._can_use_tdx_depth():
+            return "tdxapi"
+        capset = self._get_capset()
+        return "tickflow" if capset.has(Cap.DEPTH5_BATCH) else None
+
+    @staticmethod
+    def _can_use_tdx_depth() -> bool:
+        try:
+            from app.data_providers import custom as custom_sources
+            from app.services import preferences
+
+            return (
+                preferences.get_realtime_data_provider() == "tdxapi"
+                and custom_sources.provider_has_dataset("tdxapi", "realtime")
+            )
+        except Exception:
+            return False
 
     def _get_capset(self):
         """获取当前 capset(优先 app.state, 回退 detect)。"""

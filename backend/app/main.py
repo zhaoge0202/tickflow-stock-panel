@@ -14,10 +14,12 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.api import (
     abnormal,
+    alert_outcomes,
     alerts,
     analysis,
     backtest,
     data,
+    decision,
     events,
     ext_data,
     ext_pages,
@@ -27,20 +29,29 @@ from app.api import (
     intraday,
     kline,
     lots,
+    manual_positions,
+    market_breadth,
     market_recap,
     mining,
     monitor_rules,
     overview,
     paper,
     pipeline,
+    quote_ticks,
     regime,
+    replay,
     rps,
     screener,
+    sector_flow,
     sector_rotation,
     signals,
+    signal_frame,
     stock_analysis,
     strategy,
+    strategy_history,
+    strategy_purchase_marks,
     task_registry,
+    trade_ticks,
     watchlist,
 )
 from app.api import auth as auth_api
@@ -146,7 +157,7 @@ async def _application_lifespan(app: FastAPI):
     app.state.indicators_ready = False
     repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
 
-    # Polars 缓存预热 — enriched 的重计算 (107万行 compute_indicators) 推后台,
+    # Polars 缓存预热 — 最新日指标和盘中递推状态推后台计算，历史不常驻内存；
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
     repo.refresh_cache(background=True)
 
@@ -180,6 +191,22 @@ async def _application_lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
+    quote_snapshot_ingestor.start()
+    app.state.quote_snapshot_ingestor = quote_snapshot_ingestor
+    # 启动时清理过期/脏 quote_ticks 分区, 控制磁盘与后续扫描成本
+    try:
+        from app.services import quote_tick_store
+
+        cleanup = quote_tick_store.cleanup_old_partitions(store.data_dir)
+        if cleanup.get("removed"):
+            logger.info(
+                "quote_ticks cleanup on boot: removed=%d kept=%d",
+                len(cleanup["removed"]),
+                len(cleanup.get("kept") or []),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("quote_ticks cleanup failed: %s", e)
     qs.boot_check()
 
     # QuoteService 需要访问 strategy_monitor 等单例
@@ -266,6 +293,17 @@ async def _application_lifespan(app: FastAPI):
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
 
+    # TDX 逐笔成交 MySQL 异步入库 worker。未配置/未开启时只会拒绝入队,不影响实时展示。
+    from app.services.trade_tick_ingest import trade_tick_ingestor
+    trade_tick_ingestor.start()
+    app.state.trade_tick_ingestor = trade_tick_ingestor
+
+    # 告警后验收益追踪: 独立读取 alerts.jsonl + quote_ticks, 不改写原告警流水。
+    from app.services.alert_outcome import AlertOutcomeTracker
+    alert_outcome_tracker = AlertOutcomeTracker(store.data_dir)
+    alert_outcome_tracker.start()
+    app.state.alert_outcome_tracker = alert_outcome_tracker
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -329,6 +367,20 @@ async def _application_lifespan(app: FastAPI):
             )
 
             try:
+                # 盘中不抢实时行情内存; 休盘/收盘后再预热。
+                try:
+                    from app.services.quote_service import QuoteService
+
+                    phase = QuoteService._market_phase()
+                    if phase in {
+                        "preopen", "morning", "morning_final",
+                        "pre_afternoon", "afternoon", "close_final",
+                    }:
+                        logger.info("matrix cache prewarm deferred: market phase=%s", phase)
+                        return
+                except Exception:  # noqa: BLE001
+                    pass
+
                 latest = repo.latest_enriched_date("stock")
                 if latest is None:
                     logger.info("matrix cache prewarm skipped: no stock enriched data")
@@ -354,6 +406,19 @@ async def _application_lifespan(app: FastAPI):
 
         if not matrix_prewarm_owner.schedule(_prewarm):
             logger.info("matrix cache prewarm already running or shutting down, skip")
+
+    # 清理上次预热残留的临时目录, 避免磁盘/扫描噪音。
+    try:
+        matrix_root = store.data_dir / ".backtest_matrix_cache"
+        if matrix_root.exists():
+            import shutil
+
+            for path in matrix_root.glob("*.tmp"):
+                shutil.rmtree(path, ignore_errors=True)
+            for path in matrix_root.glob(".*.tmp"):
+                shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("matrix cache tmp cleanup skipped: %s", e)
 
     repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
     if repo.enriched_ready:
@@ -422,9 +487,19 @@ async def _application_lifespan(app: FastAPI):
         fsc = getattr(app.state, "financial_scheduler", None)
         if fsc:
             fsc.stop()
+        tti = getattr(app.state, "trade_tick_ingestor", None)
+        if tti:
+            tti.stop()
+        aot = getattr(app.state, "alert_outcome_tracker", None)
+        if aot:
+            aot.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
-            qs.stop()
+            # 进程退出/热重载只是清理后台线程, 不能把用户的实时行情开关写成关闭。
+            qs.stop(persist_enabled=False)
+        qsi = getattr(app.state, "quote_snapshot_ingestor", None)
+        if qsi:
+            qsi.stop()
         dsvc = getattr(app.state, "depth_service", None)
         if dsvc:
             dsvc.stop_polling()
@@ -560,6 +635,7 @@ app.include_router(auth_api.router)
 app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
+app.include_router(sector_flow.router)
 app.include_router(backtest.router)
 app.include_router(factors.router)
 app.include_router(mining.router)
@@ -580,12 +656,22 @@ app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
+app.include_router(strategy_history.router)
+app.include_router(strategy_purchase_marks.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(lots.router)
 app.include_router(alerts.router)
 app.include_router(events.router)
+app.include_router(decision.router)
+app.include_router(manual_positions.router)
+app.include_router(quote_ticks.router)
+app.include_router(signal_frame.router)
+app.include_router(market_breadth.router)
+app.include_router(alert_outcomes.router)
+app.include_router(replay.router)
 app.include_router(rps.router)
+app.include_router(trade_ticks.router)
 app.include_router(sector_rotation.router)
 
 # 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。

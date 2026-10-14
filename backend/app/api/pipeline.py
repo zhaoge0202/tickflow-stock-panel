@@ -28,38 +28,60 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 @router.post("/run")
 async def run_now(request: Request) -> dict:
     """异步触发盘后管道,立即返回 job_id。客户端轮询 /jobs/{id} 拿进度。"""
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        pass
+    include_minute = bool(body.get("include_minute"))
     return await trigger_pipeline_job(
         request.app.state.repo,
         request.app.state.capabilities,
         getattr(request.app.state, "quote_service", None),
+        include_minute=include_minute,
     )
 
 
-async def trigger_pipeline_job(repo, capset, quote_service=None) -> dict:
+async def trigger_pipeline_job(
+    repo, capset, quote_service=None, *, include_minute: bool = False
+) -> dict:
     """触发盘后管道后台任务(HTTP 端点与 AI 助手共用同一条触发路径)。
 
     若已有任务在跑,**返回该任务 id 而不是开新任务**(防止并发拉数据撞限流)。
     卡死判定按「进度停滞」而非总时长(慢带宽下长任务不会被误杀), 见 reap_stale。
+    include_minute: 是否在本次任务中同步分钟 K(含分钟K的按长任务计时)。
     """
     return await _submit_job(
-        repo, quote_service,
-        lambda progress: (lambda: daily_pipeline.run_now(repo, capset, on_progress=progress)),
+        repo,
+        quote_service,
+        lambda progress: (
+            lambda: daily_pipeline.run_now(
+                repo,
+                capset,
+                on_progress=progress,
+                include_minute=include_minute,
+            )
+        ),
+        long_running=include_minute,
     )
 
 
-async def _submit_job(repo, quote_service, make_run) -> dict:
+async def _submit_job(
+    repo, quote_service, make_run, *, long_running: bool = False
+) -> dict:
     """任务化执行公共机制: 单飞 create → 重任务槽 → 行情暂停 → 缓存失效。
 
     make_run(progress) 返回实际执行闭包(阻塞 IO + CPU, 在 executor 里跑)。
     盘后管道与独立除权因子同步共用 —— 两者写同一批 parquet, 必须共享
     单飞与重任务槽防并发覆写。
+    long_running: 长任务标记(如含分钟K同步), 复用更宽的任务停滞超时。
     """
     # 检测卡死的 running job (如 reload 后孤儿 task / 网络读无限阻塞)。
     # reap_stale 会在 /run 和 /jobs/{id} 轮询端点都调用,保证卡死后能自愈。
     job_store.reap_stale()
 
     # 单飞: 复用任何活跃 (pending∨running) 任务, is_new=False 时不再调度新任务
-    job_id, is_new = job_store.create()
+    job_id, is_new = job_store.create(long_running=long_running)
     if not is_new:
         return {"job_id": job_id, "reused": True}
 

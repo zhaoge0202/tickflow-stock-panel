@@ -56,8 +56,9 @@ def get_index_daily(
     df = repo.get_index_daily(symbol, start, end)
     if not df.is_empty():
         from app.api.kline import _maybe_inject_live_candle
+
         rows = _maybe_inject_live_candle(request, symbol, df.to_dicts(), "index")
-        return {"symbol": symbol, "name": info.get("name"), "index_info": info, "rows": rows, "source": "index_enriched"}
+        return {"symbol": symbol, "name": info.get("name"), "index_info": info, "rows": rows, "source": "index_daily"}
 
     capset = request.app.state.capabilities
     if not capset.has(Cap.KLINE_DAILY_BATCH):
@@ -112,7 +113,12 @@ def get_index_minute(
     if hit is not None and now - hit[0] < _INDEX_MINUTE_CACHE_TTL:
         df = hit[1]
     else:
-        df = kline_sync.fetch_minute_single(symbol, day, asset_type="index", capset=capset)
+        try:
+            df = kline_sync.fetch_minute_single(
+                symbol, day, asset_type="index", capset=capset,
+            )
+        except kline_sync.MinuteFetchError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
         with _index_minute_cache_lock:
             _index_minute_cache[cache_key] = (time.monotonic(), df)
             while len(_index_minute_cache) > _INDEX_MINUTE_CACHE_MAX:
