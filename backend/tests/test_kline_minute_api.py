@@ -18,8 +18,10 @@ class _FrozenDate(dt.date):
 
 
 class _Repo:
-    def __init__(self, local_df: pl.DataFrame):
+    def __init__(self, local_df: pl.DataFrame, data_dir):
         self.local_df = local_df
+        # get_minute 读 repo.store.data_dir 判定分钟复权口径 (raw/前复权)
+        self.store = SimpleNamespace(data_dir=data_dir)
 
     def resolve_asset_type(self, symbol: str) -> str:
         return "stock"
@@ -31,8 +33,18 @@ class _Repo:
         return self.local_df
 
 
+class _Capset:
+    """最小能力集桩: get_minute 只把 capset 透传给分钟拉取层。"""
+
+    @staticmethod
+    def has(cap) -> bool:
+        return True
+
+
 def _request(repo: _Repo):
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=_Capset())),
+    )
 
 
 def _minute_df(day: dt.date, count: int, close: float) -> pl.DataFrame:
@@ -56,7 +68,7 @@ def _freeze_today(monkeypatch, day: dt.date = dt.date(2026, 7, 8)) -> None:
     monkeypatch.setattr(kline, "normalize_symbol", lambda symbol, repo=None: symbol)
 
 
-def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
+def test_get_minute_today_prefers_live_over_complete_local(monkeypatch, tmp_path):
     _freeze_today(monkeypatch)
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
     monkeypatch.setattr(kline, "in_continuous_session", lambda: True)
@@ -65,14 +77,16 @@ def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
     live_df = _minute_df(dt.date(2026, 7, 8), 3, 7.40)
     calls: list[tuple[str, dt.date]] = []
 
-    def fake_fetch(symbol: str, trade_date: dt.date, asset_type: str = "stock") -> pl.DataFrame:
+    def fake_fetch(
+        symbol: str, trade_date: dt.date, asset_type: str = "stock", **_kwargs
+    ) -> pl.DataFrame:
         calls.append((symbol, trade_date))
         return live_df
 
     monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", fake_fetch)
 
     resp = kline.get_minute(
-        _request(_Repo(local_df)),
+        _request(_Repo(local_df, tmp_path)),
         "000725.SZ",
         dt.date(2026, 7, 8),
         live=True,
@@ -84,20 +98,26 @@ def test_get_minute_today_prefers_live_over_complete_local(monkeypatch):
     assert calls == [("000725.SZ", dt.date(2026, 7, 8))]
 
 
-def test_get_minute_today_falls_back_to_local_when_live_empty(monkeypatch):
+def test_get_minute_today_falls_back_to_local_when_live_empty(monkeypatch, tmp_path):
     _freeze_today(monkeypatch)
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
 
     local_df = _minute_df(dt.date(2026, 7, 8), 240, 7.30)
-    monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", lambda symbol, trade_date, asset_type="stock": pl.DataFrame())
+    monkeypatch.setattr(
+        kline.kline_sync,
+        "fetch_minute_single",
+        lambda symbol, trade_date, asset_type="stock", **kwargs: pl.DataFrame(),
+    )
 
-    resp = kline.get_minute(_request(_Repo(local_df)), "000725.SZ", dt.date(2026, 7, 8))
+    resp = kline.get_minute(
+        _request(_Repo(local_df, tmp_path)), "000725.SZ", dt.date(2026, 7, 8)
+    )
 
     assert resp["source"] == "local"
     assert len(resp["rows"]) == 240
 
 
-def test_get_minute_history_uses_complete_local_without_live_fetch(monkeypatch):
+def test_get_minute_history_uses_complete_local_without_live_fetch(monkeypatch, tmp_path):
     _freeze_today(monkeypatch)
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
     monkeypatch.setattr(
@@ -107,26 +127,28 @@ def test_get_minute_history_uses_complete_local_without_live_fetch(monkeypatch):
     )
 
     local_df = _minute_df(dt.date(2026, 7, 7), 240, 7.30)
-    resp = kline.get_minute(_request(_Repo(local_df)), "000725.SZ", dt.date(2026, 7, 7))
+    resp = kline.get_minute(
+        _request(_Repo(local_df, tmp_path)), "000725.SZ", dt.date(2026, 7, 7)
+    )
 
     assert resp["source"] == "local"
     assert len(resp["rows"]) == 240
 
 
-def test_get_minute_reports_transient_provider_failure(monkeypatch):
+def test_get_minute_reports_transient_provider_failure(monkeypatch, tmp_path):
     _freeze_today(monkeypatch)
     monkeypatch.setattr(kline, "_get_stock_info", lambda repo, symbol: {})
     monkeypatch.setattr(
         kline.kline_sync,
         "fetch_minute_single",
-        lambda symbol, trade_date, asset_type="stock": (_ for _ in ()).throw(
+        lambda symbol, trade_date, asset_type="stock", **kwargs: (_ for _ in ()).throw(
             kline.kline_sync.MinuteFetchError("TDX 分钟K请求失败，重试 3 次仍未恢复")
         ),
     )
 
     with pytest.raises(HTTPException) as exc_info:
         kline.get_minute(
-            _request(_Repo(pl.DataFrame())),
+            _request(_Repo(pl.DataFrame(), tmp_path)),
             "000725.SZ",
             dt.date(2026, 7, 8),
         )
