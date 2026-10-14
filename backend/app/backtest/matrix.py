@@ -51,12 +51,27 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
-_MATRIX_AXIS_INDEX_VERSION = 1
+_DIRECT_MATRIX_LOADER_VERSION = 5
+_MATRIX_AXIS_INDEX_VERSION = 2
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
 _ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES = 32 * 1024 * 1024
 _MATRIX_DISK_CACHE_DEFAULT_MAX_BYTES = 512 * 1024 * 1024
+_OPTIONAL_NUMERIC_STORAGE_FIELDS = frozenset({
+    "auction_result_price",
+    "auction_result_volume",
+    "auction_result_amount",
+    "auction_tick_count",
+    "auction_tick_seconds",
+    "auction_trade_price_change",
+    "auction_trade_price_range",
+    "auction_trade_volume_delta",
+    "auction_trade_volume_per_second",
+    "auction_trade_unmatched_ratio",
+    "auction_trade_pressure_score",
+    "auction_trade_depth_imbalance",
+    "auction_trade_spread_pct",
+})
 
 logger = logging.getLogger(__name__)
 
@@ -882,6 +897,8 @@ def _matrix_filter_expression(
     expression = (pads.field("date") >= pa.scalar(start)) & (
         pads.field("date") <= pa.scalar(end)
     )
+    for column in ("open", "high", "low", "close"):
+        expression &= pads.field(column).is_valid() & (pads.field(column) > pa.scalar(0.0))
     if symbols is not None:
         expression &= pads.field("symbol").isin(list(symbols))
     return expression
@@ -902,6 +919,8 @@ def _resolve_matrix_storage_fields(
     )
     instrument_columns = set(instruments.columns) if instruments is not None else set()
     matrix_fields = set(parquet_fields)
+    optional_missing = wanted_fields & _OPTIONAL_NUMERIC_STORAGE_FIELDS
+    matrix_fields.update(optional_missing)
     vector_fields = {
         name
         for name in ("total_shares", "float_shares")

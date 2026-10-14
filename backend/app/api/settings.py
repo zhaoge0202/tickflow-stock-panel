@@ -499,7 +499,10 @@ async def list_sponsor_models() -> dict:
 # ===== 偏好设置 =====
 
 def _realtime_allowed() -> bool:
-    """当前档位是否允许实时行情(none/free 不允许)。"""
+    """当前配置是否允许实时行情。
+
+    TickFlow 按档位判断; tdxapi 等插件实时源由 QuoteService 放行。
+    """
     from app.services.quote_service import QuoteService
     return QuoteService.is_realtime_allowed()
 
@@ -1217,7 +1220,14 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
             try:
                 if preferences.get_strategy_monitor_enabled():
                     ids = preferences.get_strategy_monitor_ids()
-                    names = {s.id: s.name for s in strategy_engine.list_strategies()}
+                    # StrategyEngine.list_strategies() 返回公开元数据字典,
+                    # 不能按 StrategyDef 对象访问属性; 否则异常会被下方兼容保护吞掉,
+                    # 造成偏好开关已开启但策略监控规则为 0。
+                    names = {
+                        str(item["id"]): str(item.get("name") or item["id"])
+                        for item in strategy_engine.list_strategies()
+                        if isinstance(item, dict) and item.get("id")
+                    }
                     mr_store.migrate_strategy_monitors(data_dir, ids, names)
                 else:
                     # 关闭策略监控: 停用所有策略规则
@@ -1919,6 +1929,18 @@ def update_pipeline_schedule(req: PipelineScheduleIn, request: Request) -> dict:
                 timezone="Asia/Shanghai",
             ),
         )
+        minute_total = sched["hour"] * 60 + sched["minute"] + 30
+        minute_hour, minute_minute = divmod(minute_total, 60)
+        if scheduler.get_job("minute_pipeline"):
+            scheduler.reschedule_job(
+                "minute_pipeline",
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=minute_hour % 24,
+                    minute=minute_minute,
+                    timezone="Asia/Shanghai",
+                ),
+            )
         logger.info("pipeline rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
 
     return sched
@@ -1991,14 +2013,12 @@ def update_limit_ladder_monitor(req: LimitLadderMonitorIn, request: Request) -> 
 
 @router.post("/preferences/limit-ladder-monitor/run")
 def run_limit_ladder_fix(request: Request) -> dict:
-    """立即手动修正一次真假板(拉取五档盘口 + 更新缓存)。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    capset = request.app.state.capabilities
-    capset.require(Cap.DEPTH5_BATCH)  # 无能力抛 CapabilityDenied(403)
-
+    """立即手动修正一次真假板(拉取五档盘口 + 更新缓存)。"""
     depth_svc = getattr(request.app.state, "depth_service", None)
     if not depth_svc:
         raise HTTPException(status_code=503, detail="depth 服务未初始化")
+    if not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
     result = depth_svc.run_once()
     # sealed 数据变了, 清看板总览缓存, 否则看板在 TTL 窗口内仍返回旧的 limit_up/fake 等
     if result.get("ok"):
@@ -2013,9 +2033,10 @@ class DepthPollingIntervalIn(BaseModel):
 
 @router.put("/preferences/depth-polling-interval")
 def update_depth_polling_interval(req: DepthPollingIntervalIn, request: Request) -> dict:
-    """保存五档盘口盘中轮询间隔(秒)。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
+    """保存五档盘口盘中轮询间隔(秒)。"""
+    depth_svc = getattr(request.app.state, "depth_service", None)
+    if not depth_svc or not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
 
     from app.services import preferences
     interval = preferences.set_depth_polling_interval(req.interval)
@@ -2029,9 +2050,10 @@ class DepthFinalizeTimeIn(BaseModel):
 
 @router.put("/preferences/depth-finalize-time")
 def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> dict:
-    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
+    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。"""
+    depth_svc = getattr(request.app.state, "depth_service", None)
+    if not depth_svc or not depth_svc.is_available():
+        raise HTTPException(status_code=403, detail="无可用五档盘口来源,请启用 tdxapi 实时源或配置 TickFlow Pro+")
 
     from app.services import preferences
     sched = preferences.set_depth_finalize_time(req.hour, req.minute)

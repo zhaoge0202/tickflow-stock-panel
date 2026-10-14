@@ -210,6 +210,14 @@ def test_board_and_st_rules() -> None:
     assert bse.thresholds[3] == (0.40, 0.40)
 
 
+def test_bench_rt_pct_converts_index_percentage_to_fraction() -> None:
+    class _Quotes:
+        def get_index_quotes(self):
+            return pl.DataFrame({"symbol": ["399001.SZ"], "change_pct": [-1.02]})
+
+    assert _bench_rt_pct(_Quotes()) == -0.0102
+
+
 class _FakeRepo:
     """最小 repo: get_enriched_latest 返回构造帧。"""
 

@@ -397,6 +397,29 @@ class BacktestEngine:
             "unable to read a stable enriched data snapshot"
         )
 
+    @staticmethod
+    def _sanitize_panel(df: pl.DataFrame) -> pl.DataFrame:
+        """清理会扭曲指标和撮合的坏行，并保证每个标的每日只有一根 K 线。"""
+        if df.is_empty():
+            return df
+
+        before = df.height
+        ohlc = [col for col in ("open", "high", "low", "close") if col in df.columns]
+        if len(ohlc) == 4:
+            valid_bar = pl.all_horizontal(
+                *[pl.col(col).is_not_null() & pl.col(col).is_finite() & (pl.col(col) > 0) for col in ohlc]
+            )
+            df = df.filter(valid_bar)
+
+        if {"symbol", "date"}.issubset(df.columns):
+            df = df.unique(subset=["symbol", "date"], keep="last", maintain_order=False)
+            df = df.sort(["symbol", "date"])
+
+        dropped = before - df.height
+        if dropped:
+            logger.warning("backtest panel sanitized: dropped %d invalid/duplicate rows", dropped)
+        return df
+
     def load_panel_for_backtest(
         self,
         symbols: list[str] | None,
@@ -610,6 +633,7 @@ class BacktestEngine:
             if columns is None and asset_type == "stock" and self.repo is not None and hasattr(self.repo, "get_enriched_range"):
                 cached = self.repo.get_enriched_range(start, end, symbols=symbols, columns=columns)
                 if cached is not None and not cached.is_empty():
+                    cached = self._sanitize_panel(cached)
                     elapsed = (time.perf_counter() - t0) * 1000
                     logger.info("load_panel(cache): %.0fms, %d rows, %d columns", elapsed, len(cached), len(cached.columns))
                     return cached
@@ -631,6 +655,18 @@ class BacktestEngine:
                 if "date" not in selected and "date" in available:
                     selected.insert(1, "date")
                 lf = lf.select(selected)
+            available = set(lf.collect_schema().names())
+            if {"open", "high", "low", "close"}.issubset(available):
+                lf = lf.filter(pl.all_horizontal(
+                    *[
+                        pl.col(col).is_not_null()
+                        & pl.col(col).is_finite()
+                        & (pl.col(col) > 0)
+                        for col in ("open", "high", "low", "close")
+                    ]
+                ))
+            if {"symbol", "date"}.issubset(available):
+                lf = lf.unique(subset=["symbol", "date"], keep="last", maintain_order=False)
             df = (
                 lf.filter(
                     (pl.col("date") >= start)
@@ -645,6 +681,8 @@ class BacktestEngine:
 
         if df.is_empty():
             return df
+
+        df = self._sanitize_panel(df)
 
         if columns is not None:
             elapsed = (time.perf_counter() - t0) * 1000
@@ -2038,27 +2076,11 @@ class BacktestEngine:
             _sell(time_id, asset_id, reason, signal_date, sold_today, override)
             return True
 
-        for time_id, date_label in enumerate(matrix.timestamp_labels):
-            date_text = date_label[:10]
-            if time_id % 20 == 0:
-                if cancel_event is not None and cancel_event.is_set():
-                    logger.info("回测被用户取消 (第 %d/%d 天)", time_id, time_count)
-                    break
-                if progress_cb is not None:
-                    try:
-                        progress_cb({
-                            "day": time_id + 1,
-                            "total": time_count,
-                            "date": date_text,
-                            "equity": round(cash + _market_value(), 2),
-                        })
-                    except Exception:
-                        pass
-
-            sold_today: set[int] = set()
-            for pos in positions.values():
-                pos["hold_days"] += 1
-
+        def _process_risk_exits(
+            time_id: int,
+            date_text: str,
+            sold_today: set[int],
+        ) -> None:
             for asset_id in list(positions):
                 pos = positions.get(asset_id)
                 if pos is None or pos.get("pending_exit_reason") or pos["entry_date"] == date_text:
@@ -2098,6 +2120,11 @@ class BacktestEngine:
                     elif _valid_price(high_price) and high_price >= take_profit:
                         _try_sell(time_id, asset_id, "take_profit", date_text, sold_today, take_profit)
 
+        def _process_scheduled_exits(
+            time_id: int,
+            date_text: str,
+            sold_today: set[int],
+        ) -> None:
             for asset_id in list(positions):
                 pos = positions.get(asset_id)
                 if pos is None:
@@ -2116,6 +2143,34 @@ class BacktestEngine:
                     reason = "end"
                 if reason:
                     _try_sell(time_id, asset_id, reason, signal_date, sold_today)
+
+        for time_id, date_label in enumerate(matrix.timestamp_labels):
+            date_text = date_label[:10]
+            if time_id % 20 == 0:
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info("回测被用户取消 (第 %d/%d 天)", time_id, time_count)
+                    break
+                if progress_cb is not None:
+                    try:
+                        progress_cb({
+                            "day": time_id + 1,
+                            "total": time_count,
+                            "date": date_text,
+                            "equity": round(cash + _market_value(), 2),
+                        })
+                    except Exception:
+                        pass
+
+            sold_today: set[int] = set()
+            for pos in positions.values():
+                pos["hold_days"] += 1
+
+            if config.exit_fill == "open_t+1":
+                _process_scheduled_exits(time_id, date_text, sold_today)
+                _process_risk_exits(time_id, date_text, sold_today)
+            else:
+                _process_risk_exits(time_id, date_text, sold_today)
+                _process_scheduled_exits(time_id, date_text, sold_today)
 
             if time_id < time_count - 1 and max_positions > 0:
                 candidates: list[tuple[int, float]] = []
@@ -2788,11 +2843,14 @@ class BacktestEngine:
             for pos in positions.values():
                 pos["hold_days"] += 1
 
-            # 统一执行顺序 (不分口径): 风控(止损/移动止损/止盈) → 计划出场(signal/max_hold/end) → 建仓。
-            # 风控是保护性离场, 必须最先; 计划出场次之; 建仓最后 (卖出释放的现金/仓位先用于满足新买)。
-            # 当天新建仓不会被风控误杀 (_process_risk_exits 跳过 entry_date == d_str 的仓位)。
-            _process_risk_exits(d_str, row_by_symbol, sold_today)
-            _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
+            # 次日开盘卖单在当日 high/low 形成前已经成交，必须先于盘中风控处理；
+            # 收盘卖单则要等到收盘确认，盘中风控仍应优先。建仓始终最后执行。
+            if config.exit_fill == "open_t+1":
+                _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
+                _process_risk_exits(d_str, row_by_symbol, sold_today)
+            else:
+                _process_risk_exits(d_str, row_by_symbol, sold_today)
+                _process_scheduled_exits(d_idx, d_str, row_by_symbol, sold_today)
             if d_idx < len(all_dates) - 1:
                 _process_entries(d_str, idxs, sold_today)
 

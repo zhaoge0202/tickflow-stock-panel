@@ -44,6 +44,7 @@ import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primit
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -502,6 +503,7 @@ const StockCard = React.memo(function StockCard({
   const price = r.rt_price ?? r.close
   const pct = r.rt_pct ?? r.change_pct
   const name = r.rt_name ?? r.name
+  const volRatio = r.realtime_vol_ratio ?? r.vol_ratio_5d
   const signals = getSignals(r)
   const isUp = (pct ?? 0) > 0
   const isDown = (pct ?? 0) < 0
@@ -597,7 +599,7 @@ const StockCard = React.memo(function StockCard({
         {/* 第三行: 指标 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
           <span title="换手率">换手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
-          <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(r.vol_ratio_5d)}</span></span>
+          <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(volRatio)}</span></span>
           <span title="RSI14">RSI<span className="font-mono ml-0.5">{r.rsi_14 != null ? r.rsi_14.toFixed(1) : '—'}</span></span>
           {/* 扩展数据列展示在卡片中 */}
           {extCols.map(col => {
@@ -789,6 +791,15 @@ export function Watchlist() {
     staleTime: 30_000,  // 清单慢变 (增删后 mutation 会失效), 减少切页重拉
   })
 
+  // 实时行情状态: 列表行情和分时图刷新共用。
+  const quoteStatus = useQuoteStatus()
+  const streamStatus = useQuoteStreamStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+  // SSE 正常连接时由 quotes_updated 事件驱动刷新, 轮询放宽至 60s 兜底;
+  // SSE 断开时退化为行情轮询间隔 (3s~15s) 兜底。
+  const watchlistRefreshInterval = realtimeRunning
+    ? (streamStatus === 'connected' ? 60_000 : Math.max(3_000, Math.min(15_000, Math.round((quoteStatus.data?.interval_s ?? 15) * 1000))))
+    : false
   const groupList = useQuery({
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
@@ -810,10 +821,13 @@ export function Watchlist() {
   }, [groupList.isSuccess, groups, selectedGroup])
 
   // enriched 数据 — 传入 ext_columns 参数
+  // SSE 是首选触发方式 (quotes_updated); 这里加页面级长轮询兜底, 避免 SSE 断线时停在旧行情。
   const enriched = useQuery({
     queryKey: QK.watchlistEnriched(extColumnsParam),
     queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
     enabled: (list.data?.symbols.length ?? 0) > 0,
+    refetchInterval: watchlistRefreshInterval,
+    refetchIntervalInBackground: false,
   })
 
   // symbol 派生只依赖 enriched.data: 旧写法 symbols 每次渲染都是新引用 (击穿 memo)
@@ -831,10 +845,6 @@ export function Watchlist() {
       minuteSymbolsKey: nonIndex.join(','),
     }
   }, [enrichedRows])
-
-  // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
-  const quoteStatus = useQuoteStatus()
-  const realtimeRunning = quoteStatus.data?.running ?? false
 
   // 批量日k数据 (天数由列配置决定; 分组卡片视图不展示蜡烛, 挂起请求)
   const klineBatch = useQuery({

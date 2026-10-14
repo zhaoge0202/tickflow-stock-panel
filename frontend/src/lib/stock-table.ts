@@ -37,7 +37,12 @@ export const SIGNAL_FIELDS: [string, string, SignalType][] = [
 
 /** 从一行数据中提取已命中的信号列表 */
 export function getSignals(r: Record<string, any>): Signal[] {
-  return SIGNAL_FIELDS.filter(([key]) => r[key]).map(([, label, type]) => ({ label, type }))
+  const signals = SIGNAL_FIELDS.filter(([key]) => r[key]).map(([, label, type]) => ({ label, type }))
+  const auctionStatus = r.auction_replay_status ?? r.auction_confirmation_status
+  if (auctionStatus === 'confirmed') signals.unshift({ label: '竞价已确认', type: 'bull' })
+  else if (auctionStatus === 'pending_trade') signals.unshift({ label: '待开盘快照', type: 'neutral' })
+  else if (auctionStatus === 'pending_auction') signals.unshift({ label: '待竞价', type: 'neutral' })
+  return signals
 }
 
 /** 信号类型 → tailwind 颜色类 */
@@ -77,7 +82,7 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'turnover':      return r.turnover_rate
     case 'amount':        return r.rt_amount ?? r.amount
     case 'float_val':     return r.float_shares && (r.rt_price ?? r.close) ? r.float_shares * (r.rt_price ?? r.close) : null
-    case 'vol_ratio':     return r.vol_ratio_5d
+    case 'vol_ratio':     return r.realtime_vol_ratio ?? r.vol_ratio_5d
     case 'annual_vol':    return r.annual_vol_20d
     case 'ma5':           return r.ma5
     case 'ma10':          return r.ma10

@@ -43,14 +43,36 @@ def _get_symbols(data_dir: Path) -> list[str]:
         return []
 
 
+def _effective_custom_financial_provider() -> str | None:
+    """返回当前可用的 custom 财务源。
+
+    老用户可能在 tdxapi 支持 financial 之前已经切过行情源, 此时
+    financial_data_provider 仍停在 tickflow。若当前主行情源已支持
+    financial, 自动用它作为财务源, 避免页面继续误判为 Expert 门槛。
+    """
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    candidates = [
+        preferences.get_financial_provider(),
+        preferences.get_daily_data_provider(),
+        preferences.get_realtime_data_provider(),
+        preferences.get_minute_data_provider(),
+    ]
+    seen: set[str] = set()
+    for provider in candidates:
+        provider = str(provider or "").lower()
+        if not provider or provider == "tickflow" or provider in seen:
+            continue
+        seen.add(provider)
+        if custom_sources.provider_has_dataset(provider, "financial"):
+            return provider
+    return None
+
 def _financial_is_custom() -> bool:
     """当前财务数据源是否走 custom (用于绕过 TickFlow Expert 套餐门槛)。"""
-    from app.services import preferences
-    provider = preferences.get_financial_provider()
-    if provider == "tickflow":
-        return False
-    from app.data_providers import custom as custom_sources
-    return custom_sources.provider_has_dataset(provider, "financial")
+    return _effective_custom_financial_provider() is not None
+
 
 
 def _financial_capability_label() -> str:
@@ -77,10 +99,10 @@ def _fetch_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        custom_provider_name = _effective_custom_financial_provider()
         try:
-            provider = custom_sources.get_provider(preferences.get_financial_provider())
+            provider = custom_sources.get_provider(custom_provider_name)
             df = provider.get_financials(table, symbols, latest_only=latest_only)
         except Exception as e:  # noqa: BLE001
             logger.warning("sync_%s custom provider failed: %s", table, e)

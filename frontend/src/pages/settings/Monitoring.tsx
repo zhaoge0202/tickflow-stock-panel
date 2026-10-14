@@ -69,7 +69,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   })
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false
-  const hasDepth = !!caps?.capabilities?.['depth5.batch']
+  const hasDepth = !!caps?.business_capabilities?.sealed_depth?.available || !!caps?.capabilities?.['depth5.batch']
+  const depthSource = caps?.business_capabilities?.sealed_depth?.source
   // 全量分钟 = intraday.universe 能力 (TickFlow Expert 专有): 标的池单请求拉全市场当日分钟,
   // 修复轮的 intraday.batch 与其同档, 见后端 minute_refresh 服务
   const hasFullMinuteCap = !!caps?.capabilities?.['intraday.universe']
@@ -518,8 +519,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         <Card
           icon={Flame}
           title="连板梯队降级修正"
+          badge={!hasDepth ? '需五档来源' : depthSource === 'tdxapi' ? 'TDX' : undefined}
           anchor="depth-fix"
-          badge={!hasDepth ? '五档盘口不可用' : undefined}
           right={hasDepth ? (
             <button
               onClick={() => runFix.mutate()}
@@ -969,7 +970,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
                 </div>
               )}
             </div>
-
           </div>
         </Card>
       </div>

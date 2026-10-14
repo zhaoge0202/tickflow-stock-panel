@@ -23,7 +23,14 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控', sector: '板块监控', abnormal: '异动监控', volume_delta: '轮询放量监控',
+  signal: '个股信号监控',
+  price: '价格监控',
+  level: '关键价位监控',
+  market: '市场异动监控',
+  strategy: '策略监控',
+  sector: '板块监控',
+  abnormal: '异动监控',
+  volume_delta: '轮询放量监控',
 }
 
 const TYPE_ICONS = {

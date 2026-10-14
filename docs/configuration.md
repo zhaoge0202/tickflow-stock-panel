@@ -49,6 +49,65 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 
 ---
 
+## 数据源:tdx-api sidecar(可选)
+
+项目内置 `tdxapi` 数据源插件,通过 HTTP 调用 `docs/zhihu/tdx-api`
+中的通达信 sidecar。sidecar 负责通达信 TCP 连接、SOCKS5 代理池和
+通达信服务器 IP 池;主后端只通过 `TDX_API_BASE_URL` 取数。
+
+### SOCKS5 代理池配置
+
+代理池配置放在:
+
+```bash
+docs/zhihu/tdx-api/.env
+```
+
+示例:
+
+```ini
+TDX_SOCKS5_PROXY=socks5://user:password@proxy.example.com:1080
+# 多代理用逗号、空格或换行分隔
+TDX_SOCKS5_PROXIES=socks5://user:pass@proxy1:1080,socks5://user:pass@proxy2:1080
+```
+
+这个 `.env` 已被 `docs/zhihu/tdx-api/.gitignore` 忽略,不要提交真实凭据。
+
+### 主项目连接配置
+
+Docker 部署时,`docker-compose.yml` 会自动启动 `tdx-api` sidecar,并把
+主后端连接地址设为:
+
+```ini
+TDX_API_BASE_URL=http://tdx-api:8080
+```
+
+如果是 Dev 模式手动启动 sidecar,根目录 `.env` 可保留默认值:
+
+```ini
+TDX_API_PORT=8080
+TDX_API_BASE_URL=http://127.0.0.1:8080
+```
+
+主后端访问 tdx-api 时默认最多同时占用 4 个 HTTP 连接槽。日 K worker
+较高时可按 sidecar 和 SOCKS5 代理池容量小幅提高，范围为 1~16；配置在
+后端进程启动时读取，修改后需要重启后端：
+
+```ini
+TDX_API_HTTP_CONCURRENCY=4
+TDX_API_DAILY_WORKERS=8
+```
+
+HTTP 闸门会限制所有 tdx-api 请求（历史日 K、分钟 K、实时行情）共享的
+入口并发。提高日 K worker 而不提高闸门，主要会增加等待队列；两者同时提高
+时必须用真实标的批量测试确认没有超时或代理池饱和。
+
+启动后到 **设置 → 数据源** 点击「重新加载」,选择
+**tdx-api(通达信代理池)** 即可。它覆盖日 K、分钟 K、实时行情;
+除权因子和财务数据会回退 TickFlow。
+
+---
+
 ## AI(可选)
 
 用于自然语言生成策略。**所有配置留空即跳过**,不影响核心功能。支持任意 OpenAI 兼容接口。

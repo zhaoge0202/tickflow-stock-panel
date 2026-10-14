@@ -492,6 +492,10 @@ def prewarm_matrix_cache(
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
     }
     del market
+    # 预热只为落盘 mmap; 进程内句柄立刻丢掉, 并回收构建期临时数组。
+    import gc
+
+    gc.collect()
     return result
 
 
@@ -2702,6 +2706,7 @@ class StrategyBacktestService:
             "position_sizing": c.position_sizing,
             "mode": c.mode,
             "holding_days": c.holding_days,
+            "asset_type": c.asset_type,
             "minute_fill": c.minute_fill,
             "regime_filter": c.regime_filter,
         }

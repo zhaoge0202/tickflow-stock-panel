@@ -41,13 +41,20 @@ export function StockIntradayChart({
   const minute = useQuery({
     // 轮询上下文 (个股详情) 传 live: 当日盘中后端直接实时拉取最新K,
     // 避免读到分钟增量落盘的上一轮本地分区; 历史日期后端自行忽略 live。
-    ...klineMinuteQueryOptions(symbol, date ?? undefined, refetchIntervalMs != null),
+    ...klineMinuteQueryOptions(
+      symbol,
+      date ?? undefined,
+      refetchIntervalMs != null && refetchIntervalMs > 0,
+    ),
     enabled: !!symbol && !!date,
+    staleTime: 0,
+    retry: false,
     refetchInterval: minuteRefetchInterval(refetchIntervalMs),
+    refetchIntervalInBackground: true,
   })
 
   const fetchMinute = useMutation({
-    mutationFn: () => api.syncMinuteSingle(symbol),
+    mutationFn: () => api.syncMinuteSingle(symbol, undefined, date ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
       qc.invalidateQueries({ queryKey: QK.klineMinute(symbol, date ?? '') })
@@ -56,6 +63,8 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  const minuteError = minute.error instanceof Error ? minute.error.message : '分钟K请求失败'
+  const fetchMinuteError = fetchMinute.error instanceof Error ? fetchMinute.error.message : '分钟K获取失败'
   // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
   // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
   const sourceIsNone = minute.data?.source === 'none'
@@ -72,12 +81,33 @@ export function StockIntradayChart({
   return (
     <div className={className} style={{ height, flexShrink: 0 }}>
       {minute.isLoading && <div className="text-xs text-muted py-2">分时加载中…</div>}
-      {!minute.isLoading && minuteRows.length === 0 && (
+      {!minute.isLoading && minute.isError && (
+        <div className="flex h-full flex-col items-center justify-center gap-3">
+          <div className="text-xs text-warning">{minuteError}</div>
+          <button
+            onClick={() => { void minute.refetch() }}
+            className="px-4 py-1.5 rounded-btn bg-elevated text-secondary text-xs font-medium hover:bg-elevated/80 transition-colors duration-150"
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {!minute.isLoading && !minute.isError && minuteRows.length === 0 && (
         <>
           {fetchMinute.isPending ? (
             <div className="flex items-center justify-center h-full gap-2 text-xs text-accent">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>正在获取分钟K数据…</span>
+            </div>
+          ) : fetchMinute.isError ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <div className="max-w-[90%] text-center text-xs text-danger">{fetchMinuteError}</div>
+              <button
+                onClick={() => fetchMinute.mutate()}
+                className="px-4 py-1.5 rounded-btn bg-elevated text-secondary text-xs font-medium hover:bg-elevated/80 transition-colors duration-150"
+              >
+                重试
+              </button>
             </div>
           ) : isIndex ? (
             // 指数: 分钟K仅支持实时读取, 无落库获取入口

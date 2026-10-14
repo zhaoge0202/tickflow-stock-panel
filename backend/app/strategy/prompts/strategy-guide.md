@@ -206,7 +206,7 @@ REQUIRED_FEATURES = {"ma20", "momentum_20d", "vol_ratio_5d"}
 |------|------|
 | volume | 成交量 |
 | vol_ma5, vol_ma10 | 成交量均线 |
-| vol_ratio_5d | 5日量比 |
+| vol_ratio_5d | 5日放量倍数 |
 | turnover_rate | 换手率 |
 
 ### 动量与波动

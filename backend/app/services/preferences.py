@@ -752,7 +752,7 @@ def set_review_push_mode(mode: str) -> str:
 # 可刷新的页面列表及其默认值
 SSE_REFRESH_PAGES_DEFAULT = {
     "watchlist": True,
-    "limit-ladder": False,
+    "limit-ladder": True,
 }
 
 
@@ -784,6 +784,27 @@ def get_realtime_quote_scope() -> dict:
         "realtime_pull_stock": get_realtime_pull_stock(),
         "realtime_pull_etf": get_realtime_pull_etf(),
     }
+
+
+def get_realtime_watchlist_symbols() -> list[str]:
+    """返回自选实时轮询标的，保留旧调用方兼容入口。"""
+    try:
+        from app.services import watchlist
+
+        return [
+            str(row.get("symbol") or "").strip().upper()
+            for row in watchlist.list_symbols()
+            if row.get("symbol")
+        ]
+    except Exception:
+        return []
+
+
+def get_realtime_index_symbols() -> list[str]:
+    """返回核心指数实时轮询标的，保留旧调用方兼容入口。"""
+    from app.services.index_const import CORE_INDEX_SYMBOLS
+
+    return list(CORE_INDEX_SYMBOLS)
 
 
 def get_sse_refresh_pages() -> dict[str, bool]:

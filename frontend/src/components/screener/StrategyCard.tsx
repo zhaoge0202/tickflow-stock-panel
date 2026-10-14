@@ -78,6 +78,8 @@ interface StrategyCardProps {
   source?: string
   active: boolean
   count?: number
+  /** 当前计数的业务状态，例如盘后预选。 */
+  countLabel?: string
   /** 今日曾命中总数 */
   everMatched?: number
   /** 今日已失效数 (曾命中 - 当前命中) */
@@ -100,7 +102,7 @@ interface StrategyCardProps {
 }
 
 export function StrategyCard({
-  name, description, source, active, count, expiredCount,
+  name, description, source, active, count, countLabel, expiredCount,
   loading, cardSize,
   onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge, computing, awaitRun,
 }: StrategyCardProps) {
@@ -140,6 +142,11 @@ export function StrategyCard({
             )}
             {count != null && !loading && (
               <div className="mt-1.5 flex items-center gap-2">
+                {countLabel && (
+                  <span className="inline-flex items-center px-1.5 py-px rounded border border-amber-500/25 bg-amber-500/10 text-[10px] font-medium leading-tight text-amber-300">
+                    {countLabel}
+                  </span>
+                )}
                 <div className="flex items-center gap-1">
                   <span className={`text-sm font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
                   <span className="text-[10px] text-muted">只</span>
@@ -183,7 +190,14 @@ export function StrategyCard({
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
               {count != null && !loading && (
-                <span className={`text-xs font-mono font-bold tabular-nums shrink-0 ${countCls}`}>{count}</span>
+                <span className="inline-flex items-center gap-1 shrink-0">
+                  {countLabel && (
+                    <span className="inline-flex items-center px-1 py-px rounded border border-amber-500/25 bg-amber-500/10 text-[9px] font-medium leading-tight text-amber-300">
+                      {countLabel}
+                    </span>
+                  )}
+                  <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
+                </span>
               )}
               {count == null && !loading && computing && (
                 <span className="text-xs font-mono font-bold text-muted/50 animate-pulse shrink-0">···</span>
@@ -222,7 +236,14 @@ export function StrategyCard({
             <span className="text-[8px] px-0.5 rounded bg-secondary/10 text-muted border border-border font-medium leading-tight">{srcLabel}</span>
             <span className="text-[10px] font-medium whitespace-nowrap text-foreground">{name}</span>
             {count != null && !loading && (
-              <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
+              <span className="inline-flex items-center gap-1">
+                {countLabel && (
+                  <span className="inline-flex items-center px-1 py-px rounded border border-amber-500/25 bg-amber-500/10 text-[8px] font-medium leading-tight text-amber-300">
+                    {countLabel}
+                  </span>
+                )}
+                <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
+              </span>
             )}
             {count == null && !loading && computing && (
               <span className="text-xs font-mono font-bold text-muted/50 animate-pulse">···</span>
