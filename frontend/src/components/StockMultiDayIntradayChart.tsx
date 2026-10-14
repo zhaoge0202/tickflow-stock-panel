@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import { api, type MinuteKlineSession } from '@/lib/api'
 import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions, minuteRefetchInterval } from '@/lib/kline'
+import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
 
@@ -63,8 +64,8 @@ export function StockMultiDayIntradayChart({
     mutationFn: () => api.syncMinuteSingle(symbol, days),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['kline-minute-range', symbol] }),
-        queryClient.invalidateQueries({ queryKey: ['kline-minute', symbol] }),
+        queryClient.invalidateQueries({ queryKey: QK.klineMinuteRange(symbol, days) }),
+        queryClient.invalidateQueries({ queryKey: QK.klineMinute(symbol, '') }),
       ])
     },
     onError: (e: Error) => {

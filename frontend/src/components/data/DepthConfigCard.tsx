@@ -18,7 +18,8 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
   const prefs = usePreferences()
   const caps = useCapabilities()
 
-  const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
+  const hasDepth = !!caps.data?.business_capabilities?.sealed_depth?.available || !!caps.data?.capabilities?.['depth5.batch']
+  const depthSource = caps.data?.business_capabilities?.sealed_depth?.source
   // 能力判定(非档位): 具备实时推送能力的数据源允许更快的盘口轮询
   const fastPolling = !!caps.data?.capabilities?.['websocket']
   const range = fastPolling ? { lo: 3, hi: 120 } : { lo: 10, hi: 120 }
@@ -51,8 +52,8 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
     return (
       <div className="space-y-2">
         <p className="text-xs text-muted leading-relaxed">
-          真假涨停判定依赖五档盘口实时快照,该数据当前不可用。
-          配置提供五档盘口的数据源后,连板梯队将自动区分真封板(显示封单量)与假涨停(归入炸板)。
+          真假涨停判定依赖五档盘口实时快照。请启用 <span className="text-accent">tdxapi 实时源</span>
+          或配置提供五档盘口的数据源后使用；连板梯队将自动区分真封板与假涨停。
         </p>
         <MissingCapChip capKey="depth5.batch" />
       </div>
@@ -67,7 +68,7 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
       <div className="flex items-center justify-between gap-2">
         <div className={disabled ? 'opacity-50' : ''}>
           <div className="text-xs text-secondary">盘中轮询间隔</div>
-          <div className="text-[10px] text-muted">范围 {range.lo}~{range.hi} 秒 · 涨跌停过多时系统自动放慢</div>
+          <div className="text-[10px] text-muted">范围 {range.lo}~{range.hi} 秒{depthSource === 'tdxapi' ? ' · TDX 五档' : ''} · 涨跌停过多时系统自动放慢</div>
         </div>
         <div className="flex items-center gap-1">
           <input
