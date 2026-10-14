@@ -31,6 +31,22 @@ from app.services import preferences
 from app.services.quote_service import QuoteService
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(monkeypatch, tmp_path):
+    """把 data_dir 隔离到 tmp_path: boot_check() 的降级写盘不得落到真实数据目录。
+
+    `boot_check()` 在「档位不允许 + 偏好为开」时会 `preferences.save(...)` 把
+    实时行情开关写 False; 不隔离时本文件会真写 `<data_dir>/user_data/preferences.json`,
+    跑一次测试就把本机实时行情偏好改成关闭 (小测 #4 的 L-2)。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    preferences._invalidate_cache()
+    yield
+    preferences._invalidate_cache()
+
+
 def _make(monkeypatch, *, tier_allowed: bool, pref_enabled: bool):
     """构造一个不真启动线程的 QuoteService, 并返回 (qs, started 记录器)。"""
     monkeypatch.setattr(QuoteService, "is_realtime_allowed", classmethod(lambda cls: tier_allowed))
