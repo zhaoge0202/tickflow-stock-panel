@@ -1,3 +1,9 @@
+"""截面动量加速策略的矩阵口径回归。
+
+策略源文件位于 data/strategies/custom (用户数据目录, 不入库; 见 CONTRIBUTING
+「不提交用户策略」), 干净检出/CI 上没有该文件 ⇒ 本文件整体 skip; 带本地数据目录
+的开发环境照常执行 (与引擎同一条 _load_file 加载链, 含同目录 _*.py 依赖校验)。
+"""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -5,10 +11,32 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 
 from app.backtest.matrix import build_market_data_matrix
-from app.strategy.builtin.adaptive_relative_momentum import MATRIX_STRATEGY
 from app.strategy.engine import StrategyEngine
+
+STRATEGY_ID = "adaptive_relative_momentum"
+STRATEGY_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data"
+    / "strategies"
+    / "custom"
+    / f"{STRATEGY_ID}.py"
+)
+
+pytestmark = pytest.mark.skipif(
+    not STRATEGY_PATH.is_file(),
+    reason=(
+        "data/strategies/custom/adaptive_relative_momentum.py 不存在 (干净检出/CI): "
+        "用户策略不入库 (CONTRIBUTING「不提交用户策略」), 本组用例仅在有本地数据目录时运行"
+    ),
+)
+
+
+def _strategy():
+    """按引擎口径加载用户数据目录里的策略文件。"""
+    return StrategyEngine._load_file(STRATEGY_PATH)
 
 
 def _panel(bearish_symbols: int = 0) -> pl.DataFrame:
@@ -40,7 +68,9 @@ def _panel(bearish_symbols: int = 0) -> pl.DataFrame:
 def _signals(panel: pl.DataFrame, params: dict):
     field_columns = set(panel.columns) - {"symbol", "date", "open", "high", "low", "close", "volume"}
     market = build_market_data_matrix(panel, field_columns=field_columns)
-    return market, MATRIX_STRATEGY.compute_signals(market, params)
+    strategy = _strategy()
+    assert strategy.matrix_strategy is not None
+    return market, strategy.matrix_strategy.compute_signals(market, params)
 
 
 def test_matrix_strategy_keeps_only_top_cross_section():
@@ -87,14 +117,7 @@ def test_matrix_strategy_is_prefix_invariant():
 
 
 def test_strategy_explicitly_supports_etf_without_stock_board_filter():
-    path = (
-        Path(__file__).parents[1]
-        / "app"
-        / "strategy"
-        / "builtin"
-        / "adaptive_relative_momentum.py"
-    )
-    strategy = StrategyEngine._load_file(path)
+    strategy = _strategy()
 
     assert strategy.meta["asset_types"] == ["stock", "etf"]
     assert strategy.basic_filter["boards"] == []
