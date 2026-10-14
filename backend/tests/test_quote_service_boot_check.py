@@ -1,9 +1,13 @@
-"""`QuoteService.boot_check()` 的**启动决策 + 可观测性**回归测试。
+"""`QuoteService.boot_check()` 的**启动决策 + 可观测性 + 不落盘**回归测试。
 
 背景(本机实测事故 2026-09-16): 面板 08:58 起, 直到用户 09:35:33 手动开启才有行情
 ⇒ 开盘后 6 分钟实时评估全空。根因 = 旧版 `stop()` 把 `realtime_quotes_enabled` 写成 False
 (lifespan shutdown 也调 `stop`) ⇒ 次日 `boot_check()` 读到 False 就**静默不启动**,
 且**一行日志都不打** ⇒ 排查只能靠排除法。
+
+在此基础上, 档位不足时 `boot_check()` 过去还会把偏好写成 False 落盘, 次日档位恢复后
+依然读到 False ⇒ 又一轮静默不启动。本文件断言: 档位不足只停本次运行、留醒目日志,
+**不改写 preferences.json** (mtime 与键值都不变); 偏好落盘只归 enable/disable。
 
 ⚠️ 与本文件的分工:
   * `tests/test_realtime_preference_persistence.py` 管**根因**(`stop()` 不持久化 / `disable()` 才持久化)
@@ -11,18 +15,10 @@
   * 本文件管 `boot_check()` **拿这个偏好做了什么决策**、**有没有留下痕迹**
     —— 上游此前对 `boot_check()` 本身**没有任何测试**
       (`test_data_integrity.py` 里那个同名 `boot_check` 是数据修复用的, ⛔ 不是本函数)。
-
-⚠️ 已知差异(本文件用 xfail 显式记录, ⛔ 不改被测代码):
-  当**档位允许**但**偏好为关**时, 上游 `boot_check()` 分支走到底: **不启动、也不打日志**。
-  本机口径要求此处**必须留一行日志**(「静默不启动」正是 2026-09-16 事故难排查的原因)
-  ⇒ 用 `xfail(strict=True)` 编码**期望行为**: 上游修好那天它会变 XPASS ⇒ strict 会让它 FAIL
-  ⇒ 提示「该更新测试了」。(不喜欢这种用法的话, 删掉 `test_..._leaves_a_log` 即可, 其余 4 例独立。)
-
-⚠️ 标点惯例: 本仓 `tests/` 共 288 个文件, 其中 271 个不含 RUF00x(全角标点)告警 ⇒ 本文件随多数派
-  在**文档串/注释**里用 ASCII 标点(`(` `)` `,` `:` `;`), 以保持 `ruff check tests` 零新增。
 """
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -81,22 +77,28 @@ def test_logs_and_does_not_start_when_tier_disallows(monkeypatch, caplog):
     assert any("未启动" in m for m in msgs), f"档位不允许时必须留下可解析的日志行, 实际={msgs}"
 
 
-def test_demotes_preference_when_tier_disallows(monkeypatch):
-    """档位 none 且偏好为开 ⇒ 必须把偏好**同步写 False**(否则 UI 会误显示「已开启」)。"""
-    saved: list[dict] = []
-    monkeypatch.setattr(preferences, "save", lambda updates: saved.append(updates))
+def test_tier_disallow_does_not_persist_preference(monkeypatch, tmp_path):
+    """档位 none 且偏好为开 ⇒ 只停本次运行, **不得改写 preferences.json**。
+
+    这是 09-16 事故的二次回潮路径: 档位不足把偏好写成 False 落盘, 次日档位
+    恢复后 boot_check 又读到 False 静默不启动。断言 mtime 与键值都不变。
+    """
+    pref_path = tmp_path / "user_data" / "preferences.json"
+    pref_path.parent.mkdir(parents=True, exist_ok=True)
+    original = {"realtime_quotes_enabled": True, "watchlist_groups_in_nav": True}
+    pref_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    mtime_before = pref_path.stat().st_mtime_ns
+
     qs, started = _make(monkeypatch, tier_allowed=False, pref_enabled=True)
     qs.boot_check()
+
     assert started == [], "档位 none 时不应启动"
-    assert saved == [{"realtime_quotes_enabled": False}], f"应把偏好降级写回, 实际={saved}"
+    assert pref_path.stat().st_mtime_ns == mtime_before, "档位不足时不得改写 preferences.json"
+    assert json.loads(pref_path.read_text(encoding="utf-8")) == original, "偏好键值不得变化"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="上游此分支仍静默: 档位允许但偏好为关时不打日志(本机已加一行) -- 修好后本用例会 XPASS, 届时删除 xfail",
-)
 def test_preference_disabled_leaves_a_log(monkeypatch, caplog):
-    """⚠️ **期望**行为(上游当前未满足): 偏好为关而档位允许时也应留下日志。
+    """偏好为关而档位允许时也应留下日志。
 
     「不启动」本身没有错, 错的是一句话都不说 —— 那让「没行情」与「没权限/没数据/没启动」无法区分。
     """
