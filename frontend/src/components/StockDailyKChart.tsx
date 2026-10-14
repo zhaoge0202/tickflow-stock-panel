@@ -109,17 +109,23 @@ export function getDefaultRange(): { start: string; end: string } {
 
 /** 工具栏小胶囊开关（指标与标注开关共用一套尺寸/关闭态样式，激活色由调用方给字面量）。 */
 function ChartPill({
-  active, label, activeClass, title, onClick,
+  active, label, activeClass, title, role, ariaChecked, onClick,
 }: {
   active: boolean
   label: string
   activeClass: string
   title?: string
+  /** 开关型 pill 传 'switch', 与同排开关控件一致 (省略时为普通按钮) */
+  role?: 'switch'
+  ariaChecked?: boolean
   onClick: () => void
 }) {
   return (
     <button
       type="button"
+      role={role}
+      aria-checked={ariaChecked}
+      aria-label={title}
       onClick={onClick}
       title={title}
       className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
@@ -336,6 +342,8 @@ export function StockDailyKChart({
                 label="压支"
                 activeClass="text-[#F97316] bg-[#F97316]/10"
                 title={showKeyLevels ? '隐藏压力支撑位' : '显示压力支撑位'}
+                role="switch"
+                ariaChecked={showKeyLevels}
                 onClick={() => setShowKeyLevels(v => !v)}
               />
             )}
