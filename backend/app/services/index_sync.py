@@ -125,6 +125,17 @@ def sync_index_instruments(
     index_parts: list[pl.DataFrame] = []
     etf_parts: list[pl.DataFrame] = []
 
+    # 0) 当前启用 tdxapi 时,先用 sidecar 补 ETF/核心指数维表。
+    if _tdxapi_enabled():
+        if pull_index:
+            index_df = _fetch_tdxapi_instruments("index")
+            if not index_df.is_empty():
+                index_parts.append(index_df)
+        if pull_etf:
+            etf_df = _fetch_tdxapi_instruments("etf")
+            if not etf_df.is_empty():
+                etf_parts.append(etf_df)
+
     # 1) 免费通道:按开关分别拉 index / etf
     if pull_index:
         index_df = _fetch_instruments_by_type("index", "index")
@@ -181,12 +192,59 @@ def sync_index_instruments(
 
 def sync_etf_instruments(repo: KlineRepository) -> int:
     """单独同步 ETF 标的维表(返回 ETF 数量)。"""
+    parts = []
+    if _tdxapi_enabled():
+        tdx_df = _fetch_tdxapi_instruments("etf")
+        if not tdx_df.is_empty():
+            parts.append(tdx_df)
     etf_df = _fetch_instruments_by_type("etf", "etf")
     if etf_df.is_empty():
+        etf_df = pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
+    elif parts:
+        etf_df = pl.concat([*parts, etf_df], how="diagonal_relaxed")
+    if etf_df.is_empty():
         return 0
+    etf_df = etf_df.unique(subset=["symbol"], keep="last").sort("symbol")
     repo.save_etf_instruments(etf_df)
     repo.refresh_index_views()
     return etf_df.height
+
+
+def _tdxapi_enabled() -> bool:
+    return "tdxapi" in {
+        preferences.get_daily_data_provider(),
+        preferences.get_realtime_data_provider(),
+        preferences.get_minute_data_provider(),
+    }
+
+
+def _fetch_tdxapi_instruments(asset_type: str) -> pl.DataFrame:
+    try:
+        from app.plugins.tdxapi.provider import TDXAPIProvider
+        provider = TDXAPIProvider()
+        try:
+            rows = provider.get_instruments(asset_type)
+        finally:
+            provider.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("tdx-api %s 维表补全跳过: %s", asset_type, e)
+        return pl.DataFrame()
+    normalized = []
+    for row in rows or []:
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+        normalized.append({
+            "symbol": str(symbol),
+            "name": row.get("name") or str(symbol),
+            "code": row.get("code") or str(symbol).split(".")[0],
+            "exchange": row.get("exchange") or str(symbol).split(".")[-1],
+            "asset_type": asset_type,
+            "source": "tdxapi",
+        })
+    if not normalized:
+        return pl.DataFrame()
+    return pl.DataFrame(normalized).unique(subset=["symbol"], keep="last").sort("symbol")
 
 
 def sync_and_persist_index_daily(
@@ -306,6 +364,54 @@ def _load_local_etf_daily(repo: KlineRepository, symbols: list[str]) -> pl.DataF
     except Exception as e:
         logger.warning("读取本地 ETF 日K失败: %s", e)
         return pl.DataFrame()
+def _sanitize_etf_daily(
+    raw: pl.DataFrame,
+    symbols: list[str],
+    start_time: datetime,
+    end_time: datetime,
+) -> pl.DataFrame:
+    """限制 provider 返回范围，并在写盘前剔除非法或重复 K 线。"""
+    required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
+    if raw.is_empty() or not required.issubset(raw.columns):
+        return pl.DataFrame()
+    valid_ohlc = pl.all_horizontal(
+        *[
+            pl.col(col).is_not_null()
+            & pl.col(col).is_finite()
+            & (pl.col(col) > 0)
+            for col in ("open", "high", "low", "close")
+        ]
+    )
+    return (
+        raw.filter(
+            pl.col("symbol").is_in(symbols)
+            & (pl.col("date") >= start_time.date())
+            & (pl.col("date") <= end_time.date())
+            & valid_ohlc
+        )
+        .unique(subset=["symbol", "date"], keep="last")
+        .sort(["symbol", "date"])
+    )
+
+
+def _persist_etf_daily_frame(
+    repo: KlineRepository,
+    raw: pl.DataFrame,
+    factors: pl.DataFrame,
+) -> int:
+    if raw.is_empty():
+        return 0
+    symbols = raw["symbol"].unique().to_list()
+    batch_factors = (
+        factors.filter(pl.col("symbol").is_in(symbols))
+        if not factors.is_empty()
+        else factors
+    )
+    # raw 是权威数据，enriched 可由 raw 重建；两者都按 repository 的 merge-upsert 写入。
+    repo.append_etf_daily(raw)
+    enriched = compute_enriched(raw, factors=batch_factors, instruments=None)
+    repo.append_etf_enriched(enriched)
+    return raw.height
 
 
 def sync_etf_adj_factor(
@@ -357,15 +463,38 @@ def sync_and_persist_etf_daily(
     if not symbols:
         return 0
 
+    end_time = end_date or datetime.now()
+    start_time = start_date or (end_time - timedelta(days=365))
+    factors = _load_etf_factors(repo)
+
+    # TDX/API 插件等外部 provider 不依赖 TickFlow batch 能力。旧代码在此之前
+    # 检查 KLINE_DAILY_BATCH，导致 Free 档即使已选 tdxapi 也直接返回 0。
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name != "tickflow":
+        from app.data_providers import custom as custom_sources
+
+        if custom_sources.provider_has_dataset(provider_name, "daily"):
+            provider = custom_sources.get_provider(provider_name)
+            raw = provider.get_daily(
+                symbols,
+                start_time=start_time,
+                end_time=end_time,
+                asset_type="etf",
+                on_chunk_done=on_chunk_done,
+            )
+            raw = _sanitize_etf_daily(raw, symbols, start_time, end_time)
+            written = _persist_etf_daily_frame(repo, raw, factors)
+            repo.refresh_index_views()
+            return written
+
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
+        return 0
+
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
     batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
-    end_time = end_date or datetime.now()
-    start_time = start_date or (end_time - timedelta(days=365))
-
     total_rows = 0
     chunks = chunked(symbols, batch_size)
-    factors = _load_etf_factors(repo)
     for i, chunk in enumerate(chunks):
         sleep_between_batches(i, limit.rpm)
         raw = kline_sync.sync_daily_batch(
@@ -378,6 +507,9 @@ def sync_and_persist_etf_daily(
         if raw.is_empty():
             continue
 
+        raw = _sanitize_etf_daily(raw, chunk, start_time, end_time)
+        if raw.is_empty():
+            continue
         repo.append_etf_daily(raw)
         batch_factors = factors.filter(pl.col("symbol").is_in(chunk)) if not factors.is_empty() else factors
         # 前复权 ratio = cum/total, 新除权事件会改写全部历史价。只用本次拉取
