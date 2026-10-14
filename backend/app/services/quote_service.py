@@ -1251,9 +1251,9 @@ class QuoteService:
             self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         self._broadcast_quote_updated()
-        # Watchlist 模式不走离锁快照路径, 评估同样持 _evaluate_lock 串行化。
-        with self._evaluate_lock:
-            self._evaluate_monitors(daily_df, quote_extra)
+        # Watchlist 模式不走离锁快照路径: realtime_mode 为 watchlist 时
+        # _fetch_full_market_quotes 不会被调用, 这里在取数锁内评估即可。
+        self._evaluate_monitors(daily_df, quote_extra)
 
     # ================================================================
     # 工具
