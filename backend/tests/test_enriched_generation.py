@@ -15,6 +15,7 @@ from app.enriched_generation import (
     EnrichedPublication,
     get_enriched_generation,
 )
+from app import enriched_generation
 from app.tickflow.repository import DataStore, KlineRepository
 
 
@@ -75,6 +76,35 @@ def test_repository_changed_partition_before_unchanged_issue417(tmp_path) -> Non
     }))
     assert repo.get_matrix_data_generation("stock") != first
     assert repo.get_matrix_data_generation("stock") != first  # 幂等不抛
+
+
+def test_repository_warm_cache_preserves_auction_result_fields(tmp_path) -> None:
+    repo = KlineRepository(DataStore(tmp_path))
+    frame = pl.DataFrame({
+        "symbol": ["600177.SH"],
+        "date": [date(2026, 8, 14)],
+        "open": [8.20],
+        "high": [8.30],
+        "low": [8.10],
+        "close": [8.25],
+        "volume": [100_000.0],
+        "amount": [825_000.0],
+        "auction_result_price": [8.18],
+        "auction_result_volume": [637.0],
+        "auction_result_amount": [521066.0],
+    })
+
+    repo.append_enriched(frame)
+    repo.rebuild_views()
+    repo.refresh_cache(background=False)
+
+    cached, cached_date = repo.get_enriched_latest()
+    assert cached_date == date(2026, 8, 14)
+    assert cached["auction_result_price"].item() == pytest.approx(8.18)
+    queried = repo.get_daily(
+        "600177.SH", date(2026, 8, 14), date(2026, 8, 14)
+    )
+    assert queried["auction_result_price"].item() == pytest.approx(8.18)
 
 
 def test_failed_multi_partition_publication_remains_fail_closed(
@@ -157,6 +187,47 @@ def test_recovery_takes_over_when_owner_pid_is_dead_on_windows(tmp_path, monkeyp
     assert marker["state"] == "ready"
     assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
     assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
+
+
+def test_publication_replace_retries_windows_reader_lock(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"old")
+    real_replace = enriched_generation.os.replace
+    calls = {"count": 0}
+
+    def flaky_replace(source, destination):
+        if str(destination).endswith("part.parquet"):
+            calls["count"] += 1
+        if str(destination).endswith("part.parquet") and calls["count"] == 1:
+            raise PermissionError(5, "拒绝访问")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(enriched_generation.os, "replace", flaky_replace)
+    monkeypatch.setattr(enriched_generation.time, "sleep", lambda _seconds: None)
+
+    publication = EnrichedPublication(tmp_path, recover=True)
+    publication.write_parquet(_frame(13.0), out)
+    publication.commit()
+
+    assert calls["count"] == 2
+    assert pl.read_parquet(out)["close"].item() == pytest.approx(13.0)
+
+
+def test_publication_replace_failure_is_not_swallowed(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"old")
+
+    def always_fail(*_args, **_kwargs):
+        raise PermissionError(5, "拒绝访问")
+
+    monkeypatch.setattr(enriched_generation, "replace_with_retry", always_fail)
+    publication = EnrichedPublication(tmp_path, recover=True)
+
+    with pytest.raises(PermissionError, match="拒绝访问"):
+        publication.write_parquet(_frame(14.0), out)
+    assert out.read_bytes() == b"old"
 
 
 def test_panel_cache_generation_change_forces_recompute() -> None:
