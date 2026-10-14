@@ -40,6 +40,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/factors', label: '因子', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
+  { id: '/sector-flow', label: '板块强度', type: 'builtin', visible: true },
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
   { id: '/indices', label: '指数', type: 'builtin', visible: true },
   { id: '/data', label: '数据', type: 'builtin', visible: true },
