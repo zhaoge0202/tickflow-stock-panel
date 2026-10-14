@@ -13,18 +13,12 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from app.market_time import cn_today
+from app.services.local_strategy_config import load_auction_config
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-DEFAULT_PRESELECT_STRATEGY_IDS = (
-    "custom_dual_edge",
-    "custom_dual_edge_focus",
-    "custom_dual_edge_v3",
-)
-# 当前盘后预选算法是双刃合专属的竞价观察算法，不能套用到普通策略。
-SUPPORTED_PRESELECT_STRATEGY_IDS = frozenset(DEFAULT_PRESELECT_STRATEGY_IDS)
 MAIN_BOARD_FILTER = ["沪主板", "深主板"]
 DEFAULT_LIMIT_PER_STRATEGY = 5
 MAX_LIMIT_PER_STRATEGY = 30
@@ -51,6 +45,11 @@ def build_preselect_payload(
     broader watchlist that can later be narrowed by auction/open snapshots.
     """
     now = datetime.now(tz=CN_TZ)
+    data_dir = Path(repo.store.data_dir)
+    # 当前盘后预选算法是双刃合专属的竞价观察算法, 策略 ID 清单来自本地配置;
+    # 配置缺失时清单为空 → 下面降级为 empty_strategies, 不影响主流程。
+    local_cfg = load_auction_config(data_dir)
+    supported_ids = frozenset(local_cfg["preselect_strategy_ids"])
     svc = ScreenerService(repo, asset_type=asset_type)
     if as_of is not None:
         signal_date = as_of
@@ -60,14 +59,16 @@ def build_preselect_payload(
     trade_day = trade_date or cn_today()
     requested_ids = _normalize_strategy_ids(strategy_ids)
     if requested_ids is None:
-        requested_ids = [sid for sid in DEFAULT_PRESELECT_STRATEGY_IDS if engine.has(sid)]
+        requested_ids = [
+            sid for sid in local_cfg["preselect_strategy_ids"] if engine.has(sid)
+        ]
     else:
         unknown = [sid for sid in requested_ids if not engine.has(sid)]
         if unknown:
             raise ValueError(f"unknown strategies: {unknown}")
         requested_ids = [
             sid for sid in requested_ids
-            if sid in SUPPORTED_PRESELECT_STRATEGY_IDS
+            if sid in supported_ids
         ]
     limit = _limit(limit_per_strategy)
 
@@ -90,7 +91,6 @@ def build_preselect_payload(
     if unknown:
         raise ValueError(f"unknown strategies: {unknown}")
 
-    data_dir = Path(repo.store.data_dir)
     overrides_map = strategy_config.list_overrides(data_dir)
     params_map = {
         sid: dict((overrides_map.get(sid) or {}).get("params") or {})

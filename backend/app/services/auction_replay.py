@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from app.market_time import cn_today
 from app.services import quote_tick_store, strategy_cache
+from app.services.local_strategy_config import load_auction_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,6 @@ TRADE_END = dt_time(9, 30)
 MAX_DEFAULT_FRAMES = 600
 MAX_DYNAMIC_FRAMES = 300
 QUOTE_WINDOW_FINGERPRINT_TTL = 5.0
-DEFAULT_DYNAMIC_STRATEGY_IDS = (
-    "custom_dual_edge",
-    "custom_dual_edge_v3",
-    "custom_dual_edge_focus",
-)
 
 _dynamic_history_lock = threading.Lock()
 _dynamic_history_cache: dict[tuple, object] = {}
@@ -225,6 +221,7 @@ def replay_dynamic_strategy_results(
 
     now = datetime.now(tz=CN_TZ)
     data_dir = Path(repo.store.data_dir)
+    local_cfg = load_auction_config(data_dir)
     trade_day = trade_date or cn_today()
     svc = ScreenerService(repo, asset_type=asset_type)
     signal_date = as_of or svc.latest_date()
@@ -238,7 +235,9 @@ def replay_dynamic_strategy_results(
 
     requested_ids = _normalize_strategy_ids(strategy_ids)
     if requested_ids is None:
-        requested_ids = [sid for sid in DEFAULT_DYNAMIC_STRATEGY_IDS if engine.has(sid)]
+        requested_ids = [
+            sid for sid in local_cfg["dynamic_strategy_ids"] if engine.has(sid)
+        ]
     if not requested_ids:
         return _empty_dynamic_payload(
             status="empty_strategies",
@@ -655,6 +654,7 @@ def _record_dynamic_history(
     )
     events: list[dict] = []
     selection_records: list[tuple[str, str, list[dict]]] = []
+    auction_gap_config = load_auction_config(data_dir)["auction_gap"]
     for sid in requested_ids:
         raw = cache_results.get(sid)
         if not isinstance(raw, dict) or str(raw.get("as_of") or "") != signal_date.isoformat():
@@ -711,6 +711,7 @@ def _record_dynamic_history(
                     auction_row,
                     trade_row,
                     params_map.get(sid) or {},
+                    auction_gap_config=auction_gap_config,
                 )
             events.append(_outcome_event(
                 event_type="auction_rejected",
@@ -797,6 +798,7 @@ def _dynamic_rejection_reason(
     auction_row: dict | None,
     trade_row: dict | None,
     params: dict,
+    auction_gap_config: dict | None = None,
 ) -> tuple[str, str]:
     if auction_row is None:
         return "auction_data_missing", "未取得 09:25 前竞价快照，无法确认"
@@ -811,11 +813,15 @@ def _dynamic_rejection_reason(
     open_value = _positive_float(trade_row.get("open")) or auction_price
     open_gap = open_value / base_price - 1.0
     current_change = trade_price / base_price - 1.0
-    if strategy_id in {"custom_dual_edge", "custom_dual_edge_focus", "custom_dual_edge_prime"}:
-        default_gap_max = 4.0 if strategy_id == "custom_dual_edge_prime" else 3.5
-        gap_min = float(params.get("gap_min", 2.0)) / 100.0
+    if auction_gap_config is not None and strategy_id in auction_gap_config["strategy_ids"]:
+        default_gap_max = float(
+            auction_gap_config.get("gap_max_by_strategy", {}).get(
+                strategy_id, auction_gap_config["default_gap_max"],
+            )
+        )
+        gap_min = float(params.get("gap_min", auction_gap_config["gap_min"])) / 100.0
         gap_max = float(params.get("gap_max", default_gap_max)) / 100.0
-        min_change = float(params.get("auction_min_change", 3.5)) / 100.0
+        min_change = float(params.get("auction_min_change", auction_gap_config["auction_min_change"])) / 100.0
         if open_gap < gap_min:
             return (
                 "auction_gap_failed",

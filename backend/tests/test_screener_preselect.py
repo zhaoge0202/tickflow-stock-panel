@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import json
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
 
 from app.api import screener as screener_api
 from app.services import auction_preselect
+
+
+def _write_preselect_config(data_dir, strategy_ids):
+    """注入本地策略情报配置 (占位 ID, 避免在测试里复刻生产策略 ID)。"""
+    cfg = {
+        "preselect_strategy_ids": strategy_ids,
+        "dynamic_strategy_ids": [],
+        "focus_strategy_ids": [],
+        "focus_default_strategy_id": None,
+        "auction_gap": None,
+    }
+    path = Path(data_dir) / "local_config" / "auction_strategy.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
 
 def _strategy():
@@ -167,6 +183,7 @@ def test_preselect_rows_avoid_abnormal_follows_strategy_params():
 
 
 def test_preselect_payload_uses_next_trade_day_and_main_board_only(monkeypatch, tmp_path):
+    _write_preselect_config(tmp_path, ["test_preselect"])
     repo = SimpleNamespace(
         store=SimpleNamespace(data_dir=tmp_path),
     )
@@ -231,12 +248,12 @@ def test_preselect_payload_uses_next_trade_day_and_main_board_only(monkeypatch, 
         _Engine(),
         as_of=date(2026, 8, 11),
         trade_date=date(2026, 8, 12),
-        strategy_ids=["custom_dual_edge"],
+        strategy_ids=["test_preselect"],
         limit_per_strategy=5,
         asset_type="stock",
     )
 
-    result = payload["results"]["custom_dual_edge"]
+    result = payload["results"]["test_preselect"]
     assert payload["trade_date"] == "2026-08-12"
     assert [row["symbol"] for row in result["rows"]] == ["000001.SZ"]
 
