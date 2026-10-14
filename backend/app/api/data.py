@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now, cn_today
+from app.services.local_strategy_config import focus_default_strategy_id
 from app.services.strategy_date import latest_strategy_date
 
 logger = logging.getLogger(__name__)
@@ -764,32 +765,34 @@ def focus_readiness(
                 pass
 
     # 6. Focus 三版本定版状态
-    preview_file = data_dir / "user_data" / f"preview_custom_dual_edge_focus_{target_date_str}.json"
-    final_file = data_dir / "user_data" / f"focus_three_versions_custom_dual_edge_focus_{target_date_str}.json"
+    focus_sid = focus_default_strategy_id(data_dir)
     preview_info = {"exists": False, "total": 0, "created_at": None}
     final_info = {"exists": False, "final_total": 0, "preselect_total": 0, "preview_total": 0}
-    if preview_file.exists():
-        try:
-            p_data = json.loads(preview_file.read_text(encoding="utf-8"))
-            preview_info = {
-                "exists": True,
-                "total": p_data.get("total", 0),
-                "created_at": p_data.get("created_at"),
-            }
-        except Exception:
-            pass
-    if final_file.exists():
-        try:
-            f_data = json.loads(final_file.read_text(encoding="utf-8"))
-            final_info = {
-                "exists": True,
-                "final_total": f_data.get("summary", {}).get("final_total", 0),
-                "preselect_total": f_data.get("summary", {}).get("preselect_total", 0),
-                "preview_total": f_data.get("summary", {}).get("preview_total", 0),
-                "confirmed_count": f_data.get("summary", {}).get("confirmed_count", 0),
-            }
-        except Exception:
-            pass
+    if focus_sid:
+        preview_file = data_dir / "user_data" / f"preview_{focus_sid}_{target_date_str}.json"
+        final_file = data_dir / "user_data" / f"focus_three_versions_{focus_sid}_{target_date_str}.json"
+        if preview_file.exists():
+            try:
+                p_data = json.loads(preview_file.read_text(encoding="utf-8"))
+                preview_info = {
+                    "exists": True,
+                    "total": p_data.get("total", 0),
+                    "created_at": p_data.get("created_at"),
+                }
+            except Exception:
+                pass
+        if final_file.exists():
+            try:
+                f_data = json.loads(final_file.read_text(encoding="utf-8"))
+                final_info = {
+                    "exists": True,
+                    "final_total": f_data.get("summary", {}).get("final_total", 0),
+                    "preselect_total": f_data.get("summary", {}).get("preselect_total", 0),
+                    "preview_total": f_data.get("summary", {}).get("preview_total", 0),
+                    "confirmed_count": f_data.get("summary", {}).get("confirmed_count", 0),
+                }
+            except Exception:
+                pass
 
     # 7. 判定是否能够瞬间极速自愈 (当分钟K充足而日K/enriched残缺时)
     can_fast_reconstruct = bool(minute_symbols >= 5000 and (daily_count < 1000 or enriched_count < 1000))
@@ -920,14 +923,16 @@ def fast_reconstruct_today(
     focus_summary = None
     if engine:
         from app.services.focus_versions import build_focus_three_versions
-        res = build_focus_three_versions(
-            repo,
-            engine,
-            strategy_id="custom_dual_edge_focus",
-            as_of=target_date,
-            force_refresh=True,
-        )
-        focus_summary = res.get("summary")
+        focus_sid = focus_default_strategy_id(data_dir)
+        if focus_sid and engine.has(focus_sid):
+            res = build_focus_three_versions(
+                repo,
+                engine,
+                strategy_id=focus_sid,
+                as_of=target_date,
+                force_refresh=True,
+            )
+            focus_summary = res.get("summary")
 
     elapsed = round(time.perf_counter() - t0, 2)
     logger.info("fast_reconstruct_today 完成: %d 只标的, 耗时 %.2fs", len(agg), elapsed)

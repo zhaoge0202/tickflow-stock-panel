@@ -434,19 +434,24 @@ class QuoteService:
         """启动时检查 preferences, 若 enabled 则自动启动。
 
         none 档无实时行情权限:即使 preferences 标记为 enabled,
-        也不启动,并同步 preferences 为关闭(避免 UI 误显示已开启)。
+        也不启动。这里只停本次运行并留醒目日志, **不写偏好文件** ——
+        偏好只由用户在设置里主动开关 (enable/disable), boot_check 的自动
+        降级一旦落盘就会复现「次日读到 False 静默不启动」的 09-16 事故。
         """
         from app.services import preferences
         if not self.is_realtime_allowed():
-            if preferences.get_realtime_quotes_enabled():
-                self._save_enabled(False)
             # 带生效源: 便于判断「该切哪个源」, 而不是只看到 TickFlow 档位
             from app.data_providers.capabilities import capability_gate
             _, label = capability_gate("realtime")
-            logger.info("实时行情未启动: %s 不可用", label)
+            logger.warning(
+                "实时行情本次未启动: 当前档位(%s)无实时行情权限; 偏好未被修改, 升级档位或切换数据源后会自动恢复",
+                label,
+            )
             return
         if preferences.get_realtime_quotes_enabled():
             self.start()
+        else:
+            logger.info("实时行情未启动: 偏好开关为关闭")
 
     def set_repo(self, repo) -> None:
         """注入 KlineRepository, 用于实时落盘。"""

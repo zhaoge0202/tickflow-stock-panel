@@ -19,7 +19,8 @@ from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache, strategy_run_queue
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
-from app.services.focus_versions import FOCUS_STRATEGY_IDS, build_focus_three_versions
+from app.services.focus_versions import build_focus_three_versions
+from app.services.local_strategy_config import focus_default_strategy_id
 from app.services.screener import ScreenerService
 from app.services.strategy_date import (
     cache_generated_after_cutoff,
@@ -569,7 +570,7 @@ def preselect(req: PreselectRequest, request: Request):
 @router.post("/focus-versions")
 def focus_versions(
     request: Request,
-    strategy_id: str = Query("custom_dual_edge_focus"),
+    strategy_id: Optional[str] = Query(None),
     as_of: Optional[date] = Query(None),
     preselect_limit: int = Query(5),
     ext_columns: Optional[str] = Query(None),
@@ -578,6 +579,10 @@ def focus_versions(
     engine = getattr(request.app.state, "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
+    if not strategy_id:
+        strategy_id = focus_default_strategy_id(request.app.state.repo.store.data_dir)
+    if not strategy_id:
+        raise HTTPException(status_code=404, detail="未配置 Focus 默认策略")
     if not engine.has(strategy_id):
         raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
 

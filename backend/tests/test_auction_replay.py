@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 from datetime import date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -10,6 +12,7 @@ import polars as pl
 
 from app.api import replay as replay_api
 from app.services import auction_replay, quote_tick_store, strategy_cache, strategy_history
+from app.services.local_strategy_config import load_auction_config
 from app.strategy.engine import StrategyResult
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -19,6 +22,33 @@ TRADE_DATE = date(2026, 7, 8)
 
 def _ms(hour: int, minute: int, second: int = 0, ms: int = 0) -> int:
     return int(datetime(2026, 7, 8, hour, minute, second, ms * 1000, tzinfo=CN).timestamp() * 1000)
+
+
+def _write_auction_gap_config(
+    data_dir,
+    *,
+    strategy_ids=("test_dual_edge_focus",),
+    gap_min=1.5,
+    default_gap_max=2.0,
+    auction_min_change=1.0,
+):
+    """注入本地策略情报配置 (占位 ID/阈值, 避免在测试里复刻生产策略情报)。"""
+    cfg = {
+        "preselect_strategy_ids": list(strategy_ids),
+        "dynamic_strategy_ids": list(strategy_ids),
+        "focus_strategy_ids": list(strategy_ids),
+        "focus_default_strategy_id": strategy_ids[0] if strategy_ids else None,
+        "auction_gap": {
+            "strategy_ids": list(strategy_ids),
+            "default_gap_max": default_gap_max,
+            "gap_max_by_strategy": {},
+            "gap_min": gap_min,
+            "auction_min_change": auction_min_change,
+        },
+    }
+    path = Path(data_dir) / "local_config" / "auction_strategy.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
 
 def _cached() -> dict:
@@ -519,26 +549,30 @@ def test_auction_dynamic_recomputes_after_trade_snapshot(monkeypatch, tmp_path):
     assert after_result["rows"][0]["amount"] > after_result["rows"][0]["open_confirm_amount"]
 
 
-def test_dynamic_rejection_reason_reports_low_open_gap():
+def test_dynamic_rejection_reason_reports_low_open_gap(tmp_path):
+    _write_auction_gap_config(tmp_path, gap_min=1.5)
+    gap_cfg = load_auction_config(tmp_path)["auction_gap"]
     reason_code, reason = auction_replay._dynamic_rejection_reason(
-        "custom_dual_edge_focus",
+        "test_dual_edge_focus",
         {"close": 9.11},
         {"last_price": 8.95},
         {"last_price": 8.95, "open": 8.95},
         {},
+        auction_gap_config=gap_cfg,
     )
 
     assert reason_code == "auction_gap_failed"
     assert "-1.76%" in reason
-    assert "最低高开 2.0%" in reason
+    assert "最低高开 1.5%" in reason
 
 
 def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
+    _write_auction_gap_config(tmp_path, gap_min=1.5)
     strategy_cache.write_cache(
         tmp_path,
         SIGNAL_DATE.isoformat(),
         {
-            "custom_dual_edge_focus": {
+            "test_dual_edge_focus": {
                 "as_of": SIGNAL_DATE.isoformat(),
                 "total": 1,
                 "rows": [{
@@ -553,7 +587,7 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
 
     class _HistoryEngine:
         def get(self, strategy_id):
-            assert strategy_id == "custom_dual_edge_focus"
+            assert strategy_id == "test_dual_edge_focus"
             return type("Strategy", (), {"meta": {"name": "双刃合-Focus"}})()
 
     auction_ts = _ms(9, 24, 50)
@@ -566,7 +600,7 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
         trade_day=TRADE_DATE,
         final_frame={
             "results": {
-                "custom_dual_edge_focus": {
+                "test_dual_edge_focus": {
                     "rows": [],
                     "dual_rows": [],
                 },
@@ -586,18 +620,18 @@ def test_dynamic_history_records_selection_and_rejection_reason(tmp_path):
             }],
         },
         final_ts=_ms(9, 29, 59, 999),
-        requested_ids=["custom_dual_edge_focus"],
-        params_map={"custom_dual_edge_focus": {}},
+        requested_ids=["test_dual_edge_focus"],
+        params_map={"test_dual_edge_focus": {}},
     )
 
     events = strategy_history.list_events(
         tmp_path,
-        strategy_id="custom_dual_edge_focus",
+        strategy_id="test_dual_edge_focus",
         symbol="002758.SZ",
     )
     assert [event["event_type"] for event in events] == ["auction_rejected", "selected"]
     assert events[0]["reason_code"] == "auction_gap_failed"
-    assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 2.0%"
+    assert events[0]["reason"] == "竞价开盘 -1.76%，低于最低高开 1.5%"
     assert events[0]["metadata"]["open_confirm_event_ts"] == trade_ts
     assert events[1]["strategy_name"] == "双刃合-Focus"
 
@@ -641,6 +675,7 @@ def test_dynamic_history_skips_future_trade_day(tmp_path):
 
 def test_backfill_recent_history_rebuilds_previous_cycle(monkeypatch, tmp_path):
     auction_replay._backfill_cache.clear()
+    _write_auction_gap_config(tmp_path, gap_min=1.5)
     for target_date in (SIGNAL_DATE, TRADE_DATE):
         (tmp_path / "kline_daily_enriched" / f"date={target_date.isoformat()}").mkdir(
             parents=True,
@@ -648,10 +683,10 @@ def test_backfill_recent_history_rebuilds_previous_cycle(monkeypatch, tmp_path):
 
     class _HistoryEngine:
         def has(self, strategy_id):
-            return strategy_id == "custom_dual_edge_focus"
+            return strategy_id == "test_dual_edge_focus"
 
         def get(self, strategy_id):
-            assert strategy_id == "custom_dual_edge_focus"
+            assert strategy_id == "test_dual_edge_focus"
             return type("Strategy", (), {"meta": {"name": "双刃合-Focus"}})()
 
     monkeypatch.setattr(
@@ -701,20 +736,20 @@ def test_backfill_recent_history_rebuilds_previous_cycle(monkeypatch, tmp_path):
         auction_replay,
         "_build_dynamic_frame",
         lambda *_args, **_kwargs: {
-            "results": {"custom_dual_edge_focus": {"rows": [], "dual_rows": []}},
+            "results": {"test_dual_edge_focus": {"rows": [], "dual_rows": []}},
         },
     )
 
     result = auction_replay.backfill_recent_strategy_history(
         SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
         _HistoryEngine(),
-        strategy_ids=["custom_dual_edge_focus"],
+        strategy_ids=["test_dual_edge_focus"],
         max_cycles=1,
     )
 
     events = strategy_history.list_events(
         tmp_path,
-        strategy_id="custom_dual_edge_focus",
+        strategy_id="test_dual_edge_focus",
         symbol="002758.SZ",
     )
     assert result["written"] == 2

@@ -24,18 +24,13 @@ import polars as pl
 
 from app.market_time import DAILY_STRATEGY_READY_TIME, INTRADAY_PREVIEW_READY_TIME, cn_now, cn_today
 from app.services.auction_preselect import _preselect_rows, _target_frame
+from app.services.local_strategy_config import focus_default_strategy_id
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 
 logger = logging.getLogger(__name__)
 CN_TZ = ZoneInfo("Asia/Shanghai")
-
-FOCUS_STRATEGY_IDS = frozenset({
-    "custom_dual_edge",
-    "custom_dual_edge_focus",
-    "custom_dual_edge_v3",
-})
 
 
 def _json_default(obj: Any) -> Any:
@@ -57,6 +52,31 @@ def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item[k] = v.isoformat()
         safe.append(item)
     return safe
+
+
+def _unconfigured_payload(as_of: str, is_unclosed: bool) -> dict[str, Any]:
+    """本地策略情报配置缺失时的安全降级结构 (三版本均为空, 不崩调用方)。"""
+    return {
+        "as_of": as_of,
+        "strategy_id": None,
+        "strategy_name": "",
+        "current_stage": "unconfigured",
+        "is_unclosed": is_unclosed,
+        "versions": {
+            "preview": {"label": "14:50 尾盘初选", "time": "14:50", "status": "unconfigured", "total": 0, "rows": []},
+            "final": {"label": "收盘正式版", "time": "15:35", "status": "unconfigured", "total": 0, "rows": []},
+            "preselect": {"label": "次日竞价预选", "time": "15:35", "status": "unconfigured", "total": 0, "rows": []},
+        },
+        "dropped_from_preview": [],
+        "summary": {
+            "preview_total": 0,
+            "final_total": 0,
+            "preselect_total": 0,
+            "confirmed_count": 0,
+            "dropped_count": 0,
+            "late_entrant_count": 0,
+        },
+    }
 
 
 def _full_snapshot_path(data_dir: Path, strategy_id: str, as_of: str) -> Path:
@@ -215,7 +235,7 @@ def generate_preview_1450_from_context(
 def build_focus_three_versions(
     repo,
     engine: StrategyEngine,
-    strategy_id: str = "custom_dual_edge_focus",
+    strategy_id: str | None = None,
     as_of: date | None = None,
     preselect_limit: int = 5,
     force_refresh: bool = False,
@@ -225,6 +245,13 @@ def build_focus_three_versions(
     d_str = target_date.isoformat()
     data_dir = Path(repo.store.data_dir)
     now = cn_now()
+    if strategy_id is None:
+        strategy_id = focus_default_strategy_id(data_dir)
+    if not strategy_id:
+        is_today_unclosed = bool(
+            target_date == now.date() and now.weekday() < 5 and now.time() < dt_time(15, 0)
+        )
+        return _unconfigured_payload(d_str, is_today_unclosed)
 
     # 1. 缓存秒读: 如果已经完整生成且不是今天未收盘，直接从磁盘读取返回 (<5ms)
     full_cache_path = _full_snapshot_path(data_dir, strategy_id, d_str)
