@@ -92,6 +92,22 @@ class TestComputeMainline:
         # X 被黑名单; BIG 只有 2-3 家涨停 < _MIN_LIMIT_UP=3 也不参与 → 只剩空/无 X
         assert "X" not in set(out["member"].to_list())
 
+    def test_mixed_partition_schema_tolerated(self, tmp_path, monkeypatch):
+        """回归: 分区列不一致(新分区多出 auction_tick_* 列)时, 全目录扫描不得抛 SchemaError。"""
+        repo, d1, d2 = self._setup(tmp_path, monkeypatch)
+        # 模拟盘中实时 flush 写出的分区: 只有当天分区带竞价秒级特征列
+        part = tmp_path / "kline_daily_enriched" / f"date={d2.isoformat()}" / "part.parquet"
+        pl.read_parquet(part).with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("auction_tick_count")
+        ).write_parquet(part)
+
+        out = market_mainline.compute_mainline_range(
+            repo, tmp_path, d1, d2, kind="concept",
+            filter_cfg={"min_members": 4, "max_members": 600, "blacklist": []},
+        )
+
+        assert "X" in set(out["member"].to_list())
+
     def test_upsert_replaces_same_day_kind(self, tmp_path, monkeypatch):
         repo, d1, d2 = self._setup(tmp_path, monkeypatch)
         cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
