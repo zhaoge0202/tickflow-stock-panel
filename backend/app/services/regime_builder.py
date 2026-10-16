@@ -20,6 +20,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.parquet import scan_parquet_compat
 from app.services.fs_utils import atomic_write_parquet
 
 logger = logging.getLogger(__name__)
@@ -343,7 +344,7 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     from datetime import timedelta
     from app.indicators.pipeline import compute_indicators, compute_limit_signals
     warmup_start = batch_start - timedelta(days=warmup_days)
-    df = pl.scan_parquet(enriched_dir / "**" / "*.parquet").filter(
+    df = scan_parquet_compat(enriched_dir / "**" / "*.parquet").filter(
         (pl.col("date") >= warmup_start) & (pl.col("date") <= batch_end)
     ).collect()
     if df.is_empty():

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.parquet import scan_parquet_compat
 from app.services.fs_utils import atomic_write_parquet
 from app.services.rps_rotation import _load_concept_map_df
 
@@ -161,7 +162,7 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
             return pl.DataFrame()
 
     limit_rows = (
-        pl.scan_parquet(enriched_dir / "**" / "*.parquet")
+        scan_parquet_compat(enriched_dir / "**" / "*.parquet")
         .select(["date", "symbol", "consecutive_limit_ups", "amount"])
         .filter(
             (pl.col("date") >= start) & (pl.col("date") <= end)

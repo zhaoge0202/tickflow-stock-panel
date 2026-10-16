@@ -265,6 +265,52 @@ def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
     assert_frame_equal(result.sort("date"), expected.sort("date"))
 
 
+def test_compute_batch_tolerates_mixed_partition_schema(tmp_path, monkeypatch):
+    """回归: 分区列不一致(新分区多出竞价特征列)时, _compute_batch 的扫描不得抛 SchemaError。"""
+    from app.services import preferences
+
+    enriched_dir = tmp_path / "kline_daily_enriched"
+    trade_dates = [date(2026, 10, 14), date(2026, 10, 15)]
+    for index, trade_date in enumerate(trade_dates):
+        partition = enriched_dir / f"date={trade_date.isoformat()}"
+        partition.mkdir(parents=True)
+        frame = pl.DataFrame({
+            "symbol": ["A", "B"],
+            "date": [trade_date, trade_date],
+            "open": [1.0, 1.0],
+            "high": [1.1, 1.1],
+            "low": [0.9, 0.9],
+            "close": [1.05, 0.95],
+            "volume": [1e5, 1e5],
+            "amount": [1e8, 1e5],
+            "consecutive_limit_ups": pl.Series([0, 0], dtype=pl.UInt32),
+            "consecutive_limit_downs": pl.Series([0, 0], dtype=pl.UInt32),
+        })
+        if index == 1:
+            frame = frame.with_columns(pl.lit(None, dtype=pl.Float64).alias("auction_tick_count"))
+        frame.write_parquet(partition / "part.parquet")
+
+    monkeypatch.setattr(preferences, "get_regime_batch_days", lambda: 2)
+    monkeypatch.setattr(preferences, "get_regime_warmup_days", lambda: 1)
+
+    out = regime_builder._compute_batch(
+        _mixed_schema_repo(tmp_path), enriched_dir, pl.DataFrame(), pl.DataFrame(),
+        trade_dates[0], trade_dates[-1], 1,
+    )
+
+    assert out.height == 4
+
+
+def _mixed_schema_repo(tmp_path):
+    class _Store:
+        data_dir = tmp_path
+
+    class _Repo:
+        store = _Store
+
+    return _Repo()
+
+
 # ───────────────────────── 持久化(upsert) ─────────────────────────
 
 
