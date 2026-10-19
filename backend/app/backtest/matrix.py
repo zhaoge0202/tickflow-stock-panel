@@ -635,6 +635,13 @@ def build_market_data_matrix(
             # field is supplied. Keep this explicit compatibility contract for
             # strategies that estimate market value from historical raw prices.
             fields[column] = np.array(close, copy=True)
+        else:
+            # 实时快照缺少历史分区才有的可选字段 (竞价结果/竞价分笔特征等) 时,
+            # 仍按 NaN 占位, 保持 fields 键集合与首次构建一致。
+            # 否则 RealtimeMarketDataMatrix.update 会因 latest 缺字段抛
+            # "live matrix update missing field", 每轮退回全量重建 (重扫历史
+            # + 重算指标), 盘中监控评估被拖到分钟级, 信号窗口直接错过。
+            fields[column] = np.full(shape, np.nan, dtype=np.float32)
 
     names = [""] * len(symbol_values)
     if "name" in panel.columns:
