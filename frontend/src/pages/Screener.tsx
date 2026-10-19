@@ -529,7 +529,9 @@ export function Screener() {
     mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
       api.screenerRunAll(
         date,
-        strategyIds ?? dailyPoolIds,
+        // 空数组同样回落到池内: 后端把"显式空列表"视为"本轮不跑任何策略",
+        // 前端没有需要主动传空的场景; 池子本身为空时也会得到空结果而不是全量。
+        strategyIds?.length ? strategyIds : dailyPoolIds,
         assetType,
       ),
     onSuccess: (data) => {
