@@ -2381,7 +2381,7 @@ class QuoteService:
         daily_df: pl.DataFrame,
         quote_extra: pl.DataFrame = None,
         asset_type: str = "stock",
-        merge: bool = False,
+        merge: bool = True,
         *,
         _background: bool = False,
         _force_full: bool = False,
@@ -2390,6 +2390,11 @@ class QuoteService:
 
         quote_extra: API 直接提供的补充字段 (prev_close, change_pct 等),
                      不写 daily, 直接传给 compute_enriched_today 避免重复计算。
+
+        merge 默认 True (按 symbol 合并写): 单轮行情只要部分标的拉取失败,
+        daily_df/enriched_today 就会少于全市场; 覆盖写会把其余标的当天分区
+        整行删掉 (2026-10-19 收盘最终同步只拿到 2837 只, 分区从 5563 缩到
+        2837)。合并写保留旧行, 单轮残缺只影响当轮自己那几只。
         """
         try:
             today = cn_today()
