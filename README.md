@@ -50,7 +50,7 @@
   <img src="docs/sponsors/runninghub-intro-card.svg?v=4" alt="About RunningHub API — 产品介绍" width="100%">
 </a>
 
-**本项目由 [RunningHub](https://www.runninghub.ai/call-api?source=github&inviteCode=edt5wh7c) 提供支持** · 单一接口直连 400+ 主流大模型 · [DeepSeek v4.1 Flash 6 折](https://www.runninghub.ai/call-api?source=github&inviteCode=edt5wh7c) · 免费测试
+**本项目由 [RunningHub](https://www.runninghub.ai/call-api?source=github&inviteCode=edt5wh7c) 提供支持** · 单一接口直连 400+ 主流大模型 · [DeepSeek v4.1 Flash 3 折](https://www.runninghub.ai/call-api?source=github&inviteCode=edt5wh7c) · 免费测试
 
 </div>
 
@@ -59,7 +59,7 @@
 > [!IMPORTANT]
 > ⚠️ 本项目谨作为本地量化提供解决思路与方案，**不作为投资软件或者看盘软件**。**明确不做**：不对标同花顺 / 通达信，不内置「AI 荐股 / 涨停预测」。数据源已插件化，可任意接入第三方数据源。仅供学习研究使用。
 
-📮 有任何项目问题可邮件联系 **415333856@qq.com** · 觉得有用请点个 ⭐ Star
+📮 有任何项目问题可邮件联系 **shy3130@qq.com** · 觉得有用请点个 ⭐ Star
 
 ---
 
@@ -170,7 +170,7 @@
 </td>
 <td width="33.3%" valign="top">
 
-**📦 页面包**<br/>页面打包产物上传即挂载, 免重建宿主, 刷新生效
+**📦 页面插件**<br/>页面打包产物上传即挂载, 免重建宿主, 刷新生效
 
 </td>
 <td width="33.3%" valign="top">
@@ -181,7 +181,7 @@
 </tr>
 </table>
 
-> 📄 **19 个页面的完整功能细节**见 [docs/features.md](./docs/features.md) 与 [screenshots/](./screenshots/README.md) —— 上表之外, 回测四种研究视图、异动三时间线、页面包运行时分发等都在其中。
+> 📄 **19 个页面的完整功能细节**见 [docs/features.md](./docs/features.md) 与 [screenshots/](./screenshots/README.md) —— 上表之外, 回测四种研究视图、异动三时间线、页面插件运行时分发等都在其中。
 
 ---
 
@@ -257,9 +257,9 @@
 |                     | 内容                                                                                                                   | 划线依据                                  |
 | :------------------ | :--------------------------------------------------------------------------------------------------------------------- | :---------------------------------------- |
 | **核心域 · 8**      | 数据底座 / 能力路由 / 订阅锚点(自选) / 策略与回测 / 因子与挖掘 / 环境数据生产 / 监控推送管道 / 扩展数据存储 + 认证配置 | 被多个模块消费其数据与语义,自身不依赖外围 |
-| **扩展域 · 5 通道** | 数据源插件 · 扩展数据表 · 自定义策略/信号 · 页面扩展(单文件源码 + 运行时页面包) · 后端 custom 模块                       | 只消费核心契约,可整体替换/移除而不伤核心  |
+| **扩展域 · 5 通道** | 数据源插件 · 扩展数据表 · 自定义策略/信号 · 页面扩展(单文件源码 + 运行时页面插件) · 后端 custom 模块                       | 只消费核心契约,可整体替换/移除而不伤核心  |
 
-设置 → 菜单设置里每个页面带 `核心 / 扩展` 架构徽标与 `内置 / 自定义 / 扩展` 类型徽标;11 个官方页面(概念/行业/个股/财务分析、监控中心、异动、持仓提醒、模拟盘、信号库、复盘、连板梯队)已全部落地为 `frontend/src/custom/<ns>/extension.tsx` **单文件扩展** —— 删除目录即卸载、复制目录即导入;例如监控中心页面可换,规则引擎与推送管道属核心照常运行。新装默认隐藏这些扩展页面(菜单设置一键开启),老用户升级自动保持原菜单位置与排序。免宿主重建的运行时分发走**页面包**(设置 → 页面包,契约见 [docs/page-sdk.md](./docs/page-sdk.md))。详见 [docs/open-platform-plan.md](./docs/open-platform-plan.md)。
+设置 → 菜单设置里每个页面带 `核心 / 扩展` 架构徽标与 `内置 / 自定义 / 扩展` 类型徽标;11 个官方页面(概念/行业/个股/财务分析、监控中心、异动、持仓提醒、模拟盘、信号库、复盘、连板梯队)已全部落地为 `frontend/src/custom/<ns>/extension.tsx` **单文件扩展** —— 删除目录即卸载、复制目录即导入;例如监控中心页面可换,规则引擎与推送管道属核心照常运行。新装默认隐藏这些扩展页面(菜单设置一键开启),老用户升级自动保持原菜单位置与排序。免宿主重建的运行时分发走**页面插件**(设置 → 页面插件,契约见 [docs/page-sdk.md](./docs/page-sdk.md))。详见 [docs/open-platform-plan.md](./docs/open-platform-plan.md)。
 
 ### 关键机制
 
@@ -272,7 +272,7 @@
 | **开放网关**         | Token 通道与面板密码会话并行互不影响:网络门禁(默认仅本机/内网, `API_TOKEN_LOCAL_ONLY=0` 放开) → 认证 → 六档 scope 校验 → 每 Token 滑动窗口限流(默认 120 次/分,O(1) 内存)→ 放行;管理面(数据同步/表结构/设置)永不开放给 Token                                                         |
 | **事件总线**         | 进程内发布/订阅(慢消费者丢旧保新,广播失败不反噬主流程),告警落盘唯一入口已挂接;SSE 流按票据 scope 过滤,票据一次性 60 秒过期                                                                                               |
 | **交易日探针**       | fuyao 交易日历(确定性,含调休)→ tickflow 全市场行情时间戳探针(OR 语义)→ 工作日兜底;节假日自动停掉实时轮询与分钟增量,零无效请求                                                                                            |
-| **扩展自动发现**     | 后端 `app/custom/<包>/` 启动时自动发现、注册独立路由(版本不符或 setup 失败即隔离跳过);前端 `src/custom/<ns>/extension.tsx` 单文件即完整扩展(组件+路由+导航),构建时自动挂载 —— 删除目录即整体卸载、复制目录即导入;运行时分发走**页面包**(上传即挂载,免重建宿主) |
+| **扩展自动发现**     | 后端 `app/custom/<包>/` 启动时自动发现、注册独立路由(版本不符或 setup 失败即隔离跳过);前端 `src/custom/<ns>/extension.tsx` 单文件即完整扩展(组件+路由+导航),构建时自动挂载 —— 删除目录即整体卸载、复制目录即导入;运行时分发走**页面插件**(上传即挂载,免重建宿主) |
 
 ### 技术栈
 
@@ -516,7 +516,7 @@ xattr -dr com.apple.quarantine /Applications/TSP.app
 5. **监控中心**配规则,盘中实时弹窗 + 持久化记录;**异动监控**覆盖竞价/盘中/偏移全时段
 6. 配好 AI Key 后,**悬浮球 / ⌘K** 呼出 **AI 对话助手**,直接问「今天市场怎么样」「我的自选表现如何」「我的扩展数据表里有什么」,或让它「生成一个放量站上 20 日线的信号」「检查一下数据完整性」——写操作会先弹确认卡, 你点确认才执行
 7. 想接自己的程序?**设置 → 开放接口**建个 Token,照着 [examples/open-api](./examples/open-api/README.md) 十分钟跑通第一个脚本;AI 玩家直接配 [MCP](./mcp-server/README.md)
-8. 想定制页面?核心之外 11 个官方页面都是单文件扩展(新装默认隐藏,在**设置 → 菜单设置**开启);自己开发的页面用 [frontend/page-pack-template](./frontend/page-pack-template) 打包,经**设置 → 页面包**上传即用,宿主无需重建
+8. 想定制页面?核心之外 11 个官方页面都是单文件扩展(新装默认隐藏,在**设置 → 菜单设置**开启);自己开发的页面用 [frontend/page-pack-template](./frontend/page-pack-template) 打包,经**设置 → 页面插件**上传即用,宿主无需重建
 
 ---
 
@@ -546,7 +546,8 @@ PORT=3018                      # 服务端口
 | **v0.3**              | 能力路由矩阵 · fuyao 数据源(财务/龙虎榜/风向标) · 分钟策略与回测 · 交易日探针 · 全时段异动中心 · 回测导出与候选复测                | ✅            |
 | **AI 助手**           | 对话式数据问答与操作: 21 查询 + 4 动作工具(确认卡放行, 含生成信号/回测/加自选/数据补全) · 逐字流式 + 工具足迹卡 · 完全解耦扩展模块 | ✅            |
 | **v0.3.2 开放能力版** | API Token + 六档 scope 网关 · 61 端点契约(快照+CI 守护) · 扩展数据读写闭环 · SSE 事件流 · MCP 服务器 · 核心/扩展域边界标注         | ✅            |
-| **v0.3.6**            | [TdxQuant](https://help.tdx.com.cn/quant/) 数据源(realtime/五档/日K/复权/分钟) · 11 官方页面单文件扩展化 + 运行时页面包 · 扩展表两级拉取配方(概念/行业出厂即用) · AI Responses 协议与会话跨设备 · 情绪评分口径可配置 · 财务画像手动拉取 · 策略池叠加分组 · 65 端点契约 | 🚧          |
+| **v0.3.6**            | [TdxQuant](https://help.tdx.com.cn/quant/) 数据源(realtime/五档/日K/复权/分钟) · 11 官方页面单文件扩展化 + 运行时页面插件 · 扩展表两级拉取配方(概念/行业出厂即用) · AI Responses 协议与会话跨设备 · 情绪评分口径可配置 · 财务画像手动拉取 · 策略池叠加分组 · 65 端点契约 | 🚧          |
+| **v0.3.7**            | 模拟盘重构(多账户对比·策略自动执行) · 桌面修复(TdxQuant Key 探测·macOS 数据目录移出 .app 包) · 界面缩放 transform scale 修复 · 策略安全校验加固(GH #475) · 68 端点契约 | 🚧          |
 
 ---
 
@@ -567,7 +568,7 @@ PORT=3018                      # 服务端口
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 fuyao 为参考实现)                  |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
-| [docs/page-sdk.md](./docs/page-sdk.md)                                                             | 页面包开发指南:产物契约、能力桥 ctx、打包与上传、安全边界           |
+| [docs/page-sdk.md](./docs/page-sdk.md)                                                             | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界           |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 ---

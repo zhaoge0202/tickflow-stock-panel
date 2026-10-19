@@ -56,6 +56,7 @@ from app.api import (
 )
 from app.api import auth as auth_api
 from app.api import settings as settings_api
+from app.api import upgrade_guard as upgrade_guard_api
 from app.api.routes import router as core_router
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
@@ -187,6 +188,13 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001 — 仅日志, 失败不影响启动
         logger.warning("能力路由日志输出失败: %s", e)
 
+    # 二次开发升级保护: 后台常备备份用户修改的程序文件 (无清单时自动停用)
+    from app.services.upgrade_guard import UpgradeGuard
+
+    upgrade_guard = UpgradeGuard(store.data_dir)
+    app.state.upgrade_guard = upgrade_guard
+    upgrade_guard.start_background_scan()
+
     # 全局行情服务
     qs = QuoteService()
     app.state.quote_service = qs
@@ -316,6 +324,16 @@ async def _application_lifespan(app: FastAPI):
 
     _screener_svc = ScreenerService(repo)
     _etf_screener_svc = ScreenerService(repo, asset_type="etf")
+    # 去内置化补全(仅升级用户): 原内置策略按 ID 补回 custom (一次性,
+    # 已自行迁移的不覆盖; 新装无旧版使用痕迹, 跳过保持策略库为空)。
+    # 必须在 StrategyEngine 创建前完成, 否则首载拿不到刚补回的文件。
+    _seeded_strategies = 0
+    try:
+        from app.strategy.strategy_seeds import seed_missing_builtins
+
+        _seeded_strategies = seed_missing_builtins(store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("strategy seeding failed (ignored): %s", e)
     strategy_dirs = [
         Path(__file__).resolve().parent / "strategy" / "research",
         store.data_dir / "strategies" / "custom",
@@ -336,6 +354,9 @@ async def _application_lifespan(app: FastAPI):
         if _seeded_signals:
             legacy_migration["seeded_signals"] = _seeded_signals
             logger.info("legacy migrate: seeded %d default signals", _seeded_signals)
+        if _seeded_strategies:
+            legacy_migration["seeded_strategies"] = _seeded_strategies
+            logger.info("legacy migrate: seeded %d builtin strategies", _seeded_strategies)
         archived = archive_unloadable_strategies(strategy_engine.load_errors())
         if archived:
             strategy_engine.reload()
@@ -655,6 +676,7 @@ app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(upgrade_guard_api.router)
 app.include_router(strategy.router)
 app.include_router(strategy_history.router)
 app.include_router(strategy_purchase_marks.router)
