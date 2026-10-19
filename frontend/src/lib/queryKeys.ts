@@ -59,6 +59,8 @@ export const QK = {
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       (asOf?: string | null, asOfTs?: number | 'live' | null) =>
                            ['market-snapshot', asOf ?? 'latest', asOfTs ?? 'latest'] as const,
+  /** 日内多盘扩展列迷你图序列 (集合竞价等): 列集 + 日期 + 标的集 */
+  extSeries:           (colsKey: string, date?: string | null, symbolsKey?: string) => ['ext-series', colsKey, date ?? '', symbolsKey ?? ''] as const,
   marketDates:          (limit?: number) => ['market-dates', limit ?? 120] as const,
   marketIntradayTimeline: (asOf?: string | null, stepSeconds?: number) =>
                            ['market-intraday-timeline', asOf ?? 'today', stepSeconds ?? 60] as const,

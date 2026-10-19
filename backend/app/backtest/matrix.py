@@ -636,12 +636,16 @@ def build_market_data_matrix(
             # strategies that estimate market value from historical raw prices.
             fields[column] = np.array(close, copy=True)
         else:
-            # 实时快照缺少历史分区才有的可选字段 (竞价结果/竞价分笔特征等) 时,
-            # 仍按 NaN 占位, 保持 fields 键集合与首次构建一致。
-            # 否则 RealtimeMarketDataMatrix.update 会因 latest 缺字段抛
-            # "live matrix update missing field", 每轮退回全量重建 (重扫历史
-            # + 重算指标), 盘中监控评估被拖到分钟级, 信号窗口直接错过。
-            fields[column] = np.full(shape, np.nan, dtype=np.float32)
+            # 只有"存储型可选字段"(竞价结果/竞价分笔特征) 才按 NaN 占位:
+            # 它们无法从 close 现算, 且盘中实时快照不带这些列 —— 不占位会让
+            # RealtimeMarketDataMatrix.update 因 latest 缺字段抛
+            # "live matrix update missing field", 每轮回退全量重建 (重扫历史
+            # + 重算指标), 盘中监控被拖到分钟级。
+            # 计算型 feature (ma60 / momentum_60d / vol_ratio_5d 等) 必须继续
+            # 跳过: matrix_feature 优先返回 market.fields 里的同名字段, 占位
+            # 成 NaN 会把"从 close 现算"的路径顶掉, 信号全部失效。
+            if column in _OPTIONAL_NUMERIC_STORAGE_FIELDS:
+                fields[column] = np.full(shape, np.nan, dtype=np.float32)
 
     names = [""] * len(symbol_values)
     if "name" in panel.columns:
@@ -900,12 +904,22 @@ def _matrix_filter_expression(
     start: date,
     end: date,
     symbols: tuple[str, ...] | None,
+    *,
+    available: frozenset[str] | None = None,
 ):
     expression = (pads.field("date") >= pa.scalar(start)) & (
         pads.field("date") <= pa.scalar(end)
     )
-    for column in ("open", "high", "low", "close"):
-        expression &= pads.field(column).is_valid() & (pads.field(column) > pa.scalar(0.0))
+    # 价格健全性过滤: 剔除停牌/无效价行, 避免下游出现重复 date/symbol。
+    # 只在调用方提供了 dataset schema 时按实际存在的列加条件 —— 直接调用
+    # (无 schema 上下文) 时保持纯日期过滤, 否则会引用 dataset 里没有的列,
+    # pyarrow scanner 抛 "No match for FieldRef.Name(open)"。
+    if available is not None:
+        for column in ("open", "high", "low", "close"):
+            if column in available:
+                expression &= pads.field(column).is_valid() & (
+                    pads.field(column) > pa.scalar(0.0)
+                )
     if symbols is not None:
         expression &= pads.field("symbol").isin(list(symbols))
     return expression
@@ -964,7 +978,12 @@ def _build_market_data_matrix_from_dataset(
     cancel_event: threading.Event | None = None,
 ) -> MarketDataMatrix:
     _raise_if_matrix_cancelled(cancel_event)
-    filter_expr = _matrix_filter_expression(start, end, symbols)
+    filter_expr = _matrix_filter_expression(
+        start,
+        end,
+        symbols,
+        available=frozenset(dataset.schema.names),
+    )
     actual_dates, actual_symbols = _collect_parquet_axes(
         dataset,
         filter_expr,
@@ -1097,7 +1116,12 @@ def _build_market_data_matrix_cache_from_dataset(
     temporary.mkdir()
     mapped: list[np.memmap] = []
     try:
-        filter_expr = _matrix_filter_expression(start, end, symbols)
+        filter_expr = _matrix_filter_expression(
+            start,
+            end,
+            symbols,
+            available=frozenset(dataset.schema.names),
+        )
         stage_started = time.perf_counter()
         actual_dates, actual_symbols = _load_or_build_matrix_axes(
             dataset,
@@ -2022,6 +2046,7 @@ def _load_or_build_matrix_axes(
                 min(changed_dates),
                 max(changed_dates),
                 symbols,
+                available=frozenset(dataset.schema.names),
             ) & pads.field("date").isin(changed_dates)
             scanner = dataset.scanner(
                 columns=["date", "symbol"],
@@ -2081,13 +2106,36 @@ def _collect_parquet_axes(
         batch_size=int(batch_size),
         use_threads=True,
     )
-    for batch in scanner.to_batches():
+    read_s = 0.0
+    unique_s = 0.0
+    group: list[pa.RecordBatch] = []
+    batches = scanner.to_batches()
+    while True:
+        step = time.perf_counter()
+        try:
+            batch = next(batches)
+        except StopIteration:
+            read_s += time.perf_counter() - step
+            break
+        read_s += time.perf_counter() - step
         _raise_if_matrix_cancelled(cancel_event)
-        dates.update(pc.unique(_batch_column(batch, "date")).to_pylist())
-        symbols.update(
-            str(value)
-            for value in pc.unique(_batch_column(batch, "symbol")).to_pylist()
-        )
+        group.append(batch)
+        if len(group) < 8:
+            continue
+        step = time.perf_counter()
+        table = pa.Table.from_batches(group)
+        dates.update(pc.unique(table["date"]).to_pylist())
+        symbols.update(str(value) for value in pc.unique(table["symbol"]).to_pylist())
+        unique_s += time.perf_counter() - step
+        group.clear()
+    if group:
+        _raise_if_matrix_cancelled(cancel_event)
+        step = time.perf_counter()
+        table = pa.Table.from_batches(group)
+        dates.update(pc.unique(table["date"]).to_pylist())
+        symbols.update(str(value) for value in pc.unique(table["symbol"]).to_pylist())
+        unique_s += time.perf_counter() - step
+    logger.info("matrix axes scan read_ms=%.1f unique_ms=%.1f", read_s * 1000, unique_s * 1000)
     return sorted(dates), sorted(symbols)
 
 
@@ -4278,9 +4326,9 @@ def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
             return True
         if board == "深主板" and symbol.startswith(("00", "001")):
             return True
-        if board == "创业板" and symbol.startswith(("300", "301")):
+        if board == "创业板" and symbol.startswith(("300", "301", "302")):
             return True
-        if board == "科创板" and symbol.startswith("688"):
+        if board == "科创板" and symbol.startswith(("688", "689")):
             return True
         if board == "北交所" and symbol.endswith(".BJ"):
             return True

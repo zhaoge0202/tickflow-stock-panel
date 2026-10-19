@@ -1760,9 +1760,13 @@ class StrategyEngine:
                     board_exprs.append(
                         pl.col("symbol").str.starts_with("300")
                         | pl.col("symbol").str.starts_with("301")
+                        | pl.col("symbol").str.starts_with("302")
                     )
                 elif b == "科创板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("688"))
+                    board_exprs.append(
+                        pl.col("symbol").str.starts_with("688")
+                        | pl.col("symbol").str.starts_with("689")
+                    )
                 elif b == "北交所":
                     board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
             if board_exprs:

@@ -41,6 +41,10 @@ _TOP_LEVEL_META = re.compile(r"(?m)^META\s*=\s*\{(?!\{)")
 _CUSTOM_ID = re.compile(r'"custom_[a-z0-9_]+"')
 _MIN_DISTINCT_CUSTOM_IDS = 5
 
+# 上游内置策略种子 (feat(migrate): 内置策略按 ID 种入 custom, 25 个官方模板)。
+# 它们是随程序分发的公共资产, 与"用户私有策略出库"是两回事, 整目录跳过。
+_EXCLUDED_DIR_PREFIXES = ("backend/app/strategy/seeds/",)
+
 
 def _tracked_python_files() -> list[str]:
     result = subprocess.run(
@@ -72,6 +76,7 @@ def test_no_user_strategy_source_committed_under_backend():
         relative: markers
         for relative in _tracked_python_files()
         if relative not in _ALLOWLIST
+        and not relative.startswith(_EXCLUDED_DIR_PREFIXES)
         and (markers := _strategy_markers((REPO_ROOT / relative).read_text(encoding="utf-8")))
     }
 
