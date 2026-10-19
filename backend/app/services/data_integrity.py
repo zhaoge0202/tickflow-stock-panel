@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable
@@ -453,5 +454,23 @@ def boot_integrity_check(app_state) -> None:
             earliest, AUTO_REPAIR_MAX_LAG_DAYS,
         )
         return
+    if not _boot_autorepair_enabled():
+        logger.warning(
+            "integrity: 启动自动修复已禁用 (INTEGRITY_BOOT_AUTOREPAIR=0), "
+            "坏分区交盘后管道处理, 不暂停盘中行情",
+        )
+        return
     with contextlib.suppress(Exception):
         launch_integrity_repair(app_state, earliest, "boot_integrity_check")
+
+
+def _boot_autorepair_enabled() -> bool:
+    """启动自检是否允许自动创建修复任务。
+
+    盘中启动时自动修复会 pause 行情轮询, 并以多线程逐股拉日K抢 sidecar
+    的全局 HTTP 闸门, 把实时行情饿死数小时; 取消也只是标记 job, 执行体
+    仍卡在 ThreadPoolExecutor.shutdown(wait=True) 里无法 resume。
+    生产可在 .env 设 INTEGRITY_BOOT_AUTOREPAIR=0, 坏分区交给 15:35 盘后管道。
+    """
+    raw = os.getenv("INTEGRITY_BOOT_AUTOREPAIR", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
