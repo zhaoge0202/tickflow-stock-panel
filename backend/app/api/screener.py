@@ -1509,7 +1509,12 @@ def run_all(request: Request, body: Optional[dict] = None):
 
     requested_ids = body.get("strategy_ids")
     skipped_unknown: list[str] = []
-    if requested_ids and isinstance(requested_ids, list):
+    if isinstance(requested_ids, list):
+        # 显式传列表即视为"调用方已决定跑哪些": 空数组=本轮不跑任何策略。
+        # 旧实现写 `if requested_ids and ...`, [] 是 falsy 会落到 else 分支
+        # 跑全部策略 —— 前端任何一次空池/空数组请求都会静默升级成全市场
+        # 计算 (58 个策略各自重扫历史), 表现为"没选的策略也在跑"。
+        source = "client"
         all_ids = [str(sid) for sid in requested_ids]
         # 宽容降级: 策略池可能残留已不存在的策略 ID (如内置策略移除后的
         # 旧数据目录) —— 跳过未知项继续跑, 响应带回 skipped_unknown 供前端
@@ -1526,6 +1531,7 @@ def run_all(request: Request, body: Optional[dict] = None):
             logger.warning("run_all: 跳过 %d 个不存在/不可用的策略 ID: %s", len(skipped_unknown), skipped_unknown)
             all_ids = known
     else:
+        source = "all"
         all_ids = [
             meta["id"]
             for meta in engine.list_strategies()
@@ -1533,6 +1539,13 @@ def run_all(request: Request, body: Optional[dict] = None):
             and asset_type in meta.get("asset_types", ["stock"])
             and timeframe in meta.get("timeframes", ["1d"])
         ]
+
+    # 可观测性: 明确记录本轮是客户端指定还是全量兜底, 以及具体跑了哪些 ID。
+    # 排查"为什么跑了没选的策略"时不需要再靠日志拼凑单策略耗时反推。
+    logger.info(
+        "run_all: source=%s as_of=%s asset=%s tf=%s strategies=%d %s",
+        source, as_of, asset_type, timeframe, len(all_ids), all_ids,
+    )
 
     if not all_ids:
         return {"as_of": str(as_of), "results": {}}
