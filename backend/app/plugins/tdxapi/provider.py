@@ -223,6 +223,41 @@ class TDXAPIProvider:
                         on_chunk_done(completed, len(symbols))
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
+    # ---- daily snapshot (盘后定版) ----
+    def get_daily_snapshot(self, symbols: list[str]) -> pl.DataFrame:
+        """用批量行情接口生成当日日K, 供盘后定版覆写当天分区。
+
+        /api/batch-quote 的 K.Close 在收盘后就是当日最终收盘价(实测与官方日K
+        的 OHLC/成交量/成交额完全一致), 50 只一批, 全市场约 120 个请求,
+        比逐只拉日K快两个数量级。单位对齐日K口径: volume=手, amount=厘。
+        """
+        if not symbols:
+            return pl.DataFrame()
+        rows = self.get_realtime(symbols=symbols)
+        if not rows:
+            return pl.DataFrame()
+        today = _cn_today()
+        records = []
+        for row in rows:
+            open_ = row.get("open") or 0.0
+            high = row.get("high") or 0.0
+            if open_ <= 0 or high <= 0:
+                continue
+            records.append({
+                "symbol": row.get("symbol"),
+                "date": today,
+                "open": open_,
+                "high": high,
+                "low": row.get("low") or 0.0,
+                "close": row.get("last_price") or 0.0,
+                "volume": row.get("volume") or 0.0,
+                # 行情接口的 amount 是元, 日K 分区存厘, 差 1000 倍。
+                "amount": (row.get("amount") or 0.0) * 1000.0,
+            })
+        if not records:
+            return pl.DataFrame()
+        return normalize_daily(records, source=self.name)
+
     # ---- minute ----
     def get_minute(
         self,
