@@ -274,6 +274,44 @@ def _repair_lagging_symbols(
     return result
 
 
+def _residual_snapshot_targets(
+    data_dir: Path,
+    *,
+    today: _date,
+    retry: dict[str, str],
+    days: int = 7,
+) -> dict[_date, list[str]]:
+    """最近若干日K分区里仍是盘中快照的行 (quote_ts 非空), 按日期分组。
+
+    权威行占绝对多数的分区不再整块重拉(见 data_integrity), 但残留行的收盘价
+    可能停在盘中那一刻。这里把它们挑出来交给定点补拉, 避免为了几行重跑全市场。
+    """
+    base = data_dir / "kline_daily"
+    if not base.exists():
+        return {}
+    parts = sorted(p for p in base.glob("date=*") if p.is_dir())[-days:]
+    retry_after = (today - _td(days=_LAGGARD_RETRY_DAYS)).isoformat()
+    out: dict[_date, list[str]] = {}
+    for part in parts:
+        try:
+            df = pl.read_parquet(part / "*.parquet", columns=["symbol", "quote_ts"])
+        except Exception:  # noqa: BLE001
+            continue
+        if "quote_ts" not in df.columns:
+            continue
+        residual = df.filter(pl.col("quote_ts").is_not_null())
+        if residual.is_empty():
+            continue
+        day = _date.fromisoformat(part.name[5:])
+        symbols = [
+            str(s) for s in residual["symbol"].drop_nulls().unique().to_list()
+            if s and not (retry.get(str(s)) and retry[str(s)] > retry_after)
+        ]
+        if symbols:
+            out[day] = sorted(symbols)
+    return out
+
+
 class PipelineStageError(RuntimeError):
     """管道有阶段软失败(数据可能陈旧)时抛出, 让上层 job_store 把任务标记为 failed。
 
@@ -613,6 +651,43 @@ def run_now(
         except Exception as e:  # noqa: BLE001
             logger.warning("laggard 回补异常 (soft): %s", e)
             stage_errors.append(f"laggard repair: {e}")
+
+    # Step 1.45: 修正残留的盘中快照行 — 权威行占绝对多数的分区不再整块重拉,
+    # 但个别标的的收盘价可能停在盘中那一刻, 按 symbol+日期定点补一次。
+    residual_fixed = 0
+    if pull_a_share and latest_daily:
+        try:
+            retry = _load_laggard_retry(repo.store.data_dir)
+            residual = _residual_snapshot_targets(
+                repo.store.data_dir, today=today, retry=retry,
+            )
+            if residual:
+                from datetime import datetime as _dt_residual
+
+                emit("sync_daily", 47, f"修正盘中残留 {sum(map(len, residual.values()))} 只…")
+                for day, symbols in sorted(residual.items()):
+                    day_dt = _dt_residual.combine(day, _dt_residual.min.time())
+                    zero_rows: list[str] = []
+                    try:
+                        written = kline_sync.sync_and_persist_daily_batch(
+                            symbols, repo, capset,
+                            start_date=day_dt, end_date=day_dt,
+                            zero_row_out=zero_rows,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("残留快照修正失败(%s, %d 只): %s", day, len(symbols), e)
+                        continue
+                    residual_fixed += max(0, len(symbols) - len(zero_rows))
+                    for s in zero_rows:
+                        retry[s] = today.isoformat()
+                    logger.info("残留快照修正: %s, %d 只, 写入 %d 行, 空拉 %d 只",
+                                day, len(symbols), written, len(zero_rows))
+                _save_laggard_retry(repo.store.data_dir, retry, today)
+                if residual_fixed:
+                    _invalidate("daily")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("残留快照修正异常 (soft): %s", e)
+            stage_errors.append(f"residual snapshot: {e}")
 
     # Step 1.5: 同步除权因子 — 范围与日K拉取方式对齐
     #   日K范围拉取(补缺口/首次) → 除权用日K范围 [daily_range_start, now]
@@ -1064,6 +1139,7 @@ def run_now(
         "laggard_repaired": laggard_repaired,
         "laggard_empty": laggard_empty,
         "laggard_skipped": laggard_skipped,
+        "residual_fixed": residual_fixed,
         "enriched_total_days": enriched_total_days,
         "integrity_repair_from": repair_start.isoformat() if repair_start else None,
         "integrity_issues": len(integrity_issues),
