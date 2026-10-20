@@ -453,10 +453,39 @@ def _sweep_stale_daily_staging(staging_base, max_age_s: int = 24 * 60 * 60) -> N
             logger.warning("failed to clean stale daily staging: %s", run_dir)
 
 
-def sync_daily_by_quotes(repo: KlineRepository) -> int:
-    """用实时行情接口拉全市场当日数据,覆写 kline_daily 今天分区。
+def _provider_daily_snapshot(symbols: list[str] | None) -> pl.DataFrame | None:
+    """当前日K数据源若支持批量行情快照, 返回当日日K; 不支持返回 None。
 
-    一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
+    逐只拉日K的成本由供应商的并发能力决定; 行情快照接口一次覆盖数十只,
+    盘后定版当天数据快一到两个数量级。
+    """
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name == "tickflow":
+        return None
+    from app.data_providers import custom as custom_sources
+
+    if not custom_sources.provider_has_dataset(provider_name, "daily"):
+        return None
+    if not symbols:
+        return None
+    try:
+        provider = custom_sources.get_provider(provider_name)
+        snapshot = getattr(provider, "get_daily_snapshot", None)
+        if not callable(snapshot):
+            return None
+        df = snapshot(list(symbols))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("%s 日K快照失败, 回退逐只拉取: %s", provider_name, e)
+        return None
+    if not isinstance(df, pl.DataFrame) or df.is_empty():
+        return None
+    return df
+
+
+def sync_daily_by_quotes(repo: KlineRepository, symbols: list[str] | None = None) -> int:
+    """用行情快照拉全市场当日数据, 定版 kline_daily 今天分区。
+
+    symbols: 标的池。自定义源走批量快照时必须给出; TickFlow 走全市场 universes。
     返回写入的行数。
     """
     today = cn_today()
@@ -465,6 +494,17 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
         # 落盘会产生日期错误的假日K (如周日分区复制周五)。
         logger.info("sync_daily_by_quotes: %s 为周末非交易日, 跳过当日快照写盘", today)
         return 0
+
+    snapshot = _provider_daily_snapshot(symbols)
+    if snapshot is not None:
+        snapshot = filter_halt_days(snapshot)
+        if snapshot.is_empty():
+            logger.info("sync_daily_by_quotes: %s 快照全部停牌/无效, 跳过", today)
+            return 0
+        repo.append_daily(snapshot)
+        logger.info("sync_daily_by_quotes: %d symbols flushed for %s (provider snapshot)",
+                    snapshot.height, today)
+        return snapshot.height
 
     from app.tickflow.client import get_client
 

@@ -336,6 +336,27 @@ def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
     return sorted(base)
 
 
+def _has_daily_snapshot(capset: CapabilitySet) -> bool:
+    """当天日K能否走批量行情快照定版。
+
+    TickFlow 需要 quote.pool; 自定义数据源需要实现 get_daily_snapshot。
+    没有快照能力时退回逐只拉日K, 行为与之前一致。
+    """
+    provider_name = _prefs.get_daily_data_provider()
+    if provider_name == "tickflow":
+        return capset.has(Cap.QUOTE_POOL)
+    try:
+        from app.data_providers import custom as custom_sources
+
+        if not custom_sources.provider_has_dataset(provider_name, "daily"):
+            return False
+        provider = custom_sources.get_provider(provider_name)
+        return callable(getattr(provider, "get_daily_snapshot", None))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("日K快照能力检测失败, 按不支持处理: %s", e)
+        return False
+
+
 def run_instruments_sync(repo: KlineRepository) -> dict:
     """盘前同步个股维表。
 
@@ -464,19 +485,19 @@ def run_now(
     elif (
         today_exists
         and stale_day is None
-        and capset.has(Cap.QUOTE_POOL)
-        and _prefs.get_daily_data_provider() == "tickflow"
+        and _has_daily_snapshot(capset)
     ):
-        # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
+        # 今天已有盘中数据(QuoteService 已落盘)→ 批量行情快照定版。
+        # 逐只拉日K的成本由供应商的并发能力决定, 快照一次覆盖数十只;
+        # 收盘后快照的收盘价与官方日K一致(实测 OHLC/量/额全部相符)。
         # stale_day 非空时禁用本分支: "只刷今天"会让停机日的盘中快照永久留存,
         # 降级到下方 batch 路径从坏日起重拉。
-        # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
-        # 也降级到下方 batch 路径刷新,避免调用无权限的实时行情接口。
-        emit("sync_daily", 12, f"获取日K [{today} ~ {today}] 实时行情…")
-        written_daily = kline_sync.sync_daily_by_quotes(repo)
+        # 没有任何快照能力时同样降级到 batch 路径。
+        emit("sync_daily", 12, f"获取日K [{today} ~ {today}] 行情快照…")
+        written_daily = kline_sync.sync_daily_by_quotes(repo, universe)
         new_daily_days = 1
         emit("sync_daily", 45, f"日K 完成,{written_daily} 只标的")
-        logger.info("sync_daily: [%s ~ %s] live quotes, %d symbols", today, today, written_daily)
+        logger.info("sync_daily: [%s ~ %s] quote snapshot, %d symbols", today, today, written_daily)
     elif latest_daily or stale_day:
         # 有历史 → batch 补齐缺口。
         # 盘中 safe_end 会回退到昨天,避免 batch 日K 覆盖 QuoteService 写入的今天实时数据。
