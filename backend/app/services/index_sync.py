@@ -471,13 +471,28 @@ def sync_and_persist_etf_daily(
 
         if custom_sources.provider_has_dataset(provider_name, "daily"):
             provider = custom_sources.get_provider(provider_name)
-            raw = provider.get_daily(
-                symbols,
-                start_time=start_time,
-                end_time=end_time,
-                asset_type="etf",
-                on_chunk_done=on_chunk_done,
-            )
+            # 只补当天时优先走批量行情快照: 一次覆盖 50 只, 收盘价/量/额与
+            # 官方 ETF 日K实测完全一致(510050: 2.878/2.882/2.843/2.877,
+            # 26249038 手, 7527794688 元)。窗口更长说明要补历史, 快照只有
+            # 当天, 仍逐只拉取。
+            raw = None
+            snapshot_fn = getattr(provider, "get_daily_snapshot", None)
+            if callable(snapshot_fn) and start_time.date() >= end_time.date():
+                try:
+                    raw = snapshot_fn(symbols)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("ETF 日K快照失败, 回退逐只拉取: %s", e)
+                    raw = None
+                if raw is not None and not raw.is_empty() and on_chunk_done:
+                    on_chunk_done(len(symbols), len(symbols))
+            if raw is None or raw.is_empty():
+                raw = provider.get_daily(
+                    symbols,
+                    start_time=start_time,
+                    end_time=end_time,
+                    asset_type="etf",
+                    on_chunk_done=on_chunk_done,
+                )
             raw = _sanitize_etf_daily(raw, symbols, start_time, end_time)
             written = _persist_etf_daily_frame(repo, raw, factors)
             repo.refresh_index_views()
