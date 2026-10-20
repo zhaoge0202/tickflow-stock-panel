@@ -2553,15 +2553,31 @@ class KlineRepository:
         掉队的个股缺口。此方法按 symbol 聚合最新日期, 找出掉队者。只读, 不改数据。
         """
         from datetime import timedelta
+        cutoff = reference_date - timedelta(days=min_gap_days)
+        return [symbol for symbol, _ in self.symbols_lagging_with_dates(cutoff)]
+
+    def symbols_lagging_with_dates(self, cutoff: date) -> list[tuple[str, date]]:
+        """返回最新 bar 早于 cutoff 的 (symbol, 最新日期), 按最新日期降序。
+
+        回补逻辑需要每只标的自己的起点, 只给 symbol 列表无法算出各自缺口。
+        降序让"最近才掉队"的标的排在前面, 超量时优先补它们。
+        """
         try:
-            cutoff = reference_date - timedelta(days=min_gap_days)
             with self._lock:
                 rows = self.db.execute(
                     "SELECT symbol, max(date) AS mx FROM kline_daily "
-                    "GROUP BY symbol HAVING max(date) < ? ORDER BY mx",
+                    "GROUP BY symbol HAVING max(date) < ? ORDER BY mx DESC",
                     [cutoff],
                 ).fetchall()
-            return [r[0] for r in rows if r and r[0]]
+            out: list[tuple[str, date]] = []
+            for r in rows:
+                if not r or not r[0] or not r[1]:
+                    continue
+                latest = r[1]
+                if not isinstance(latest, date):
+                    latest = date.fromisoformat(str(latest)[:10])
+                out.append((r[0], latest))
+            return out
         except Exception:
             return []
 
