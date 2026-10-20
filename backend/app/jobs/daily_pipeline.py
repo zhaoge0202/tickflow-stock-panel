@@ -437,6 +437,15 @@ def run_now(
             integrity_issues = data_integrity.scan_recent_integrity(
                 repo.store.data_dir, today=today,
             )
+            # 当天的股票日K由盘后行情快照定版(见 Step 1 的快照分支), 不参与
+            # 完整性修复判定: 实时行情写出的当天分区必然带 quote_ts, 每天都会被
+            # 判成盘中快照, 管道就会永远走"从坏日逐只重拉", 快照分支永不生效。
+            # 只排除 kline_daily 的当天, ETF/指数与历史日不受影响。
+            if _prefs.get_pipeline_pull_a_share() and _has_daily_snapshot(capset):
+                integrity_issues = [
+                    issue for issue in integrity_issues
+                    if not (issue.table == "kline_daily" and issue.day >= today)
+                ]
             if integrity_issues:
                 stale_day = data_integrity.earliest_issue_day(integrity_issues, ("kline_daily",))
                 etf_stale_day = data_integrity.earliest_issue_day(integrity_issues, ("kline_etf_daily",))
