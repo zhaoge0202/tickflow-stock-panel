@@ -11,9 +11,11 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
-from datetime import date as _date, timedelta as _td
+from datetime import date as _date
+from datetime import timedelta as _td
 from pathlib import Path
 
 import polars as pl
@@ -140,6 +142,136 @@ def _prune_stale_price_partitions(
             shutil.rmtree(enriched_dir / f"date={ds}", ignore_errors=True)
             pruned.append(ds)
     return pruned
+
+
+# 掉队标的回补: 主同步只覆盖 [全局最新日, 今天], 个股若因停牌/复牌/拉取失败掉在
+# 更早的位置, 那段缺口自己不会浮出来。这里按其自身最新日期单独补一轮。
+# 深度与节流是为了不把已退市标的变成每轮固定开销 —— 空拉过的标的 7 天内不再试。
+_LAGGARD_RETRY_PATH = Path("user_data") / "laggard_retry.json"
+_LAGGARD_RETRY_DAYS = 7
+_LAGGARD_MAX_LOOKBACK_DAYS = 45
+_LAGGARD_MAX_SYMBOLS = 300
+_LAGGARD_RETRY_KEEP_DAYS = 90
+
+
+def _load_laggard_retry(data_dir: Path) -> dict[str, str]:
+    try:
+        raw = json.loads((data_dir / _LAGGARD_RETRY_PATH).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("laggard 重试记录读取失败, 按空处理: %s", e)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items() if k and v}
+
+
+def _save_laggard_retry(data_dir: Path, retry: dict[str, str], today: _date) -> None:
+    """写回重试记录并清理过老条目。失败只告警, 不影响管道结果。"""
+    keep_after = (today - _td(days=_LAGGARD_RETRY_KEEP_DAYS)).isoformat()
+    cleaned = {s: d for s, d in retry.items() if d >= keep_after}
+    try:
+        from app.services.fs_utils import atomic_write_text
+
+        path = data_dir / _LAGGARD_RETRY_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("laggard 重试记录写入失败: %s", e)
+
+
+def _select_laggard_targets(
+    laggards: list[tuple[str, _date]],
+    *,
+    universe: set[str],
+    today: _date,
+    retry: dict[str, str],
+    max_symbols: int = _LAGGARD_MAX_SYMBOLS,
+    retry_days: int = _LAGGARD_RETRY_DAYS,
+    max_lookback_days: int = _LAGGARD_MAX_LOOKBACK_DAYS,
+) -> list[tuple[str, _date]]:
+    """挑出本轮值得回补的 (symbol, 最新日期), 按最新日期降序。
+
+    过滤三类: 不在本轮标的池、缺口超过回补深度(长期停牌/退市)、近期已空拉过(节流)。
+    降序让"最近才掉队"的排在前面, 超量时优先补更可能仍有交易的标的。
+    """
+    retry_after = (today - _td(days=retry_days)).isoformat()
+    earliest = today - _td(days=max_lookback_days)
+    picked: list[tuple[str, _date]] = []
+    for symbol, latest in laggards:
+        if symbol not in universe or latest < earliest:
+            continue
+        last_try = retry.get(symbol)
+        if last_try and last_try > retry_after:
+            continue
+        picked.append((symbol, latest))
+    picked.sort(key=lambda item: item[1], reverse=True)
+    return picked[:max_symbols]
+
+
+def _repair_lagging_symbols(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    universe: list[str],
+    today: _date,
+    *,
+    laggards: list[tuple[str, _date]],
+    emit: ProgressCb,
+) -> dict:
+    """按标的自身最新日期回补日K缺口。返回 repaired/empty/skipped/earliest。"""
+    data_dir = repo.store.data_dir
+    retry = _load_laggard_retry(data_dir)
+    targets = _select_laggard_targets(
+        laggards, universe=set(universe), today=today, retry=retry,
+    )
+    result = {
+        "repaired": [],
+        "empty": [],
+        "skipped": len(laggards) - len(targets),
+        "earliest": None,
+    }
+    if not targets:
+        return result
+
+    from datetime import datetime as _dt
+
+    emit("sync_daily", 46, f"回补掉队标的 {len(targets)} 只…")
+    # 按各自最新日期分桶: 同一日期共用一个拉取窗口, limit 只按这个窗口算,
+    # 避免为最老的那只把所有标的的历史一起拉下来。
+    buckets: dict[_date, list[str]] = {}
+    for symbol, latest in targets:
+        buckets.setdefault(latest, []).append(symbol)
+
+    end_dt = _dt.combine(today, _dt.min.time())
+    for latest, symbols in sorted(buckets.items(), reverse=True):
+        start_dt = _dt.combine(latest + _td(days=1), _dt.min.time())
+        zero_rows: list[str] = []
+        try:
+            written = kline_sync.sync_and_persist_daily_batch(
+                symbols, repo, capset,
+                start_date=start_dt, end_date=end_dt,
+                zero_row_out=zero_rows,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("laggard 回补失败(%d 只, 起点 %s): %s", len(symbols), latest, e)
+            continue
+        empty_set = set(zero_rows)
+        fixed = [s for s in symbols if s not in empty_set]
+        result["repaired"].extend(fixed)
+        result["empty"].extend(zero_rows)
+        for s in fixed:
+            retry.pop(s, None)
+        for s in zero_rows:
+            retry[s] = today.isoformat()
+        if result["earliest"] is None:
+            result["earliest"] = latest + _td(days=1)
+        logger.info(
+            "laggard 回补: 起点 %s, %d 只, 写入 %d 行, 空拉 %d 只",
+            latest, len(symbols), written, len(zero_rows),
+        )
+    _save_laggard_retry(data_dir, retry, today)
+    return result
 
 
 class PipelineStageError(RuntimeError):
@@ -412,18 +544,45 @@ def run_now(
 
     # 单标的新鲜度: 全局 max(date) 会被任一有今日数据的标的"拉高", 掩盖停牌/复牌/
     # 一直拉失败而掉队的个股缺口(全局判据只刷"今天", 永不回补掉队标的的历史缺口)。
-    # 这里检测并**可见化**(WARNING + 计入结果), 让掉队标的不再隐形。
-    # (自动回补暂不做 —— 需带退市判定, 否则对已退市标的每轮空拉浪费 API 额度。)
+    # 先检测并可见化(WARNING + 计入结果), 再按各标的自身最新日期回补一轮。
     lagging_symbols: list[str] = []
+    lagging_pairs: list[tuple[str, _date]] = []
+    laggard_repaired = 0
+    laggard_empty = 0
+    laggard_skipped = 0
     if pull_a_share and latest_daily:
         try:
-            lagging_symbols = repo.symbols_lagging(today, min_gap_days=3)
+            lagging_pairs = repo.symbols_lagging_with_dates(today - _td(days=3))
+            lagging_symbols = [s for s, _ in lagging_pairs]
             if lagging_symbols:
                 logger.warning("日K新鲜度: %d 只标的落后 >3 日 (停牌/退市/拉取失败; 样例: %s)",
                                len(lagging_symbols), lagging_symbols[:10])
         except Exception as e:  # noqa: BLE001
             logger.warning("laggard detection failed: %s", e)
             stage_errors.append(f"laggard detection: {e}")
+
+    # Step 1.4: 掉队标的回补 — 主同步从全局最新日起拉, 个股更早的缺口只能靠这里补。
+    # 回补起点并入 daily_range_start, 让 Step 1.5 的除权窗口跟着覆盖。
+    if pull_a_share and lagging_pairs:
+        try:
+            laggard_result = _repair_lagging_symbols(
+                repo, capset, universe, today, laggards=lagging_pairs, emit=emit,
+            )
+            laggard_repaired = len(laggard_result["repaired"])
+            laggard_empty = len(laggard_result["empty"])
+            laggard_skipped = laggard_result["skipped"]
+            earliest = laggard_result["earliest"]
+            if laggard_repaired:
+                _invalidate("daily")
+                logger.info("laggard 回补完成: 修复 %d 只, 空拉 %d 只, 跳过 %d 只",
+                            laggard_repaired, laggard_empty, laggard_skipped)
+                if earliest is not None and (
+                    daily_range_start is None or daily_range_start > earliest
+                ):
+                    daily_range_start = earliest
+        except Exception as e:  # noqa: BLE001
+            logger.warning("laggard 回补异常 (soft): %s", e)
+            stage_errors.append(f"laggard repair: {e}")
 
     # Step 1.5: 同步除权因子 — 范围与日K拉取方式对齐
     #   日K范围拉取(补缺口/首次) → 除权用日K范围 [daily_range_start, now]
@@ -872,6 +1031,9 @@ def run_now(
         "mainline_rows": mainline_rows,
         "paper_settle": paper_summary,
         "lagging_symbols": len(lagging_symbols),
+        "laggard_repaired": laggard_repaired,
+        "laggard_empty": laggard_empty,
+        "laggard_skipped": laggard_skipped,
         "enriched_total_days": enriched_total_days,
         "integrity_repair_from": repair_start.isoformat() if repair_start else None,
         "integrity_issues": len(integrity_issues),
