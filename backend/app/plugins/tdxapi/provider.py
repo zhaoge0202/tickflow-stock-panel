@@ -44,6 +44,11 @@ _MINUTE_FETCH_ATTEMPTS = 3
 _REALTIME_FETCH_ATTEMPTS = 2
 _REALTIME_RETRY_DELAY = 0.2
 _CN_TZ = ZoneInfo("Asia/Shanghai")
+# sidecar 的日K接口支持 limit 后只做 offset=0 的单页读取(最近 N 根), 不再
+# 分页拼全历史。单页上限 800 根; 超过该阈值说明请求窗口覆盖多年历史,
+# 截断会丢早期数据, 此时不传 limit, 退回全量语义。
+_DAILY_ROW_LIMIT_FULL_THRESHOLD = 700
+_DAILY_ROW_LIMIT_MIN = 10
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 # TDX /api/finance 只有单票财务快照(~37 字段), 不是完整三大表历史。
 # 这里同时保留原始映射, 并在 _financial_row 中派生前端契约字段
@@ -176,10 +181,12 @@ class TDXAPIProvider:
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
+        row_limit = _daily_row_limit(start_time, end_time)
+
         def _fetch_one(symbol: str) -> pl.DataFrame | None:
             app_symbol = _to_app_symbol(symbol, None) or str(symbol).upper()
             try:
-                rows = self._fetch_kline_rows(symbol, "day")
+                rows = self._fetch_kline_rows(symbol, "day", limit=row_limit or None)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("tdx-api daily 拉取失败(%s): %s", app_symbol, exc)
                 return None
@@ -833,6 +840,7 @@ class TDXAPIProvider:
         trade_date: str | None = None,
         *,
         asset_type: AssetType = "stock",
+        limit: int | None = None,
     ) -> list[dict]:
         is_index = asset_type == "index"
         params = {"code": _to_tdx_code(symbol), "type": kline_type}
@@ -845,6 +853,10 @@ class TDXAPIProvider:
             params["limit"] = "800" if is_index else (
                 "800" if trade_date == _cn_today().strftime("%Y%m%d") else "2400"
             )
+        elif limit and limit > 0:
+            # 日/周/月线: sidecar 收到 limit 后只读最近 N 根(单次往返),
+            # 否则会为几天的增量分页拉完全部历史。
+            params["limit"] = str(limit)
         if trade_date:
             params["date"] = trade_date
         data = self._request(
@@ -1589,6 +1601,22 @@ def _in_date_range(value, start_time: datetime | None, end_time: datetime | None
     if start_time and value < start_time.date():
         return False
     return not (end_time and value > end_time.date())
+
+
+def _daily_row_limit(start_time: datetime | None, end_time: datetime | None) -> int:
+    """按请求窗口估算需要拉取的日K根数; 0 表示走全量语义(不传 limit)。
+
+    A 股每年约 243 个交易日, 按自然日的 0.7 倍估算后再留 10 根余量, 覆盖
+    停牌与长假造成的空档。窗口超过单页上限时返回 0, 避免 limit 截断把早期
+    历史悄悄丢掉(数据修正/首次全量仍按全量拉取)。
+    """
+    if start_time is None or end_time is None:
+        return 0
+    days = (end_time.date() - start_time.date()).days + 1
+    want = int(days * 0.7) + _DAILY_ROW_LIMIT_MIN
+    if want >= _DAILY_ROW_LIMIT_FULL_THRESHOLD:
+        return 0
+    return max(_DAILY_ROW_LIMIT_MIN, want)
 
 
 def _in_datetime_range(value: datetime, start_time: datetime | None, end_time: datetime | None) -> bool:
