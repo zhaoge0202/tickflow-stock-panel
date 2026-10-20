@@ -133,6 +133,7 @@ def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | Non
     cutoff_ms = int(datetime.combine(day, CLOSE_CUTOFF, tzinfo=CN_TZ).timestamp() * 1000)
     authoritative_rows = 0
     suspicious_rows = 0
+    total_rows = 0
 
     for path in sorted(part_dir.glob("*.parquet")):
         try:
@@ -146,6 +147,7 @@ def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | Non
             frame = pl.read_parquet(path, columns=columns).with_columns(
                 pl.col("quote_ts").cast(pl.Int64, strict=False),
             )
+            total_rows += frame.height
             authoritative_rows += frame["quote_ts"].null_count()
             suspicious = frame.filter(
                 pl.col("quote_ts").is_between(start_ms, cutoff_ms, closed="left")
@@ -166,6 +168,12 @@ def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | Non
                 ).any()
             ).item()
             if has_activity:
+                # 权威行占绝对多数时, 个别标的的盘中残留(batch 未覆盖到的停牌/
+                # 新股)不应让整个分区反复重拉: 那样每个交易日都会从"最早坏日"
+                # 全市场逐只重拉一遍(实测 5740 只/26 分钟), 而实际需要的是
+                # 下一次 batch 覆盖这几行。整分区都是实时行时仍按快照处理。
+                if authoritative_rows > 0 and authoritative_rows * 100 >= total_rows * 99:
+                    continue
                 return True
         except Exception as e:
             logger.debug("snapshot residue scan skipped %s: %s", path, e)
