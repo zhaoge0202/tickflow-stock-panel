@@ -229,7 +229,7 @@ class TDXAPIProvider:
 
         /api/batch-quote 的 K.Close 在收盘后就是当日最终收盘价(实测与官方日K
         的 OHLC/成交量/成交额完全一致), 50 只一批, 全市场约 120 个请求,
-        比逐只拉日K快两个数量级。单位对齐日K口径: volume=手, amount=厘。
+        比逐只拉日K快两个数量级。单位对齐日K口径: volume=手, amount=元。
         """
         if not symbols:
             return pl.DataFrame()
@@ -251,8 +251,8 @@ class TDXAPIProvider:
                 "low": row.get("low") or 0.0,
                 "close": row.get("last_price") or 0.0,
                 "volume": row.get("volume") or 0.0,
-                # 行情接口的 amount 是元, 日K 分区存厘, 差 1000 倍。
-                "amount": (row.get("amount") or 0.0) * 1000.0,
+                # _quote_row 已把 TDX 的厘换算成元, 与日K分区口径一致(实测相等)。
+                "amount": row.get("amount") or 0.0,
             })
         if not records:
             return pl.DataFrame()
