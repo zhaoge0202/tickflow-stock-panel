@@ -43,6 +43,10 @@ _MINUTE_WORKERS_MAX = 32
 _MINUTE_FETCH_ATTEMPTS = 3
 _REALTIME_FETCH_ATTEMPTS = 2
 _REALTIME_RETRY_DELAY = 0.2
+# 逐笔成交: sidecar 内部 wait 超时(默认 8s)代表这一轮节点/代理没回包,
+# 属于瞬时故障; 换一次请求重发即可恢复, 不必像分钟K那样重试 3 次。
+_TRADE_TICK_FETCH_ATTEMPTS = 2
+_TRADE_TICK_RETRY_DELAY = 0.3
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 # sidecar 的日K接口支持 limit 后只做 offset=0 的单页读取(最近 N 根), 不再
 # 分页拼全历史。单页上限 800 根; 超过该阈值说明请求窗口覆盖多年历史,
@@ -530,7 +534,30 @@ class TDXAPIProvider:
             params["date"] = date_arg
 
         path = "/api/minute-trade-all" if str(mode or "").lower() == "all" else "/api/trade"
-        data = self._request("GET", path, params=params, timeout=max(self.timeout, 60.0))
+        data: dict | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, _TRADE_TICK_FETCH_ATTEMPTS + 1):
+            try:
+                data = self._request("GET", path, params=params, timeout=max(self.timeout, 60.0))
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                # sidecar 的 wait 超时(节点/代理这一轮没回包)可换连接恢复;
+                # 代码无效、非交易日等确定性业务错误立即失败, 不放大请求。
+                if attempt < _TRADE_TICK_FETCH_ATTEMPTS and _is_transient_error(e):
+                    logger.warning(
+                        "tdx-api trade_ticks 请求失败(%s), 尝试 %d/%d: %s",
+                        app_symbol,
+                        attempt,
+                        _TRADE_TICK_FETCH_ATTEMPTS,
+                        e,
+                    )
+                    time.sleep(_TRADE_TICK_RETRY_DELAY * attempt)
+                    continue
+                raise
+        if last_error is not None:  # pragma: no cover - 循环内已 raise
+            raise RuntimeError(f"TDX 逐笔成交请求失败: {last_error}") from last_error
         raw_rows = list((data or {}).get("List") or [])
 
         rows = [
@@ -1442,6 +1469,11 @@ def _is_transient_realtime_error(error: Exception) -> bool:
             "504",
         )
     )
+
+
+def _is_transient_error(error: Exception) -> bool:
+    """通用瞬时故障判定 (逐笔成交等非分批接口复用)。"""
+    return _is_transient_realtime_error(error)
 
 
 def _to_tdx_code(symbol: str | None) -> str:

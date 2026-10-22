@@ -63,6 +63,9 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
     },
     enabled: !!symbol && !!date,
     staleTime: 0,
+    // sidecar 的 8s wait 超时已由后端重试兜底; 前端只补一次,
+    // 避免默认 3 次重试让用户干等 30 秒才看到报错。
+    retry: 1,
     refetchInterval: isToday && !fullDayMode ? 3000 : false,
     refetchIntervalInBackground: true,
   })
@@ -118,6 +121,7 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
   const rows = useMemo(() => ticks.data?.rows ?? [], [ticks.data?.rows])
   const mysqlRows = persistStatus.data?.mysql?.rows ?? 0
   const statusError = persistStatus.error instanceof Error ? persistStatus.error.message : null
+  const ticksError = ticks.error instanceof Error ? ticks.error.message : null
   const requestPersisting = persist.isPending && !persistStatus.isError
   const persistHint = getPersistHint(persistStatus.data, statusError)
 
@@ -137,6 +141,11 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
           {ticks.data?.warning && (
             <span className="max-w-[420px] truncate text-[10px] text-warning" title={ticks.data.warning}>
               {ticks.data.warning}
+            </span>
+          )}
+          {ticksError && (
+            <span className="max-w-[420px] truncate text-[10px] text-danger" title={ticksError}>
+              {ticksError}
             </span>
           )}
           {mysqlRows > 0 && (
@@ -193,7 +202,9 @@ export function StockTradeTicksPanel({ symbol, date }: Props) {
             )}
             {!ticks.isLoading && rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="h-24 text-center text-xs text-muted">暂无成交明细</td>
+                <td colSpan={6} className="h-24 text-center text-xs text-muted">
+                  {ticksError ? <span className="text-danger">{ticksError}</span> : '暂无成交明细'}
+                </td>
               </tr>
             )}
             {rows.map((row) => (
