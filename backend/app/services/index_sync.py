@@ -247,6 +247,95 @@ def _fetch_tdxapi_instruments(asset_type: str) -> pl.DataFrame:
     return pl.DataFrame(normalized).unique(subset=["symbol"], keep="last").sort("symbol")
 
 
+def _iter_custom_daily_frames(provider, symbols, asset_type, start_time, end_time, on_chunk_done):
+    """自定义源日K帧迭代器: iter_daily 流式优先, 仅实现 get_daily 的源包装为单帧。
+
+    asset_type 按内部契约传 "index"/"etf"; 只服务股票的源 (fuyao/tdxquant/amber
+    对 asset_type≠stock 一律空手而归) 由此自然表达「不支持」, 由调用方回退。"""
+    iter_daily = getattr(provider, "iter_daily", None)
+    if callable(iter_daily):
+        yield from iter_daily(
+            symbols, start_time=start_time, end_time=end_time,
+            asset_type=asset_type, on_chunk_done=on_chunk_done,
+        )
+        return
+    df = provider.get_daily(
+        symbols, start_time=start_time, end_time=end_time,
+        asset_type=asset_type, on_chunk_done=on_chunk_done,
+    )
+    if not df.is_empty():
+        yield df
+
+
+def _sync_custom_daily(
+    repo: KlineRepository,
+    symbols: list[str],
+    *,
+    asset_type: str,
+    asset_label: str,
+    start_time: datetime,
+    end_time: datetime,
+    on_chunk_done: Callable[[int, int], None] | None,
+    persist_frame: Callable[[pl.DataFrame], int],
+    use_snapshot: bool = False,
+) -> int:
+    """日K源为自定义 provider 时接管指数/ETF 日K同步 (#502)。
+
+    与个股 sync_and_persist_daily_batch 同一路由语义, 路由判定在 TickFlow 能力
+    检查之前 —— 纯自定义源部署 (未配置 TickFlow) 也能同步指数/ETF。
+
+    返回 -1 表示「本次不由自定义源接管」, 调用方继续 TickFlow 原路径:
+    - 日K源是 tickflow, 或该源未声明 daily 数据集;
+    - 声明了但对该资产类型空手而归 —— 插件契约本就如此 (tdxquant 注释:
+      "asset_type 仅接受 stock, 其余空手而归(上层回退)"), 告警后回退,
+      与修复前行为一致, 不静默吞掉。
+
+    persist_frame 接收一帧原始日K并完成 append_*_daily + enriched 落盘,
+    返回行数 —— 指数/ETF 各自复用与 TickFlow 路径相同的落盘逻辑, 不另起一套。
+
+    use_snapshot: 只补当天时优先走 provider 的批量行情快照 (一次覆盖 50 只,
+    收盘价/量/额与官方 ETF 日K实测一致), 拿不到再回退逐只拉取。
+    """
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name == "tickflow":
+        return -1
+    from app.data_providers import custom as custom_sources
+    if not custom_sources.provider_has_dataset(provider_name, "daily"):
+        return -1
+
+    provider = custom_sources.get_provider(provider_name)
+    total_rows = 0
+    frames = _iter_custom_daily_frames(
+        provider, symbols, asset_type, start_time, end_time, on_chunk_done,
+    )
+    snapshot_fn = getattr(provider, "get_daily_snapshot", None)
+    if use_snapshot and callable(snapshot_fn) and start_time.date() >= end_time.date():
+        try:
+            snapped = snapshot_fn(symbols)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("%s 日K快照失败, 回退逐只拉取: %s", asset_label, e)
+            snapped = None
+        if snapped is not None and not snapped.is_empty():
+            if on_chunk_done:
+                on_chunk_done(len(symbols), len(symbols))
+            frames = iter([snapped])
+    for raw in frames:
+        if raw is None or raw.is_empty():
+            continue
+        total_rows += persist_frame(raw)
+        logger.info("%s daily synced (custom %s): +%d rows", asset_label, provider_name, raw.height)
+        del raw
+        gc.collect()
+    if total_rows > 0:
+        repo.refresh_index_views()
+        return total_rows
+    logger.warning(
+        "自定义源 %s 未返回%s日K数据 (源仅服务股票时属预期), 本轮回退 TickFlow",
+        provider_name, asset_label,
+    )
+    return -1
+
+
 def sync_and_persist_index_daily(
     repo: KlineRepository,
     capset: CapabilitySet,
@@ -262,10 +351,6 @@ def sync_and_persist_index_daily(
     否则取 index_instruments 表全量(指数+ETF 合并存储)。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
-        kline_sync._log_cap_unavailable("daily", "指数/ETF 日K同步")
-        return 0
-
     if symbols_override:
         symbols = sorted(set(s for s in symbols_override if s))
         if not symbols:
@@ -280,11 +365,34 @@ def sync_and_persist_index_daily(
         if instruments.is_empty() or "symbol" not in instruments.columns:
             return 0
         symbols = sorted(set(instruments["symbol"].to_list()))
-    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
-    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
     end_time = end_date or datetime.now()
     start_time = start_date or (end_time - timedelta(days=365))
+
+    def _persist_index_frame(raw: pl.DataFrame) -> int:
+        repo.append_index_daily(raw)
+        enriched = compute_enriched(raw, factors=None, instruments=None)
+        repo.append_index_enriched(enriched)
+        del enriched
+        return raw.height
+
+    # 自定义日K源优先接管指数日K (#502): 路由判定在 TickFlow 能力检查之前,
+    # 纯自定义源部署 (未配置 TickFlow) 也能同步; 空手而归时回退下方 TickFlow 路径。
+    custom_rows = _sync_custom_daily(
+        repo, symbols,
+        asset_type="index", asset_label="指数",
+        start_time=start_time, end_time=end_time,
+        on_chunk_done=on_chunk_done,
+        persist_frame=_persist_index_frame,
+    )
+    if custom_rows >= 0:
+        return custom_rows
+
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
+        kline_sync._log_cap_unavailable("daily", "指数/ETF 日K同步")
+        return 0
+    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
+    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
     total_rows = 0
     chunks = chunked(symbols, batch_size)
@@ -300,14 +408,11 @@ def sync_and_persist_index_daily(
         if raw.is_empty():
             continue
 
-        repo.append_index_daily(raw)
-        enriched = compute_enriched(raw, factors=None, instruments=None)
-        repo.append_index_enriched(enriched)
-        total_rows += raw.height
+        total_rows += _persist_index_frame(raw)
         logger.info("index/etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
-        del raw, enriched
+        del raw
         gc.collect()
     repo.refresh_index_views()
     return total_rows
@@ -364,6 +469,8 @@ def _load_local_etf_daily(repo: KlineRepository, symbols: list[str]) -> pl.DataF
     except Exception as e:
         logger.warning("读取本地 ETF 日K失败: %s", e)
         return pl.DataFrame()
+
+
 def _sanitize_etf_daily(
     raw: pl.DataFrame,
     symbols: list[str],
@@ -398,19 +505,34 @@ def _persist_etf_daily_frame(
     repo: KlineRepository,
     raw: pl.DataFrame,
     factors: pl.DataFrame,
+    symbols: list[str],
+    *,
+    start_time: datetime,
+    end_time: datetime,
 ) -> int:
+    """限制 provider 返回范围并落盘 ETF 日K + enriched, 返回写入行数。"""
     if raw.is_empty():
         return 0
-    symbols = raw["symbol"].unique().to_list()
+    # symbols 是本次请求的 ETF 标的池: 源可能顺带返回池外代码, 写盘前一并剔除
+    raw = _sanitize_etf_daily(raw, symbols, start_time, end_time)
+    if raw.is_empty():
+        return 0
+    frame_symbols = raw["symbol"].unique().to_list()
     batch_factors = (
-        factors.filter(pl.col("symbol").is_in(symbols))
+        factors.filter(pl.col("symbol").is_in(frame_symbols))
         if not factors.is_empty()
         else factors
     )
     # raw 是权威数据，enriched 可由 raw 重建；两者都按 repository 的 merge-upsert 写入。
     repo.append_etf_daily(raw)
-    enriched = compute_enriched(raw, factors=batch_factors, instruments=None)
+    # 前复权 ratio = cum/total, 新除权事件会改写全部历史价。只用本次拉取窗口算
+    # enriched 时, 拆分日前的分区停在未复权价, 日K 留下跳空。
+    local = _load_local_etf_daily(repo, frame_symbols)
+    hist = local if not local.is_empty() else raw
+    # ETF 使用复权和通用技术指标; 不传 instruments, 避免套用 A股涨跌停/连板逻辑。
+    enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
     repo.append_etf_enriched(enriched)
+    del enriched, local, hist
     return raw.height
 
 
@@ -461,47 +583,30 @@ def sync_and_persist_etf_daily(
 
     end_time = end_date or datetime.now()
     start_time = start_date or (end_time - timedelta(days=365))
+
     factors = _load_etf_factors(repo)
 
-    # TDX/API 插件等外部 provider 不依赖 TickFlow batch 能力。旧代码在此之前
-    # 检查 KLINE_DAILY_BATCH，导致 Free 档即使已选 tdxapi 也直接返回 0。
-    provider_name = preferences.get_daily_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
+    def _persist_etf_frame(raw: pl.DataFrame) -> int:
+        return _persist_etf_daily_frame(
+            repo, raw, factors, symbols,
+            start_time=start_time, end_time=end_time,
+        )
 
-        if custom_sources.provider_has_dataset(provider_name, "daily"):
-            provider = custom_sources.get_provider(provider_name)
-            # 只补当天时优先走批量行情快照: 一次覆盖 50 只, 收盘价/量/额与
-            # 官方 ETF 日K实测完全一致(510050: 2.878/2.882/2.843/2.877,
-            # 26249038 手, 7527794688 元)。窗口更长说明要补历史, 快照只有
-            # 当天, 仍逐只拉取。
-            raw = None
-            snapshot_fn = getattr(provider, "get_daily_snapshot", None)
-            if callable(snapshot_fn) and start_time.date() >= end_time.date():
-                try:
-                    raw = snapshot_fn(symbols)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("ETF 日K快照失败, 回退逐只拉取: %s", e)
-                    raw = None
-                if raw is not None and not raw.is_empty() and on_chunk_done:
-                    on_chunk_done(len(symbols), len(symbols))
-            if raw is None or raw.is_empty():
-                raw = provider.get_daily(
-                    symbols,
-                    start_time=start_time,
-                    end_time=end_time,
-                    asset_type="etf",
-                    on_chunk_done=on_chunk_done,
-                )
-            raw = _sanitize_etf_daily(raw, symbols, start_time, end_time)
-            written = _persist_etf_daily_frame(repo, raw, factors)
-            repo.refresh_index_views()
-            return written
+    # 自定义日K源优先接管 ETF 日K (#502), 语义与上方指数分支一致
+    custom_rows = _sync_custom_daily(
+        repo, symbols,
+        asset_type="etf", asset_label="ETF",
+        start_time=start_time, end_time=end_time,
+        on_chunk_done=on_chunk_done,
+        persist_frame=_persist_etf_frame,
+        use_snapshot=True,
+    )
+    if custom_rows >= 0:
+        return custom_rows
 
     if not capset.has(Cap.KLINE_DAILY_BATCH):
         kline_sync._log_cap_unavailable("daily", "ETF 日K同步")
         return 0
-
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
     batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
@@ -519,23 +624,11 @@ def sync_and_persist_etf_daily(
         if raw.is_empty():
             continue
 
-        raw = _sanitize_etf_daily(raw, chunk, start_time, end_time)
-        if raw.is_empty():
-            continue
-        repo.append_etf_daily(raw)
-        batch_factors = factors.filter(pl.col("symbol").is_in(chunk)) if not factors.is_empty() else factors
-        # 前复权 ratio = cum/total, 新除权事件会改写全部历史价。只用本次拉取
-        # 窗口算 enriched 时, 拆分日前的分区停在未复权价, 日K 留下跳空。
-        local = _load_local_etf_daily(repo, chunk)
-        hist = local if not local.is_empty() else raw
-        # ETF 使用复权和通用技术指标; 不传 instruments, 避免套用 A股涨跌停/连板逻辑。
-        enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
-        repo.append_etf_enriched(enriched)
-        total_rows += raw.height
+        total_rows += _persist_etf_frame(raw)
         logger.info("etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
-        del raw, enriched, local, hist
+        del raw
         gc.collect()
     repo.refresh_index_views()
     return total_rows

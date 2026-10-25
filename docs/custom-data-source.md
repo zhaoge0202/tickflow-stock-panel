@@ -8,7 +8,7 @@
 
 | 数据集 | 配置名 | 说明 |
 | --- | --- | --- |
-| 日K | `daily` | 批量返回一组股票在指定区间内的日K |
+| 日K | `daily` | 批量返回一组标的在指定区间内的日K。个股、指数与 ETF 的日K同步都会路由到生效源,并按契约传入 `asset_type`(`stock`/`index`/`etf`);仅支持股票的源(如 fuyao/tdxquant/amber)对其他资产类型返回空数据即可,该轮同步会告警并回退 TickFlow,不会写入错误数据 |
 | 除权因子 | `adj_factor` | 批量返回一组股票的复权因子 |
 | 实时行情 | `realtime` | 返回全市场快照,用于盘中 enriched 增量计算 |
 | 分钟K | `minute` | 返回 1m 分钟K(需映射出 symbol / datetime / OHLC / 量; amount 成交额可缺省, 缺省时均价线降级显示 —) |
@@ -29,6 +29,8 @@ data/data_sources/*.yaml
 ```
 
 Dev 模式下，默认位置是项目根目录的 `data/`；Docker 部署中，项目的 `data/` 会挂载为容器内的 `/app/data`。可通过 `DATA_DIR` 覆盖。
+
+Docker 里 URL 填 `127.0.0.1` 指的是容器自身：数据源服务跑在宿主机时，应改用 `host.docker.internal`（Linux `docker run` 需加 `--add-host=host.docker.internal:host-gateway` 才能解析，compose 已内置该映射；也可直接用宿主机内网 IP，如 `172.17.0.1`）。
 
 修改 YAML 后可在「设置 -> 数据源」点击「重新加载」,或调用:
 

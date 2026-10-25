@@ -6,6 +6,7 @@ import { getQueryConfig } from './useQueryConfig'
 import { toast } from '@/components/Toast'
 import { pushAlertToasts } from '@/components/AlertToast'
 import { feedReviewEvent } from './reviewStore'
+import { createEnrichedThrottler } from './enrichedInvalidateThrottle'
 import type { KlineDailyResponse, StrategyAlertEvent } from './api'
 
 // ===== 全局 SSE 连接状态 (模块级 store, 仿 AlertToast.tsx 模式) =====
@@ -93,6 +94,8 @@ export function useQuoteStream(
   const retryRef = useRef<ReturnType<typeof setTimeout>>()
   const pagesRef = useRef(sseRefreshPages)
   pagesRef.current = sseRefreshPages
+  // watchlist-enriched 单独节流 5s: SSE 每秒到达, 该前缀整表重拉代价最大
+  const enrichedThrottlerRef = useRef(createEnrichedThrottler())
 
   const handleAlerts = useCallback((alerts: StrategyAlertEvent[]) => {
     // depth 系统接管通知: 单独处理, 不走 strategy 回调
@@ -126,40 +129,49 @@ export function useQuoteStream(
     let failCount = 0
     let toastFired = false
 
+    // 分组 invalidation: watchlist-enriched 走 5s 节流 (整表 N 行×64 字段重拉,
+    // 大自选时每秒一拍代价最大), 其余前缀立即。节流 leading 立即 + trailing 兜底。
+    const invalidatePrefixes = (prefixes: readonly string[]) => {
+      const immediate = prefixes.filter(p => p !== 'watchlist-enriched')
+      if (immediate.length) {
+        qc.invalidateQueries({
+          predicate: query =>
+            immediate.some(prefix => String(query.queryKey[0]).startsWith(prefix)),
+        })
+      }
+      if (prefixes.includes('watchlist-enriched')) {
+        enrichedThrottlerRef.current.fire(() => {
+          qc.invalidateQueries({
+            predicate: query =>
+              String(query.queryKey[0]).startsWith('watchlist-enriched'),
+          })
+        })
+      }
+    }
+
+    // 根据用户页面配置过滤 invalidation (无配置时全部刷新, 向后兼容)
     const invalidateQuoteQueries = () => {
       // 实时行情未开启时不处理行情刷新
       if (!enabledRef.current) return
-      // 根据用户配置过滤 invalidation
       const pages = pagesRef.current
-      if (pages) {
-        // 只 invalidate 开启的页面对应的 prefix
-        const activePrefixes = SSE_INVALIDATE_PREFIXES.filter((p) => {
-          // 'quote-status' 始终刷新 (全局状态)
-          if (p === 'quote-status') return true
-          // 兼容旧配置: 'watchlist' 拆成两个精确前缀后, 未单独设置时沿用旧 'watchlist' 开关
-          if (
-            (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
-            pages[p] === undefined
-          ) {
-            return pages['watchlist'] !== false
-          }
-          return pages[p] !== false
-        })
-        qc.invalidateQueries({
-          predicate: (query) =>
-            activePrefixes.some(
-              (prefix) => String(query.queryKey[0]).startsWith(prefix),
-            ),
-        })
-      } else {
-        // 无配置时全部刷新 (向后兼容)
-        qc.invalidateQueries({
-          predicate: (query) =>
-            SSE_INVALIDATE_PREFIXES.some(
-              (prefix) => String(query.queryKey[0]).startsWith(prefix),
-            ),
-        })
+      if (!pages) {
+        invalidatePrefixes(SSE_INVALIDATE_PREFIXES)
+        return
       }
+      // 只 invalidate 开启的页面对应的 prefix
+      const activePrefixes = SSE_INVALIDATE_PREFIXES.filter((p) => {
+        // 'quote-status' 始终刷新 (全局状态)
+        if (p === 'quote-status') return true
+        // 兼容旧配置: 'watchlist' 拆成两个精确前缀后, 未单独设置时沿用旧 'watchlist' 开关
+        if (
+          (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
+          pages[p] === undefined
+        ) {
+          return pages['watchlist'] !== false
+        }
+        return pages[p] !== false
+      })
+      invalidatePrefixes(activePrefixes)
     }
 
     const connect = () => {
@@ -271,6 +283,7 @@ export function useQuoteStream(
 
     return () => {
       clearTimeout(retryRef.current)
+      enrichedThrottlerRef.current.cancel()
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null

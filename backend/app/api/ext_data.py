@@ -100,6 +100,12 @@ class PullConfigReq(BaseModel):
     schedule_time: str | None = Field(
         None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
     )
+    # 固定时刻的重复周期: daily=每天 | weekly=每周 | monthly=每月 (仅 schedule_time 生效)
+    schedule_period: str | None = Field(None, pattern=r"^(daily|weekly|monthly)$")
+    # weekly: 1=周一..7=周日; monthly: 1..31 (短月无该日则该月跳过)
+    schedule_day: int | None = Field(None, ge=1, le=31)
+    # 仅交易日: 跳过周六日 (法定节假日无法离线判定, 仍会按期尝试, 拉取幂等)
+    schedule_trading_only: bool = False
     time_window_start: str | None = None   # "HH:MM", None=不限
     time_window_end: str | None = None     # "HH:MM", None=不限
     # 接口按日查询的参数名 (如 "date"): 配置后支持历史回补, 且当日拉取也带日期参数
@@ -113,6 +119,14 @@ class PullConfigReq(BaseModel):
     auth: PullAuthReq | None = None
     # 单次拉取请求超时 (秒), 默认 30 与历史行为一致; 大响应接口可调高
     timeout_seconds: int = Field(30, ge=5, le=300)
+    # ── 分页协议 (仅 GET; 页码经 query 参数传递) ──
+    # 必须与本类其它字段一样显式声明: Pydantic 默认忽略未声明键, 前端保存时
+    # 提交的 page_param/page_size_* 会被静默丢弃, 回读退化成单次请求。
+    page_param: str | None = Field(None, max_length=64)
+    page_size_param: str | None = Field(None, max_length=64)
+    page_size: int = Field(0, ge=0)
+    page_start: int = Field(1, ge=0)
+    max_pages: int = Field(20, ge=1, le=200)
     # 两级拉取配方 (目录 → 逐条目明细); 缺省 (None) = 保留现有配置
     fanout: dict | None = None
 
@@ -1017,6 +1031,14 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
             new_auth["key_ref"] = old_auth["key_ref"]
     else:
         new_auth = old_pull.auth if old_pull else None
+    # 会话 Cookie 不能当服务间长期凭据: 保存时就拒绝, 让问题在配置阶段暴露,
+    # 而不是等 24 小时会话过期后定时拉取集体 401。
+    if new_auth:
+        from app.services.ext_pull import session_cookie_rejection
+
+        rejected = session_cookie_rejection(new_auth, get_ext_api_key(config_id))
+        if rejected:
+            raise HTTPException(400, rejected)
     config.pull = PullConfig(
         url=body.url,
         method=body.method,
@@ -1027,6 +1049,9 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         schedule_minutes=body.schedule_minutes,
         enabled=body.enabled,
         schedule_time=body.schedule_time,
+        schedule_period=body.schedule_period,
+        schedule_day=body.schedule_day,
+        schedule_trading_only=body.schedule_trading_only,
         time_window_start=body.time_window_start,
         time_window_end=body.time_window_end,
         date_param=body.date_param,
@@ -1034,6 +1059,11 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         time_field=body.time_field,
         auth=new_auth,
         timeout_seconds=body.timeout_seconds,
+        page_param=body.page_param,
+        page_size_param=body.page_size_param,
+        page_size=body.page_size,
+        page_start=body.page_start,
+        max_pages=body.max_pages,
         fanout=body.fanout if body.fanout is not None else (old_pull.fanout if old_pull else None),
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
@@ -1081,6 +1111,11 @@ def set_pull_api_key(request: Request, config_id: str, body: ApiKeyReq):
 
     value = body.key.strip()
     if value:
+        from app.services.ext_pull import session_cookie_rejection
+
+        rejected = session_cookie_rejection(config.pull.auth if config.pull else None, value)
+        if rejected:
+            raise HTTPException(400, rejected)
         secrets_store.save({ext_api_key_field(config_id): value})
     else:
         secrets_store.clear(ext_api_key_field(config_id))
@@ -1399,6 +1434,27 @@ async def detect_url(body: DetectUrlReq):
     }
 
 
+def _describe_parquet_columns(glob: str) -> list[tuple[str, str]]:
+    """读取 Parquet 的 (列名, 类型), 类型用 DuckDB 类型名 (DOUBLE/BIGINT/VARCHAR…)。
+
+    DESCRIBE 的输出列名随 DuckDB 版本变化: 1.4 及以前是 data_type, 1.5 起是
+    column_type。写死任一名字都会在另一版本整体抛 BinderException, 使 schema
+    端点静默退回配置字段 (列对象只有 dtype 没有 type), 前端按 type 判断数值列
+    的下拉随之变空。这里按实际输出列名取值, 两个版本都可用。
+    """
+    import duckdb
+
+    # hive_partitioning=false: 时序表目录名形如 date=YYYY-MM-DD, DuckDB 默认据此
+    # 推断分区并在真实列之外多出一个 date 列, 污染列选择器里的扩展字段。
+    rel = duckdb.query(
+        f"DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true, hive_partitioning=false)"
+    )
+    names = rel.columns
+    type_idx = names.index("column_type" if "column_type" in names else "data_type")
+    name_idx = names.index("column_name")
+    return [(row[name_idx], row[type_idx]) for row in rel.fetchall()]
+
+
 @router.get("/schema/{config_id}")
 def discover_schema(request: Request, config_id: str):
     """发现扩展数据的实际 Parquet schema（基于已有数据）。"""
@@ -1410,14 +1466,15 @@ def discover_schema(request: Request, config_id: str):
     glob = _parquet_glob(config, data_dir)
 
     try:
-        import duckdb
-        rows = duckdb.query(
-            f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-        ).fetchall()
-        return {"columns": [{"name": r[0], "type": r[1]} for r in rows]}
+        return {"columns": [
+            {"name": name, "type": dtype}
+            for name, dtype in _describe_parquet_columns(glob)
+        ]}
     except Exception:
-        # 无数据时返回配置中定义的字段
-        return {"columns": [f.to_dict() for f in config.fields]}
+        # 无数据时返回配置中定义的字段 — 键名与真实 schema 对齐 (type 而非 dtype)
+        return {"columns": [
+            {"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields
+        ]}
 
 
 @router.get("/schema-all")
@@ -1430,14 +1487,15 @@ def discover_all_schemas(request: Request):
         glob = _parquet_glob(config, data_dir)
 
         try:
-            import duckdb
-            cols = duckdb.query(
-                f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-            ).fetchall()
             field_labels = {f.name: f.label for f in config.fields}
-            columns = [{"name": r[0], "type": r[1], "label": field_labels.get(r[0], r[0])} for r in cols]
+            columns = [
+                {"name": name, "type": dtype, "label": field_labels.get(name, name)}
+                for name, dtype in _describe_parquet_columns(glob)
+            ]
         except Exception:
-            columns = [f.to_dict() for f in config.fields]
+            columns = [
+                {"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields
+            ]
 
         result.append({
             "id": config.id,

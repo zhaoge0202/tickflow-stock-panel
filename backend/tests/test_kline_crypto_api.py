@@ -457,7 +457,10 @@ def test_minute_stock_path_keeps_240_bars_and_price_limit(monkeypatch):
     assert repo.minute_calls == [(STOCK_SYMBOL, dt.date(2026, 10, 12), "stock")]
 
 
-def test_minute_stock_incomplete_still_fetches_live(monkeypatch):
+def test_minute_stock_incomplete_returns_local_partial(monkeypatch):
+    """上游口径: 历史日期本地有残缺数据时直接回 local_partial, 不去问一个给不出
+    历史分钟的源; 用户点「尝试补齐」走 sync/minute 落盘后再读 (见前端横幅)。
+    这里守住 A 股路径本身: 残缺数据必须如实带 expected/actual, 不能被当完整。"""
     local = _minute_rows(datetime(2026, 10, 12, 9, 31), 3, symbol=STOCK_SYMBOL)
     repo = _Repo(asset_type="stock", minute_by_day={dt.date(2026, 10, 12): local})
     monkeypatch.setattr(kline, "cn_today", lambda: dt.date(2026, 10, 15))
@@ -467,6 +470,7 @@ def test_minute_stock_incomplete_still_fetches_live(monkeypatch):
 
     resp = kline.get_minute(_request(repo, capabilities=SimpleNamespace()), STOCK_SYMBOL, dt.date(2026, 10, 12), live=False)
 
-    assert resp["source"] == "live"
-    assert len(resp["rows"]) == 5
-    live.assert_called_once()
+    assert resp["source"] == "local_partial"
+    assert resp["expected"] == 240
+    assert resp["actual"] == len(resp["rows"]) == 3
+    live.assert_not_called()
