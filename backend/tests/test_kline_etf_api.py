@@ -69,7 +69,8 @@ def test_daily_batch_splits_normalized_etf_symbols() -> None:
     resp = kline.get_daily_batch(_request(repo), {"symbols": ["002491", "589020"], "days": 5})
 
     assert repo.stock_batch_symbols == ["002491.SZ"]
-    assert repo.etf_daily_symbols == ["589020.SH"]
+    # 只有 1 行 (< days) → 停牌回补会追加更宽窗口的读取, 分流断言只看首次调用
+    assert repo.etf_daily_symbols[0] == "589020.SH"
     assert set(resp["data"]) == {"002491.SZ", "589020.SH"}
     assert resp["data"]["589020.SH"][0]["close"] == 3.08
 

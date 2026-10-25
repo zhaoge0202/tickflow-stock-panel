@@ -1318,8 +1318,14 @@ def run_minute_sync(
     if not minute_on:
         logger.info("sync_minute skipped: user disabled")
         return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
-    if not capset.has(Cap.KLINE_MINUTE_BATCH):
-        logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
+    # 门控口径与 api/kline._minute_allowed 一致: TickFlow 需 KLINE_MINUTE_BATCH
+    # 能力; 自定义源声明 minute 数据集即放行 (resolver 异常按降级 TickFlow 处理)。
+    _, minute_fallback, _minute_resolve_err = kline_sync._resolve_minute_provider(
+        preferences.get_minute_data_provider()
+    )
+    minute_allowed = (not minute_fallback) or capset.has(Cap.KLINE_MINUTE_BATCH)
+    if not minute_allowed:
+        logger.info("sync_minute skipped: minute provider has no capability/dataset")
         return {"minute_rows": 0, "skipped_stages": ["sync_minute"]}
 
     today = cn_today()

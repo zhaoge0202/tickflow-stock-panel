@@ -32,6 +32,11 @@ function harness(enabled = true, pages) {
     '@/components/Toast': { toast() {} },
     '@/components/AlertToast': { pushAlertToasts() {} },
     './reviewStore': { feedReviewEvent() {} },
+    // watchlist-enriched 的 5s 节流由 src/lib/enrichedInvalidateThrottle.test.ts 覆盖;
+    // 这里只断言「哪些 key 该失效」, 直通实现避免节流窗口吞掉触发。
+    './enrichedInvalidateThrottle': {
+      createEnrichedThrottler: () => ({ fire: fn => fn(), cancel() {} }),
+    },
   }, { EventSource, setTimeout: fn => { reconnect = fn }, clearTimeout() {} })
   hook.useQuoteStream(enabled, pages)
   return { client, hook, streams, reconnect: () => reconnect(), close: () => { cleanup(); client.clear() } }

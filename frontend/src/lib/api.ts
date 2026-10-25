@@ -283,6 +283,18 @@ export interface MinuteKlineSession {
   rows: MinuteKlineRow[]
 }
 
+/** 分钟数据缺口体检的一行: 某标的某交易日分钟 K 不完整 */
+export interface MinuteGapRow {
+  symbol: string
+  date: string
+  actual_bars: number
+  expected_bars: number
+  missing_bars: number
+  /** 现有数据的首/末分钟 (HH:MM), 用于显示"仅到 13:49" */
+  first_time: string | null
+  last_time: string | null
+}
+
 export interface PriceLimitInfo {
   rate: number
   limit_up: number | null
@@ -508,6 +520,8 @@ export interface ScreenerCachedSummary {
   results: Record<string, ScreenerResultSummary>
   today_ever_counts: Record<string, number>
   updated_at: number | null
+  /** 分钟策略后台批量计算中尚未完成的策略 (结果不落盘, 由 handle 快照合入) */
+  minute_pending?: string[]
 }
 
 export interface ScreenerAuctionConfirmationResult {
@@ -2572,6 +2586,16 @@ export interface SponsorModelItem {
   discount_rate?: number
   input_price?: number | null
   output_price?: number | null
+  /** 忙时折扣率 (timePricing 的 BUSY 档); 无忙闲时定价的模型为 null */
+  busy_discount_rate?: number | null
+  /** 闲时折扣率 (timePricing 的 OFF_PEAK 档) */
+  offpeak_discount_rate?: number | null
+  /** 闲时时段说明, 上游原文 (如 "00:00-09:00、12:00-14:00、18:00-00:00") */
+  offpeak_label?: string | null
+  /** 上游判定的当前时段: BUSY / OFF_PEAK */
+  current_band?: string | null
+  /** 当前时段对应的折扣率 */
+  current_discount_rate?: number | null
 }
 
 export interface SettingsState {
@@ -2840,6 +2864,8 @@ export interface Preferences {
   review_schedule: { enabled: boolean; hour: number; minute: number }
   review_push_channels: string[]
   review_push_mode?: 'auto' | 'manual'
+  /** 用户自定义复盘系统提示词；空串 = 使用内置默认模板 */
+  market_recap_system_prompt?: string
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
@@ -3220,6 +3246,26 @@ export const api = {
       next_round_at?: number | null
       last_error?: string | null
     }>('/api/settings/minute-refresh/status'),
+
+  /** 分钟数据缺口体检: 列出本地分区中分钟 K 不完整的 (标的, 交易日)。
+   *  只发现不补齐 — 超出上游历史窗口的缺口补不回来, 前端据此标注。 */
+  minuteGaps: (params?: { symbols?: string[]; dates?: string[]; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.symbols?.length) q.set('symbols', params.symbols.join(','))
+    if (params?.dates?.length) q.set('dates', params.dates.join(','))
+    if (params?.limit) q.set('limit', String(params.limit))
+    const qs = q.toString()
+    return request<{
+      status: string
+      scanned_dates: number
+      scanned_symbols: number
+      complete_dates: string[]
+      gaps: MinuteGapRow[]
+      summary_by_date: { date: string; gap_symbols: number; missing_bars: number; expected_bars: number }[]
+      truncated: boolean
+      limit?: number
+    }>(`/api/kline/minute-gaps${qs ? `?${qs}` : ''}`)
+  },
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{
       pipeline_pull_a_share: boolean
@@ -3384,6 +3430,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ channels, mode: mode ?? null }),
     }),
+  /** 复盘系统提示词: 自定义值 + 内置默认全文(按需拉取, 供「填入默认模板」) */
+  getMarketRecapPrompt: () =>
+    request<{ custom: string; default: string; customized: boolean }>('/api/settings/preferences/market-recap-prompt'),
+  /** 保存自定义复盘系统提示词; 空串 = 恢复内置默认模板 */
+  updateMarketRecapPrompt: (prompt: string) =>
+    request<{ custom: string; customized: boolean }>('/api/settings/preferences/market-recap-prompt', {
+      method: 'PUT',
+      body: JSON.stringify({ prompt }),
+    }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
       method: 'PUT',
@@ -3497,8 +3552,12 @@ export const api = {
       stock_info?: { name?: string; total_shares?: number; float_shares?: number }
       date: string | null
       rows: MinuteKlineRow[]
-      /** crypto_local = 24x7 合约只读本地仓库 (实时链路未落地), 无实时补拉 */
-      source?: 'local' | 'live' | 'crypto_local' | 'none'
+      /** local=完整; local_partial=本地有但不完整(见 expected/actual); live=源实时; none=无数据;
+       *  crypto_local=24x7 合约只读本地仓库 (实时链路未落地), 无实时补拉 */
+      source?: 'local' | 'local_partial' | 'live' | 'crypto_local' | 'none'
+      /** local_partial 时: 该交易日应有根数 / 实有根数 */
+      expected?: number
+      actual?: number
       asset_type?: AssetType
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
@@ -4330,6 +4389,39 @@ export const api = {
   extPagesDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/ext-pages/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  // ===== 源码导入: .tsx → 后端 esbuild 编译+契约适配 → 标准页面插件 =====
+  // 编译可能耗时数秒 (全依赖自包含打包), 走计算型超时; 仅源码/桌面部署可用 (409)
+  extPagesImportSource: (file: File, id?: string) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (id) fd.append('id', id)
+    return request<RuntimePagePack>('/api/ext-pages/import-source', {
+      method: 'POST',
+      body: fd,
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    })
+  },
+
+  extPagesImportFromProject: (namespace: string) =>
+    request<RuntimePagePack>('/api/ext-pages/import-source/from-project', {
+      method: 'POST',
+      body: JSON.stringify({ namespace }),
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    }),
+
+  extPagesSourceNamespaces: () =>
+    request<string[]>('/api/ext-pages/import-source/namespaces'),
+
+  // ===== 页面管理 — 源码扩展页删除 =====
+  // 物理删除 frontend/src/custom/<ns>/; 后端先备份 zip 到 data/backups/pages/ 再删,
+  // 返回备份文件名。仅源码部署可用 (Docker/桌面产物部署后端 409)。
+  pageAdminDeleteSourceExtension: (namespace: string) =>
+    request<{ deleted: string; backup: string }>(`/api/pages-admin/source-extensions/${encodeURIComponent(namespace)}`, { method: 'DELETE' }),
+
+  // 备份下载走浏览器原生下载 (同源 /api, dev 由 Vite 代理), 存到用户下载文件夹
+  pageAdminBackupUrl: (filename: string) =>
+    `/api/pages-admin/backups/${encodeURIComponent(filename)}`,
+
   analysisMenu: (id: string) =>
     request<AnalysisMenu>(`/api/analysis-menus/${encodeURIComponent(id)}`),
 
@@ -4406,6 +4498,9 @@ export const api = {
     response_path?: string; field_map?: Record<string, string>;
     schedule_minutes?: number; enabled?: boolean;
     schedule_time?: string | null;
+    schedule_period?: 'daily' | 'weekly' | 'monthly' | null;
+    schedule_day?: number | null;
+    schedule_trading_only?: boolean;
     time_window_start?: string | null; time_window_end?: string | null;
     date_param?: string | null;
     time_field?: string | null;
@@ -5457,6 +5552,12 @@ export interface PullConfig {
   enabled: boolean
   /** 每日固定拉取时刻 "HH:MM" (北京时间): 配置后忽略间隔, 每天该时刻拉一次; null=间隔制 */
   schedule_time?: string | null
+  /** 固定时刻重复周期: daily=每天 | weekly=每周 | monthly=每月 (仅 schedule_time 生效) */
+  schedule_period?: 'daily' | 'weekly' | 'monthly' | null
+  /** weekly: 1=周一..7=周日; monthly: 1..31 (短月无该日则该月跳过) */
+  schedule_day?: number | null
+  /** 仅交易日: 跳过周六日 (节假日无法离线判定, 仍会按期尝试) */
+  schedule_trading_only?: boolean
   last_run?: string | null
   last_status?: string | null
   last_message?: string | null
@@ -5609,7 +5710,9 @@ export interface AnalysisMenu {
   label: string
   icon: string
   data_source: string
-  template: 'dimension_rank' | 'ranking' | 'table'
+  template: 'dimension_rank' | 'ranking' | 'table' | 'url'
+  /** url 嵌入型模板: 内嵌的 http(s) 地址 (仅 template='url' 有值) */
+  url?: string | null
   dimension_field?: string | null
   rank_field?: string | null
   group_columns: AnalysisColumn[]

@@ -327,12 +327,144 @@ def _cache_payload_with_ext(
     return payload
 
 
+# 被实时行情覆盖的展示字段。
+#
+# 策略结果缓存只记录「计算那一刻」的价格: 盘中运行 run_all 后, 列表里的
+# close/change_pct 会一直停在那时, 而点开详情走的是实时 enriched 缓存 ——
+# 同一个票在两个地方显示不同涨幅 (实测 13:27 的扫描结果到收盘差了 2 个点)。
+# 这里在返回前用当前实时快照覆盖这些纯展示字段; 指标列 (ma20/score/signal_*)
+# 保持计算时点值不动, 否则等于用新价格重算了一个过期策略结果。
+_LIVE_QUOTE_FIELDS: tuple[str, ...] = (
+    "open", "high", "low", "close",
+    "prev_close", "volume", "amount",
+    "change_pct", "change_amount", "turnover_rate",
+    "raw_close", "raw_high", "raw_low", "quote_ts",
+)
+
+
+def _live_quote_overlay(repo) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """当前实时 enriched 快照的展示字段: ({symbol: row}, 日期字符串)。
+
+    缓存为空 (启动预热中) 或 repo 不支持该接口时返回空映射, 调用方原样返回
+    策略结果 —— 拿不到实时数据时不能伪造新价格。
+    """
+    loader = getattr(repo, "get_enriched_latest", None)
+    if not callable(loader):
+        return {}, None
+    try:
+        frame, cache_date = loader()
+    except Exception:  # noqa: BLE001 — 展示层增强绝不打断缓存读取
+        logger.debug("live quote overlay unavailable", exc_info=True)
+        return {}, None
+    if frame is None or frame.is_empty() or cache_date is None:
+        return {}, None
+    columns = [c for c in ("symbol", *_LIVE_QUOTE_FIELDS) if c in frame.columns]
+    if "symbol" not in columns:
+        return {}, None
+    return {
+        str(row["symbol"]): row
+        for row in frame.select(columns).to_dicts()
+    }, str(cache_date)
+
+
+def _quote_date_matches(row: dict, live_date: str | None, result_as_of: Any = None) -> bool:
+    """结果日期与实时快照同日才可覆盖。
+
+    历史日期结果 (例如回看昨天/上周) 必须保留当时价格, 不能用今天的行情覆盖。
+    优先用结果级 as_of (策略结果整体属于哪一天), 行级 date 作兜底 —— 个别
+    策略输出行不带 date 字段, 只看行日期会误覆盖历史结果。
+    """
+    if live_date is None:
+        return False
+    for candidate in (result_as_of, row.get("date")):
+        if candidate is None:
+            continue
+        return str(candidate)[:10] == live_date
+    # 结果与行都没有日期: 视为「最新」(与 as_of=None 的缓存语义一致)
+    return True
+
+
+def _rows_with_live_quotes(
+    rows: list[dict],
+    overlay: dict[str, dict[str, Any]],
+    live_date: str | None,
+    result_as_of: Any = None,
+) -> list[dict]:
+    if not overlay:
+        return rows
+    merged: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            merged.append(row)
+            continue
+        live = overlay.get(str(row.get("symbol") or ""))
+        if live is None or not _quote_date_matches(row, live_date, result_as_of):
+            merged.append(row)
+            continue
+        next_row = dict(row)
+        for key, value in live.items():
+            if key == "symbol":
+                continue
+            next_row[key] = value
+        merged.append(next_row)
+    return merged
+
+
+def _cached_with_live_quotes(request: Request) -> dict:
+    """盘后缓存 + 监控实时结果 + 当前行情展示字段覆盖。
+
+    与 `_cached_with_realtime` 的区别: 后者只覆盖「加入监控的策略」(每轮行情
+    重算结果), 未加监控的策略仍显示计算时点价格。这里对所有策略只覆盖价格类
+    展示字段, 行情轮询期间列表与详情保持一致。
+    """
+    cached = _cached_with_realtime(request)
+    results = cached.get("results") or {}
+    ever_rows = cached.get("today_ever_rows")
+    if not results and not ever_rows:
+        return cached
+
+    overlay, live_date = _live_quote_overlay(request.app.state.repo)
+    if not overlay:
+        return cached
+
+    payload = dict(cached)
+    payload["results"] = {
+        sid: (
+            {
+                **result,
+                "rows": _rows_with_live_quotes(
+                    result.get("rows") or [], overlay, live_date, result.get("as_of"),
+                ),
+            }
+            if isinstance(result, dict) else result
+        )
+        for sid, result in results.items()
+    }
+
+    if isinstance(ever_rows, dict):
+        # 「今日曾命中」行是逐行的历史快照 (各自带 date), 一律按行日期判断
+        payload["today_ever_rows"] = {
+            sid: (
+                {
+                    symbol: _rows_with_live_quotes([row], overlay, live_date)[0]
+                    for symbol, row in sym_map.items()
+                    if isinstance(row, dict)
+                }
+                if isinstance(sym_map, dict) else sym_map
+            )
+            for sid, sym_map in ever_rows.items()
+        }
+    return payload
+
+
 def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict) -> None:
     """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
     from app.services import strategy_cache
     cached = strategy_cache.read_cache(data_dir)
     if cached and cached.get("as_of") == as_of:
-        results = cached.get("results", {})
+        # read_cache 返回进程内共享镜像, 先拷贝再改 (write_cache 的 read-merge-write
+        # 以这份拷贝为准, 不污染镜像)
+        results = dict(cached.get("results") or {})
         results[strategy_id] = {
             "total": safe_data.get("total", 0),
             "as_of": as_of,
@@ -684,8 +816,10 @@ def get_cached(
     - 监控引擎内存结果 (latest_strategy_results): 实时行情每轮对「加入监控的策略」算出,
       不落盘 (避免与 read_cache 的 mtime 校验冲突), 在此直接叠加覆盖盘后结果。
       被监控的策略拿到新鲜数据, 非监控策略仍用盘后缓存。
+    - 价格类展示字段统一用当前实时快照覆盖 (同日才覆盖), 避免列表显示扫描时刻
+      价格、详情显示实时价格造成的"同一只票两个涨幅"。
     """
-    cached = _cached_with_realtime(request)
+    cached = _cached_with_live_quotes(request)
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
@@ -738,11 +872,23 @@ def get_cached_summary(request: Request):
             if isinstance(row, dict) and row.get("symbol")
         }
         ever_counts[sid] = len(set((ever_rows.get(sid) or {}).keys()) | current_symbols)
+
+    # 分钟策略结果不落 strategy_cache (日线语义), 渐进式转后台算完后在这里
+    # 以 handle 快照合入 (仅 as_of 与日线缓存同日的), 前端轮询本端点点亮卡片。
+    minute_pending: list[str] = []
+    for m in strategy_run_queue.MANAGER.minute_summaries():
+        if m.get("as_of") != cached_as_of:
+            continue
+        for sid, item in (m.get("results") or {}).items():
+            summary[sid] = item
+        minute_pending.extend(m.get("pending") or [])
+
     return {
         "as_of": cached_as_of,
         "results": summary,
         "today_ever_counts": ever_counts,
         "updated_at": cached.get("updated_at"),
+        "minute_pending": minute_pending,
     }
 
 
@@ -752,8 +898,12 @@ def get_cached_result(
     request: Request,
     ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
 ):
-    """按需返回单个策略的完整明细及其今日失效行。"""
-    cached = _cached_with_realtime(request)
+    """按需返回单个策略的完整明细及其今日失效行。
+
+    与 /cached 一致: 价格类展示字段用当前实时快照覆盖 (同日才覆盖), 保证
+    详情里的涨跌幅与列表、以及个股详情弹窗同源。
+    """
+    cached = _cached_with_live_quotes(request)
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {
@@ -1423,14 +1573,16 @@ def _run_all_progressive(
                     payload["warnings"] = w
             all_results[sid] = payload
             elapsed_map[sid] = (time.perf_counter() - t0) * 1000
-            # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到
-            try:
-                strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
-            except Exception:
-                logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
+            # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到。
+            # 分钟结果不落盘 (strategy_cache 为日线语义), 改经 handle 快照合入 summary
+            if timeframe == "1d":
+                try:
+                    strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
+                except Exception:
+                    logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
             handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
-        # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序
-        if all_results:
+        # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序 (分钟不落盘)
+        if all_results and timeframe == "1d":
             with contextlib.suppress(Exception):
                 strategy_cache.write_cache(data_dir, str(as_of), all_results)
         strategy_run_queue.record_run_timings(data_dir, elapsed_map)
@@ -1563,9 +1715,10 @@ def run_all(request: Request, body: Optional[dict] = None):
 
     # 渐进式返回 (页面首屏路径): 按历史耗时升序执行, 首返时限内算完的随响应
     # 返回, 慢策略转后台继续算并逐个写入策略缓存, 前端轮询 cached-summary 点亮。
-    # 仅日线 + summary_only (策略页卡片) 启用; 分钟/明细请求保持整段阻塞。
-    first_return_s = float(getattr(settings, "strategy_run_all_first_return_s", 15.0))
-    if body.get("summary_only") and timeframe == "1d" and first_return_s > 0:
+    # 日线与分钟都启用: 分钟策略结果不落盘, 后台算完经 handle 快照合入
+    # cached-summary (见 get_cached_summary) — 请求不再整段占用线程等计算。
+    first_return_s = settings.strategy_run_all_first_return_s
+    if body.get("summary_only") and first_return_s > 0:
         progressive = _run_all_progressive(
             repo=repo,
             engine=engine,

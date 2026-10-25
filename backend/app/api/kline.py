@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/kline", tags=["kline"])
 _LIVE_FILL_DATE_TOLERANCE_DAYS = 5
 
+# 批量端点 (daily-batch / minute-batch) 单次 symbols 上限: 千只级自选整表直发
+# 会在服务端构造百万行级的 Python dict 峰值 (内存暴涨主因之一)。前端已按
+# 视口/分块收敛请求; 此上限挡住旧客户端与异常调用的一次性全量请求。
+_MAX_BATCH_SYMBOLS = 400
+
 
 def _json_safe(obj):
     """把 nan/inf 换成 None, 保证 JSON 合法。
@@ -106,16 +111,15 @@ def _resolve_asset_type(repo, symbol: str) -> str:
 
 
 def _minute_allowed(capset) -> bool:
-    """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
+    """仅当前分钟数据源确实可用时开放分钟 K 接口。"""
     from app.tickflow.capabilities import Cap
-    if capset.has(Cap.KLINE_MINUTE_BATCH):
-        return True
-    from app.services import preferences
-    provider = preferences.get_minute_data_provider()
+    provider = kline_sync._selected_minute_provider_name()
+    if provider == "tickflow":
+        return capset.has(Cap.KLINE_MINUTE_BATCH)
     _, fallback, error = kline_sync._resolve_minute_provider(provider)
     if error is not None:
         logger.warning("minute provider resolution failed while checking access: %s", error)
-    return not fallback
+    return error is None and not fallback
 
 
 @lru_cache(maxsize=8192)
@@ -824,11 +828,20 @@ def get_daily_batch(request: Request, body: dict):
     """批量获取多只股票最近 N 天日K (OHLCV)。
 
     用于自选列表迷你蜡烛图等场景，只返回基础列，不返回全部 enriched 指标。
+    按交易日语义取「最近 N 根」: 停牌/断档股在窗口内凑不满时向更早窗口回补,
+    跳过停牌空档取复牌前的 K, 而不是把迷你K截成只剩复牌后几根。
     """
     symbols = body.get("symbols", [])
     days = body.get("days", 12)
     if not symbols:
         return {"data": {}}
+    if len(symbols) > _MAX_BATCH_SYMBOLS:
+        # 大自选整表直发会构造千只级响应 (百万行 dict 峰值); 前端已按视口/分块
+        # 收敛, 上限挡住旧客户端或异常调用的一次性全量请求
+        raise HTTPException(
+            status_code=400,
+            detail=f"symbols 单次上限 {_MAX_BATCH_SYMBOLS} 只, 请分批请求",
+        )
     days = max(5, min(60, days))
 
     repo = request.app.state.repo
@@ -845,70 +858,86 @@ def get_daily_batch(request: Request, body: dict):
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
 
-    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
-    stock_symbols: list[str] = []
-    etf_symbols: list[str] = []
-    index_symbols: list[str] = []
-    for s in symbols:
-        t = _resolve_asset_type(repo, s)
-        if t == "etf":
-            etf_symbols.append(s)
-        elif t == "index":
-            index_symbols.append(s)
-        else:
-            stock_symbols.append(s)
+    # 资产类型解析一次, 回补轮次复用: stock 走批量缓存; etf/index 逐只查独立存储
+    # (数量少, 成本可忽略)
+    sym_type = {s: _resolve_asset_type(repo, s) for s in symbols}
 
-    frames: list[pl.DataFrame] = []
-    if stock_symbols:
-        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
-        if not df_stock.is_empty():
-            frames.append(df_stock)
-    for sym in etf_symbols:
-        getter = getattr(repo, "get_etf_daily", None)
-        sub = (
-            getter(sym, start, end, columns=cols)
-            if callable(getter)
-            else repo.get_daily_asset("etf", sym, start, end, columns=cols)
-        )
-        if not sub.is_empty():
-            frames.append(sub)
-    for sym in index_symbols:
-        getter = getattr(repo, "get_index_daily", None)
-        sub = (
-            getter(sym, start, end, columns=cols)
-            if callable(getter)
-            else repo.get_daily_asset("index", sym, start, end, columns=cols)
-        )
-        if not sub.is_empty():
-            frames.append(sub)
+    def _read_range(syms: list[str], s) -> pl.DataFrame:
+        stock_syms = [x for x in syms if sym_type.get(x, "stock") not in ("etf", "index")]
+        frames: list[pl.DataFrame] = []
+        if stock_syms:
+            df_stock = repo.get_daily_batch(stock_syms, s, end, columns=cols)
+            if not df_stock.is_empty():
+                frames.append(df_stock)
+        for x in syms:
+            asset = sym_type.get(x, "stock")
+            if asset not in ("etf", "index"):
+                continue
+            getter = getattr(repo, f"get_{asset}_daily", None)
+            sub = (
+                getter(x, s, end, columns=cols)
+                if callable(getter)
+                else repo.get_daily_asset(asset, x, s, end, columns=cols)
+            )
+            if not sub.is_empty():
+                frames.append(sub)
+        if not frames:
+            return pl.DataFrame()
+        return pl.concat(frames, how="diagonal_relaxed")
+
+    def _tail_bars(df: pl.DataFrame) -> dict[str, list[dict]]:
+        # 按 symbol 分组, 每只取最近 N 条。
+        # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
+        out: dict[str, list[dict]] = {}
+        if df.is_empty():
+            return out
+        for part in df.partition_by("symbol", maintain_order=True):
+            sub = part.sort("date").tail(days)
+            if not sub.is_empty():
+                out[sub["symbol"][0]] = sub.to_dicts()
+        return out
+
+    first_df = _read_range(list(symbols), start)
 
     # ETF 本地无日K时实时补拉 (与 stock 路径的 batch 缓存对称; 不落库)
-    present_symbols: set[str] = set()
-    for part in frames:
-        if "symbol" in part.columns:
-            present_symbols.update(part["symbol"].cast(pl.Utf8).to_list())
-    missing_etfs = [sym for sym in etf_symbols if sym not in present_symbols]
+    present = set(first_df["symbol"].cast(pl.Utf8).to_list()) if not first_df.is_empty() else set()
+    missing_etfs = [s for s in symbols if sym_type.get(s) == "etf" and s not in present]
     if missing_etfs:
         try:
             live_etf_df = kline_sync.sync_daily_batch(missing_etfs, count=days + 30)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("ETF daily-batch live fallback failed: %s", e)
             live_etf_df = pl.DataFrame()
         if not live_etf_df.is_empty():
-            existing = [c for c in cols if c in live_etf_df.columns]
-            frames.append(live_etf_df.select(existing).filter(pl.col("symbol").is_in(missing_etfs)))
+            keep = [c for c in cols if c in live_etf_df.columns]
+            extra = live_etf_df.select(keep).filter(pl.col("symbol").is_in(missing_etfs))
+            first_df = (
+                extra
+                if first_df.is_empty()
+                else pl.concat([first_df, extra], how="diagonal_relaxed")
+            )
 
-    if not frames:
-        return {"data": {}}
-    df = pl.concat(frames, how="diagonal_relaxed")
+    result = _tail_bars(first_df)
 
-    # 按 symbol 分组, 每只取最近 N 条。
-    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
-    result: dict[str, list[dict]] = {}
-    for part in df.partition_by("symbol", maintain_order=True):
-        sub = part.sort("date").tail(days)
-        if not sub.is_empty():
-            result[sub["symbol"][0]] = sub.to_dicts()
+    # 停牌回补: 首段窗口是「自然日×2 ≈ 交易日」启发式, 默认窗口内每个交易日都有行情;
+    # 停牌股在窗口内交易日不足, tail(days) 只封顶不回补, 迷你K会只剩复牌后几根。
+    # 只对凑不满 days 根的股票 (含整窗无数据的长期停牌股) 分轮向更早窗口重取:
+    # 第一轮 +120 自然日通常落在 repo 的 enriched 300 天内存缓存内 (近零成本),
+    # 第二轮 +480 自然日 (约回看一年) 兜更长停牌, 兜不着的极端停牌按可得分量返回。
+    backlog: set[str] = {s for s, rows in result.items() if len(rows) < days}
+    backlog |= {s for s in symbols if s not in result}
+    for pad in (120, 480):
+        if not backlog:
+            break
+        wider = _tail_bars(_read_range(sorted(backlog), start - timedelta(days=pad)))
+        still: set[str] = set()
+        for sym in backlog:
+            rows = wider.get(sym)
+            if rows:  # 宽窗读到的必然 ⊇ 窄窗行, 直接覆盖
+                result[sym] = rows
+            if not rows or len(rows) < days:
+                still.add(sym)
+        backlog = still
 
     # 日K批量同为大响应端点 (千只自选 MB 级), 与分时各自独立压缩开关
     return _gzip_payload(request, {"data": result}, pref_key="daily_batch_compress")
@@ -952,6 +981,12 @@ def get_minute_batch(request: Request, body: dict):
     prefer_local = bool(body.get("prefer_local", False))
     if not symbols:
         return {"data": {}}
+    if len(symbols) > _MAX_BATCH_SYMBOLS:
+        # 同 daily-batch: 前端分块/视口化后单请求远低于此, 上限只挡异常规模
+        raise HTTPException(
+            status_code=400,
+            detail=f"symbols 单次上限 {_MAX_BATCH_SYMBOLS} 只, 请分批请求",
+        )
 
     repo = request.app.state.repo
     symbols = [normalize_symbol(sym, repo) for sym in symbols]
@@ -1145,6 +1180,11 @@ def get_minute_batch(request: Request, body: dict):
             _pull("etf", [s for s in stale_last if s in etf_set], inc_start)
 
     # 合并: 有增量/回填的 symbol = 本地 + 拉取 upsert; 仅拉到的 (missing) 直接进结果
+    # 补拉落空兜底 (truncated): 本地已有部分K但本轮补拉失败/为空 (上游断网窗口) 时,
+    # 返回本地已落盘的行 — 图冻结在最后落盘时刻, 而不是整只从结果里消失
+    # (2026-10-23 实测: 断网 40 分钟, 分时列全部退化为只剩竞价栏)。
+    # truncated 标记这些 symbol 是残缺快照, 前端可据此提示; 严格只回本地行, 不外推。
+    truncated: set[str] = set()
     for sym, sub in local_parts.items():
         live = live_map.get(sym)
         if live is not None:
@@ -1154,6 +1194,9 @@ def get_minute_batch(request: Request, body: dict):
                 .sort("datetime")
             )
             result[sym] = merged.to_dicts()
+        elif sym not in result and not sub.is_empty():
+            result[sym] = sub.to_dicts()
+            truncated.add(sym)
     for sym, live in live_map.items():
         if sym not in result:
             result[sym] = live.to_dicts()
@@ -1169,16 +1212,24 @@ def get_minute_batch(request: Request, body: dict):
             for sym, rows in result.items()
         }
         result = {sym: rows for sym, rows in result.items() if rows}
+    # since 过滤后已无行的 symbol 不再标记 truncated (标记与 data 键一致)
+    truncated &= result.keys()
 
     payload = {
         "data": result,
         "full_minute_local": full_minute_healthy,
         "incremental": since_dt is not None,
     }
+    if truncated:
+        payload["truncated"] = sorted(truncated)
     if crypto_syms:
         # 只在真出现 crypto 标的中加入, A 股/ETF 响应字节不变
         payload["unsupported_symbols"] = crypto_syms
-    return _gzip_payload(request, payload, pref_key="minute_batch_compress")
+    return _gzip_payload(
+        request,
+        payload,
+        pref_key="minute_batch_compress",
+    )
 
 
 @router.get("/minute-range")
@@ -1441,7 +1492,27 @@ def get_minute(
             pref_key="minute_batch_compress",
         )
 
-    # 本地不完整或无数据 → 从当前有效分钟源实时拉取
+    # 历史日期本地有数据但不完整: 优先返回已有行, 不再丢弃去问一个给不出
+    # 历史分钟的源。历史上这里把 171 根当「无数据」→ 补拉历史日期恒为空 →
+    # 前端白屏, 用户看到「同步完成却显示不出来」。
+    # 当日盘中不适用: 盘中本地落后于实时源是常态, 仍应走下方补拉 (见
+    # test_minute_lunch_break_still_pulls_when_morning_incomplete)。
+    if not df.is_empty() and trade_date != cn_today():
+        return _gzip_payload(
+            request,
+            {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(trade_date), "rows": df.to_dicts(),
+                "source": "local_partial",
+                "expected": expected, "actual": len(df),
+                "asset_type": asset_type,
+                "price_limit": price_limit,
+                "prev_close": prev_close,
+            },
+            pref_key="minute_batch_compress",
+        )
+
+    # 本地无数据 (或当日盘中数据落后) → 从当前有效分钟源实时拉取
     live_df = _fetch_minute_or_502(
         symbol, trade_date, asset_type=asset_type, capset=capset,
         raw_basis=raw_basis,
@@ -1742,6 +1813,33 @@ async def sync_minute_single(request: Request, body: dict):
     _refresh_single_view(repo, "kline_minute")
 
     return {"status": "ok", "symbol": symbol, "rows": written}
+
+
+@router.get("/minute-gaps")
+def get_minute_gaps(
+    request: Request,
+    symbols: str | None = Query(None, description="逗号分隔, 只看这些标的"),
+    dates: str | None = Query(None, description="逗号分隔 YYYY-MM-DD, 只看这些交易日"),
+    limit: int = Query(500, ge=1, le=2000, description="最多返回的缺口行数"),
+):
+    """分钟数据缺口体检: 列出本地分区中分钟 K 不完整的 (标的, 交易日)。
+
+    只做**发现**, 不做补齐 —— 上游分钟源通常只提供最近 N 天, 超出窗口的历史
+    缺口补不回来, 盲目补拉会白等且返回空。前端据此展示残缺清单并标注
+    「可补 / 超出源窗口」, 避免用户误以为「同步完成 = 数据完整」。
+    """
+    from app.services.minute_gaps import scan_minute_gaps
+
+    repo = request.app.state.repo
+    now = cn_now()
+    return scan_minute_gaps(
+        repo.store.data_dir / "kline_minute",
+        today=cn_today(),
+        now_hm=(now.hour, now.minute),
+        symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
+        dates=[d.strip() for d in dates.split(",") if d.strip()] if dates else None,
+        limit=limit,
+    )
 
 
 @router.post("/minute-migrate")
