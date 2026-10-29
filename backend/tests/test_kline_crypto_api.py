@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -367,10 +368,11 @@ def test_minute_batch_excludes_crypto_without_breaking_a_share(monkeypatch):
         _batch_request(repo),
         {"symbols": [CRYPTO_SYMBOL, STOCK_SYMBOL], "date": "2026-10-12"},
     )
+    body = json.loads(resp.body)
 
-    assert resp["unsupported_symbols"] == [CRYPTO_SYMBOL]
-    assert resp["data"][CRYPTO_SYMBOL] == []
-    assert len(resp["data"][STOCK_SYMBOL]) == 240
+    assert body["unsupported_symbols"] == [CRYPTO_SYMBOL]
+    assert body["data"][CRYPTO_SYMBOL] == []
+    assert len(body["data"][STOCK_SYMBOL]) == 240
     # crypto 被剔除后才读 A 股分钟K: 仓储只见 A 股标的
     assert repo.minute_batch_calls == [([STOCK_SYMBOL], dt.date(2026, 10, 12), "stock")]
 

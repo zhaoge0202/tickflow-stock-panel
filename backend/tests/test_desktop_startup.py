@@ -99,28 +99,66 @@ def test_precheck_mining_lock_detects_conflict(data_dir):
 
 # ---------- main() 预检冲突路径 ----------
 
-def test_main_releases_lock_when_failure_window_crashes(
+def test_main_proceeds_when_mining_lock_precheck_conflicts(
     tmp_path, monkeypatch, caplog
 ):
-    """预检冲突 + 失败页窗口自身崩溃 (如缺 webview 依赖): 异常不得裸穿 main()。
+    """预检撞锁只降级: 留 WARNING 日志并继续启动, 不再提前退出失败页。
 
-    该路径在 main() 的 try/finally 之外, 不兜底会导致 console=False 闪退无反馈、
-    .desktop.lock 跳过释放。断言: 记录异常日志、单实例锁仍释放、退出码 1。
+    lifespan 会以降级模式起面板 (挖掘入口 409, 挖掘页提供强制释放),
+    桌面版必须照常开窗, 否则用户没有入口处理锁冲突。
     """
+    import logging
+
     monkeypatch.setattr(settings, "data_dir", tmp_path, raising=False)
     monkeypatch.setattr(desktop, "_guard_streams", lambda: None)
     monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
-    monkeypatch.setattr(desktop, "_precheck_mining_lock", lambda: "冲突原因")
+    monkeypatch.setattr(
+        desktop, "_precheck_mining_lock", lambda: "另一个后端实例正在占用数据目录"
+    )
+    monkeypatch.setattr(desktop, "_find_free_port", lambda base: 59998)
+    monkeypatch.setattr(
+        desktop, "_wait_for_server",
+        lambda port, timeout, done_event: True,
+    )
+    opened = []
+    monkeypatch.setattr(desktop, "_open_window", lambda url: opened.append(url))
 
-    def _boom(_html_text):
-        raise RuntimeError("webview unavailable")
+    def _fake_uvmicorn(port, ready):
+        ready.set()
 
-    monkeypatch.setattr(desktop, "_open_static_window", _boom)
+    monkeypatch.setattr(desktop, "_run_uvmicorn", _fake_uvmicorn)
 
-    import logging
+    with caplog.at_level(logging.WARNING, logger="app.desktop"):
+        assert desktop.main() == 0
 
-    with caplog.at_level(logging.ERROR, logger="app.desktop"):
-        assert desktop.main() == 1
-
-    assert "启动失败页窗口打开失败" in caplog.text
+    assert opened and opened[0].startswith("http://127.0.0.1:")
+    assert "启动预检" in caplog.text
     assert not (tmp_path / ".desktop.lock").exists()
+
+
+# ---------- _open_window: pywebview 下载启用 ----------
+
+def test_open_window_enables_downloads_before_start(monkeypatch):
+    """pywebview 5.0+ 默认取消所有文件下载 (Edge WebView2 / WKWebView 一致) —
+    必须在 webview.start() 前显式开启 ALLOW_DOWNLOADS, 否则配置备份导出、
+    回测 CSV 等 <a download> 直链在桌面版点击无反应 (2026-10-27 用户反馈)。"""
+    import sys
+    import types
+
+    calls: list[str] = []
+
+    class _RecordingSettings(dict):
+        def __setitem__(self, key, value):
+            calls.append(f"set:{key}={value}")
+            super().__setitem__(key, value)
+
+    fake = types.ModuleType("webview")
+    fake.settings = _RecordingSettings()
+    fake.create_window = lambda *a, **k: calls.append("create_window") or object()
+    fake.start = lambda *a, **k: calls.append("start")
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    desktop._open_window("http://127.0.0.1:1")
+
+    assert fake.settings.get("ALLOW_DOWNLOADS") is True
+    assert calls == ["set:ALLOW_DOWNLOADS=True", "create_window", "start"]

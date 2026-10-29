@@ -14,6 +14,7 @@ export const QK = {
   endpoints:      ['endpoints'] as const,
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,
+  soundPacks:     ['sound-packs'] as const,
   dataSources:    ['data-sources'] as const,
   capabilityMatrix: ['capability-matrix'] as const,
   quoteStatus:    ['quote-status'] as const,
@@ -77,12 +78,20 @@ export const QK = {
   backtestCandidates:   ['backtest-candidates'] as const,
   factorColumns:        ['backtest-factor-columns'] as const,
   factorLibrary:        (assetType: string) => ['factors-library', assetType] as const,
+  /** 统一定义目录 (信号+因子, P4) — 定义选择器数据源 */
+  definitions:          ['definitions'] as const,
+  /** 用户自定义仓位策略 (设置→定义 与 回测设置共用) */
+  positionPolicies:     ['backtest-position-policies'] as const,
   miningRuns:           ['backtest-mining-runs'] as const,
   miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
                           ['backtest-mining-availability', assetType, profile, start, end] as const,
   miningRun:            (id: string) => ['backtest-mining-run', id] as const,
   miningResult:         (id: string) => ['backtest-mining-result', id] as const,
   miningConfig:         ['backtest-mining-config'] as const,
+  miningLock:           ['backtest-mining-lock'] as const,
+  guardianOverview:     ['backtest-guardian-overview'] as const,
+  guardianRuns:         ['backtest-guardian-runs'] as const,
+  labReport:            ['backtest-lab-report'] as const,
   researchCandidates:  ['research-candidates'] as const,
   strategyLinkOptions: (assetType?: 'stock' | 'etf') => assetType
     ? ['strategy-link-options', assetType] as const

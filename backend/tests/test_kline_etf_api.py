@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -67,12 +68,13 @@ def test_daily_batch_splits_normalized_etf_symbols() -> None:
     repo = _Repo()
 
     resp = kline.get_daily_batch(_request(repo), {"symbols": ["002491", "589020"], "days": 5})
+    body = json.loads(resp.body)
 
     assert repo.stock_batch_symbols == ["002491.SZ"]
     # 只有 1 行 (< days) → 停牌回补会追加更宽窗口的读取, 分流断言只看首次调用
     assert repo.etf_daily_symbols[0] == "589020.SH"
-    assert set(resp["data"]) == {"002491.SZ", "589020.SH"}
-    assert resp["data"]["589020.SH"][0]["close"] == 3.08
+    assert set(body["data"]) == {"002491.SZ", "589020.SH"}
+    assert body["data"]["589020.SH"][0]["close"] == 3.08
 
 
 def test_daily_batch_fetches_missing_etf_live(monkeypatch) -> None:
@@ -86,10 +88,11 @@ def test_daily_batch_fetches_missing_etf_live(monkeypatch) -> None:
     monkeypatch.setattr(kline.kline_sync, "sync_daily_batch", fake_sync_daily_batch)
 
     resp = kline.get_daily_batch(_request(repo), {"symbols": ["589020"], "days": 5})
+    body = json.loads(resp.body)
 
     assert calls == [(["589020.SH"], 35)]
-    assert set(resp["data"]) == {"589020.SH"}
-    assert resp["data"]["589020.SH"][0]["close"] == 3.09
+    assert set(body["data"]) == {"589020.SH"}
+    assert body["data"]["589020.SH"][0]["close"] == 3.09
 
 
 def test_instrument_search_returns_etf_and_index() -> None:
