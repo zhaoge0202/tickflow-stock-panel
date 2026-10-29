@@ -628,6 +628,15 @@ export function Screener() {
   )
   const cacheCoversPool = dailyPoolIds.length > 0 && missingStrategyIds.length === 0
 
+  // 自动计算的目标: 单策略视图只补当前选中的那条, "全部"视图才补整池。
+  // 一次 run_all = 一次全市场历史窗口重算 (实测 30~90s), 切日期时按整池跑
+  // 会把 API 线程饿死 (30s 超时); 用户明确要求只算选中的策略。
+  const autoRunIds = useMemo(() => {
+    if (showAll) return missingStrategyIds
+    if (activeStrategy && missingStrategyIds.includes(activeStrategy)) return [activeStrategy]
+    return []
+  }, [showAll, activeStrategy, missingStrategyIds])
+
   // 防止 reload / auto-run / StrictMode 叠出并发 run_all（后端 Numba 会崩溃）
   // 用 ref 同步门闩，避免同一渲染周期内 isPending 尚未更新导致重复触发
   const runAllPendingRef = useRef(false)
@@ -1168,10 +1177,10 @@ export function Screener() {
     if (assetType !== 'stock' || tfFilter === '1m') return
     if (runAllMinute.isPending) return
     if (!asOf || strategyPresets.length === 0 || !summaryQuery.isSuccess || runAll.isPending || dailyPoolIds.length === 0) return
-    const runKey = `${asOf}|${dailyPoolIds.join(',')}`
+    const runKey = `${asOf}|${autoRunIds.join(',')}`
     if (runAllDateRef.current === runKey) return
-    // 缓存已覆盖当前策略池 → 秒加载, 不触发 runAll
-    if (cacheCoversPool) {
+    // 没有需要补的目标 (缓存命中 / 未选中任何策略) → 秒加载, 不触发 runAll
+    if (autoRunIds.length === 0) {
       runAllDateRef.current = runKey
       return
     }
@@ -1183,8 +1192,8 @@ export function Screener() {
       return
     }
     runAllDateRef.current = runKey
-    requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
-  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, dailyPoolIds, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, tfFilter, runAll.isPending, runAllMinute.isPending, requestRunAll])
+    requestRunAll({ date: asOf, strategyIds: autoRunIds })
+  }, [asOf, strategyPresets.length, summaryQuery.isSuccess, dailyPoolIds, autoRunIds, screenerAutoRun, assetType, tfFilter, runAll.isPending, runAllMinute.isPending, requestRunAll])
 
   // 分钟策略自动计算: 结果不落盘后缓存, 每次进入页面/池变化后异步跑一轮点亮卡片。
   // 与日线 runAll 串行 (并发 run_all 会崩 Numba); 分钟卡片不可见 (日线视图) 时不白算。
@@ -1236,6 +1245,8 @@ export function Screener() {
       toast('今日尚未收盘，正式日线策略将在 15:35 盘后管道完成后定版生成')
       return
     }
+    // 单策略跑已覆盖这个目标, 标记 runKey 避免上面的自动 run_all 再把同一条算一遍
+    runAllDateRef.current = `${asOf}|${s.id}`
     run.mutate({ id: s.id, date: asOf, timeframe: tf })
   }
 
