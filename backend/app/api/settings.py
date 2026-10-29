@@ -1333,7 +1333,10 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
                         for item in strategy_engine.list_strategies()
                         if isinstance(item, dict) and item.get("id")
                     }
-                    mr_store.migrate_strategy_monitors(data_dir, ids, names)
+                    mr_store.migrate_strategy_monitors(
+                        data_dir, ids, names,
+                        default_channels=preferences.get_webhook_default_channels(),
+                    )
                 else:
                     # 关闭策略监控: 停用所有策略规则
                     mr_store.migrate_strategy_monitors(data_dir, [], {})
