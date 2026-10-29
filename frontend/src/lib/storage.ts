@@ -185,7 +185,6 @@ export const storage = {
   industryAnalysisConfig: kv<Record<string, any>>('industry-analysis-config'),
 
   /** 板块动能气泡页面配置 */
-  sectorFlowConfig: kv<Record<string, any>>('sector-flow-config'),
 
   /** 数据页画像卡片显隐 (卡片key → 是否显示) */
   dataCardVisible: kv<Record<string, boolean>>('data-card-visible'),

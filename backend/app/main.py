@@ -48,7 +48,6 @@ from app.api import (
     replay,
     rps,
     screener,
-    sector_flow,
     sector_rotation,
     signals,
     signal_frame,
@@ -721,7 +720,6 @@ app.include_router(auth_api.router)
 app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
-app.include_router(sector_flow.router)
 app.include_router(backtest.router)
 app.include_router(factors.router)
 app.include_router(definitions.router)
