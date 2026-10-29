@@ -1798,6 +1798,7 @@ class QuoteService:
                     paper_watch_events = [ev for ev in rule_events if is_paper_watch_event(ev)]
                     rule_events = [ev for ev in rule_events if not is_paper_watch_event(ev)]
                     if rule_events:
+                        rule_events = self._refresh_alert_quotes(rule_events, engine)
                         rule_events = self._format_extension_notifications(rule_events)
                         # 落盘到 alerts.jsonl
                         try:
@@ -2293,6 +2294,77 @@ class QuoteService:
                 logger.info("模拟盘 Webhook 已提交 %d 条 (异步投递, 失败记 WARNING)", enqueued)
         except Exception as e:  # noqa: BLE001
             logger.warning("模拟盘 Webhook 提交异常 (不影响主流程): %s", e)
+
+    # 告警行情刷新上限: 全市场快照一轮 20s+, 触发的标的通常 <=5 只;
+    # 一次补拉最多一批 (50 只) 加少量余量, 避免异常规则把行情线程拖长。
+    ALERT_QUOTE_REFRESH_MAX = 64
+
+    def _refresh_alert_quotes(self, rule_events: list[dict], engine) -> list[dict]:
+        """用最新一笔行情覆盖告警里的展示价。
+
+        全市场快照一轮 20s+, 告警里的 price/change_pct 是快照值, 推到企业微信
+        时可能已经过去十几秒。这里只对本轮触发的少数标的补拉一次行情 (1 批,
+        ~1s), 把价格更新到最新, 并写入 quote_ts 供事后核对数据时间。
+
+        策略判定、入选结果、冷却去重都不受影响 —— 只有展示/推送字段变新。
+        """
+        symbols = sorted({
+            str(ev.get("symbol") or "").strip().upper()
+            for ev in rule_events if ev.get("symbol")
+        })
+        if not symbols:
+            return rule_events
+        try:
+            records = self._fetch_symbol_quotes(symbols[: self.ALERT_QUOTE_REFRESH_MAX])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("告警行情刷新失败 (保留快照价): %s", e)
+            return rule_events
+        latest = {
+            str(record.get("symbol") or "").strip().upper(): record
+            for record in records or []
+            if record.get("symbol") and record.get("last_price") is not None
+        }
+        if not latest:
+            return rule_events
+
+        rules = engine.rules if engine is not None else {}
+        refreshed = 0
+        for ev in rule_events:
+            symbol = str(ev.get("symbol") or "").strip().upper()
+            record = latest.get(symbol)
+            if record is None:
+                continue
+            ev["price"] = record.get("last_price")
+            ev["change_pct"] = record.get("change_pct")
+            ev["quote_ts"] = record.get("timestamp")
+            rule = rules.get(ev.get("rule_id"))
+            # 默认文案里含涨跌幅, 价格刷新后同步重算; 用户自定义的 message
+            # 是原文, 不擅自改写。
+            if rule and not rule.get("message") and engine is not None:
+                try:
+                    ev["message"] = engine.rebuild_default_message(rule, ev)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("告警文案重算失败 (保留原文): %s", e)
+            refreshed += 1
+        if refreshed:
+            logger.info("告警行情已刷新 %d 条 (最新一笔, 快照价不再滞后一轮)", refreshed)
+        return rule_events
+
+    def _fetch_symbol_quotes(self, symbols: list[str]) -> list[dict]:
+        """按 symbol 精确补拉行情; 数据源不支持按码拉取时返回空 (保留快照价)。"""
+        from app.services import preferences
+
+        provider_name = preferences.get_realtime_data_provider()
+        if provider_name == "tickflow":
+            return []
+        from app.data_providers import custom as custom_sources
+
+        if not custom_sources.provider_has_dataset(provider_name, "realtime"):
+            return []
+        provider = custom_sources.get_provider(provider_name)
+        if not self._provider_accepts_realtime_symbols(provider):
+            return []
+        return list(provider.get_realtime(symbols=symbols) or [])
 
     def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
         """把告警转发到操作系统通知中心 (由 preferences 开关控制)。

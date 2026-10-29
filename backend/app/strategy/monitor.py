@@ -1747,6 +1747,24 @@ class MonitorRuleEngine:
             })
         return events
 
+    def rebuild_default_message(self, rule: dict, ev: dict) -> str:
+        """按事件当前字段重算默认文案。
+
+        告警价格被最新一笔行情刷新后, 默认文案里的"现价/涨跌幅"必须同步重算,
+        否则推送正文与 price 字段互相矛盾。规则配置了自定义 message 时不要调用
+        本方法 —— 用户原文优先。
+        """
+        return self._default_message(
+            rule,
+            ev_type=ev.get("type", ""),
+            sym=ev.get("symbol", ""),
+            name=ev.get("name", ""),
+            pct=ev.get("change_pct"),
+            price=ev.get("price"),
+            conditions=list(ev.get("conditions") or []) if rule.get("type") != "strategy" else None,
+            signals=ev.get("signals") or [],
+        )
+
     def _default_message(self, rule: dict, ev_type: str = "", sym: str = "",
                           name: str = "", pct: Any = None, price: Any = None,
                           conditions: list[dict] | None = None,
