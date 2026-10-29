@@ -502,7 +502,10 @@ async def _application_lifespan(app: FastAPI):
             ids = preferences.get_strategy_monitor_ids()
             if ids:
                 names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
-                mr_store.migrate_strategy_monitors(store.data_dir, ids, names)
+                mr_store.migrate_strategy_monitors(
+                    store.data_dir, ids, names,
+                    default_channels=preferences.get_webhook_default_channels(),
+                )
                 logger.info("strategy monitor migrated: %d strategies", len(ids))
     except Exception as e:  # noqa: BLE001
         logger.warning("strategy monitor migration failed: %s", e)

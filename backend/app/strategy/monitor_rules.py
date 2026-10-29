@@ -397,7 +397,13 @@ def strategy_rule_id(strategy_id: str) -> str:
     return f"{STRATEGY_RULE_PREFIX}{strategy_id}"
 
 
-def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_names: dict[str, str]) -> list[dict]:
+def migrate_strategy_monitors(
+    data_dir: Path,
+    strategy_ids: list[str],
+    strategy_names: dict[str, str],
+    *,
+    default_channels: list[str] | None = None,
+) -> list[dict]:
     """把 preferences.strategy_monitor_ids 里的策略,同步生成/更新 type=strategy 规则。
 
     幂等: 已存在的策略规则会被更新 (方向/名称),不会重复创建。
@@ -407,6 +413,8 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
         data_dir: 数据目录
         strategy_ids: 当前监控池中的策略 id 列表
         strategy_names: {strategy_id: 策略名} 用于规则显示名
+        default_channels: 新建规则继承的默认推送渠道 (webhook_default_channels)。
+            缺省空数组 = 新规则不推送; 已有规则的渠道保持不变。
     Returns:
         本次生成/更新的规则列表
     """
@@ -439,6 +447,10 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
                 "conditions": [],
                 "cooldown_seconds": 3600,
                 "enabled": True,
+                # 与批次派生规则 (api/lots) 口径一致: 新建时继承用户默认推送渠道。
+                # 缺这一步, 自动迁移出来的策略规则 webhook_channels 恒为空数组,
+                # 告警只进应用内, 外部一条都发不出去 (排查时还完全静默)。
+                "webhook_channels": list(default_channels or []),
             })
         else:
             rule = dict(rule)
