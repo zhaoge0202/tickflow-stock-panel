@@ -4,11 +4,11 @@
 
 <br/>
 
-[![个人开源](https://img.shields.io/badge/%E4%B8%AA%E4%BA%BA%E5%BC%80%E6%BA%90-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tick-stock-panel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](./LICENSE)
 [![Engine: Polars](https://img.shields.io/badge/Engine-Polars-6f42c1?style=for-the-badge)](https://pola.rs/)
-[![Open API](https://img.shields.io/badge/Open_API-65_%E7%AB%AF%E7%82%B9-00b386?style=for-the-badge)](./docs/open-platform-plan.md)
-[![MCP](https://img.shields.io/badge/MCP-12_%E5%B7%A5%E5%85%B7-7c3aed?style=for-the-badge)](./mcp-server/README.md)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Node 20+](https://img.shields.io/badge/Node.js-20+-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![React 18](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 
 [![Build: Docker CI](https://github.com/shy3130/tick-stock-panel/actions/workflows/docker.yml/badge.svg)](https://github.com/shy3130/tick-stock-panel/actions/workflows/docker.yml)
 [![Test: Backend + Frontend](https://github.com/shy3130/tick-stock-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/shy3130/tick-stock-panel/actions/workflows/ci.yml)
@@ -18,16 +18,16 @@
 
 [![官网](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-tsp.shy313.com-8B5CF6?style=for-the-badge&labelColor=181717&logo=googlechrome&logoColor=white)](https://tsp.shy313.com/)
 
-`策略` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `Open API` · `MCP`
+`策略` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `Polars` · `React`
 
 <a href="https://trendshift.io/repositories/64327?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/64327" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
 <a href="https://trendshift.io/repositories/64327?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/64327/daily?language=TypeScript" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
 
 <table>
-<tr><td align="center"><big><b>65</b></big><br/><sub>开放 API 端点</sub></td>
-<td align="center"><big><b>6</b></big><br/><sub>Token 权限档</sub></td>
-<td align="center"><big><b>12</b></big><br/><sub>MCP 工具</sub></td>
-<td align="center"><big><b>2400+</b></big><br/><sub>测试全绿 · CI 守护</sub></td>
+<tr><td align="center"><big><b>3.11+</b></big><br/><sub>Python 后端</sub></td>
+<td align="center"><big><b>20+</b></big><br/><sub>Node 前端</sub></td>
+<td align="center"><big><b>18</b></big><br/><sub>React · TypeScript</sub></td>
+<td align="center"><big><b>3000+</b></big><br/><sub>测试全绿 · CI 守护</sub></td>
 <td align="center"><big><b>ms 级</b></big><br/><sub>全市场策略扫描</sub></td>
 <td align="center"><big><b>1 容器</b></big><br/><sub>零外部数据库</sub></td></tr>
 </table>
@@ -238,6 +238,8 @@
 | 🧬 **单一 enriched 口径** | 只存 15 列基础数据、现算 68 列指标信号;策略 → 回测 → 监控 → 复盘吃同一份数据 |
 | 📁 **文件型零运维存储** | Parquet + DuckDB,单容器零外部数据库,数据 100% 落在本地 |
 | 🔁 **回测 = 实盘同路径** | 策略执行只此一条 `StrategyEngine.run`;分钟策略逐日回放 +「当日已知」纪律,杜绝未来函数 |
+| 🛡️ **稳健参数筛选** | 参数按 K 段折外稳健分(0.6×中位+0.4×最差)排名而非样本内得分:主目标白名单 + 最小交易数门槛 + Top-20 全窗退化率 + 冠军收敛/高原判据;滚动样本外检验每折重优化防过拟合,冠军/最新折参数一键应用到策略 |
+| 🛡️ **策略守护** | 发布的策略自动落基线,每日用新数据 K 段真实回测复验:退化自动判定 健康/观察/退役(交易数枯竭即退役),连续观察告警;退役只标记不删档,支持任意策略手动入护(尾随参考基线)。冠军按稳健分(中位+最差折)选出并做权重精调;健康冠军间低相关(日收益 Pearson≤0.7)可一键生成组合策略并入护;实验室战报聚合守护/挖掘/名额,挖掘名额满时新候选等位 |
 | 🏛️ **网关居中的开放单体** | 面板密码会话与 Token 网关双通道并行;65 端点契约快照 + CI 守护,SSE 事件流与 MCP 平等开放 |
 | 🚀 **重活进程隔离** | 回测跑在 spawn worker 子进程,刷新/切页重连不丢任务,主服务永不被计算卡住 |
 
@@ -314,7 +316,7 @@
 | 数据写闭环   | 外部写入复用管理端同一校验/落盘路径 | `write:ext` 只写行数据,表结构锁死管理面    |
 | 事件推送     | 告警落盘即广播,**亚秒级**到 SSE 流  | 进程内事件总线(丢旧保新)+ 一次性票据订阅   |
 | MCP 工具调用 | 12 工具按 scope 联动暴露            | 薄桥零业务逻辑,权限裁决复用网关            |
-| 质量保障     | **2400+ 测试全绿,约 100 秒跑完**    | GitHub Actions CI(后端全量 + 前端构建)     |
+| 质量保障     | **3000+ 测试全绿,约 100 秒跑完**    | GitHub Actions CI(后端全量 + 前端构建)     |
 
 ---
 
@@ -369,7 +371,7 @@ curl -H "Authorization: Bearer tsp_xxxx" \
 | **侧栏「AI 助手」行** | 左上角状态区 (AI 配置行下方), 一键展开 |
 | **⌘K / Ctrl+K**   | 全局快捷键随时呼出, Esc 关闭         |
 
-**能问什么** — 21 个查询工具覆盖全站页面能力, 4 个动作工具经确认卡放行:
+**能问什么** — 21 个查询工具覆盖全站页面能力, 5 个动作工具经确认卡放行 (可开免确认):
 
 | 类别             | 覆盖能力                                                                                                                    |
 | :--------------- | :-------------------------------------------------------------------------------------------------------------------------- |
@@ -380,12 +382,12 @@ curl -H "Authorization: Bearer tsp_xxxx" \
 | **策略与因子**   | 策略目录 · 执行策略取标的 · 因子目录 · 因子全市场排名                                                                   |
 | **扩展内容**     | 扩展数据表(列表·字段·数据日期, 读行支持过滤/排序/日期范围) · 自定义策略与信号                                               |
 | **数据健康**     | 完整性检查(日线/enriched/分钟K 覆盖区间与停更、财务表缺口、单标的滞后) · 同步任务进度                                       |
-| **动作(须确认)** | 生成信号策略(声明式白名单条件, 落库即用) · 运行策略回测 · 加入自选 · 数据补全(盘后管道/财务表/分钟K扩展, 后台执行·单飞去重) |
+| **动作(须确认)** | 生成信号策略(声明式白名单条件, 落库即用) · 创建 AI 策略草稿(草稿态, 发布后生效) · 运行策略回测 · 加入自选 · 数据补全(盘后管道/财务表/分钟K扩展, 后台执行·单飞去重) |
 
 **交互设计**
 
 - **工具足迹卡** — 每次调用的工具名、参数、耗时、结果摘要均可展开核对; 取数可核对是设计铁律
-- **动作确认卡** — 生成信号/回测/加自选/数据补全等写操作先弹确认卡(完整待执行参数可见), 你点「确认执行」才真正运行; 拒绝或 120 秒超时自动取消
+- **动作确认卡** — 生成信号/回测/加自选/数据补全等写操作先弹确认卡(完整待执行参数可见), 你点「确认执行」才真正运行; 拒绝或 120 秒超时自动取消; 可在助手界面开启免确认(默认关, 轮次检查点安全阀不受影响)
 - **逐字流式 + 非模态面板** — 从页面右缘滑入可拖宽(宽度记忆), 边看行情边问; 新会话带分组快捷建议, 个股问答附走势双图(日K + 分时)
 - **会话历史跨设备** — 服务端注册表同步(回测/挖掘/优化/滚动任务同步接回), 本地存储降级为缓存
 - **固定合规提示** — 每条回答完成后附风险提示与数据口径提示; 轮次检查点与连续执行上限可在设置调整
@@ -545,7 +547,7 @@ POLARS_MAX_THREADS=2        # 主要收益项: 用约 40% 的构建耗时换 500
     memswap_limit: 3g         # 留 swap 缓冲, 避免偶发峰值直接触发 OOM kill
 ```
 
-- **不要在 2 GB 机器上跑回测/参数优化/因子挖掘**:这类任务会另起独立 worker 进程并重新加载整套后端,单个约 800 MB,与主进程叠加必然超出。
+- **不要在 2 GB 机器上跑回测/稳健优化/因子挖掘**:这类任务会另起独立 worker 进程并重新加载整套后端,单个约 800 MB,与主进程叠加必然超出。
 - **不要多开实例**:每个后端实例都会各自构建一份历史缓存。重复运行启动脚本会叠加占用,Windows 可用下面的命令确认是否只有一个:
 
   ```powershell
@@ -555,6 +557,14 @@ POLARS_MAX_THREADS=2        # 主要收益项: 用约 40% 的构建耗时换 500
   ```
 
 - **确认预热规模**:`data/logs/backend.log` 中的 `enriched 历史缓存: N rows` 表示本次预热实际载入的行数,N 越大占用越高。历史数据较少时(例如首次只同步了几十天)内存会明显低于上表。
+
+**内存保护环境变量**(`/health` 的 `memory` 字段可实时观察主进程 RSS / 系统可用 / cgroup 节流计数):
+
+| 变量 | 默认 | 作用 |
+| :-- | :-- | :-- |
+| `TICK_WORKER_RSS_LIMIT_BYTES` | `6442450944` (6GiB) | 回测/优化独立 worker 的 RSS 上限, 超限终止并返回明确错误(而非拖垮整机); `0` = 不限制 |
+| `TICK_HEAVY_MIN_AVAILABLE_BYTES` | `1073741824` (1GiB) | 系统可用内存低于该值时, 新的重任务(回测/因子批量/挖掘)挂起等待内存恢复; `0` = 不检查 |
+| `TICK_DUCKDB_READ_CONCURRENCY` | `3` | DuckDB 并发读上限。读查询走独立连接(MVCC), 同步期的长扫描不再阻塞交互读; 并发数越高峰值内存越大, `1` = 完全串行(旧行为) |
 
 ### 跑起来后的第一次使用
 
@@ -593,7 +603,7 @@ PORT=3018                      # 服务端口
 | 6                     | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析)                                                                                    | ✅            |
 | **v0.2**              | 因子挖掘全链路 · 市场阶段与主线识别 · 异动监控 · 数据源插件化                                                                      | ✅            |
 | **v0.3**              | 能力路由矩阵 · fuyao 数据源(财务/龙虎榜/风向标) · 分钟策略与回测 · 交易日探针 · 全时段异动中心 · 回测导出与候选复测                | ✅            |
-| **AI 助手**           | 对话式数据问答与操作: 21 查询 + 4 动作工具(确认卡放行, 含生成信号/回测/加自选/数据补全) · 逐字流式 + 工具足迹卡 · 完全解耦扩展模块 | ✅            |
+| **AI 助手**           | 对话式数据问答与操作: 21 查询 + 5 动作工具(确认卡放行可免确认, 含生成信号/创建策略草稿/回测/加自选/数据补全) · 逐字流式 + 工具足迹卡 · 完全解耦扩展模块 | ✅            |
 | **v0.3.2 开放能力版** | API Token + 六档 scope 网关 · 61 端点契约(快照+CI 守护) · 扩展数据读写闭环 · SSE 事件流 · MCP 服务器 · 核心/扩展域边界标注         | ✅            |
 | **v0.3.6**            | [TdxQuant](https://help.tdx.com.cn/quant/) 数据源(realtime/五档/日K/复权/分钟) · 11 官方页面单文件扩展化 + 运行时页面插件 · 扩展表两级拉取配方(概念/行业出厂即用) · AI Responses 协议与会话跨设备 · 情绪评分口径可配置 · 财务画像手动拉取 · 策略池叠加分组 · 65 端点契约 | 🚧          |
 | **v0.3.7**            | 模拟盘重构(多账户对比·策略自动执行) · 桌面修复(TdxQuant Key 探测·macOS 数据目录移出 .app 包) · 界面缩放 transform scale 修复 · 策略安全校验加固(GH #475) · 68 端点契约 | 🚧          |

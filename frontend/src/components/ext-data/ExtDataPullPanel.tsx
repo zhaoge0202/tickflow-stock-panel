@@ -82,6 +82,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
       date_param: pull.date_param ?? null,
       date_format: pull.date_format,
       time_field: pull.time_field ?? null,
+      since_param: pull.since_param ?? null,
+      granularity: pull.granularity ?? 'auto',
       timeout_seconds: pull.timeout_seconds,
       page_param: pull.page_param ?? null,
       page_size_param: pull.page_size_param ?? null,
@@ -267,6 +269,9 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
   const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
   const [dateFormat, setDateFormat] = useState(pull?.date_format ?? 'iso')
   const [timeField, setTimeField] = useState(pull?.time_field ?? '')
+  // 序列粒度: auto=按数据形态判断 | intraday=日内多盘 | daily=日级别 (钉死判断)
+  const [granularity, setGranularity] = useState<'auto' | 'intraday' | 'daily'>(pull?.granularity ?? 'auto')
+  const [sinceParam, setSinceParam] = useState(pull?.since_param ?? '')
   const [timeoutSec, setTimeoutSec] = useState(pull?.timeout_seconds ?? 30)
   // 分页协议 (仅 GET): 页码参数名配置后按页循环拉取
   const [pageParam, setPageParam] = useState(pull?.page_param ?? '')
@@ -342,6 +347,8 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
       date_param: dateParam.trim() || null,
       date_format: dateFormat,
       time_field: timeField.trim() || null,
+      since_param: sinceParam.trim() || null,
+      granularity,
       timeout_seconds: effTimeoutSec,
       page_param: pageParam.trim() || null,
       page_size_param: pageSizeParam.trim() || null,
@@ -798,15 +805,40 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
                 <div>
                   <div className="text-[11px] font-medium text-secondary mb-1.5">
                     时间字段
-                    <span className="ml-1.5 text-[10px] font-normal text-muted">日内多行数据填，如 ts</span>
+                    <span className="ml-1.5 text-[10px] font-normal text-muted">日内多行数据填，如 ts；无时间列填 __pull_ts__</span>
                   </div>
                   <input
                     value={timeField} onChange={e => setTimeField(e.target.value)}
-                    placeholder="ts · 留空=每日快照表"
-                    title="配置后同一代码允许一天多行, 按代码+时间列去重"
+                    placeholder="ts / __pull_ts__ · 留空=每日快照表"
+                    title="配置后同一代码允许一天多行, 按代码+时间列去重; 填 __pull_ts__ 时自动注入每次拉取的时刻, 盘中多次拉取各存一盘"
                     className={`${INPUT_CLS} font-mono`}
                   />
                 </div>
+              </div>
+              <div>
+                <div className="text-[11px] font-medium text-secondary mb-1.5">
+                  序列粒度
+                  <span className="ml-1.5 text-[10px] font-normal text-muted">决定列表迷你图口径: 当日逐盘 / 近N日每日一值</span>
+                </div>
+                <select
+                  aria-label="序列粒度"
+                  value={granularity} onChange={e => setGranularity(e.target.value as 'auto' | 'intraday' | 'daily')}
+                  title="列表迷你图列与序列接口按此口径取数; 自动判断依据时间列数据形态"
+                  className="h-9 w-full rounded-lg border border-border bg-base px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-accent/25 focus:border-accent/50"
+                >
+                  <option value="auto">
+                    {`自动判断${config.granularity_effective
+                      ? `（当前: ${config.granularity_effective === 'intraday' ? '日内多盘' : '日级别'}${config.granularity_effective === 'intraday' && config.plate ? ` · ${config.plate.plates} 盘` : ''}）`
+                      : '（暂无数据）'}`}
+                  </option>
+                  <option value="intraday">日内多盘（当日逐盘序列）</option>
+                  <option value="daily">日级别（近 N 日每日一值）</option>
+                </select>
+                {granularity === 'auto' && (
+                  <div className="mt-1 text-[10px] text-muted/70">
+                    按时间列数据形态判断: 存在非零时刻 → 日内多盘; 日期形态 / 00:00:00 / 未配时间字段 → 日级别
+                  </div>
+                )}
               </div>
               <div>
                 <div className="text-[11px] font-medium text-secondary mb-1.5">
@@ -843,6 +875,22 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
                     <option value="ts_ms">毫秒时间戳</option>
                   </select>
                 </div>
+              </div>
+              <div>
+                <div className="text-[11px] font-medium text-secondary mb-1.5">
+                  增量参数名
+                  <span className="ml-1.5 text-[10px] font-normal text-muted">盘中多盘表填，如 since · 免每次全量重拉</span>
+                </div>
+                <input
+                  value={sinceParam} onChange={e => setSinceParam(e.target.value)}
+                  placeholder="since · 留空=每次全量"
+                  disabled={!timeField.trim()}
+                  title="每次拉取自动带上本地已有最大时间值 (?参数=值), 源只返回其后数据; 缺多少补多少, 本地无数据时自动整日全量。需先配置时间字段; 两级拉取不适用"
+                  className="h-9 w-full rounded-lg border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/40 focus:outline-none focus:ring-1 focus:ring-accent/25 focus:border-accent/50 transition-shadow disabled:opacity-40"
+                />
+                {!timeField.trim() && (
+                  <div className="mt-1 text-[10px] text-muted/70">需先填「时间字段」才能增量续传</div>
+                )}
               </div>
               <div>
                 <div className="text-[11px] font-medium text-secondary mb-1.5">

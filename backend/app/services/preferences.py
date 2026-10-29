@@ -262,6 +262,47 @@ def get_daily_batch_compress() -> bool:
     return bool(raw)
 
 
+# ===== 批量端点单请求标的数上限 (daily-batch / minute-batch) =====
+# 这两个上限是「单请求成本」的闸门, 不是业务契约: 成本 ≈ 标的数 × 每只根数
+# (日K 约 12 根, 分时约 240 根, 差 20 倍), 所以两档独立配置而非共用一个数。
+# 上限同时也是前端的单批分块大小 —— 前端读同一偏好分块, 不会发出必然被拒的
+# 请求 (此前 400/300/300 三处硬编码, 任一处不一致即全站 400)。
+def get_daily_batch_symbols() -> int:
+    """daily-batch 单请求标的数上限。默认 2000, 范围 [50, 5000]。"""
+    raw = load().get("daily_batch_symbols", 400)
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        size = 400
+    return max(50, min(5000, size))
+
+
+def set_daily_batch_symbols(size: int) -> int:
+    size = max(50, min(5000, int(size)))
+    save({"daily_batch_symbols": size})
+    return size
+
+
+def get_minute_batch_symbols() -> int:
+    """minute-batch 单请求标的数上限。默认 400, 范围 [50, 2000]。
+
+    分时每只回 ~240 根 (日K ~12 根), 同样的标的数内存/传输量高一个量级,
+    因此上限与推荐区间都比日K保守。
+    """
+    raw = load().get("minute_batch_symbols", 400)
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        size = 400
+    return max(50, min(2000, size))
+
+
+def set_minute_batch_symbols(size: int) -> int:
+    size = max(50, min(2000, int(size)))
+    save({"minute_batch_symbols": size})
+    return size
+
+
 def _allowed_data_providers() -> set[str]:
     try:
         from app.data_providers import custom as custom_sources
@@ -736,6 +777,75 @@ def set_mining_schedule(enabled: bool, weekday: int, profile: str) -> dict:
     return result
 
 
+def get_guardian_schedule() -> dict:
+    """策略守护 (发布后持续复验) 配置。历史缺键时整体回退默认 (默认关闭)。"""
+    data = load()
+    enabled = data.get("guardian_schedule_enabled", False)
+    if not isinstance(enabled, bool):
+        enabled = False
+    watch = _guardian_pct(data.get("guardian_watch_pct"), 0.2)
+    retire = _guardian_pct(data.get("guardian_retire_pct"), 0.5)
+    if not 0.0 < watch < retire <= 1.0:
+        watch, retire = 0.2, 0.5
+    k_max = data.get("guardian_k_max", 4)
+    if isinstance(k_max, bool) or not isinstance(k_max, int) or not 2 <= k_max <= 4:
+        k_max = 4
+    slot_limit = data.get("lab_mined_slot_limit", 10)
+    if (
+        isinstance(slot_limit, bool)
+        or not isinstance(slot_limit, int)
+        or not 0 <= slot_limit <= 50
+    ):
+        slot_limit = 10
+    return {
+        "guardian_schedule_enabled": enabled,
+        "guardian_watch_pct": watch,
+        "guardian_retire_pct": retire,
+        "guardian_k_max": k_max,
+        "lab_mined_slot_limit": slot_limit,
+    }
+
+
+def set_guardian_schedule(
+    enabled: bool,
+    watch_pct: float,
+    retire_pct: float,
+    k_max: int,
+    lab_mined_slot_limit: int = 10,
+) -> dict:
+    """校验并一次写入守护/实验室配置整组 (阈值语义与 backtest.guardian 一致)。"""
+    from app.backtest.guardian import GuardianThresholds
+
+    thresholds = GuardianThresholds(
+        watch_pct=watch_pct, retire_pct=retire_pct, k_max=k_max
+    )
+    if (
+        isinstance(lab_mined_slot_limit, bool)
+        or not isinstance(lab_mined_slot_limit, int)
+        or not 0 <= lab_mined_slot_limit <= 50
+    ):
+        raise ValueError("lab mined slot limit must be between 0 and 50 (0 = unlimited)")
+    result = {
+        "guardian_schedule_enabled": bool(enabled),
+        "guardian_watch_pct": thresholds.watch_pct,
+        "guardian_retire_pct": thresholds.retire_pct,
+        "guardian_k_max": thresholds.k_max,
+        "lab_mined_slot_limit": lab_mined_slot_limit,
+    }
+    save(result)
+    return result
+
+
+def _guardian_pct(value, default: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not 0.0 < float(value) <= 1.0
+    ):
+        return default
+    return float(value)
+
+
 def get_review_push_channels() -> list[str]:
     """复盘推送渠道(多选) — 选定的外部工具列表, 复盘归档后逐个推送。
 
@@ -1080,6 +1190,38 @@ def get_screener_auto_run() -> bool:
     return load().get("screener_auto_run", True)
 
 
+def get_assistant_auto_approve_actions() -> bool:
+    """AI 助手的动作工具是否免确认直接执行。默认关。
+
+    默认关是安全底线: 打开后 create_signal_strategy / run_backtest /
+    add_to_watchlist / sync_data 会不经用户点按就执行 (写信号文件、改自选、
+    触发数据补全)。存量用户不能因为升级而静默变成全自动。
+    只影响动作确认, 不影响轮次检查点 (那是防跑飞的安全阀, 见 chat_service)。
+    """
+    return bool(load().get("assistant_auto_approve_actions", False))
+
+
+def set_assistant_auto_approve_actions(enabled: bool) -> bool:
+    """保存 AI 助手免确认开关。"""
+    save({"assistant_auto_approve_actions": bool(enabled)})
+    return bool(enabled)
+
+
+def get_assistant_mask_enabled() -> bool:
+    """AI 助手打开时是否在页面主体上盖毛玻璃遮罩 (点击遮罩关闭助手)。默认开。
+
+    纯前端视觉/交互偏好, 后端只负责持久化; 关闭后恢复非模态体验
+    (页面主体可正常交互, 边看行情边问)。
+    """
+    return bool(load().get("assistant_mask_enabled", True))
+
+
+def set_assistant_mask_enabled(enabled: bool) -> bool:
+    """保存 AI 助手毛玻璃遮罩开关。"""
+    save({"assistant_mask_enabled": bool(enabled)})
+    return get_assistant_mask_enabled()
+
+
 def get_strategy_monitor_ids() -> list[str]:
     """返回监控池中的策略 ID。"""
     return load().get("strategy_monitor_ids", [])
@@ -1284,6 +1426,13 @@ _UI_PREFS_KEYS = (
     "voice_broadcast_rate",
     "stock_external_template",
     "page_zoom",
+    # 界面局部状态的跨端副本 (随配置备份迁移): 监控徽标/设置页收起/回测列表高度/导航形态
+    "monitor_badge_enabled",
+    "settings_nav_collapsed",
+    "bt_strategy_list_maxh",
+    "nav_state",
+    # AI 助手悬浮球显隐 (assistant.fab.enabled 的后端副本) — 同样受端口漂移影响
+    "assistant_fab_enabled",
 )
 _UI_PREFS_MAX_JSON = 16 * 1024
 

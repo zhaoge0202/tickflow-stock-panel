@@ -1,7 +1,7 @@
 import { toast } from '@/components/Toast'
 import { playNotificationSound } from './notificationSound'
 import type { StrategyBacktestResult } from './api'
-import type { OptimizeResult } from './optimizerTask'
+import type { RobustResult } from './robustTask'
 
 function pct(value: unknown): string {
   const number = Number(value)
@@ -57,9 +57,9 @@ export function notifyBacktestCompleted(result: StrategyBacktestResult): void {
   desktopNotification('TickFlow · 回测完成', message)
 }
 
-export function notifyOptimizerCompleted(result: OptimizeResult): void {
-  const message = `参数优化完成 · ${result.n_completed}/${result.n_combinations} 组 · 最优值 ${result.best_score ?? '—'}`
+export function notifyRobustCompleted(result: RobustResult): void {
+  const message = `稳健优化完成 · ${result.n_completed}/${result.n_combinations} 组 · 稳健分 ${result.best_score ?? '—'}`
   toast(message, 'success')
   playNotificationSound()
-  desktopNotification('TickFlow · 优化完成', message)
+  desktopNotification('TickFlow · 稳健优化完成', message)
 }
