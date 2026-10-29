@@ -47,9 +47,15 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 
 
 # ── 进程级有界历史数据缓存 (避免 run_all/preselect 短时间内重复计算) ──
-_history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
+# 键只到 (资产, 日期), 窗口长度记在值里: 同一天 41/81 两个窗口各算一次会把
+# 单日成本翻倍 (实测 12s + 30s), 且 4 个槽位被两个窗口挤满后反复淘汰重算。
+_history_cache: dict[tuple[str, date], tuple[float, int, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 300.0  # 秒 (5分钟)
-_HISTORY_CACHE_MAX_ENTRIES = 4
+_HISTORY_CACHE_MAX_ENTRIES = 2  # 每个日期只留一份最大窗口, 两个日期足够轮换
+# 计算窗口下限: 策略池常见的最大回看 (矩阵 warmup 40 + 评分 warmup 40)。
+# 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加扫描量, 却能让同一天
+# 的 41/81 两个请求共用同一份缓存。
+_HISTORY_LOOKBACK_FLOOR = 81
 _HISTORY_SYMBOL_BATCH_SIZE = 256
 _history_compute_lock = threading.Lock()
 
@@ -346,47 +352,39 @@ class ScreenerService:
                             target_date, lookback_days, elapsed, len(cached))
                 return cached
 
-        # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
-        cache_key = (self.asset_type, target_date, lookback_days)
+        # 优先级 2: 进程级 history_cache (按日期缓存一份最大窗口, 小窗口裁剪复用)
+        cache_key = (self.asset_type, target_date)
         now = time.monotonic()
         expired = [
-            key for key, (ts, _) in _history_cache.items()
+            key for key, (ts, _lookback, _frame) in _history_cache.items()
             if now - ts >= _HISTORY_CACHE_TTL
         ]
         for key in expired:
             del _history_cache[key]
 
-        ttl_cached = _history_cache.get(cache_key)
-        if ttl_cached is not None:
-            logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-            return ttl_cached[1]
-
-        # 监控规则经常只差 lookback_days (例如 41/61/71/81), 大窗口已经包含
-        # 小窗口所需的全部交易日。裁剪复用避免同一交易日重复 scan + 指标计算,
-        # 也避免为每个规则再保留一份完整 DataFrame。
-        reusable = [
-            (key[2], frame)
-            for key, (_, frame) in _history_cache.items()
-            if key[0] == self.asset_type
-            and key[1] == target_date
-            and key[2] > lookback_days
-        ]
-        if reusable:
-            _, larger_frame = min(reusable, key=lambda item: item[0])
-            cropped = self._crop_history_cache(larger_frame, lookback_days)
-            if cropped is not None:
-                logger.debug(
-                    "history reusable cache hit: %s lookback=%d",
-                    target_date,
-                    lookback_days,
-                )
-                return cropped
+        cached_entry = _history_cache.get(cache_key)
+        if cached_entry is not None:
+            _, cached_lookback, cached_frame = cached_entry
+            # 只有缓存窗口不小于请求时才可裁剪复用; 请求更大窗口只能重算。
+            if cached_lookback >= lookback_days:
+                cropped = self._crop_history_cache(cached_frame, lookback_days)
+                if cropped is not None:
+                    logger.debug(
+                        "history TTL cache hit: %s lookback=%d (cached %d)",
+                        target_date,
+                        lookback_days,
+                        cached_lookback,
+                    )
+                    return cropped
 
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
+        # 计算窗口抬到 floor: 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加
+        # 扫描量, 却能让同一天的 41/81 两个请求共用同一份缓存。
+        compute_lookback = max(lookback_days, _HISTORY_LOOKBACK_FLOOR)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
-                       target_date, lookback_days)
+                       target_date, compute_lookback)
         warmup = 60
-        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
+        start = target_date - timedelta(days=min((compute_lookback + warmup) * 2, 180))
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
@@ -431,8 +429,8 @@ class ScreenerService:
                 .to_list()
             )
         lookback_start = (
-            trading_dates[-(lookback_days + 1)]
-            if len(trading_dates) > lookback_days
+            trading_dates[-(compute_lookback + 1)]
+            if len(trading_dates) > compute_lookback
             else trading_dates[0]
         )
         df_full = self._compute_enriched_batches(
@@ -444,21 +442,26 @@ class ScreenerService:
 
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
-                    target_date, lookback_days, elapsed, len(df_full))
+                    target_date, compute_lookback, elapsed, len(df_full))
 
         # TTL 先清一轮; 仍超上限时按最旧无条件淘汰 — 否则短时间内出现多个
-        # 不同 (asset_type, date, lookback) 键时全部新鲜、零逐出, 数 GB 宽帧驻留。
+        # 不同 (asset_type, date) 键时全部新鲜、零逐出, 数 GB 宽帧驻留。
         if cache_key not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
+            now = time.monotonic()
+            expired = [
+                k for k, (ts, _lookback, _frame) in _history_cache.items()
+                if now - ts > _HISTORY_CACHE_TTL
+            ]
             for k in expired:
                 del _history_cache[k]
             while len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
                 oldest = min(_history_cache, key=lambda k: _history_cache[k][0])
                 del _history_cache[oldest]
         # 长计算期间不应消耗 TTL; 从计算完成时开始计时, 保证刚算好的窗口有完整的复用周期。
-        _history_cache[cache_key] = (now, df_full)
+        _history_cache[cache_key] = (time.monotonic(), compute_lookback, df_full)
 
-        return df_full
+        cropped = self._crop_history_cache(df_full, lookback_days)
+        return cropped if cropped is not None else df_full
 
     def run(
         self,
