@@ -264,7 +264,6 @@ class QuoteService:
     # 全量 enriched 是冷路径兜底, 同一天最多启动一次, 避免 live_agg
     # 暂不可用时每轮行情都重复扫描 90 日 × 全市场 parquet。
     FULL_ENRICHED_REBUILD_COOLDOWN_S = 60.0
-    FETCH_BACKOFF_FACTOR = 1.2
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -748,15 +747,12 @@ class QuoteService:
                         final_boundary_ms=self._final_boundary_ms(phase),
                     )
                     fetch_elapsed = time.perf_counter() - fetch_started
-                    if fetch_elapsed > sleep_s:
-                        sleep_s = min(
-                            self.MAX_INTERVAL,
-                            max(sleep_s, fetch_elapsed * self.FETCH_BACKOFF_FACTOR),
-                        )
+                    sleep_s = self._next_sleep_s(fetch_elapsed)
+                    if fetch_elapsed > self._interval:
                         logger.info(
-                            "行情轮询自适应退避: 本轮 %.1fs, 下轮等待 %.1fs",
+                            "本轮 %.1fs 超过目标间隔 %.1fs, 立即进入下一轮",
                             fetch_elapsed,
-                            sleep_s,
+                            self._interval,
                         )
                     if is_final:
                         key = self._final_sync_key(phase)
@@ -792,6 +788,15 @@ class QuoteService:
             while self._running and self._enabled and not self._paused and waited < sleep_s:
                 time.sleep(0.5)
                 waited += 0.5
+
+    def _next_sleep_s(self, work_s: float) -> float:
+        """本轮结束到下一轮开始前应等待的秒数。
+
+        间隔是「周期」而不是「空闲时长」: 本轮工作耗时从间隔里扣除, 否则实际
+        周期会变成 工作 + 间隔。工作已超过间隔时立即开下一轮 —— 慢数据源本身
+        就是节流器, 再乘一个系数只会把 3s 的周期放大到一分钟, 与用户设置无关。
+        """
+        return max(0.0, self._interval - work_s)
 
     def _cleanup_day_scoped_state(self) -> None:
         """按日清理 final 同步状态 (键为 (date, phase), 严格无界累积)。
@@ -2189,12 +2194,17 @@ class QuoteService:
             # 反查规则, 过滤出启用推送的事件
             rules = engine.rules if engine is not None else {}
             enqueued = 0
+            skipped_no_channel = 0
             for ev in rule_events:
                 rule = rules.get(ev.get("rule_id"))
                 # webhook_channels 指定本规则需要投递的外部渠道。
                 # 空列表 = 该规则不推送。仅推送「渠道已选 + 对应地址已配置」的组合。
                 channels = rule.get("webhook_channels") if rule else None
                 if not channels:
+                    skipped_no_channel += 1
+                    logger.debug(
+                        "Webhook 跳过: 规则 %s 未配置推送渠道", ev.get("rule_id"),
+                    )
                     continue
                 source = ev.get("source", "")
                 source_label = SOURCE_LABELS.get(source, source or "通知")
@@ -2237,6 +2247,13 @@ class QuoteService:
                     enqueued += 1
             if enqueued:
                 logger.info("Webhook 已提交 %d 条 (异步投递, 按渠道独立投递, 失败记 WARNING)", enqueued)
+            elif skipped_no_channel:
+                # 曾经完全静默: 用户只能靠"应用内有、企业微信没有"反推。
+                logger.info(
+                    "Webhook 未投递: %d 条事件所属规则未勾选推送渠道 "
+                    "(监控中心 → 编辑规则 → 推送渠道)",
+                    skipped_no_channel,
+                )
         except Exception as e:
             logger.warning("Webhook 提交异常 (不影响告警主流程): %s", e)
 
