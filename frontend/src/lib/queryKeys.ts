@@ -69,8 +69,6 @@ export const QK = {
   marketDates:          (limit?: number) => ['market-dates', limit ?? 120] as const,
   marketIntradayTimeline: (asOf?: string | null, stepSeconds?: number) =>
                            ['market-intraday-timeline', asOf ?? 'today', stepSeconds ?? 60] as const,
-  sectorFlowSeries: (kind: 'concept' | 'industry', metric: 'strength' | 'main_flow', asOf?: string | null, stepSeconds?: number, level?: number | null) =>
-                           ['sector-flow-series', kind, metric, asOf ?? 'today', stepSeconds ?? 60, level ?? 'all'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
 
   // Backtest
@@ -220,5 +218,4 @@ export const SSE_INVALIDATE_PREFIXES = [
   'decision',
   'abnormal',
   'market-breadth',
-  'sector-flow',
 ] as const

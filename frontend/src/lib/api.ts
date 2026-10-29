@@ -779,51 +779,6 @@ export interface MarketIntradayTimelineResponse {
   error?: string
 }
 
-export interface SectorFlowSeriesItem {
-  key: string
-  name: string
-  source_field?: string | null
-  value?: string | null
-  level?: number | null
-  member_count: number
-  valid_count: number
-  coverage_ratio: number
-  flow_values: (number | null)[]
-  strength_values: (number | null)[]
-  latest_flow: number | null
-  latest_strength: number | null
-  flow_source: string
-  classification_method: string
-  is_proxy: boolean
-  rank?: number
-}
-
-export interface SectorFlowSeriesResponse {
-  as_of: string
-  kind: 'concept' | 'industry'
-  metric: 'strength' | 'main_flow'
-  points: number[]
-  sectors: SectorFlowSeriesItem[]
-  index: {
-    symbol: string
-    name: string
-    values: (number | null)[]
-  }
-  data_quality: {
-    status: string
-    has_ticks: boolean
-    symbol_count: number
-    sources: string[]
-    flow_source?: string | null
-    is_proxy?: boolean
-    expected_point_count?: number
-    observed_point_count?: number
-    missing_point_count?: number
-    point_coverage_ratio?: number
-    max_gap_seconds?: number
-  }
-}
-
 export interface QuoteTickBackfillStatus {
   status?: string
   date?: string
@@ -4220,24 +4175,6 @@ export const api = {
     if (opts?.stepSeconds) params.set('step_seconds', String(opts.stepSeconds))
     const suffix = params.toString()
     return request<MarketIntradayTimelineResponse>(`/api/screener/market-intraday-timeline${suffix ? `?${suffix}` : ''}`)
-  },
-  sectorFlowSeries: (opts: {
-    kind: 'concept' | 'industry'
-    metric: 'strength' | 'main_flow'
-    date?: string | null
-    stepSeconds?: number
-    limit?: number
-    level?: number | null
-  }) => {
-    const params = new URLSearchParams({
-      kind: opts.kind,
-      metric: opts.metric,
-      step_seconds: String(opts.stepSeconds ?? 60),
-      limit: String(opts.limit ?? 32),
-    })
-    if (opts.date) params.set('date', opts.date)
-    if (opts.level != null) params.set('level', String(opts.level))
-    return request<SectorFlowSeriesResponse>(`/api/sector-flow/series?${params.toString()}`)
   },
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
