@@ -143,39 +143,47 @@ def generate_preview_1450_from_context(
     hist_prev = hist_panel.filter(pl.col("date") < target_date)
     day_meta = hist_panel.filter(pl.col("date") == target_date)
 
+    agg_1450: pl.DataFrame | None = None
     if min_file.exists():
         # 扫描并切出 14:50 前的分钟线
-        cutoff_dt = f"{d_str} 14:50:00"
+        cutoff_dt = datetime.combine(target_date, dt_time(14, 50))
         min_cut = (
             pl.scan_parquet(str(min_file))
-            .filter(pl.col("datetime") <= pl.lit(cutoff_dt).str.to_datetime())
+            .filter(pl.col("datetime") <= pl.lit(cutoff_dt))
             .collect()
         )
-        if min_cut.is_empty():
-            return []
+        # 分钟K由盘后任务同步: 盘中 14:50 时文件可能只覆盖开盘几分钟甚至为空,
+        # 覆盖不到 14:50 就只能退回实时快照 —— 否则残缺分钟线会把当天所有票都
+        # 判成"未达标", 初选天天 0 条。
+        minute_latest = min_cut["datetime"].max() if not min_cut.is_empty() else None
+        if minute_latest is not None and minute_latest >= datetime.combine(target_date, dt_time(14, 45)):
+            agg_1450 = (
+                min_cut.sort("datetime")
+                .group_by("symbol")
+                .agg([
+                    pl.first("open").alias("open"),
+                    pl.max("high").alias("high"),
+                    pl.min("low").alias("low"),
+                    pl.last("close").alias("close"),
+                    (pl.sum("volume") * (240.0 / 230.0)).alias("volume"),
+                    (pl.sum("amount") * (240.0 / 230.0)).alias("amount"),
+                ])
+                .with_columns(pl.lit(target_date).alias("date"))
+            )
+        else:
+            logger.info("14:50 初选: 分钟K覆盖不足 (%s), 退回实时快照", minute_latest)
 
-        agg_1450 = (
-            min_cut.sort("datetime")
-            .group_by("symbol")
-            .agg([
-                pl.first("open").alias("open"),
-                pl.max("high").alias("high"),
-                pl.min("low").alias("low"),
-                pl.last("close").alias("close"),
-                (pl.sum("volume") * (240.0 / 230.0)).alias("volume"),
-                (pl.sum("amount") * (240.0 / 230.0)).alias("amount"),
-            ])
-            .with_columns(pl.lit(target_date).alias("date"))
-        )
-    else:
+    if agg_1450 is None:
         # 实盘盘中路径: 直接复用当前的 current enriched 快照 (即盘中实时计算的 live enriched)
         if base_ctx.current is None or base_ctx.current.is_empty():
+            logger.warning("14:50 初选: 无可用分钟K且无实时快照, %s 跳过", d_str)
             return []
         agg_1450 = base_ctx.current
 
     meta_cols = [
         c for c in day_meta.columns
         if c not in ["open", "high", "low", "close", "volume", "amount", "date", "symbol"]
+        and c not in agg_1450.columns
     ]
     day_1450 = agg_1450.join(day_meta.select(["symbol"] + meta_cols), on="symbol", how="left")
 
