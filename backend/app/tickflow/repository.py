@@ -2158,9 +2158,17 @@ class KlineRepository:
 
     def _minute_partition_path(self, asset_type: str, trade_date: date) -> str | None:
         """单日分钟K分区文件路径; 不存在 (含存量未迁移的旧 symbol= 分区) 返回 None。"""
-        base = self._minute_glob_for(asset_type).rsplit("/", 2)[0]
-        p = f"{base}/date={trade_date.isoformat()}/part.parquet"
-        return p if Path(p).exists() else None
+        p = self._minute_dir(asset_type) / f"date={trade_date.isoformat()}" / "part.parquet"
+        return str(p) if p.exists() else None
+
+    def _minute_dir(self, asset_type: str) -> Path:
+        """分钟K分区根目录 (kline_minute / kline_etf_minute / kline_crypto_minute)。
+
+        必须走 Path 拼接: glob 字符串在 Windows 上是反斜杠, 用 rsplit("/") 截
+        date= 分区会得到原串, 拼出的路径永远不存在 —— 分钟策略回测在 Windows
+        上会静默读到空分区。
+        """
+        return Path(self._minute_glob_for(asset_type)).parent.parent
 
     def get_minute(
         self,
@@ -2265,13 +2273,13 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
+        base = self._minute_dir(asset_type)
         # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
         parts: list[str] = []
         for d in dates:
-            p = f"{base}/date={d.isoformat()}/part.parquet"
-            if Path(p).exists():
-                parts.append(p)
+            p = base / f"date={d.isoformat()}" / "part.parquet"
+            if p.exists():
+                parts.append(str(p))
         if not parts:
             return pl.DataFrame()
         try:
