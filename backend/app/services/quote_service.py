@@ -2618,7 +2618,20 @@ class QuoteService:
 
                 cutoff = today - timedelta(days=90)
                 table = {"etf": "kline_etf_daily", "index": "kline_index_daily"}.get(asset_type, "kline_daily")
-                daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
+                daily_dir = self._repo.store.data_dir / table
+                # 只按需要的日期分区拼文件列表, 不要 "**/*.parquet" 全量 glob。
+                # kline_index_daily 有近 2900 个 date= 分区(2015 至今), 而这里
+                # 每次只需要最近 90 天 + 60 天暖机; 全量 glob 让每轮为 4 只指数
+                # 付 1.7s 的文件枚举成本(实测 enriched 全量 4 只 = 1749ms)。
+                hist_paths: list[str] = []
+                cursor = cutoff - timedelta(days=60)
+                while cursor < today:
+                    part_dir = daily_dir / f"date={cursor.isoformat()}"
+                    if part_dir.is_dir():
+                        hist_paths.extend(str(p) for p in part_dir.glob("*.parquet"))
+                    cursor += timedelta(days=1)
+                # 分区命名与预期不符时回退到全量 glob, 保持兼容。
+                hist_source = hist_paths if hist_paths else str(daily_dir / "**" / "*.parquet")
                 ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
                 daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
                 if daily_ohlcv.is_empty() or "symbol" not in daily_ohlcv.columns:
@@ -2636,7 +2649,7 @@ class QuoteService:
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
                 today_parts: list[pl.DataFrame] = []
-                hist_lf = scan_daily_parquet(daily_glob).filter(
+                hist_lf = scan_daily_parquet(hist_source).filter(
                     # 多读一段自然日, 再按交易日计数确定窗口起点
                     # (长假前后 90 个自然日不足 60 个交易日)
                     (pl.col("date") >= cutoff - timedelta(days=60)) & (pl.col("date") != today)
