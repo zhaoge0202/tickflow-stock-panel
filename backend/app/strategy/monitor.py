@@ -355,6 +355,10 @@ class MonitorRuleEngine:
         self._history_loader: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
         self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        # 当日分钟K加载器: (as_of, current) → 当日分钟K DataFrame。
+        # 用于 minute_filter(1m) 策略的实时监控评估; 复用 ScreenerService._load_minute_history
+        # (单日分区直读 + quote_ticks 聚合兜底)。为 None 时分钟策略退回跳过(不破坏无分钟数据场景)。
+        self._minute_loader: Callable[[_dt.date, "pl.DataFrame"], "pl.DataFrame"] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
         # 本轮 evaluate() 产出的策略结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
@@ -421,6 +425,15 @@ class MonitorRuleEngine:
         为 None 时 ETF filter_history 策略退回到跳过逻辑。
         """
         self._history_loader_etf = fn
+
+    def set_minute_loader(self, fn) -> None:
+        """注入当日分钟K加载器, 用于 minute_filter(1m) 策略的实时监控。
+
+        loader 签名: (as_of: date, current: pl.DataFrame) → 当日分钟K DataFrame。
+        复用 ScreenerService._load_minute_history (单日分区直读 + quote_ticks 兜底)。
+        为 None 时分钟策略退回跳过逻辑。
+        """
+        self._minute_loader = fn
 
     def _history_loader_for(self, rule: dict):
         """按规则的 asset_type 选历史加载器。etf → ETF 加载器, 否则股票加载器。"""
@@ -1228,12 +1241,38 @@ class MonitorRuleEngine:
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
         # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
         from app.strategy.engine import StrategyDataContext
-        current_context = StrategyDataContext(
-            asset_type=at,
-            timeframe="1d",
-            as_of=cn_today(),
-            current=df,
-        )
+        if getattr(s, "execution_backend", "polars_expr") == "minute_filter":
+            # 分钟策略(minute_filter): 与日线策略不同, 走 timeframe="1m" 上下文,
+            # history=当日分钟K, daily_history=日线窗口(minute_daily_bars 供日线闸用)。
+            minute_df = pl.DataFrame()
+            if self._minute_loader is not None:
+                try:
+                    loaded = self._minute_loader(cn_today(), df)
+                    minute_df = loaded if loaded is not None else pl.DataFrame()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("策略 %s 分钟K加载失败, 跳过本轮: %s", sid, exc)
+                    return []
+            daily_window = None
+            if s.minute_daily_bars > 0 and self._history_loader is not None:
+                try:
+                    daily_window = self._history_loader(cn_today(), s.minute_daily_bars)
+                except Exception:  # noqa: BLE001
+                    daily_window = None
+            current_context = StrategyDataContext(
+                asset_type=at,
+                timeframe="1m",
+                as_of=cn_today(),
+                current=df,
+                history=minute_df,
+                daily_history=daily_window,
+            )
+        else:
+            current_context = StrategyDataContext(
+                asset_type=at,
+                timeframe="1d",
+                as_of=cn_today(),
+                current=df,
+            )
         if getattr(s, "execution_backend", "polars_expr") == "composite":
             # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
             # 违反"实时热路径不得随历史数据量线性增长"约束。fail-closed 跳过本轮,
