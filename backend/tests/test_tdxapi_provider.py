@@ -170,7 +170,7 @@ def test_request_releases_shared_http_gate_on_error(monkeypatch):
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, 4), ("8", 8), ("16", 16), ("0", 1), ("999", 16), ("bad", 4)],
+    [(None, 8), ("8", 8), ("16", 16), ("0", 1), ("999", 16), ("bad", 8)],
 )
 def test_tdx_http_concurrency_is_configurable_and_bounded(monkeypatch, raw, expected):
     if raw is None:
