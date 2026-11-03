@@ -295,6 +295,10 @@ class QuoteService:
         # 异动边缘规则上次评估时间戳 (秒)。异动快照历史部分有 60s 缓存,
         # 但每次构建仍有全市场循环, 轮询线程里限频到 30s 一次。
         self._abnormal_last_eval = 0.0
+        # 上一轮行情轮的结束时刻 (perf_counter)。只用于打印轮次周期, 用来判断
+        # "行情轮实际多久一次" —— 串行链路下周期 = 取数 + 监控评估, 排查是否
+        # 被监控评估拖长时, 需要这两个数字分开看。
+        self._last_round_perf = 0.0
 
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
@@ -818,23 +822,54 @@ class QuoteService:
         的本轮不落盘 (见 _process_full_market_records)。
         """
         self._cleanup_day_scoped_state()
+        fetch_started = time.perf_counter()
         with self._fetch_lock:
             before = self._fetched_at
             if final:
                 logger.info("最终行情同步开始")
             snapshot = None
+            watchlist_eval = 0.0
             if self.realtime_mode() == "watchlist":
                 # Free 档自选模式: 只有自选(含指数监控标的)有实时数据, 评估在该方法内完成。
-                self._fetch_watchlist_quotes()
+                watchlist_eval = self._fetch_watchlist_quotes()
             else:
                 snapshot = self._fetch_full_market_quotes(final_boundary_ms=final_boundary_ms)
             updated = self._fetched_at > before
+        fetch_elapsed = time.perf_counter() - fetch_started
         # 监控评估移出取数锁执行: 评估输入是本轮快照 (daily_df/quote_extra),
         # 离锁执行结果不变; 时序不变式 (enriched 替换后才评估) 仍由调用顺序保证。
         if snapshot is not None:
+            eval_started = time.perf_counter()
             with self._evaluate_lock:
                 self._evaluate_monitors(*snapshot)
+            eval_elapsed = time.perf_counter() - eval_started
+        else:
+            # 自选模式在取数锁内就完成评估了, 这段耗时已计入 fetch_elapsed,
+            # 这里摘出来单独呈现, 否则会被误读成"取数很慢"。
+            eval_elapsed = watchlist_eval
+            fetch_elapsed -= watchlist_eval
+        self._log_round_timing(fetch_elapsed, eval_elapsed)
         return updated
+
+    def _log_round_timing(self, fetch_elapsed: float, eval_elapsed: float) -> None:
+        """打印本轮分段耗时。
+
+        取数与监控评估在当前实现里是**同一线程串行**的, 所以行情轮周期 =
+        取数 + 评估。这两个数字必须分开看, 否则无法判断 8s 里有多少是取数、
+        多少被监控评估吃掉。监控段接近 0 说明非连续竞价时段直接早退了。
+        """
+        now = time.perf_counter()
+        last = getattr(self, "_last_round_perf", 0.0)
+        period = f", 距上轮 {now - last:.1f}s" if last else ""
+        self._last_round_perf = now
+        total = fetch_elapsed + eval_elapsed
+        if eval_elapsed < 0.001:
+            logger.info("行情轮 %.1fs (取数 %.1fs / 监控 跳过)%s", total, fetch_elapsed, period)
+            return
+        logger.info(
+            "行情轮 %.1fs (取数 %.1fs / 监控 %.1fs)%s",
+            total, fetch_elapsed, eval_elapsed, period,
+        )
 
     def _fetch_full_market_quotes(
         self, final_boundary_ms: int | None = None
@@ -1129,8 +1164,11 @@ class QuoteService:
         # 返回本轮快照 (daily_df, quote_extra) 作为评估输入
         return daily_df, quote_extra
 
-    def _fetch_watchlist_quotes(self) -> None:
-        """Free 档自选股实时: 按 capability batch 上限分批拉取。"""
+    def _fetch_watchlist_quotes(self) -> float:
+        """Free 档自选股实时: 按 capability batch 上限分批拉取。
+
+        返回监控评估耗时(秒), 供调用方把「取数」和「评估」分开计时。
+        """
         from app.services import preferences
         from app.tickflow.client import get_paid_realtime_client
         from app.tickflow.capabilities import Cap
@@ -1263,7 +1301,9 @@ class QuoteService:
         self._broadcast_quote_updated()
         # Watchlist 模式不走离锁快照路径: realtime_mode 为 watchlist 时
         # _fetch_full_market_quotes 不会被调用, 这里在取数锁内评估即可。
+        eval_started = time.perf_counter()
         self._evaluate_monitors(daily_df, quote_extra)
+        return time.perf_counter() - eval_started
 
     # ================================================================
     # 工具
