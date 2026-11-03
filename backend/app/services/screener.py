@@ -50,7 +50,11 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 # 键只到 (资产, 日期), 窗口长度记在值里: 同一天 41/81 两个窗口各算一次会把
 # 单日成本翻倍 (实测 12s + 30s), 且 4 个槽位被两个窗口挤满后反复淘汰重算。
 _history_cache: dict[tuple[str, date], tuple[float, int, pl.DataFrame]] = {}
-_HISTORY_CACHE_TTL = 300.0  # 秒 (5分钟)
+# enriched 历史窗口是「T-1 及更早」的日级数据, 盘中本身不变; 5 分钟 TTL 会让
+# 行情轮询/监控每 5 分钟触发一次 ~51s 的同步重算, 直接拖死行情线程(实测一天
+# 69 次 × 51s ≈ 58 分钟)。改为 1 小时: 一天交易时段最多重算 4 次, 且重算与
+# 当日快照新鲜度无关(当日行由 enriched 增量单独维护)。
+_HISTORY_CACHE_TTL = 3600.0  # 秒 (1小时)
 _HISTORY_CACHE_MAX_ENTRIES = 2  # 每个日期只留一份最大窗口, 两个日期足够轮换
 # 计算窗口下限: 策略池常见的最大回看 (矩阵 warmup 40 + 评分 warmup 40)。
 # 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加扫描量, 却能让同一天
@@ -399,10 +403,18 @@ class ScreenerService:
                      "turnover_rate"]
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-            )
+            # 只扫 start..target_date 之间实际存在的日期分区, 避免 glob 全量历史
+            # 分区(数据可回溯多年, 全量 glob 会把几千个 date= 分区元数据都读一遍)。
+            paths: list[str] = []
+            cursor = start
+            while cursor <= target_date:
+                part = enriched_dir / f"date={cursor.isoformat()}" / "part.parquet"
+                if part.exists():
+                    paths.append(str(part))
+                cursor += timedelta(days=1)
+            if not paths:
+                return pl.DataFrame()
+            lf = scan_enriched_parquet(paths)
             available = [c for c in read_cols if c in lf.collect_schema().names()]
             history_lf = lf.select(available)
             trading_dates = (
