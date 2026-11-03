@@ -299,16 +299,14 @@ def save_rule(req: RuleModel, request: Request):
             raise HTTPException(status_code=503, detail="策略引擎未初始化")
         try:
             strategy = strategy_engine.get(str(rule.get("strategy_id")))
-            # 监控评估链路硬编码 timeframe="1d"(monitor 评估只用日线 enriched),
-            # 分钟策略(minute_filter, timeframes=['1m'])没有日线候选。这里先给出
-            # 清晰提示, 而不是让 validate_context 抛晦涩的英文 "does not support"。
-            if "1d" not in strategy.meta.get("timeframes", ["1d"]):
-                raise ValueError("该策略是分钟策略, 监控功能暂仅支持日线策略")
+            # 按策略自己声明的周期校验 (1d / 1m 都支持监控), 而不是硬编码 1d。
+            # 1m 分钟策略走 monitor 的 minute_filter 评估分支 (当日分钟K)。
+            tf = (strategy.meta.get("timeframes") or ["1d"])[0]
             strategy_engine.validate_context(
                 strategy,
                 StrategyDataContext(
                     asset_type=str(rule.get("asset_type") or "stock"),
-                    timeframe="1d",
+                    timeframe=tf,
                     as_of=date.today(),
                 ),
             )
