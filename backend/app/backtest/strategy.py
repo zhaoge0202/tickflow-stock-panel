@@ -2852,7 +2852,18 @@ class StrategyBacktestService:
                     num = min(num, float(param["max"]))
                 normalized[pid] = int(num) if p_type == "int" else num
             elif p_type == "select" and param.get("options"):
-                normalized[pid] = value if value in param["options"] else param.get("default")
+                # options 的规范形态是 [{"label": .., "value": ..}] (见
+                # strategy-guide), 直接拿 value 去 in 这个列表永远为假 ——
+                # 字符串型 select 参数会被静默丢弃、回落 default, 用户选的
+                # 值在回测里根本不生效。这里先归一化出候选值集合。
+                allowed: list = []
+                for opt in param["options"]:
+                    if isinstance(opt, dict):
+                        if "value" in opt:
+                            allowed.append(opt["value"])
+                    else:
+                        allowed.append(opt)
+                normalized[pid] = value if value in allowed else param.get("default")
             elif p_type == "bool":
                 if isinstance(value, bool):
                     normalized[pid] = value
