@@ -415,7 +415,15 @@ def backfill_recent_strategy_history(
     from app.strategy import config as strategy_config
 
     data_dir = Path(repo.store.data_dir)
-    requested_ids = [sid for sid in _normalize_strategy_ids(strategy_ids) or [] if engine.has(sid)]
+    # 竞价回填是 1d 生命周期特征, 只处理支持日线的策略; 分钟(minute_filter)
+    # 策略(timeframes=['1m'])没有日线候选, 若强行按 1d 跑会抛
+    # "does not support timeframe '1d'", 这里直接跳过, 避免刷错误日志。
+    requested_ids = [
+        sid
+        for sid in _normalize_strategy_ids(strategy_ids) or []
+        if engine.has(sid)
+        and "1d" in engine.get(sid).meta.get("timeframes", ["1d"])
+    ]
     if not requested_ids:
         return {"cycles": 0, "written": 0}
     monitor_written = strategy_history.backfill_monitor_events(
