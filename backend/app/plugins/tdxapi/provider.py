@@ -28,8 +28,13 @@ logger = logging.getLogger(__name__)
 
 _DATASETS = ("daily", "minute", "realtime", "trade_ticks", "auction_result", "financial")
 _DEFAULT_BASE_URL = "http://127.0.0.1:8080"
-_QUOTE_BATCH = 50
-_QUOTE_WORKERS_DEFAULT = 4
+# 单次 batch-quote 的股票数上限。通达信对 TypeQuote 一帧最多 80 只(实测 >80 时
+# 节点只回 80 条, 触发 sidecar 侧的长度校验「预期N个, 实际80个」), 所以 80 就是
+# 协议硬上限。原来取 50, 比上限保守 30 只, 全市场要多花 37% 的往返; 默认抬到上限,
+# 可用 TDX_API_QUOTE_BATCH 回退(需与 sidecar 的 TDX_QUOTE_BATCH_MAX 同步)。
+_QUOTE_BATCH = 80
+_QUOTE_BATCH_MAX = 80
+_QUOTE_WORKERS_DEFAULT = 8
 _QUOTE_WORKERS_MAX = 16
 _KLINE_BATCH = 8
 # 日K接口是逐股请求; 与 sidecar 共享 HTTP 闸门, 允许多个请求在闸门内排队,
@@ -123,11 +128,11 @@ _CORE_INDEXES = {
 
 # Provider 会在多个请求线程中被分别实例化; 闸门必须是模块级共享对象,
 # 否则每个实例各自限流仍会把 tdx-api 同时打满。
-# 与 tdx-api Web 层的默认 4 条行情连接对应。Provider 实例可能有多个, 闸门
-# 必须是模块级共享对象, 避免每个实例各自放行请求把 sidecar 打满。
+# 与 tdx-api Web 层的默认 8 条行情连接(TDX_QUOTE_POOL)对应。Provider 实例可能
+# 有多个, 闸门必须是模块级共享对象, 避免每个实例各自放行请求把 sidecar 打满。
 # 生产环境可通过 TDX_API_HTTP_CONCURRENCY 小幅提高, 但仍有硬上限;
 # 该值只在进程启动时读取，便于通过配置和重启回滚。
-_TDX_HTTP_CONCURRENCY_DEFAULT = 4
+_TDX_HTTP_CONCURRENCY_DEFAULT = 8
 _TDX_HTTP_CONCURRENCY_MAX = 16
 
 
@@ -393,7 +398,7 @@ class TDXAPIProvider:
             logger.warning("tdx-api codes 拉取失败, 实时行情将不补名称: %s", e)
             name_map = {}
         rows: list[dict] = []
-        chunks = chunked(target_symbols, _QUOTE_BATCH)
+        chunks = chunked(target_symbols, _quote_batch())
         workers = min(_realtime_workers(), len(chunks))
         if workers <= 1 or len(chunks) <= 1:
             for chunk in chunks:
@@ -829,7 +834,7 @@ class TDXAPIProvider:
     def _major_index_snapshots(self, symbols: list[str]) -> list[dict]:
         name_map = {symbol: _CORE_INDEXES.get(symbol, symbol) for symbol in symbols}
         rows = []
-        for chunk in chunked(symbols, _QUOTE_BATCH):
+        for chunk in chunked(symbols, _quote_batch()):
             try:
                 data = self._request(
                     "POST",
@@ -862,7 +867,7 @@ class TDXAPIProvider:
             df = self.get_minute(symbols[:1], None, None)
             return _preview(self.name, "minute", df)
         if dataset == "realtime":
-            rows = self.get_realtime(symbols=symbols[: min(len(symbols), _QUOTE_BATCH)])
+            rows = self.get_realtime(symbols=symbols[: min(len(symbols), _quote_batch())])
             head = rows[:5]
             return {
                 "provider": self.name,
@@ -1406,6 +1411,23 @@ def _realtime_workers() -> int:
     except ValueError:
         workers = _QUOTE_WORKERS_DEFAULT
     return max(1, min(_QUOTE_WORKERS_MAX, workers))
+
+
+def _quote_batch() -> int:
+    """单次 batch-quote 的股票数 (env TDX_API_QUOTE_BATCH 可覆盖, 上限 80)。
+
+    与 sidecar 的 TDX_QUOTE_BATCH_MAX 是一对: Python 送超过 sidecar 上限的批次
+    会被整批拒绝("一次最多查询N只股票"), 所以两侧要同步调整。
+    """
+    raw = (os.getenv("TDX_API_QUOTE_BATCH") or "").strip()
+    if not raw:
+        value = _QUOTE_BATCH
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = _QUOTE_BATCH
+    return max(1, min(_QUOTE_BATCH_MAX, value))
 
 
 def _minute_workers() -> int:
