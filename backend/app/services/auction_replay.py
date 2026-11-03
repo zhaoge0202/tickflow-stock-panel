@@ -1254,6 +1254,10 @@ def _build_dynamic_frame(
         engine_results = {}
 
     matrix_stats = engine.realtime_matrix_stats(context.cache_key)
+    # 本函数的 cache_key 含 trade_day, 每个交易日会构建一份独立矩阵; 若不清除,
+    # 这些矩阵会常驻 engine._realtime_matrices 直到 reload, 逐日累积数 GB 内存。
+    # 矩阵在 run_all 之后已不再被使用 (结果已落 engine_results/matrix_stats), 立即释放。
+    engine.release_realtime_matrix(context.cache_key)
     for sid in strategy_ids:
         raw_result = engine_results.get(sid)
         if raw_result is None:

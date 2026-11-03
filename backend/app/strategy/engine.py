@@ -930,6 +930,16 @@ class StrategyEngine:
                 "update_count": int(entry.buffer.update_count),
             }
 
+    def release_realtime_matrix(self, cache_key: str) -> None:
+        """释放指定 cache_key 的实时矩阵缓冲, 立即回收其占用的内存。
+
+        用于按日期生成 cache_key 的一次性调用方 (如 auction_replay 回填,
+        cache_key 含 trade_day, 每个日期一份矩阵且用后即弃)。若不释放,
+        这些缓冲会常驻 _realtime_matrices 直到 reload, 内存持续累积。
+        """
+        with self._realtime_matrix_lock:
+            self._realtime_matrices.pop(cache_key, None)
+
     # ================================================================
     # 执行
     # ================================================================
