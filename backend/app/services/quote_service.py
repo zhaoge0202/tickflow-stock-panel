@@ -264,6 +264,10 @@ class QuoteService:
     # 全量 enriched 是冷路径兜底, 同一天最多启动一次, 避免 live_agg
     # 暂不可用时每轮行情都重复扫描 90 日 × 全市场 parquet。
     FULL_ENRICHED_REBUILD_COOLDOWN_S = 60.0
+    # 行情快照"数据龄"告警阈值(秒)。监控推送用的是 enriched 里的 quote_ts 对应价,
+    # 若快照已过去这么久, 推出去的价格就不再是"当时的价格" —— 必须让日志/告警
+    # 带着这个数字, 否则"实时推送"无法被验证。
+    MONITOR_STALE_WARN_S = 15.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -274,6 +278,11 @@ class QuoteService:
         # IO/webhook 判定, 留在取数锁内会阻塞下一轮拉取与手动刷新), 此锁保证
         # 两轮评估不并发 (原先由取数锁隐式串行)。
         self._evaluate_lock = threading.Lock()
+        # 监控评估异步化: 行情线程只投递"该评估了"的信号, 评估跑在独立线程。
+        # 单槽 latest-wins —— 评估比取数慢时丢弃积压, 只算最新状态。
+        self._monitor_wake = threading.Event()
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
         # 全量 enriched 采用 single-flight: 行情轮询只负责提交一次后台任务,
         # 后续轮次合并掉, 不阻塞下一轮行情采集和 HTTP 请求。
         self._enriched_rebuild_lock = threading.Lock()
@@ -350,6 +359,7 @@ class QuoteService:
         self._enabled = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+        self._start_monitor_worker()
         self._save_enabled(True)
         logger.info("行情服务已启动, 轮询间隔 %.1fs", self._interval)
 
@@ -360,6 +370,7 @@ class QuoteService:
         """
         self._running = False
         self._enabled = False
+        self._stop_monitor_worker()
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
@@ -386,6 +397,7 @@ class QuoteService:
             self._running = True
             self._thread = threading.Thread(target=self._poll_loop, daemon=True)
             self._thread.start()
+            self._start_monitor_worker()
         logger.info("行情服务已启用, 轮询间隔 %.1fs", self._interval)
         return True
 
@@ -839,19 +851,100 @@ class QuoteService:
         # 监控评估移出取数锁执行: 评估输入是本轮快照 (daily_df/quote_extra),
         # 离锁执行结果不变; 时序不变式 (enriched 替换后才评估) 仍由调用顺序保证。
         if snapshot is not None:
-            eval_started = time.perf_counter()
-            with self._evaluate_lock:
-                self._evaluate_monitors(*snapshot)
-            eval_elapsed = time.perf_counter() - eval_started
+            eval_elapsed, eval_async = self._dispatch_monitors(*snapshot)
         else:
             # 自选模式在取数锁内就完成评估了, 这段耗时已计入 fetch_elapsed,
             # 这里摘出来单独呈现, 否则会被误读成"取数很慢"。
             eval_elapsed = watchlist_eval
             fetch_elapsed -= watchlist_eval
-        self._log_round_timing(fetch_elapsed, eval_elapsed)
+            eval_async = False
+        self._log_round_timing(fetch_elapsed, eval_elapsed, eval_async=eval_async)
         return updated
 
-    def _log_round_timing(self, fetch_elapsed: float, eval_elapsed: float) -> None:
+    # ── 监控评估异步化 ────────────────────────────────────────────
+    #
+    # 串行链路下"行情轮周期 = 取数 + 评估": 盘中实测取数 12~24s、评估 11~40s,
+    # 推送时价格已是 10~40 秒前。改成两个线程后周期 = max(取数, 评估), 且
+    # 评估永远对着最新快照, 推送延迟收敛到"取数周期"。
+
+    def _monitor_worker_alive(self) -> bool:
+        thread = getattr(self, "_monitor_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _dispatch_monitors(
+        self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None,
+    ) -> tuple[float, bool]:
+        """投递一次监控评估。返回 (本轮评估耗时, 是否异步)。
+
+        worker 未启动时退回同步调用 —— 未调用 start()/enable() 的场景(单测、
+        轻量替身)保持原有的同步语义。
+        """
+        if not self._monitor_worker_alive():
+            started = time.perf_counter()
+            with self._evaluate_lock:
+                self._evaluate_monitors(daily_df, quote_extra)
+            return time.perf_counter() - started, False
+        # 单槽合并: 已有待评估信号时再 set 无副作用, 不会积压多轮。
+        self._monitor_wake.set()
+        return 0.0, True
+
+    def _monitor_loop(self) -> None:
+        while not self._monitor_stop.is_set():
+            if not self._monitor_wake.wait(timeout=0.5):
+                continue
+            self._monitor_wake.clear()
+            if self._monitor_stop.is_set():
+                return
+            started = time.perf_counter()
+            try:
+                with self._evaluate_lock:
+                    self._evaluate_monitors(pl.DataFrame(), None)
+            except Exception:  # noqa: BLE001 — 评估异常不得终止线程
+                logger.exception("监控评估线程异常")
+            else:
+                logger.info("监控线程评估 %.1fs", time.perf_counter() - started)
+
+    def _start_monitor_worker(self) -> None:
+        if self._monitor_worker_alive():
+            return
+        self._monitor_stop = threading.Event()
+        self._monitor_wake = threading.Event()
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop, name="monitor-eval", daemon=True,
+        )
+        self._monitor_thread.start()
+        logger.info("监控评估线程已启动 (异步, 单槽 latest-wins)")
+
+    def _stop_monitor_worker(self) -> None:
+        thread = getattr(self, "_monitor_thread", None)
+        if thread is None:
+            return
+        self._monitor_stop.set()
+        self._monitor_wake.set()
+        thread.join(timeout=5)
+        self._monitor_thread = None
+
+    @staticmethod
+    def _enriched_data_age_s(df: pl.DataFrame) -> float | None:
+        """行情快照相对当前时间的数据龄(秒)。
+
+        口径: enriched 里 quote_ts(行情时间戳 ms)的最大值 → 现在。这是"推送用的
+        价格距现在多久"的唯一可验证指标; quote_ts 缺失/为空时返回 None。
+        """
+        if df is None or df.is_empty() or "quote_ts" not in df.columns:
+            return None
+        try:
+            newest = df.select(pl.col("quote_ts").max().cast(pl.Float64)).item()
+        except Exception:  # noqa: BLE001
+            return None
+        if newest is None:
+            return None
+        now_ms = float(int(time.time() * 1000))
+        return max(0.0, (now_ms - float(newest)) / 1000.0)
+
+    def _log_round_timing(
+        self, fetch_elapsed: float, eval_elapsed: float, *, eval_async: bool = False,
+    ) -> None:
         """打印本轮分段耗时。
 
         取数与监控评估在当前实现里是**同一线程串行**的, 所以行情轮周期 =
@@ -863,6 +956,9 @@ class QuoteService:
         period = f", 距上轮 {now - last:.1f}s" if last else ""
         self._last_round_perf = now
         total = fetch_elapsed + eval_elapsed
+        if eval_async:
+            logger.info("行情轮 %.1fs (取数 %.1fs / 监控 异步)%s", total, fetch_elapsed, period)
+            return
         if eval_elapsed < 0.001:
             logger.info("行情轮 %.1fs (取数 %.1fs / 监控 跳过)%s", total, fetch_elapsed, period)
             return
@@ -1745,6 +1841,8 @@ class QuoteService:
 
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
+            # 数据龄: 推送用的价格距现在多久。这是"实时性"唯一可验证的口径。
+            data_age_s = self._enriched_data_age_s(enriched_today)
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
             # ETF/指数轮有各自的空表+日期守卫, 不受影响 (纯指数行情/自选场景可独立评估)。
             stock_ready = (not enriched_today.is_empty()) and (enriched_date == cn_today())
@@ -1967,6 +2065,16 @@ class QuoteService:
                 except Exception as e:
                     logger.warning("模拟盘钩子失败 (不影响监控): %s", e)
                 t0 = _mark("模拟盘", t0)
+
+            if data_age_s is not None:
+                if data_age_s >= self.MONITOR_STALE_WARN_S:
+                    logger.warning(
+                        "监控数据龄 %.1fs (≥%.0fs, 本轮推送价格已陈旧): 分段 %s",
+                        data_age_s, self.MONITOR_STALE_WARN_S,
+                        " ".join(f"{n} {s:.1f}s" for n, s in marks if s >= 0.05) or "-",
+                    )
+                else:
+                    logger.info("监控数据龄 %.1fs", data_age_s)
 
             if marks:
                 total = sum(sec for _, sec in marks)
