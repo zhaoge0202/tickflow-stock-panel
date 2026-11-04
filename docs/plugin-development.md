@@ -9,6 +9,10 @@
 > 无代码接入(纯 HTTP YAML 配置)请看 [custom-data-source.md](./custom-data-source.md),
 > 两种方式遵循同一套内部数据契约。
 
+## 外部安装
+
+现在可通过「设置 → 数据源 → 安装插件」上传独立源码 ZIP。外部包格式、版本管理、兼容范围和模板见 [外部数据源插件安装](external-data-source-packages.md)。现有内置目录方式继续兼容。
+
 ## 快速上手
 
 一个插件 = 一个目录 + 一个 `plugin.yaml` 清单:
@@ -31,15 +35,24 @@ check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可�
 datasets: [realtime]                     # 支持: daily/adj_factor/minute/realtime/depth5/financial
 api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
-description: "数据源描述"
+description: |
+  ## 接入说明
+  使用 **个人 API Key** 获取数据。
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
-homepage: "https://example.com"          # (可选)官网/申请地址, 显示在设置页 Key 配置说明中
+homepage: "https://example.com"          # (可选)官网/文档地址, 显示在插件详情中
+homepage_label: "访问官网"                 # (可选)链接文字, 缺省为「显示名 官网」
 billing: points                          # (可选)计费标识: "points" → 设置页能力芯片/适配行标注「积分」
 billing_note: "消耗与频率/范围相关,间隔越短越高"  # (可选)计费提示: 设置页按警示框展示
 usage_notes:                             # (可选)使用要点: 各能力规模/节奏, 详情卡以列表展示
-  - "实时快照: 600 只/批, 全市场一轮约 10 批"
-key_manage_url: "https://example.com/me" # (可选)Key/账务管理页, 显示在设置页 Key 配置区(如积分明细入口)
+  - "实时快照: **600 只/批**, 全市场一轮约 10 批"
+  - "请先阅读 [接口文档](https://example.com/docs)。"
+key_manage_url: "https://example.com/me" # (可选)Key/账务管理页, 显示在插件详情中
+key_manage_label: "获取 Key / 查看用量"    # (可选)缺省为「管理 Key / 查看账户用量」
 ```
+
+`homepage_label`、`key_manage_label` 为可选纯文本，最多 200 字符；不填或留空时使用默认文案，没有对应 URL 时不显示入口。外部安装包的 `homepage`、`key_manage_url` 必须使用 HTTPS。链接在「数据源」与「已安装扩展」详情中展示，不依赖 `api_key_env` 或 Key 配置状态。新增字段不改变插件 API 版本，旧清单继续兼容。
+
+这两处详情及数据源安装预览的 `description`、详情中的 `usage_notes` 支持基础 Markdown：1–4 级标题、加粗、行内代码、无序/有序列表、引用、分隔线、表格和 HTTP/HTTPS 链接。YAML 多行正文可用 `|` 编写；名称、按钮与链接文案保持纯文本。当前不是完整 GFM，不支持图片、代码围栏或原始 HTML；原始 HTML 和不安全协议链接只显示为文字，不会执行。
 
 只声明真实提供的数据集;未声明的数据集 `provider_has_dataset` 返回 False,自动回退
 TickFlow。不要声明做不了的数据集(粒度含义见下文"能力声明的粒度")。
@@ -64,7 +77,7 @@ TickFlow 的「先探后存」语义:
 | `python` | 纯 Python 依赖, `pip install` | akshare、tushare |
 | `none` | 无额外依赖 | 纯 HTTP API 源 |
 
-`runtime` 字段当前仅用于 UI 展示, 实际依赖检测由 `check` 函数负责。
+内置插件的 `runtime` 决定依赖安装方式，实际就绪检测由 `check` 函数负责。外部源码包只检查依赖兼容性，不执行 pip/npm 安装。
 
 ### check 函数
 
@@ -326,7 +339,11 @@ uv run --extra dev python -m ruff check app/plugins/<your_plugin>/ tests/test_<y
   - 提供 `realtime`(五市场全 A 股票池枚举 + 600 只/批快照, 批间失败隔离)、`depth5`(快照自带买卖五档数组, 手口径透传)、`daily`(count 模式单标的拉取, 原始价, volume 股→手, amount 万元→元, `iter_daily` 逐标的流式)、`adj_factor`(事件接口每10股口径 ÷10 转每股 + 本地K线一次配价, 交易所公式推导单事件比值, 涨跌停自检)、`minute`(1m count 模式单标的, 240 根/日, 深度约 40 交易日, datetime=Date+Time 拼北京墙钟 naive, 与日K同口径 股→手/万元→元)、`full_minute`(修复轮 `get_intraday_batch` 当日窗口 + 稳态增量 `get_intraday_latest` 每股最新 N 根; 无批量端点, 全市场一轮 10 分钟量级); 指数快照直接支持(上证指数走 TDX 999999.SH 别名, `get_realtime_indices` 映射); 快照无名称列由维表关联; 未声明 financial → 回退 TickFlow; 清单声明 `billing: points` + `key_manage_url`(商城积分明细入口)
   - `client.py` — 原生层封装(lib 私有物化 + token 注入双 ini + `TDX_AI_DATA_LIB` 指向、空闲首连 "Invalid server response" 重试包装、股票池 12h 缓存)
   - `provider.py` — Provider 实现(快照昨收=LastClose/高低=Max/Min 字段映射、涨跌幅 (Now-LastClose)/LastClose 小数制、RefreshTime 北京墙钟→epoch ms、软失败)
-  - `probe.py` — 候选 Key 探测的独立子进程(原生 DLL 每进程单 Key): 分阶段进度留痕定位原生层死点; 因 TDX 会话按 IP 复用(错误 Key 在活跃会话下也能拉数), 探测语义为格式+连通性而非 Key 真伪, 真伪由首次实拉暴露
+  - `probe.py` — 候选 Key 探测的独立子进程(原生 DLL 每进程单 Key): 分阶段进度留痕定位原生层死点; 服务端明确拒绝凭据或额度时不保存。因 TDX 会话按 IP 复用(错误 Key 在活跃会话下也能拉数), 通过探测仅代表格式与连通性检查通过, 不保证所有数据接口均有权限。
+
+TdxQuant 在 SDK 清理响应前检查服务端错误, 保留错误原因并脱敏; 明确的凭据/额度拒绝不重试, 实时分钟轮立即熔断。历史分钟请求失败会通过 `app.data_providers.base.ProviderRequestError` 传递到任务层并标记失败, 不转换成成功的 0 行或跨源重试; 其他插件也可用该异常显式声明请求失败。带时区的分钟请求窗口在插件边界归一为北京墙钟, 再与原生分钟列比较。正常停牌、休市或窗口内无数据的空结果保留原语义。
+
+除权事件也在原生 `get_cw_data` 响应上执行上述检查：SDK 1.2.2 的 `get_divid_factors` 会将服务端失败与正常无事件都转换为空 DataFrame，不能用 DataFrame 是否为空判断请求成功。插件按 SDK 的 `Date/Type/Value` 契约解析事件，保留每 10 股单位及闭区间日期筛选；正常无事件返回空列表，事件或配价请求失败则中止本轮、保留原有因子文件，并向任务层及数据源试拉返回明确错误。
 
 ## 路由机制(无需关心, 仅参考)
 

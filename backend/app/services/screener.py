@@ -97,7 +97,7 @@ class ScreenerService:
         self._enriched_dirname = enriched_dirname(asset_type)
 
     @staticmethod
-    def clear_history_cache() -> None:
+    def clear_history_cache(asset_type: str | None = None) -> None:
         """清空进程级 _history_cache (TTL 缓存)。
 
         清除数据后调用, 避免内存里的旧历史窗口残留导致策略/看板仍命中旧数据。
@@ -105,7 +105,12 @@ class ScreenerService:
         # 与历史窗口计算共用同一把锁, 防止清理与慢计算并发时旧结果在清理后
         # 又被写回缓存。管道刷新宁可等待当前计算结束, 也不能继续消费旧快照。
         with _history_compute_lock:
-            _history_cache.clear()
+            if asset_type is None:
+                _history_cache.clear()
+            else:
+                for key in list(_history_cache):
+                    if key[0] == asset_type:
+                        _history_cache.pop(key, None)
 
     @staticmethod
     def _crop_history_cache(
@@ -122,12 +127,20 @@ class ScreenerService:
         start_date = dates[-keep_count]
         return frame.filter(pl.col("date") >= start_date)
 
+    def _assert_integrity(self, end: date, *, enriched_only=False) -> None:
+        from app.services.daily_health import assert_usable
+
+        root = getattr(getattr(self.repo, "store", None), "data_dir", None)
+        if root is not None:
+            assert_usable(root, self.asset_type, end=end, enriched_only=enriched_only)
+
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
 
         enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
         对于最新日, 优先使用内存缓存 (已包含完整指标)。
         """
+        self._assert_integrity(target_date, enriched_only=True)
         # 优先使用 repo 最新日缓存
         cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
         if cache is not None and not cache.is_empty() and cache_date == target_date:
@@ -352,6 +365,7 @@ class ScreenerService:
         repository 不常驻完整历史；这里按需 scan_parquet + compute_indicators，
         并仅保留最近一次结果的短 TTL 缓存。
         """
+        self._assert_integrity(target_date, enriched_only=True)
         # 兼容 repository 接口；当前实现主动返回 None，不再命中常驻历史缓存。
         t0 = time.perf_counter()
         if self.asset_type == "stock":
@@ -425,7 +439,9 @@ class ScreenerService:
                     paths.append(str(part))
                 cursor += timedelta(days=1)
             if not paths:
-                return pl.DataFrame()
+                # 按 date= 目录逐个探测是性能优化 (避免几千个分区元数据全量枚举)。
+                # 探测为空 (目录尚未落地/命名变体/测试替身) 时回退 glob, 保持既有行为。
+                paths = [str(enriched_dir / "**" / "*.parquet")]
             lf = scan_enriched_parquet(paths)
             available = [c for c in read_cols if c in lf.collect_schema().names()]
             history_lf = lf.select(available)
@@ -500,6 +516,7 @@ class ScreenerService:
         先通过 Polars 即时计算完整指标, 再用 DuckDB 做 SQL WHERE 过滤。
         kline_enriched DuckDB 视图只有 14 列, 不能直接用于指标过滤。
         """
+        self._assert_integrity(as_of)
         t0 = time.perf_counter()
 
         if not conditions:
@@ -571,6 +588,7 @@ class ScreenerService:
         """按调用方要求装配标准策略数据上下文，不解释策略公式。"""
         from app.strategy.engine import StrategyDataContext
 
+        self._assert_integrity(as_of)
         if current is None:
             current = self._load_enriched_for_date(as_of)
         if timeframe == "1m":

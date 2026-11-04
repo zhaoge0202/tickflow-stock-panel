@@ -110,6 +110,10 @@ TickFlowStockPanel.app/
 TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
 reports/cursor_tickflow_pro_rate_limit_p0.bundle
+<<<<<<< HEAD
 .bce-tool/
 # 运维手册含服务器密码, 禁止提交
 docs/windows-server-ops.md
+
+# 协议变更工作文档 (含贡献者个人信息, 自述不入库 — CONTRIBUTING §8/§14.4)
+relicensing/

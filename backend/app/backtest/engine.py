@@ -387,10 +387,16 @@ class BacktestEngine:
     def __init__(self, repo: KlineRepository) -> None:
         self.repo = repo
         self._cache = PanelCache()
+        self._evidence = None
 
     # ── 数据加载 ──────────────────────────────────────
 
     def data_generation(self, asset_type: str = "stock") -> str | None:
+        from app.services.daily_health import assert_usable
+
+        root = getattr(getattr(self.repo, "store", None), "data_dir", None)
+        if root is not None:
+            assert_usable(root, asset_type)
         loader = getattr(self.repo, "get_matrix_data_generation", None)
         return loader(asset_type) if callable(loader) else None
 
@@ -403,9 +409,13 @@ class BacktestEngine:
     ) -> str | None:
         """获取 generation; 发布进行中时在超时窗口内轮询, 可被取消事件打断。"""
         deadline = time.monotonic() + timeout_s
+        from app.services.daily_health import DailyIntegrityError
+
         while True:
             try:
                 return self.data_generation(asset_type)
+            except DailyIntegrityError:
+                raise
             except EnrichedGenerationUnavailableError:
                 if cancel_event is not None and cancel_event.is_set():
                     raise
@@ -425,6 +435,17 @@ class BacktestEngine:
             raise EnrichedGenerationUnavailableError(
                 "enriched data changed while the snapshot was being read"
             )
+
+    def _range_cache_generation(self, asset_type: str, end: date, expected: str | None) -> str | None:
+        loader = getattr(self.repo, "get_enriched_generation_snapshot", None)
+        if not callable(loader) or expected is None:
+            return expected
+        snapshot = loader(asset_type)
+        if snapshot.generation != expected:
+            raise EnrichedGenerationUnavailableError(
+                "enriched data changed while the snapshot was being read"
+            )
+        return snapshot.through(end)
 
     def load_panel(
         self,
@@ -447,16 +468,19 @@ class BacktestEngine:
                 if expected is not None
                 else self.data_generation(asset_type)
             )
-            panel = self._cache.get_or_compute(
-                symbols,
-                start,
-                end,
-                columns,
-                self._load_panel_inner,
-                asset_type=asset_type,
-                generation=generation,
-            )
             try:
+                # Cache identity follows the consumed prefix. The global generation
+                # still guards the read, including in-progress/partial publications.
+                cache_generation = self._range_cache_generation(asset_type, end, generation)
+                panel = self._cache.get_or_compute(
+                    symbols,
+                    start,
+                    end,
+                    columns,
+                    self._load_panel_inner,
+                    asset_type=asset_type,
+                    generation=cache_generation,
+                )
                 self.assert_data_generation(asset_type, generation)
             except EnrichedGenerationUnavailableError:
                 if attempt + 1 >= attempts:
@@ -498,14 +522,10 @@ class BacktestEngine:
         end: date,
         feature_plan,
         asset_type: str = "stock",
+        *,
+        evidence=None,
     ) -> pl.DataFrame:
         """按解析后的依赖加载窄基础列并计算回测所需特征。"""
-        from app.indicators.pipeline import (
-            compute_indicators,
-            compute_limit_signals,
-            compute_signals,
-        )
-
         df = self.load_panel(
             symbols,
             start,
@@ -517,7 +537,6 @@ class BacktestEngine:
             return df
 
         from app.backtest.fundamentals import (
-            attach_fundamental_factors,
             load_fundamental_snapshot,
         )
 
@@ -525,25 +544,59 @@ class BacktestEngine:
             getattr(feature_plan, "fundamental_columns", frozenset())
             or frozenset()
         )
-        if fundamental_names:
-            # 财务因子列不落 enriched 存储, 在加载口按公告日门控并入。
-            df = attach_fundamental_factors(
-                df,
-                load_fundamental_snapshot(
-                    self.repo.store.data_dir if self.repo is not None else None
-                ),
-                fundamental_names,
-            )
-
+        financials = load_fundamental_snapshot(
+            self.repo.store.data_dir if self.repo is not None else None,
+        ) if fundamental_names else None
         instruments = (
             self.repo.get_instruments_asset(asset_type)
             if self.repo is not None
             else pl.DataFrame()
         )
+        historical_shares = (
+            self.repo.get_historical_shares()
+            if asset_type == "stock" and self.repo is not None and not instruments.is_empty()
+            else None
+        )
+        if evidence is not None:
+            from app.factors.ext_factors import attach_ext_columns
+
+            # 扩展时序值也要固定在本次原始快照内；检查期间不重新读取磁盘。
+            df = attach_ext_columns(df, include_snapshot=False, data_dir=self.repo.store.data_dir)
+
+        def prepare(raw):
+            return self._prepare_panel_features(
+                raw, feature_plan, instruments, historical_shares, financials,
+                attach_extensions=evidence is None,
+            )
+
+        if evidence is not None:
+            evidence.capture_panel(df, prepare, {
+                "instruments": instruments, "historical_shares": historical_shares,
+                "financial_announcements": financials,
+            })
+        return prepare(df)
+
+    @staticmethod
+    def _prepare_panel_features(
+        df, feature_plan, instruments, historical_shares, financials, *, attach_extensions=True,
+    ):
+        from app.backtest.fundamentals import attach_fundamental_factors
+        from app.indicators.pipeline import (
+            compute_indicators,
+            compute_limit_signals,
+            compute_signals,
+        )
+
+        fundamental_names = sorted(getattr(feature_plan, "fundamental_columns", ()) or ())
+        if fundamental_names:
+            df = attach_fundamental_factors(df, financials, fundamental_names)
         matrix_native = feature_plan.execution_backend == "matrix_native"
         if not matrix_native:
             df = compute_indicators(df, needed=set(feature_plan.indicator_columns))
-            df = compute_signals(df, needed=set(feature_plan.signal_columns))
+            df = compute_signals(
+                df, needed=set(feature_plan.signal_columns),
+                **({"attach_extensions": False} if not attach_extensions else {}),
+            )
         if not instruments.is_empty():
             df = compute_limit_signals(
                 df,
@@ -551,11 +604,7 @@ class BacktestEngine:
                 needed={"signal_limit_up", "signal_limit_down"}
                 if matrix_native
                 else set(feature_plan.signal_columns),
-                historical_shares=(
-                    self.repo.get_historical_shares()
-                    if asset_type == "stock" and self.repo is not None
-                    else None
-                ),
+                historical_shares=historical_shares,
             )
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
             join_cols.extend(
@@ -609,6 +658,8 @@ class BacktestEngine:
 
         parquet_root = self.repo.store.data_dir / enriched_dirname(asset_type)
         instruments = self.repo.get_instruments_asset(asset_type)
+        if self._evidence is not None:
+            self._evidence.record_frame("instruments", instruments)
         field_columns = (
             set(feature_plan.base_columns)
             | set(feature_plan.instrument_columns)
@@ -656,6 +707,9 @@ class BacktestEngine:
         attempts = 2
         for attempt in range(attempts):
             try:
+                cache_generation = self._range_cache_generation(
+                    asset_type, coverage_end or end, source_generation,
+                )
                 market = load_market_data_matrix_from_parquet(
                     parquet_root,
                     start,
@@ -671,7 +725,7 @@ class BacktestEngine:
                     profile_generation=(
                         cache_profile.generation if cache_profile is not None else "request"
                     ),
-                    source_generation=source_generation,
+                    source_generation=cache_generation,
                     cancel_event=cancel_event,
                 )
                 self.assert_data_generation(asset_type, source_generation)
@@ -687,6 +741,7 @@ class BacktestEngine:
                         market,
                         self.repo.store.data_dir if self.repo is not None else None,
                         fundamental_names,
+                        evidence=self._evidence,
                     )
                 if ext_wanted:
                     from app.factors.ext_factors import attach_matrix_ext_fields
@@ -1017,7 +1072,9 @@ class BacktestEngine:
             dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
             symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if dates and symbols:
-                loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, config.asset_type)
+                loaded = self._load_minute_for_fills(
+                    self.repo, list(symbols), dates, config.asset_type, evidence=self._evidence,
+                )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
         def _count(key: str) -> None:
@@ -1074,6 +1131,14 @@ class BacktestEngine:
             same = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
             flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
             return bool(flags[time_id, asset_id]) and same
+
+        def _intraday_entry(time_id: int, asset_id: int) -> bool:
+            """该格建仓是否发生在盘中: 分钟策略的逐格价格覆盖 (entry_price) 有限,
+            或 minute_fill 细化可用。粗粒度: 只要有分钟数据即视为盘中 — 方向保守
+            (多计入峰值 → 早退出), 不会像漏计那样高估收益。"""
+            if matrix.entry_price is not None and bool(np.isfinite(matrix.entry_price[time_id, asset_id])):
+                return True
+            return config.minute_fill and bool(minute_cache)
 
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
             if not matrix.tradable[time_id, asset_id]:
@@ -1268,7 +1333,15 @@ class BacktestEngine:
                 "entry_price": entry_price,
                 "entry_score": score,
                 "hold_days": 0,
-                "max_high": max(entry_price, float(matrix.high[time_id, asset_id])),
+                # close_t 且收盘价成交: 当日 high 发生在建仓之前, 不得进入移动止损
+                # 峰值 (峰值虚高会把风控线整体上移、退出提前 — 时间口径错误);
+                # 盘中成交 (分钟策略的 entry_price_override / minute_fill 细化)
+                # 建仓后冲高合法, 仍计入。open 成交同理。
+                "max_high": (
+                    entry_price
+                    if config.entry_fill == "close_t" and not _intraday_entry(time_id, asset_id)
+                    else max(entry_price, float(matrix.high[time_id, asset_id]))
+                ),
                 "pending_exit_reason": None,
                 "pending_exit_signal_date": None,
                 "pending_exit_signal_id": None,
@@ -1411,6 +1484,7 @@ class BacktestEngine:
             if _trigger_dates and _trigger_symbols:
                 _loaded = self._load_minute_for_fills(
                     self.repo, list(_trigger_symbols), _trigger_dates, "stock",
+                    evidence=self._evidence,
                 )
                 for _key, _marr in _loaded.items():
                     if _marr is not None and len(_marr) > 0:
@@ -1425,13 +1499,24 @@ class BacktestEngine:
             if _marr is None:
                 return daily_price
             _ref = None
-            for _col in ("ma5", "ma10", "ma20"):
+            for _col, _win in (("ma5", 5), ("ma10", 10), ("ma20", 20)):
                 if _col in panel.columns:
                     try:
                         _fv = float(panel[_col][idx])
-                        if _fv > 0 and np.isfinite(_fv):
+                        if not (_fv > 0 and np.isfinite(_fv)):
+                            continue
+                        # 当日已知纪律 (#388, 与 matrix 路径同口径): enriched maN
+                        # 含当根收盘, 盘中成交不可能知道当日收盘 → 代数剔除;
+                        # close 缺失/非法时退回原均线 (该格本不可交易)。
+                        try:
+                            _cv = float(panel["close"][idx])
+                        except (TypeError, ValueError):
+                            _cv = float("nan")
+                        if _win > 1 and _cv > 0 and np.isfinite(_cv):
+                            _ref = (_win * _fv - _cv) / (_win - 1)
+                        else:
                             _ref = _fv
-                            break
+                        break
                     except (TypeError, ValueError):
                         pass
             _precise = self._resolve_minute_fill(_marr, _ref, side)
@@ -1693,13 +1778,16 @@ class BacktestEngine:
                 "entry_price": entry_price,
                 "entry_score": score,
                 "hold_days": 0,
+                # close_t 收盘成交: 当日 high 在建仓前发生, 不进移动止损峰值
+                # (与矩阵独立路径同口径)
                 "max_high": entry_price,
                 "pending_exit_reason": None,
                 "pending_exit_signal_date": None,
                 "blocked_exit_days": 0,
             }
             hi = float(high_prices[entry_idx])
-            if _valid_price(hi):
+            legacy_intraday_entry = config.minute_fill and bool(minute_cache)
+            if (config.entry_fill != "close_t" or legacy_intraday_entry) and _valid_price(hi):
                 pos["max_high"] = max(float(pos["max_high"]), hi)
 
             closed = False
@@ -1847,6 +1935,7 @@ class BacktestEngine:
         symbols: list[str],
         dates_needed: set,
         asset_type: str,
+        *, evidence=None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
@@ -1878,6 +1967,8 @@ class BacktestEngine:
                 continue
             if df.is_empty():
                 continue
+            if evidence is not None:
+                evidence.record_frame(f"minute_fill/{asset_type}/{batch[0]}/{batch[-1]}", df)
             # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
             df = df.sort(["symbol", "datetime"]).with_columns(
                 pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
@@ -1984,6 +2075,7 @@ class BacktestEngine:
             if trigger_dates and trigger_symbols:
                 loaded = self._load_minute_for_fills(
                     self.repo, list(trigger_symbols), trigger_dates, config.asset_type,
+                    evidence=self._evidence,
                 )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
@@ -2051,6 +2143,14 @@ class BacktestEngine:
             flag = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
             return bool(flag[time_id, asset_id]) and same_price
 
+        def _intraday_entry(time_id: int, asset_id: int) -> bool:
+            """该格建仓是否发生在盘中: 分钟策略的逐格价格覆盖 (entry_price) 有限,
+            或 minute_fill 细化可用。粗粒度: 只要有分钟数据即视为盘中 — 方向保守
+            (多计入峰值 → 早退出), 不会像漏计那样高估收益。"""
+            if matrix.entry_price is not None and bool(np.isfinite(matrix.entry_price[time_id, asset_id])):
+                return True
+            return config.minute_fill and bool(minute_cache)
+
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
@@ -2071,6 +2171,16 @@ class BacktestEngine:
             price = override if override is not None else exit_prices[time_id, asset_id]
             if not _valid_price(price):
                 return False, "sell_invalid_price"
+            if (
+                override is None
+                and config.exit_fill == "close_t"
+                and bool(matrix.limit_down_locked[time_id, asset_id])
+            ):
+                # close_t 按当日收盘价卖出: 收盘封死跌停(含一字)的卖队排队现实中
+                # 排不出去, 拦截并经 pending_exit 递延到下一可卖日 — 与独立路径/
+                # legacy 路径同口径 (本路径此前只拦一字板, 尾盘封板股按跌停价
+                # "卖出"导致亏损被低估)。
+                return False, "sell_limit_down"
             if _one_price_limit(time_id, asset_id, "down"):
                 return False, "sell_limit_down"
             return True, ""
@@ -2388,7 +2498,16 @@ class BacktestEngine:
 
             for asset_id, pos in positions.items():
                 high_price = float(matrix.high[time_id, asset_id])
-                if _valid_price(high_price):
+                # close_t 且收盘价成交的当日建仓: 当日 high 在建仓之前, 不进移动
+                # 止损峰值; 盘中成交 (override/minute_fill) 与 open 成交仍计入。
+                if (
+                    _valid_price(high_price)
+                    and not (
+                        config.entry_fill == "close_t"
+                        and not _intraday_entry(time_id, asset_id)
+                        and pos["entry_date"] == date_text
+                    )
+                ):
                     pos["max_high"] = max(float(pos["max_high"]), high_price)
             valid_closes = np.isfinite(matrix.close[time_id]) & (matrix.close[time_id] > 0)
             last_close[valid_closes] = matrix.close[time_id, valid_closes]
@@ -2415,6 +2534,26 @@ class BacktestEngine:
                     "value": round(float(drawdown), 4),
                 })
 
+        # 期末仍持仓 (含被封板/停牌递延的): 不再只计入 pending_exit_positions 而
+        # 静默丢弃交易记录 — 按该标的最后一个价格有效日强制落账,
+        # blocked_exit_days 保留"曾受阻"痕迹 (与独立路径的期末兜底同口径,
+        # n_trades/win_rate 与权益口径不再分裂)。先取 pending 计数再清仓。
+        pending_exit_count = sum(1 for pos in positions.values() if pos.get("pending_exit_reason"))
+        for asset_id in list(positions):
+            last_time = None
+            for t in range(time_count - 1, -1, -1):
+                if _valid_price(exit_prices[t, asset_id]):
+                    last_time = t
+                    break
+            if last_time is None:
+                continue
+            _sell(
+                last_time, asset_id,
+                str(positions[asset_id].get("pending_exit_reason") or "end"),
+                matrix.timestamp_labels[last_time][:10],
+                set(),
+            )
+
         statistics_started = time.perf_counter()
         stats = self._calc_portfolio_stats_from_values(
             equity_values,
@@ -2428,7 +2567,7 @@ class BacktestEngine:
             1,
         )
         stats["execution"] = execution_stats
-        stats["pending_exit_positions"] = sum(1 for pos in positions.values() if pos.get("pending_exit_reason"))
+        stats["pending_exit_positions"] = pending_exit_count
         stats["market_matrix_shape"] = [time_count, asset_count]
         stats["market_matrix_bytes"] = matrix.nbytes
         return SimResult(
@@ -2570,6 +2709,7 @@ class BacktestEngine:
                 ) else "stock"
                 loaded = self._load_minute_for_fills(
                     self.repo, list(trigger_symbols), trigger_dates, asset_type,
+                    evidence=self._evidence,
                 )
                 for key, marr in loaded.items():
                     if marr is not None and len(marr) > 0:
@@ -2584,16 +2724,23 @@ class BacktestEngine:
             marr = minute_cache.get((sym, d_str))
             if marr is None:
                 return daily_price
-            # 参考线: 从 panel 取 ma5/ma10/ma20 作为近似 (均线类信号)
+            # 参考线: 从 panel 取 ma5/ma10/ma20 作为近似 (均线类信号)。
+            # 当日已知纪律 (#388, 与 matrix 路径同口径): enriched maN 含当根收盘,
+            # 盘中成交不可能知道当日收盘 → 代数剔除; close 缺失/非法时退回原均线。
             ref = None
-            for col in ("ma5", "ma10", "ma20"):
+            for col, win in (("ma5", 5), ("ma10", 10), ("ma20", 20)):
                 if col in panel.columns:
                     val = panel[col][idx]
                     try:
                         fv = float(val)
-                        if fv > 0 and np.isfinite(fv):
-                            ref = fv
-                            break
+                        if not (fv > 0 and np.isfinite(fv)):
+                            continue
+                        try:
+                            cv = float(panel["close"][idx])
+                        except (TypeError, ValueError):
+                            cv = float("nan")
+                        ref = (win * fv - cv) / (win - 1) if (win > 1 and cv > 0 and np.isfinite(cv)) else fv
+                        break
                     except (TypeError, ValueError):
                         pass
             precise = self._resolve_minute_fill(marr, ref, side)
@@ -3015,7 +3162,17 @@ class BacktestEngine:
                 idx = row_by_symbol.get(sym)
                 if idx is not None:
                     hi = float(high_prices[idx])
-                    if _valid_price(hi):
+                    # close_t 且收盘价成交的当日建仓: 当日 high 在建仓之前, 不进
+                    # 移动止损峰值; minute_fill 细化 (盘中成交) 仍计入。
+                    legacy_intraday_entry = config.minute_fill and bool(minute_cache)
+                    if (
+                        _valid_price(hi)
+                        and not (
+                            config.entry_fill == "close_t"
+                            and not legacy_intraday_entry
+                            and pos["entry_date"] == str(d_str)[:10]
+                        )
+                    ):
                         pos["max_high"] = max(float(pos.get("max_high", pos["entry_price"])), hi)
 
             for i in idxs:
@@ -3037,9 +3194,27 @@ class BacktestEngine:
             })
             drawdown_curve.append({"date": d_str[:10], "value": round(float(dd), 4)})
 
+        # 期末仍持仓 (含递延): 与矩阵路径同口径, 按最后一个价格有效日强制落账。
+        # 先取 pending 计数再清仓。
+        pending_exit_count = sum(1 for p in positions.values() if p.get("pending_exit_reason"))
+        for sym in list(positions):
+            last_idx = None
+            for i in range(n - 1, -1, -1):
+                if str(panel_symbols[i]) == sym and _valid_price(exit_prices[i]):
+                    last_idx = i
+                    break
+            if last_idx is None:
+                continue
+            _sell(
+                sym, last_idx,
+                str(positions[sym].get("pending_exit_reason") or "end"),
+                self._date_str(panel_dates[last_idx]),
+                set(),
+            )
+
         stats = self._calc_portfolio_stats(equity_curve, trades, config.initial_capital)
         stats["execution"] = execution_stats
-        stats["pending_exit_positions"] = sum(1 for p in positions.values() if p.get("pending_exit_reason"))
+        stats["pending_exit_positions"] = pending_exit_count
         per_symbol = self._calc_per_symbol(trades)
         return SimResult(
             equity_curve=equity_curve,
@@ -3206,7 +3381,9 @@ class BacktestEngine:
             max_dd = min(max_dd, dd)
 
         # 夏普 — 用交易收益标准差近似
-        sharpe = float(np.mean(pnls) / np.std(pnls)) * np.sqrt(252) if np.std(pnls) > 0 else 0.0
+        # 样本标准差 (ddof=1): 与主流回测库惯例一致; 单样本 std=nan → 守卫为 0
+        _std = float(np.std(pnls, ddof=1)) if len(pnls) > 1 else 0.0
+        sharpe = float(np.mean(pnls) / _std) * np.sqrt(252) if _std > 0 else 0.0
 
         # Sortino: 刻意沿用本函数 sharpe 的逐笔收益 x sqrt(252) 基准。逐笔年化非严格正确,
         # 但保证同一函数内 sharpe/sortino 口径一致可比 (内部一致 > 局部绝对)。仅惩罚下行波动。
@@ -3337,7 +3514,9 @@ class BacktestEngine:
         drawdowns = values / peaks - 1 if len(values) else np.array([])
         max_drawdown = float(drawdowns.min()) if len(drawdowns) else 0.0
         daily = np.array(daily_avg, dtype=float)
-        sharpe = float(np.mean(daily) / np.std(daily) * np.sqrt(252)) if len(daily) > 1 and np.std(daily) > 0 else 0.0
+        # 样本标准差 (ddof=1), 与主流回测库惯例一致
+        _std = float(np.std(daily, ddof=1)) if len(daily) > 1 else 0.0
+        sharpe = float(np.mean(daily) / _std * np.sqrt(252)) if _std > 0 else 0.0
         sortino = BacktestEngine._sortino_ratio(daily)
 
         stats = {
@@ -3428,7 +3607,9 @@ class BacktestEngine:
         peaks = np.maximum.accumulate(values)
         drawdowns = values / peaks - 1
         max_drawdown = float(drawdowns.min()) if len(drawdowns) else 0.0
-        sharpe = float(np.mean(daily) / np.std(daily) * np.sqrt(252)) if len(daily) and np.std(daily) > 0 else 0.0
+        # 样本标准差 (ddof=1), 与主流回测库惯例一致
+        _std = float(np.std(daily, ddof=1)) if len(daily) > 1 else 0.0
+        sharpe = float(np.mean(daily) / _std * np.sqrt(252)) if _std > 0 else 0.0
         sortino = BacktestEngine._sortino_ratio(daily)
         pnls = np.array([t.pnl_pct for t in trades], dtype=float) if trades else np.array([])
         durations = np.array([t.duration for t in trades], dtype=float) if trades else np.array([])

@@ -9,7 +9,9 @@ app/extensions/loader.py 用 importlib.import_module + pkgutil.iter_modules 在
     保 pkgutil.iter_modules 可枚举(与 fuyao 插件同一处理方式)。
 """
 
+import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_TEXT = (REPO_ROOT / "packaging" / "tsp.spec").read_text(encoding="utf-8")
@@ -37,3 +39,37 @@ def test_spec_declares_builtin_plugin_tdx():
     assert "app.plugins.tdxquant.client" in SPEC_CODE
     assert "app.plugins.tdxquant.probe" in SPEC_CODE
     assert '"plugins" / "tdxquant" / "plugin.yaml"' in SPEC_CODE  # 源路径必须指向现存目录
+
+
+def test_installer_launches_desktop_only_once():
+    """重复 postinstall 条目会同时拉起两个桌面后端。"""
+    text = (REPO_ROOT / "packaging" / "tsp.iss").read_text(encoding="utf-8")
+    section = text.split("[Run]", 1)[1].split("[UninstallRun]", 1)[0]
+    launches = [
+        line for line in section.splitlines()
+        if line.startswith("Filename:") and "{#MyAppExeName}" in line
+    ]
+    assert len(launches) == 1
+
+
+def test_installer_deploys_dotnet_config_beside_executable():
+    """.NET 只读取 EXE 同目录的配置，放进 _internal 无法解除组件来源限制。"""
+    installer = REPO_ROOT / "packaging" / "tsp.iss"
+    text = installer.read_text(encoding="utf-8")
+    exe_name = re.search(r'#define MyAppExeName\s+"([^"]+)"', text)
+    assert exe_name is not None
+    config_name = f"{exe_name.group(1)}.config"
+    section = text.split("[Files]", 1)[1].split("[Icons]", 1)[0]
+    entries = [
+        line for line in section.splitlines()
+        if line.startswith(f'Source: "{config_name}";')
+    ]
+    assert len(entries) == 1, "Windows 安装包必须显式携带 EXE 配置文件"
+    assert 'DestDir: "{app}";' in entries[0]
+    assert "ignoreversion" in entries[0]
+
+    config = ElementTree.parse(installer.parent / config_name)
+    assert config.getroot().tag == "configuration"
+    setting = config.find("./runtime/loadFromRemoteSources")
+    assert setting is not None
+    assert setting.get("enabled") == "true"

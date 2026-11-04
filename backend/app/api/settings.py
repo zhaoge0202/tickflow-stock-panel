@@ -675,6 +675,7 @@ def get_preferences() -> dict:
         "index_daily_batch_size": preferences.get_index_daily_batch_size(),
         "daily_batch_symbols": preferences.get_daily_batch_symbols(),
         "minute_batch_symbols": preferences.get_minute_batch_symbols(),
+        "backtest_worker_rss_limit_gib": preferences.get_backtest_worker_rss_limit_gib(),
         "watchlist_columns": preferences.get_watchlist_columns(),
         "screener_result_columns": preferences.get_screener_result_columns(),
         "sse_refresh_pages": preferences.get_sse_refresh_pages(),
@@ -760,7 +761,7 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
     """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
 
     流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
-    ({plugin}_api_key, 优先级高于 .env) → load_all 重扫, 插件即刻变为可切换。
+    ({plugin}_api_key, 优先级高于 .env) → 定向刷新当前插件。
     """
     from app.data_providers import custom as custom_sources
 
@@ -768,11 +769,27 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
     key = req.api_key.strip()
     if not key:
         return {"ok": False, "error": "key empty"}
-    ok, message = custom_sources.probe_plugin_key(name, key)
-    if not ok:
-        return {"ok": False, "reason": "invalid", "error": message}
-    secrets_store.save({f"{name}_api_key": key})
-    custom_sources.load_all()
+    from contextlib import nullcontext
+
+    from app.data_providers.custom import packages
+    external = packages.read_state(name) is not None
+    with packages.mutation() if external else nullcontext():
+        ok, message = custom_sources.probe_plugin_key(name, key)
+        if not ok:
+            return {"ok": False, "reason": "invalid", "error": message}
+        previous = secrets_store.load().get(f"{name}_api_key") if external else None
+        secrets_store.save({f"{name}_api_key": key})
+        try:
+            if external:
+                custom_sources.refresh_plugin(name, strict=True)
+            else:
+                custom_sources.refresh_plugin(name)
+        except ValueError:
+            if previous is None:
+                secrets_store.clear(f"{name}_api_key")
+            else:
+                secrets_store.save({f"{name}_api_key": previous})
+            return {"ok": False, "error": "插件初始化失败，已保留原配置"}
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -788,12 +805,12 @@ def clear_plugin_key(name: str) -> dict:
     from app.data_providers import custom as custom_sources
 
     manifest = custom_sources.plugin_manifest(name)
-    if manifest is None or not custom_sources.is_builtin(name):
+    if manifest is None:
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
     if not manifest.get("api_key_env"):
         raise HTTPException(status_code=400, detail=f"插件 '{name}' 不支持在界面配置 Key")
     secrets_store.clear(f"{name.lower()}_api_key")
-    custom_sources.load_all()
+    custom_sources.refresh_plugin(name)
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -954,10 +971,15 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
-    if updates:
-        preferences.save(updates)
-    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
-    request.app.state.capabilities = detect_capabilities()
+    with preferences.mutation():
+        from app.data_providers import custom as custom_sources
+        removing = {p["name"] for p in custom_sources.list_plugins() if p.get("pending_remove")}
+        if any(provider.lower() in removing for provider in updates.values()):
+            raise HTTPException(400, "该插件正在等待卸载，请选择其他数据源")
+        if updates:
+            preferences.save(updates)
+        # 与插件卸载共用写锁，避免并发请求重新引用已移除的数据源。
+        request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -1195,16 +1217,12 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if repo is not None:
             try:
                 issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
+                issues = [i for i in issues if i.table in data_integrity.active_daily_tables()]
             except Exception:  # noqa: BLE001
                 issues = []
             earliest = data_integrity.earliest_issue_day(issues)
             if issues and data_integrity.within_auto_repair_window(earliest):
-                symbols = sorted({
-                    s
-                    for i in issues
-                    if i.table == "kline_daily" and i.kind == "snapshot"
-                    for s in i.symbols
-                }) or None
+                symbols = data_integrity._stock_snapshot_symbols(issues)
                 job_id, is_new = data_integrity.launch_integrity_repair(
                     request.app.state, earliest, "realtime_gate", symbols=symbols,
                 )
@@ -2115,6 +2133,19 @@ def update_minute_batch_symbols(req: BatchSymbolsIn) -> dict:
     """保存 minute-batch 单请求标的数上限 (同时是前端分块大小)。"""
     from app.services import preferences
     return {"minute_batch_symbols": preferences.set_minute_batch_symbols(req.size)}
+
+
+class BacktestWorkerRssLimitIn(BaseModel):
+    gib: int = Field(ge=0, le=64, description="回测/优化 worker RSS 上限 (GiB), 0 = 不限制")
+
+
+@router.put("/preferences/backtest-worker-rss-limit")
+def update_backtest_worker_rss_limit(req: BacktestWorkerRssLimitIn) -> dict:
+    """保存回测/优化 worker RSS 内存上限 (GiB)。对下一个任务即生效, 无需重启。"""
+    from app.services import preferences
+    return {
+        "backtest_worker_rss_limit_gib": preferences.set_backtest_worker_rss_limit_gib(req.gib)
+    }
 
 
 # ── 五档盘口 sealed 配置 ──────────────────────────────

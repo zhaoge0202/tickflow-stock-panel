@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
@@ -57,7 +58,14 @@ def load() -> dict:
     return copy.deepcopy(_cache)
 
 
-_SAVE_LOCK = threading.Lock()
+_SAVE_LOCK = threading.RLock()
+
+
+@contextmanager
+def mutation():
+    """Serialize multi-step preference changes with ordinary merge-writes."""
+    with _SAVE_LOCK:
+        yield
 
 
 def save(updates: dict) -> dict:
@@ -303,6 +311,33 @@ def set_minute_batch_symbols(size: int) -> int:
     return size
 
 
+# ===== 回测/优化 worker RSS 上限 (GiB) =====
+# 环境变量 TICK_WORKER_RSS_LIMIT_BYTES 仍是更高优先级的部署级覆盖 (见
+# app/backtest/worker.py 的解析顺序); 这里只承接设置页的界面化配置。
+_BACKTEST_RSS_LIMIT_GIB_DEFAULT = 6
+_BACKTEST_RSS_LIMIT_GIB_MAX = 64
+
+
+def get_backtest_worker_rss_limit_gib() -> int:
+    """回测/优化独立 worker 的 RSS 上限 (GiB)。默认 6, 范围 [0, 64], 0 = 不限制。
+
+    单位是 GiB 而非字节: 界面与报错文案均以 GiB 呈现, 换算只发生在
+    worker.py 的字节级解析处, 避免两套单位并存。
+    """
+    raw = load().get("backtest_worker_rss_limit_gib", _BACKTEST_RSS_LIMIT_GIB_DEFAULT)
+    try:
+        gib = int(raw)
+    except (TypeError, ValueError):
+        gib = _BACKTEST_RSS_LIMIT_GIB_DEFAULT
+    return max(0, min(_BACKTEST_RSS_LIMIT_GIB_MAX, gib))
+
+
+def set_backtest_worker_rss_limit_gib(gib: int) -> int:
+    gib = max(0, min(_BACKTEST_RSS_LIMIT_GIB_MAX, int(gib)))
+    save({"backtest_worker_rss_limit_gib": gib})
+    return gib
+
+
 def _allowed_data_providers() -> set[str]:
     try:
         from app.data_providers import custom as custom_sources
@@ -311,35 +346,49 @@ def _allowed_data_providers() -> set[str]:
         return set(_ALLOWED_DATA_PROVIDERS)
 
 
+def _validated_provider(raw: str, pref_key: str) -> str:
+    """数据源偏好白名单校验。非法/已卸载的源回退 tickflow 并告警。
+
+    静默回退曾让「配了 fuyao 却全程走免费档」无从排查 (fuyao 事件的
+    定位难点之一): 回退必须留痕。
+    """
+    if raw in _allowed_data_providers():
+        return raw
+    logger.warning(
+        "数据源偏好 %s=%r 不在可用列表 %s, 回退 tickflow",
+        pref_key, raw, sorted(_allowed_data_providers()))
+    return "tickflow"
+
+
 def get_daily_data_provider() -> str:
     provider = str(load().get("daily_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "daily_data_provider")
 
 
 def get_adj_factor_provider() -> str:
     # 「跟随日K」(same_as_daily) 特殊值已下线: 存量配置里的旧值按非法值回退 tickflow
     provider = str(load().get("adj_factor_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "adj_factor_provider")
 
 
 def get_minute_data_provider() -> str:
     provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "minute_data_provider")
 
 
 def get_full_minute_data_provider() -> str:
     provider = str(load().get("full_minute_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "full_minute_data_provider")
 
 
 def get_depth5_data_provider() -> str:
     provider = str(load().get("depth5_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "depth5_data_provider")
 
 
 def get_realtime_data_provider() -> str:
     provider = str(load().get("realtime_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "realtime_data_provider")
 
 
 def get_crypto_data_provider() -> str:
@@ -359,7 +408,7 @@ def get_crypto_data_provider() -> str:
 
 def get_financial_provider() -> str:
     provider = str(load().get("financial_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _validated_provider(provider, "financial_data_provider")
 
 
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
@@ -1433,6 +1482,9 @@ _UI_PREFS_KEYS = (
     "nav_state",
     # AI 助手悬浮球显隐 (assistant.fab.enabled 的后端副本) — 同样受端口漂移影响
     "assistant_fab_enabled",
+    # JSON 文本沿用标量契约，保存统一策略池的 ID 顺序与显式空选择。
+    "strategy_pool",
+    "theme",
 )
 _UI_PREFS_MAX_JSON = 16 * 1024
 
@@ -1453,17 +1505,28 @@ def set_ui_prefs(updates: dict) -> dict:
     """
     if not isinstance(updates, dict):
         raise ValueError("ui_prefs 需为对象")
-    current = get_ui_prefs()
-    for key, value in updates.items():
-        if key not in _UI_PREFS_KEYS:
-            continue
-        if value is None:
-            current.pop(key, None)
-        elif isinstance(value, (bool, int, float, str)):
-            current[key] = value
-        else:
-            raise ValueError(f"ui_prefs.{key} 只接受标量")
-    if len(json.dumps(current, ensure_ascii=False)) > _UI_PREFS_MAX_JSON:
-        raise ValueError("ui_prefs 数据过大 (>16KB)")
-    save({"ui_prefs": current})
+    # 多项界面设置可同时写入，整个 blob 的读改写须与普通偏好保存共用锁。
+    with mutation():
+        current = get_ui_prefs()
+        for key, value in updates.items():
+            if key not in _UI_PREFS_KEYS:
+                continue
+            if key == "theme" and value not in ("light", "dark", None):
+                raise ValueError("ui_prefs.theme 仅接受 light / dark")
+            if key == "strategy_pool" and value is not None:
+                try:
+                    pool = json.loads(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("ui_prefs.strategy_pool 须为策略 ID 列表的 JSON 文本") from exc
+                if not isinstance(pool, list) or any(not isinstance(item, str) for item in pool):
+                    raise ValueError("ui_prefs.strategy_pool 须为策略 ID 列表的 JSON 文本")
+            if value is None:
+                current.pop(key, None)
+            elif isinstance(value, (bool, int, float, str)):
+                current[key] = value
+            else:
+                raise ValueError(f"ui_prefs.{key} 只接受标量")
+        if len(json.dumps(current, ensure_ascii=False)) > _UI_PREFS_MAX_JSON:
+            raise ValueError("ui_prefs 数据过大 (>16KB)")
+        save({"ui_prefs": current})
     return current

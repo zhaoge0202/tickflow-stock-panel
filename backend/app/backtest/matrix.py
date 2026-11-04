@@ -29,7 +29,8 @@ import pyarrow.dataset as pads
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.price_limits import (
-    MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
+    numpy_gem_pre_registration_vector,
+    numpy_limit_pct_for_date,
     numpy_limit_pct_vectors,
     numpy_limit_price,
     write_numpy_price_limit_matrix,
@@ -51,7 +52,10 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 5
+# Price-limit rules are baked into the mmap fields and lock arrays.
+# 合并上游 v0.3.29 时两侧独立把 loader 版本都推到 5 (语义不同): 统一抬到 6,
+# 让任一侧的旧磁盘矩阵缓存都失效重建, 避免读到字段口径不一致的缓存。
+_DIRECT_MATRIX_LOADER_VERSION = 6
 _MATRIX_AXIS_INDEX_VERSION = 2
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -2249,15 +2253,14 @@ def _limit_lock_matrices(
     up_locked.fill(0)
     down_locked.fill(0)
     legacy_pct, current_pct = numpy_limit_pct_vectors(symbols, names)
+    pre_gem_pct = numpy_gem_pre_registration_vector(symbols, legacy_pct, names)
 
     previous_close = np.full(shape[1], np.nan, dtype=np.float64)
     previous_raw = np.full(shape[1], np.nan, dtype=np.float64)
     previous_adjustment = np.full(shape[1], np.nan, dtype=np.float64)
     for time_id in range(shape[0]):
-        limit_pct = (
-            legacy_pct
-            if trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
-            else current_pct
+        limit_pct = numpy_limit_pct_for_date(
+            trading_dates[time_id], pre_gem_pct, legacy_pct, current_pct,
         )
         present = seen[time_id]
         current_close = close[time_id].astype(np.float64, copy=False)
@@ -2274,7 +2277,17 @@ def _limit_lock_matrices(
             & np.isfinite(previous_adjustment)
             & (np.abs(current_adjustment - previous_adjustment) > 1e-6)
         )
-        reference = np.where(adjustment_changed, previous_close, previous_raw)
+        # 除权日交易所参考价 = 前复权昨收还原到当日口径 (prev_qfq / 当日复权比例)。
+        # prev_qfq = raw_prev / F(prev) × F(today) ⇒ 商 = raw_prev × F(today)/F(prev)
+        # = raw_prev / ex_factor, 即除权参考价。直接拿 prev_qfq 当参考价会把限价
+        # 压低 F(prev)/F(today) 倍 — 窗口后还有更晚除权事件时, 除权日被误标
+        # 涨停锁死、真封死跌停漏检。
+        safe_adjustment = np.where(
+            np.isfinite(current_adjustment) & (current_adjustment > 0),
+            current_adjustment,
+            1.0,
+        )
+        reference = np.where(adjustment_changed, previous_close / safe_adjustment, previous_raw)
         valid = (
             present
             & np.isfinite(reference)

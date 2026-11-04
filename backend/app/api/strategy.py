@@ -17,11 +17,16 @@ from typing import Any, Literal
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.strategy import config as strategy_config
-from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
+from app.strategy.ai_generator import (
+    AIStrategyGenerator,
+    _strategy_execution_backend,
+    find_meta_assignment,
+)
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
@@ -273,7 +278,7 @@ class AIIterateRequest(BaseModel):
     description: str = ""
     direction: str = "long"
     rules: str = ""
-    execution_backend: Literal["polars_expr", "matrix_native"] = "polars_expr"
+    execution_backend: Literal["polars_expr", "matrix_native", "minute_filter"] = "polars_expr"
     max_rounds: int = Field(default=4, ge=1, le=10)
 
 
@@ -608,7 +613,7 @@ class BuildRequest(BaseModel):
     direction: str = "long"
     rules: str = ""
     strategy_id: str = ""
-    execution_backend: Literal["polars_expr", "matrix_native"] = "polars_expr"
+    execution_backend: Literal["polars_expr", "matrix_native", "minute_filter"] = "polars_expr"
     # 用户「默认基础参数」(策略页设置): 生成代码的 META.basic_filter 优先采用
     basic_filter: dict[str, Any] | None = None
     # step2 字段
@@ -992,7 +997,7 @@ async def inspect_strategy_bundle(file: UploadFile = _BUNDLE_FILE):
     """导入预览: 条目清单 (create/conflict) + 缺失依赖预警, 不落盘。"""
     data = await file.read()
     try:
-        return _bundle_service().inspect_bundle(data)
+        return await run_in_threadpool(_bundle_service().inspect_bundle, data)
     except _bundle_service().StrategyBundleError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1003,6 +1008,10 @@ async def apply_strategy_bundle(
 ):
     """导入策略包: 复用配置备份的校验/写盘/导入即冒烟/热重载管线。"""
     data = await file.read()
+    return await run_in_threadpool(_apply_strategy_bundle, request, data, allow_overwrite)
+
+
+def _apply_strategy_bundle(request: Request, data: bytes, allow_overwrite: bool):
     service = _bundle_service()
     try:
         result = service.apply_bundle(data, allow_overwrite=allow_overwrite)
@@ -1053,13 +1062,24 @@ def _build_prompt(req: BuildRequest) -> str:
     raise ValueError(f"无效步骤: {req.step}")
 
 
+def _build_execution_backend(req: BuildRequest) -> str:
+    # 旧客户端修改策略未传后端时，按已有代码保留分钟/矩阵契约。
+    if req.step == 2 and "execution_backend" not in req.model_fields_set:
+        try:
+            meta = AIStrategyGenerator._extract_meta(req.current_code)
+            return _strategy_execution_backend(ast.parse(req.current_code), meta)
+        except (SyntaxError, ValueError):
+            pass
+    return req.execution_backend
+
+
 @router.post("/build")
 async def build_strategy(req: BuildRequest, request: Request):
     """两步策略构建。
     step1: name + description + direction + rules → 完整策略
     step2: current_code + instruction → 修改任意部分
     """
-    gen = AIStrategyGenerator()
+    gen = AIStrategyGenerator(execution_backend=_build_execution_backend(req))
 
     try:
         prompt = _build_prompt(req)
@@ -1083,7 +1103,7 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     async def event_generator():
-        gen = AIStrategyGenerator()
+        gen = AIStrategyGenerator(execution_backend=_build_execution_backend(req))
         chunks: list[str] = []
         yield json.dumps({"type": "meta", "strategy_id": req.strategy_id, "step": req.step}, ensure_ascii=False)
         try:
@@ -1150,7 +1170,10 @@ async def ai_iterate(req: AIIterateRequest, request: Request):
             strategy_id="", execution_backend=req.execution_backend,
         )
         iterator = AIStrategyIterator(max_rounds=req.max_rounds)
-        result = await iterator.iterate(prompt, engine=engine, data_dir=str(data_dir))
+        result = await iterator.iterate(
+            prompt, engine=engine, data_dir=str(data_dir), execution_backend=req.execution_backend,
+            repo=request.app.state.repo,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception:

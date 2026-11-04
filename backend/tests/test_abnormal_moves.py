@@ -324,7 +324,7 @@ def test_build_overview_cache_date_today_no_double_count() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {
@@ -349,7 +349,7 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {

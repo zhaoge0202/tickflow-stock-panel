@@ -18,6 +18,10 @@ import polars as pl
 AssetType = Literal["stock", "index", "etf", "crypto"]
 
 
+class ProviderRequestError(RuntimeError):
+    """数据源明确请求失败; 调用方须标记失败, 不得转换成成功的空数据。"""
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     instruments: bool = False
