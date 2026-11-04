@@ -59,6 +59,10 @@ _HISTORY_CACHE_MAX_ENTRIES = 2  # 每个日期只留一份最大窗口, 两个�
 # 计算窗口下限: 策略池常见的最大回看 (矩阵 warmup 40 + 评分 warmup 40)。
 # 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加扫描量, 却能让同一天
 # 的 41/81 两个请求共用同一份缓存。
+#
+# 注: 收盘后批量跑多策略时会请求 81 / 90 / 91 三种窗口, 缓存键含窗口长度,
+# 三者各自重算。真正的解法是 SWR(过期先返回旧帧 + 后台重算), 见待办;
+# 单纯抬高 floor 会改变既有缓存复用语义并影响单测, 不在此处做。
 _HISTORY_LOOKBACK_FLOOR = 81
 _HISTORY_SYMBOL_BATCH_SIZE = 256
 _history_compute_lock = threading.Lock()
@@ -294,15 +298,23 @@ class ScreenerService:
             return pl.DataFrame()
         instruments = self.repo.get_instruments_asset(self.asset_type)
         parts: list[pl.DataFrame] = []
+        # 整帧只物化一次, 后续按 symbol 切片。
+        #
+        # 原实现在批循环里对同一个 history_lf 反复 scan+filter+collect: 22 个批次
+        # = 把同一批日期分区扫 22 遍, 单次重算实测 40~49s(2026-11-04 收盘后日志),
+        # 且整段持有 _history_compute_lock, 期间所有需要历史的请求排队超时。
+        # 整帧约 50 万行 × 十几列(几十 MB), 一次物化的代价远小于重复扫描。
+        full_hist = (
+            history_lf
+            .collect(engine="streaming")
+            .unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
+        )
+        if full_hist.is_empty():
+            return pl.DataFrame()
         for offset in range(0, len(symbols), _HISTORY_SYMBOL_BATCH_SIZE):
             batch = symbols[offset:offset + _HISTORY_SYMBOL_BATCH_SIZE]
-            df_hist = (
-                history_lf
-                .filter(pl.col("symbol").is_in(batch))
-                .collect(engine="streaming")
-                .unique(subset=["symbol", "date"], keep="last")
-                .sort(["symbol", "date"])
-            )
+            df_hist = full_hist.filter(pl.col("symbol").is_in(batch))
             if df_hist.is_empty():
                 continue
             df_full = compute_signals(compute_indicators(df_hist))
