@@ -1736,6 +1736,13 @@ class QuoteService:
             # 基于这些非连续竞价价格。
             if not self._is_continuous_trading():
                 return
+            # 分段计时: 盘中监控评估可达 10s+, 必须能拆出是哪一段(见函数末尾的分段日志)。
+            marks: list[tuple[str, float]] = []
+
+            def _mark(name: str, started: float) -> float:
+                marks.append((name, time.perf_counter() - started))
+                return time.perf_counter()
+
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
@@ -1765,20 +1772,25 @@ class QuoteService:
                         logger.debug("name_map 构建失败 (不影响监控): %s", e)
                     # 股票轮: 快照未就绪时跳过 (ladder 封单也依赖股票快照日期, 一并跳过)
                     if stock_ready:
+                        t0 = time.perf_counter()
                         eval_df = enriched_today
                         if engine.has_rule_type("ladder"):
                             eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
                         if engine.has_rule_type("volume_delta"):
                             eval_df = self._inject_volume_delta(eval_df)
                         eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
+                        t0 = _mark("指标注入", t0)
                         rule_events = engine.evaluate(eval_df, asset_type="stock")
+                        t0 = _mark("股票引擎", t0)
                         if engine.consume_strategy_result_updates():
                             self.notify_strategy_results_updated()
                     if engine.has_rule_type("sector"):
+                        t0 = time.perf_counter()
                         rule_events += engine.evaluate_sectors(
                             enriched_today if stock_ready else pl.DataFrame(),
                             self.get_index_quotes(),
                         )
+                        t0 = _mark("板块", t0)
                     # 异动边缘规则轮: 快照 (enriched 偏离列 + 实时叠加) 由
                     # abnormal_moves.build_overview 统一构建, 引擎只做边缘触发判定。
                     # 30s 限频 —— 快照历史部分 60s 缓存, 无需跟行情轮询同频重算。
@@ -1786,6 +1798,7 @@ class QuoteService:
                         _now_ts = time.time()
                         if _now_ts - self._abnormal_last_eval >= 30.0:
                             self._abnormal_last_eval = _now_ts
+                            t0 = time.perf_counter()
                             try:
                                 from app.services import abnormal_moves
                                 _overview = abnormal_moves.build_overview(
@@ -1796,6 +1809,7 @@ class QuoteService:
                                 rule_events += engine.evaluate_abnormal(_overview.get("rows") or [])
                             except Exception as e:  # noqa: BLE001
                                 logger.warning("异动监控规则评估失败 (不影响其他告警): %s", e)
+                            t0 = _mark("异动", t0)
                     # 日期提醒轮: 纯日历、无行情, 已在盘中; 引擎内按天 cooldown 保证每天一次
                     if engine.has_rule_type("date"):
                         try:
@@ -1809,6 +1823,7 @@ class QuoteService:
                     # 日期守卫同指数轮: 自选/策略等页面会把磁盘上一交易日的 ETF 快照读进缓存,
                     # ETF 实时拉取关闭 (默认) 或休市时它不会被当日数据替换, 不得当作当日评估。
                     if engine.has_asset_rules("etf") and self._repo is not None:
+                        t0 = time.perf_counter()
                         try:
                             etf_enriched, etf_date = self._repo.get_enriched_latest_asset("etf", refresh=False)
                             if not etf_enriched.is_empty() and etf_date == cn_today():
@@ -1818,10 +1833,12 @@ class QuoteService:
                                 )
                         except Exception as e:
                             logger.warning("ETF 监控评估失败 (不影响股票告警): %s", e)
+                        t0 = _mark("ETF", t0)
                     # 指数规则轮: 复刻 ETF 轮。快照由指数实时 flush 焐热;
                     # refresh=False 冷缓存不同步重算; 显式日期守卫防陈旧 parquet 误告警
                     # (与 ETF 轮同口径)。
                     if engine.has_asset_rules("index") and self._repo is not None:
+                        t0 = time.perf_counter()
                         try:
                             index_enriched, index_date = self._repo.get_enriched_latest_asset("index", refresh=False)
                             if not index_enriched.is_empty() and index_date == cn_today():
@@ -1831,12 +1848,14 @@ class QuoteService:
                                 )
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
+                        t0 = _mark("指数", t0)
                     # 模拟盘「绑定即评估」的合成规则事件是沙盒信号: 只喂下面的
                     # 模拟盘钩子, 不进告警流 (留痕/SSE/系统通知/webhook/扩展格式化)。
                     from app.strategy.paper_watch import is_paper_watch_event
 
                     paper_watch_events = [ev for ev in rule_events if is_paper_watch_event(ev)]
                     rule_events = [ev for ev in rule_events if not is_paper_watch_event(ev)]
+                    t0 = time.perf_counter()
                     if rule_events:
                         rule_events = self._refresh_alert_quotes(rule_events, engine)
                         rule_events = self._format_extension_notifications(rule_events)
@@ -1884,6 +1903,7 @@ class QuoteService:
                                 if key in ev:
                                     alert[key] = ev[key]
                             all_alerts.append(alert)
+                    t0 = _mark("告警处理", t0)
 
             # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
             # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
@@ -1892,6 +1912,7 @@ class QuoteService:
             # 广播到所有 SSE 订阅者 (背压保护在订阅者队列内做)
             if all_alerts:
                 # 按 symbol 富化行业/概念 ext 字段, 使 toast + 触发记录统一展示板块标签。
+                t0 = time.perf_counter()
                 self._enrich_alerts_ext(all_alerts)
                 self._broadcast_alerts(all_alerts)
                 logger.info("监控评估完成: %d 条通知", len(all_alerts))
@@ -1899,17 +1920,21 @@ class QuoteService:
                 # 系统通知 (可选通道, 由 preferences 开关控制)。
                 # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
                 self._maybe_send_system_notifications(all_alerts)
+                t0 = _mark("广播通知", t0)
 
             # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
             # 紧随系统通知, 同样静默降级不阻断主流程。
             if rule_events:
+                t0 = time.perf_counter()
                 self._maybe_send_webhook(rule_events, engine)
+                t0 = _mark("Webhook", t0)
 
             # 模拟盘钩子: 与监控评估同频 —— ① 用同一份实时快照撮合 pending 即时单;
             # ② rule_events 喂给自动跟单规则触发自动下单。逐账户执行 (账户间规则与订单隔离)。
             # 即时撮合仅股票 (ETF 即时单在下单时已转次日开盘); 独立 try ——
             # 模拟盘任何异常只留痕, 不得影响监控告警链路。
             if stock_ready and self._app_state is not None:
+                t0 = time.perf_counter()
                 try:
                     from app.strategy import paper as paper_trading
                     from app.strategy import paper_auto
@@ -1941,7 +1966,12 @@ class QuoteService:
                         self._maybe_send_paper_webhook(paper_events)
                 except Exception as e:
                     logger.warning("模拟盘钩子失败 (不影响监控): %s", e)
+                t0 = _mark("模拟盘", t0)
 
+            if marks:
+                total = sum(sec for _, sec in marks)
+                detail = " ".join(f"{name} {sec:.1f}s" for name, sec in marks if sec >= 0.05)
+                logger.info("监控分段 %.1fs: %s", total, detail or "(各段均 <50ms)")
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
 

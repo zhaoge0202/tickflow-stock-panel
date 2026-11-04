@@ -663,6 +663,7 @@ class MonitorRuleEngine:
                 overrides_map[sid] = overrides
                 params_map[sid] = dict(overrides.get("params") or {})
         if matrix_rules:
+            matrix_started = time.perf_counter()
             try:
                 history_loader = self._history_loader_for(matrix_rules[0])
                 if history_loader is None:
@@ -709,6 +710,10 @@ class MonitorRuleEngine:
             except Exception as e:
                 self._active_matrix_snapshots.pop(asset_type, None)
                 logger.warning("%s 矩阵策略实时缓存准备失败: %s", asset_type, e)
+            matrix_elapsed = time.perf_counter() - matrix_started
+            if matrix_elapsed >= 0.3:
+                logger.info("监控矩阵准备 %.1fs (%d 条矩阵规则, asset=%s)",
+                            matrix_elapsed, len(matrix_rules), asset_type)
 
         # list() 快照: 本方法跑在行情轮询线程, API 线程同时 add/remove 规则
         # 会触发 "dictionary changed size during iteration", 整轮告警丢失
@@ -720,7 +725,13 @@ class MonitorRuleEngine:
                 # evaluate_date_rules 专用路径
                 continue
             try:
+                rule_started = time.perf_counter()
                 events.extend(self._evaluate_rule(df, rule, now))
+                rule_elapsed = time.perf_counter() - rule_started
+                if rule_elapsed >= 0.3:
+                    # 单条策略规则盘中可达数秒(分钟数据加载/矩阵计算), 逐条打点才能定位。
+                    logger.info("监控规则耗时: %s %.1fs (asset=%s)",
+                                rule.get("name") or rule_id, rule_elapsed, asset_type)
             except Exception as e:
                 logger.warning("规则评估失败 %s: %s", rule_id, e)
 
