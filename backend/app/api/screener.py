@@ -749,6 +749,10 @@ def _cached_with_realtime(request: Request) -> dict:
     """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
+    from app.services.daily_health import assert_usable
+
+    # 已知日K缺陷或依赖重算未完成时直接报错, 不再把可疑缓存当正式结果返回。
+    assert_usable(data_dir)
     try:
         allowed: date | None = ScreenerService(repo).latest_strategy_date()
     except Exception:  # noqa: BLE001

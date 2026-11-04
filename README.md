@@ -562,8 +562,8 @@ POLARS_MAX_THREADS=2        # 主要收益项: 用约 40% 的构建耗时换 500
 
 | 变量 | 默认 | 作用 |
 | :-- | :-- | :-- |
-| `TICK_WORKER_RSS_LIMIT_BYTES` | `6442450944` (6GiB) | 回测/优化独立 worker 的 RSS 上限, 超限终止并返回明确错误(而非拖垮整机); `0` = 不限制 |
-| `TICK_HEAVY_MIN_AVAILABLE_BYTES` | `1073741824` (1GiB) | 系统可用内存低于该值时, 新的重任务(回测/因子批量/挖掘)挂起等待内存恢复; `0` = 不检查 |
+| `TICK_WORKER_RSS_LIMIT_BYTES` | `6442450944` (6GiB) | 回测/优化独立 worker 的 RSS 上限, 超限终止并返回明确错误(而非拖垮整机); `0` = 不限制。也可在 **设置 → 系统设置 → 性能与内存** 以 GiB 配置 (保存后下一任务生效, 无需重启); 环境变量显式设置时优先于界面配置 |
+| `TICK_HEAVY_MIN_AVAILABLE_BYTES` | `1073741824` (1GiB) | 有效可用内存低于该值时, 新的重任务(回测/因子批量/挖掘)挂起等待内存恢复; 有效预算取宿主机与容器 cgroup v1/v2 的较小值, 包含父级限额和 `memory.high`; `0` = 不检查 |
 | `TICK_DUCKDB_READ_CONCURRENCY` | `3` | DuckDB 并发读上限。读查询走独立连接(MVCC), 同步期的长扫描不再阻塞交互读; 并发数越高峰值内存越大, `1` = 完全串行(旧行为) |
 
 ### 跑起来后的第一次使用
@@ -626,6 +626,7 @@ PORT=3018                      # 服务端口
 | [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 fuyao 为参考实现)                  |
+| [外部数据源插件安装](./docs/external-data-source-packages.md) | ZIP 安装、Key 配置、版本维护和开发模板 |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
 | [docs/page-sdk.md](./docs/page-sdk.md)                                                             | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界           |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |

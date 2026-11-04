@@ -20,11 +20,13 @@
 - 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
 - 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
 - 后端源码扩展注册：`backend/app/custom/<module>.py`，支持 FastAPI 路由、启动钩子和通知格式化器。
+- 外部后端扩展包及配套页面安装：`data/extensions/<id>/versions/<version>/`，复用现有注册契约，静态预览、重启生效、失败保留旧版本。入口为「设置 → 导入与备份」，见 [统一导入与外部后端扩展包](extension-packages.md)。
 - 当前前端插槽：`layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`。
 - 当前后端继承点：`NotificationFormatter`。
 - 自定义仓位策略（`PositionSizingPolicy`，已实现）：`data/user_data/position_policies/*.py`，在「设置 → 定义 → 仓位策略」创建（表单 META + 只写一个 `def compute(ctx)` 函数，模板起步）。契约见 `app/backtest/position_sizing.py`：ctx 只含当日及以前信息（候选评分/近 60 日收益/已平仓快照/组合状态/参数），输出 weights + budget_scale，引擎侧单仓上限/现金/敞口钳制不变。保存/备份导入均过「AST 安全校验 → 结构解析 → 合成冒烟」三关；回测在「买入权重 → 自定义策略」选用，引用失效 400 拒绝、运行期异常当日回退等权并计入统计。
 - 因子平台与策略线的既有桥接（已实现，二开时直接复用、勿重复实现）：因子库一键生成单因子排名策略（`GenerateFactorStrategyDialog` → `custom_factor_*`）；策略触发器引用因子条件信号（`AddFactorSignalDialog`，`csg_f_*`）；自定义信号 AI 提示词含因子分组（`custom_signals_ai.py`）；策略回测因子归因（`strategy.py` 的 `factor_attribution`，覆盖 `meta.scoring` 非空的策略）。
-- 策略包导出/导入（已实现）：策略设置「导出策略包」按依赖闭包打包策略 `.py` + 引用的自定义信号/因子定义 + 用户调参（叠加策略含子策略，递归展开）。服务层 `app/services/strategy_bundle.py`；条目路径与配置备份白名单形态一致，导入直接复用 `config_backup.apply_archive` 的安全校验/导入即冒烟/热重载。包内只允许策略/调参/信号/因子四类，其余路径 400 拒绝；缺失依赖（不在包内也不在本机）导入预览黄色预警。API：`GET /api/strategies/{id}/bundle`、`POST /api/strategies/bundle/inspect|apply`。
+- 旧策略包格式与接口（兼容保留）：按依赖闭包打包策略 `.py` + 引用的自定义信号/因子定义 + 用户调参（叠加策略含子策略）。`app/services/strategy_bundle.py` 只保留兼容入口，实际实现统一位于 `app/services/resource_bundle.py`；新旧接口共用依赖闭包、ZIP 安全校验、打包与资源预检，旧导入复用 `config_backup.apply_archive` 的校验/逐条写盘/冒烟管线，缺失依赖在旧预览中只作预警。包内仅允许策略/调参/信号/因子四类，其他路径 400 拒绝。API：`GET /api/strategies/{id}/bundle`、`POST /api/strategies/bundle/inspect|apply`；当前页面入口使用下述统一资源传输。
+- 统一资源传输（已实现）：策略、因子、信号页各使用一个 `ResourceTransferButton` 图标，进入「设置 → 导入与备份」；`kind` 透传资源选择上下文，依赖统一展示并自动携带，批量导出复用 `ResourceTransferDialog`。多文件识别后优先选择同类型原始项，没有此类型原始项时允许从混合包提取该类型定义；确认冲突后只提交所选项及其依赖。`StrategyExportButton` 与弹窗共用 `downloadResourceBundle`，单个策略和批量导出均下载 ZIP，包含所需因子、信号与已保存调参。处理期间禁用关闭，关闭后重开重置临时状态。服务层 `app/services/resource_bundle.py` 统一收集多资源依赖闭包，复用备份路径/原子写与定义编译；新包格式 `tick-resource-bundle` v1，兼容旧策略包。预览通过 `registry.isolated_registry()` 在请求上下文副本内检查同包因子，不向实时线程泄漏定义；新导入链路预检后整批提交，写入/注册/重载失败回滚，区别于旧备份接口的逐条容错语义。API 位于 `/api/definitions/resources`，详见 [策略文档](strategy.md#资源导入与批量导出)。
 - 模拟盘「绑定即评估」（已实现，`app/strategy/paper_watch.py`）：账户绑定策略（自动跟单规则 `match_kind=strategy`）即自动进入实时评估循环——引擎内存态注入合成规则（`paper_watch:{strategy_id}`，不落盘、不进监控页），事件照常喂 `paper_auto.on_rule_events`。同步幂等且与真监控规则去重（同策略已有启用中的监控规则则不注入，避免重复事件）；`set_rules` 是全量覆盖，故监控规则任何保存后都会重注入。合成规则的信号是沙盒信号：只驱动模拟盘下单，不进 SSE 告警/系统通知/webhook/留痕（`quote_service` 按 `is_paper_watch_event` 分流）。
 
 尚未实现、只能在真实需求出现后增加的能力：
@@ -34,6 +36,10 @@
 - 配置 schema 迁移注册表。
 
 AI 在开始任务前必须通过代码搜索确认能力是否已经实现。找不到定义和测试时，应把示例视为设计规范，不得虚构导入路径或调用结果。
+
+## 外部数据源包安装（已实现）
+
+外置 Provider 源码包、版本状态与加载生命周期由原数据源加载器统一管理；上传/安装/版本管理 API 由 `app/custom/source_packages` 扩展注册。前端新增 `settings.data-sources.toolbar` 和 `settings.data-sources.detail-actions` 插槽，复用现有卡片、Key 和能力路由。完整契约及边界见 [外部数据源插件安装](external-data-source-packages.md)。
 
 ## 2. 二次开发分级
 
@@ -157,6 +163,8 @@ const extension: FrontendExtension = {
 路由注册与菜单注册已经解耦：页面可以存在但不显示在菜单中；菜单只能引用同一扩展内的已注册路由。首版只支持静态绝对路径。扩展路由不得覆盖核心或其他扩展路径，冲突时只禁用该扩展并输出明确错误。
 
 完整前端模板位于 [`frontend/src/custom/_template/extension.tsx.example`](../frontend/src/custom/_template/extension.tsx.example)。
+
+较大的页面应让 `extension.tsx` 只保留路由、导航与轻量组件，使用 `React.lazy(() => import('./Page').then(m => ({ default: m.Page })))` 注册页面组件；路由宿主已有 `Suspense`。源码模块并发加载、按路径排序注册，冲突处理顺序不变。运行时页面插件清单与各脚本均有加载超时，单个脚本失败只禁用该扩展；契约仍为 v1。
 
 ### 3.4 前端禁止事项
 

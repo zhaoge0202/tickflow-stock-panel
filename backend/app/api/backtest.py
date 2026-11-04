@@ -21,6 +21,7 @@ from app.services.backtest import (
     BacktestService,
     VectorbtUnavailable,
 )
+from app.services.daily_health import DailyIntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ def run(req: BacktestRequest, request: Request):
         result = svc.run(cfg)
     except VectorbtUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    return asdict(result)
+    return _stamp_daily_data(result)
 
 
 # ================================================================
@@ -184,13 +185,15 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     )
     try:
         result = svc.run(cfg)
+    except DailyIntegrityError:
+        raise
     except EnrichedGenerationUnavailableError as exc:
         # 盘中实时刷新换新 generation, 重试后仍撞上发布 (api/mining.py 同款映射)
         raise HTTPException(
             status_code=400,
             detail="行情数据正在更新(盘中实时刷新), 请稍后重试",
         ) from exc
-    return asdict(result)
+    return _stamp_daily_data(result)
 
 
 class FactorBatchRequest(BaseModel):
@@ -245,12 +248,14 @@ def factor_batch(req: FactorBatchRequest, request: Request):
             slippage_bps=req.slippage_bps,
             asset_type=req.asset_type,
         ))
+    except DailyIntegrityError:
+        raise
     except EnrichedGenerationUnavailableError as exc:
         raise HTTPException(
             status_code=400,
             detail="行情数据正在更新(盘中实时刷新), 请稍后重试",
         ) from exc
-    return asdict(result)
+    return _stamp_daily_data(result)
 
 
 # ================================================================
@@ -378,18 +383,14 @@ def _guard_minute_strategy_backtest(
         return
     if s is None or s.execution_backend != "minute_filter":
         return
-    if asset_type != "stock":
-        raise HTTPException(400, detail="分钟策略回测当前仅支持 A 股 (stock)")
-    earliest = request.app.state.repo.earliest_minute_date()
-    if earliest is None or start < earliest:
-        have = f"最早到 {earliest}, " if earliest else ""
-        raise HTTPException(
-            400,
-            detail=(
-                f"本地分钟K{have}无法覆盖回测起始日 {start}。"
-                "请先用「扩展分钟K历史」拉取更多数据, 或缩小回测区间"
-            ),
+    from app.backtest.strategy import validate_minute_backtest_coverage
+
+    try:
+        validate_minute_backtest_coverage(
+            s, request.app.state.repo, start, asset_type,
         )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
 
 @router.post("/strategy/run")
@@ -443,18 +444,43 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
     with shared_heavy_job_limiter.slot("normal"):
-        return run_worker_task(task)
+        return _stamp_daily_data(run_worker_task(task))
 
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
-import time
 import hashlib
+import time
+
+
+def _daily_data_revisions() -> dict[str, str]:
+    from app.services.daily_health import ASSET_LABELS, revision
+
+    return {asset: revision(settings.data_dir, asset) for asset in ASSET_LABELS}
+
+
+def _stamp_daily_data(result, revisions=None) -> dict:
+    payload = result if isinstance(result, dict) else asdict(result)
+    return {**payload, "daily_data_revisions": revisions if revisions is not None else _daily_data_revisions()}
+
+
+@router.get("/strategy/runs/{run_id}/evidence")
+def strategy_run_evidence(run_id: str):
+    from app.backtest.evidence import load_evidence
+
+    try:
+        return load_evidence(settings.data_dir, run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="该回测没有版本记录，旧结果可重新回测生成") from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, detail="暂时无法读取回测版本记录") from exc
 
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts")
+    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts", "daily_data_revisions")
 
     def __init__(self, key: str):
         self.key = key
@@ -464,6 +490,7 @@ class _BacktestJob:
         self.error: str | None = None
         self.done = False
         self.finish_ts: float = 0.0
+        self.daily_data_revisions = _daily_data_revisions()
 
 
 # 模块级任务表: key -> _BacktestJob
@@ -475,15 +502,41 @@ _JOB_TTL = 300  # 完成后保留 5 分钟
 def _cleanup_stale_jobs():
     """清理过期任务 (完成超过 TTL 的)。全程持 _jobs_lock: 迭代+pop 与其他访问互斥。"""
     now = time.time()
+    revisions = _daily_data_revisions()
     with _jobs_lock:
-        stale = [k for k, j in _running_jobs.items() if j.done and now - j.finish_ts > _JOB_TTL]
+        stale = [k for k, j in _running_jobs.items() if j.done and (
+            now - j.finish_ts > _JOB_TTL or j.daily_data_revisions != revisions
+        )]
         for k in stale:
             _running_jobs.pop(k, None)
+
+
+def _acquire_or_evict_job(job_key: str, *, force: bool) -> tuple[_BacktestJob, bool]:
+    """获取或创建任务, 返回 (job, is_new)。
+
+    force 强制重跑: 同 key 已完成任务 (5 分钟 TTL 内) 直接丢弃重建, 不回放旧
+    结果/旧报错 — force 任务自己的结果同样进任务缓存, 不丢弃的话 TTL 内重复
+    强制重跑只是重放上一次。运行中的任务仍允许订阅 (重连/取消按同 key 对齐,
+    语义不变); 非 force 连接保持既有缓存复用行为。
+    """
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
+        if job is not None and force and job.done:
+            _running_jobs.pop(job_key, None)
+            job = None
+        if job is None:
+            job = _BacktestJob(job_key)
+            _running_jobs[job_key] = job
+            return job, True
+        return job, False
 
 
 def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> None:
     """Publish the terminal state and proactively drop the reconnect entry after TTL."""
     finished_at = time.time()
+    if result is not None and job.daily_data_revisions != _daily_data_revisions():
+        result = None
+        error = "日K数据已修正, 请重新运行计算"
     with _jobs_lock:
         job.result = result
         job.error = error
@@ -514,8 +567,9 @@ def _make_job_key(
     regime_filter: str | None = None,
     position_policy: str | None = None,
     position_policy_params: str | None = None,
+    force: bool = False,
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{position_policy}|{position_policy_params}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{position_policy}|{position_policy_params}|force={force}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -546,12 +600,16 @@ async def strategy_stream(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    force: bool = False,
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
     - 相同参数的任务只启动一次, 多次连接订阅同一个任务
     - 断开连接不会取消任务 (除非显式调用 cancel)
     - 结果保留 5 分钟供重连
+    - force=1: 掺入 job_key 使其不命中普通 (非 force) 参数的结果缓存;
+      同 key 已完成的 force 任务也会被丢弃重建 — 5 分钟内重复强制重跑
+      都真正重算 (重连/取消仍按 qs 重算同一 key, 语义不变)
 
     事件类型:
       - progress: {day, total, date, equity}
@@ -591,19 +649,12 @@ async def strategy_stream(
         regime_filter=regime_filter,
         position_policy=position_policy,
         position_policy_params=position_policy_params,
+        force=force,
     )
 
     _cleanup_stale_jobs()
 
-    # 获取或创建任务
-    with _jobs_lock:
-        job = _running_jobs.get(job_key)
-        if job is None:
-            job = _BacktestJob(job_key)
-            _running_jobs[job_key] = job
-            is_new = True
-        else:
-            is_new = False
+    job, is_new = _acquire_or_evict_job(job_key, force=force)
 
     async def event_generator():
         # 范围保护: 直接报错
@@ -702,7 +753,7 @@ async def strategy_stream(
                         elif error:
                             yield f"event: error\ndata: {json.dumps({'message': error}, ensure_ascii=False)}\n\n"
                         else:
-                            payload = r if isinstance(r, dict) else asdict(r)
+                            payload = _stamp_daily_data(r, job.daily_data_revisions)
                             yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
                     return
 
@@ -740,6 +791,10 @@ async def strategy_cancel(request: Request):
         # 可选成本参数: 缺省或空串 → None (与 stream 侧 float | None 口径一致, 保证 job_key 对齐)。
         v = _get(key)
         return float(v) if v else None
+    def _get_opt_bool(key: str) -> bool:
+        # 与 FastAPI/pydantic v2 查询参数 bool 解析口径一致 (真值别名集合),
+        # 否则 stream/cancel 两端算出不同 job_key, 停止按钮失效
+        return _get(key).lower() in ("1", "true", "on", "yes", "t", "y")
     job_key = _make_job_key(
         _get("strategy_id"),
         _get("symbols") or None,
@@ -761,8 +816,11 @@ async def strategy_cancel(request: Request):
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
         asset_type=_get("asset_type", "stock"),
+        minute_fill=_get_opt_bool("minute_fill"),
+        regime_filter=_get("regime_filter") or None,
         position_policy=_get("position_policy") or None,
         position_policy_params=_get("position_policy_params") or None,
+        force=_get_opt_bool("force"),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
@@ -1076,7 +1134,7 @@ async def optimize_robust_stream(
                     elif job.cancel_event.is_set():
                         yield f"event: error\ndata: {json.dumps({'message': '优化已取消'}, ensure_ascii=False)}\n\n"
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield f"event: done\ndata: {json.dumps(_json_safe(_stamp_daily_data(job.result, job.daily_data_revisions)), ensure_ascii=False, default=str)}\n\n"
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():
@@ -1290,7 +1348,7 @@ async def walkforward_stream(
                     elif job.cancel_event.is_set():
                         yield f"event: error\ndata: {json.dumps({'message': 'walk-forward 已取消'}, ensure_ascii=False)}\n\n"
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield f"event: done\ndata: {json.dumps(_json_safe(_stamp_daily_data(job.result, job.daily_data_revisions)), ensure_ascii=False, default=str)}\n\n"
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():

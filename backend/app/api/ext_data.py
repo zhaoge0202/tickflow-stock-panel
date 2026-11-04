@@ -31,6 +31,7 @@ from app.services.ext_data import (
     infer_fields_from_df,
     parse_upload_file,
     rows_to_parquet,
+    run_ext_data_io,
     write_ext_parquet,
 )
 from app.services.ext_pull import _request_json, fetch_and_ingest, pull_scheduler
@@ -264,6 +265,9 @@ def _read_ext_dataframe(
     snapshot_date: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    columns: list[str] | None = None,
+    required_columns: list[str] | None = None,
 ) -> tuple[pl.DataFrame, str | None]:
     """读取扩展表数据。
 
@@ -274,13 +278,24 @@ def _read_ext_dataframe(
     """
     cfg_dir = data_dir / "ext_data" / config.id
 
+    def collect(lf: pl.LazyFrame) -> pl.DataFrame:
+        if columns:
+            available = lf.collect_schema().names()
+            keep = [c for c in columns if c in available]
+            required = required_columns or []
+            # Preserve full-row fallback for unknown output fields, and retain
+            # the original validation/errors for unknown filter/sort fields.
+            if keep and all(c in available for c in required):
+                lf = lf.select(list(dict.fromkeys([*keep, *required])))
+        return lf.collect()
+
     if config.mode == "snapshot":
         if start_date or end_date:
             raise HTTPException(400, "快照模式无历史分区, 不支持日期范围查询")
         path = cfg_dir / "part.parquet"
         if not path.exists():
             return pl.DataFrame(), None
-        return pl.read_parquet(path), _latest_sync_date(config, data_dir)
+        return collect(pl.scan_parquet(path)), _latest_sync_date(config, data_dir)
 
     base = cfg_dir / "timeseries"
     if not base.exists():
@@ -291,7 +306,7 @@ def _read_ext_dataframe(
         path = base / f"date={day}" / "part.parquet"
         if not path.exists():
             return pl.DataFrame(), day
-        return pl.read_parquet(path), day
+        return collect(pl.scan_parquet(path)), day
 
     partitions = sorted(
         d for d in base.iterdir()
@@ -316,21 +331,22 @@ def _read_ext_dataframe(
         # 没有它, 范围合并后消费方无法区分行来自哪一天。
         frames = []
         for d in selected:
-            f = pl.read_parquet(d / "part.parquet")
+            f = pl.scan_parquet(d / "part.parquet")
+            names = f.collect_schema().names()
             day = d.name[5:]
-            if "date" not in f.columns:
+            if "date" not in names:
                 f = f.with_columns(pl.lit(day).alias("date"))
-            elif "data_date" not in f.columns:
+            elif "data_date" not in names:
                 f = f.with_columns(pl.lit(day).alias("data_date"))
             frames.append(f)
         # diagonal: 各分区 schema 可能不一致 (配置中途加字段 → 早期分区少列),
         # 缺列自动补 null 并取超类型; 单分区时无需 concat
         df = pl.concat(frames, how="diagonal") if len(frames) > 1 else frames[0]
-        return df, f"{selected[0].name[5:]}..{selected[-1].name[5:]}"
+        return collect(df), f"{selected[0].name[5:]}..{selected[-1].name[5:]}"
 
     latest = partitions[-1]
     latest_date = latest.name[5:]
-    return pl.read_parquet(latest / "part.parquet"), latest_date
+    return collect(pl.scan_parquet(latest / "part.parquet")), latest_date
 
 
 def _with_instrument_name(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
@@ -635,17 +651,26 @@ def list_rows(
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
 
     data_dir = _data_dir(request)
-    df, active_date = _read_ext_dataframe(config, data_dir, snapshot_date, start_date, end_date)
+    requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
+    tf = config.pull.time_field if config.pull else None
+    required = [entry.partition(":")[0].strip() for entry in (filter or [])]
+    if sort:
+        required.append(sort.partition(":")[0].strip())
+    if tf:
+        required.append(tf)
+    df, active_date = _read_ext_dataframe(
+        config, data_dir, snapshot_date, start_date, end_date,
+        columns=["symbol", "code", "name", *requested] if requested else None,
+        required_columns=required,
+    )
     df = _with_instrument_name(df, data_dir)
     # 日内序列表: 按时间列升序, 保证分页/截断取到的是最早的盘
-    tf = config.pull.time_field if config.pull else None
     if tf and tf in df.columns:
         df = df.sort(tf)
     df = _apply_row_filters(df, filter)
     df = _apply_row_sort(df, sort)
     total = len(df)
     df = df.slice(offset, limit)
-    requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
     if requested:
         keep = [c for c in ["symbol", "code", "name", *requested] if c in df.columns]
         if keep:
@@ -979,6 +1004,10 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 async def _write_upload_capped(file: UploadFile, dest: Path, max_bytes: int) -> None:
+    await run_ext_data_io(_copy_upload_capped, file, dest, max_bytes)
+
+
+def _copy_upload_capped(file: UploadFile, dest: Path, max_bytes: int) -> None:
     """分块把上传文件写入 dest, 累计超过 max_bytes 立即拒绝(413)。
 
     避免一次性 `await file.read()` 把整个文件读入内存(大文件可能触发高内存占用、
@@ -987,7 +1016,7 @@ async def _write_upload_capped(file: UploadFile, dest: Path, max_bytes: int) -> 
     total = 0
     with dest.open("wb") as f:
         while True:
-            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            chunk = file.file.read(_UPLOAD_CHUNK_BYTES)
             if not chunk:
                 break
             total += len(chunk)
@@ -1004,6 +1033,10 @@ async def upload_data(
     snapshot_date: str | None = None,
 ):
     """上传 CSV/Excel 文件写入扩展数据。"""
+    return await run_ext_data_io(_upload_data, request, config_id, file, snapshot_date)
+
+
+def _upload_data(request: Request, config_id: str, file: UploadFile, snapshot_date: str | None):
     store = _store(request)
     config = store.get(config_id)
     if not config:
@@ -1018,7 +1051,7 @@ async def upload_data(
     tmp_dir = Path(tempfile.mkdtemp())
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
-        await _write_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
+        _copy_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
 
         # 直接读取文件，不做列重命名
         if suffix == ".csv":
@@ -1243,7 +1276,7 @@ async def test_pull(request: Request, config_id: str):
 async def run_pull(request: Request, config_id: str):
     """手动触发一次拉取并写入。"""
     store = _store(request)
-    config = store.get(config_id)
+    config = await run_ext_data_io(store.get, config_id)
     if not config:
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
     if not config.pull or not config.pull.url:
@@ -1251,26 +1284,26 @@ async def run_pull(request: Request, config_id: str):
 
     try:
         n, d = await fetch_and_ingest(config, _data_dir(request))
-        _refresh_views(request)
+        await run_ext_data_io(_refresh_views, request)
         # 写回执行状态, 让前端"上次执行"面板立即反映
-        updated = store.get(config_id)
+        updated = await run_ext_data_io(store.get, config_id)
         if updated and updated.pull:
             from datetime import datetime, timezone
             updated.pull.last_run = datetime.now(timezone.utc).isoformat()
             updated.pull.last_status = "success"
             updated.pull.last_message = f"{n} rows @ {d}"
             updated.pull.last_rows = n
-            store.upsert(updated)
+            await run_ext_data_io(store.upsert, updated)
         return {"status": "ok", "rows": n, "date": d}
     except Exception as e:
         # 失败也写回状态, 记录错误信息
-        failed = store.get(config_id)
+        failed = await run_ext_data_io(store.get, config_id)
         if failed and failed.pull:
             from datetime import datetime, timezone
             failed.pull.last_run = datetime.now(timezone.utc).isoformat()
             failed.pull.last_status = "error"
             failed.pull.last_message = str(e)[:200]
-            store.upsert(failed)
+            await run_ext_data_io(store.upsert, failed)
         raise HTTPException(400, f"拉取失败: {e}") from e
 
 
@@ -1287,7 +1320,7 @@ async def backfill_history_ep(
     查询)。幂等 —— 已存在的分区跳过, 失败单日不中断, 结果逐项返回。
     """
     store = _store(request)
-    config = store.get(config_id)
+    config = await run_ext_data_io(store.get, config_id)
     if not config:
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
     try:
@@ -1302,7 +1335,7 @@ async def backfill_history_ep(
         result = await backfill_history(config, _data_dir(request), start_d, end_d)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    _refresh_views(request)
+    await run_ext_data_io(_refresh_views, request)
     return {"status": "ok", **result}
 
 
@@ -1471,6 +1504,10 @@ async def detect_fields(
     返回 symbol_candidates（数据匹配 000001.SZ 格式的列）和
     code_candidates（数据匹配 6位纯数字的列）。
     """
+    return await run_ext_data_io(_detect_fields, file)
+
+
+def _detect_fields(file: UploadFile):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in (".csv", ".xlsx", ".xls"):
         raise HTTPException(400, "仅支持 CSV / Excel 文件")
@@ -1478,7 +1515,7 @@ async def detect_fields(
     tmp_dir = Path(tempfile.mkdtemp())
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
-        await _write_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
+        _copy_upload_capped(file, tmp_path, _MAX_UPLOAD_BYTES)
 
         # 直接读取，不要求 symbol 列
         if suffix == ".csv":

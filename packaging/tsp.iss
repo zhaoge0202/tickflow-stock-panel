@@ -83,6 +83,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; 把 PyInstaller 产出的整个文件夹搬进安装目录
 ; Source 路径相对于 .iss 文件所在目录
 Source: "..\backend\dist\TSP\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; .NET 按 EXE 文件名读取同目录配置，不能放进 PyInstaller 的 _internal。
+Source: "TSP.exe.config"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; 开始菜单
@@ -93,12 +95,6 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; 安装完成后启动应用
-; shellexec: 部分机器对 exe 路径存有「以管理员身份运行」兼容标志/策略要求提权,
-; CreateProcess 无法弹 UAC 会直接报错误码 740; ShellExecute 遇提权正常弹 UAC,
-; asInvoker 场景行为不变。
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent shellexec
-
 ; 安装完成后启动应用
 ; shellexec: 部分机器对 exe 路径存有「以管理员身份运行」兼容标志/策略要求提权,
 ; CreateProcess 无法弹 UAC 会直接报错误码 740; ShellExecute 遇提权正常弹 UAC,

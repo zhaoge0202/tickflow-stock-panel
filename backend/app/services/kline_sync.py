@@ -20,7 +20,7 @@ from typing import Any
 
 import polars as pl
 
-from app.data_providers.base import AssetType
+from app.data_providers.base import AssetType, ProviderRequestError
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today, is_trading_weekday
 from app.parquet import atomic_update_parquet, atomic_write_parquet, replace_with_retry
@@ -284,6 +284,55 @@ def sync_daily_batch(symbols: list[str],
     if not out:
         return pl.DataFrame()
     return pl.concat(out, how="diagonal_relaxed")
+
+
+def iter_custom_daily_frames(provider, symbols, *, asset_type="stock", **kwargs):
+    """复用流式/单帧插件契约; 旧股票插件可继续省略 asset_type 参数。"""
+    if asset_type != "stock":
+        kwargs["asset_type"] = asset_type
+    stream = getattr(provider, "iter_daily", None)
+    if callable(stream):
+        yield from stream(symbols, **kwargs)
+    else:
+        frame = provider.get_daily(symbols, **kwargs)
+        if not frame.is_empty():
+            yield frame
+
+
+def iter_daily_frames(
+    symbols: list[str], capset: CapabilitySet, *,
+    start_time: datetime, end_time: datetime, asset_type: str = "stock", on_chunk_done=None,
+):
+    """只取标准日K帧, 不写正式数据、不计算指标; 调用方决定校验和发布边界。"""
+    if asset_type not in {"stock", "etf", "index"}:
+        raise ValueError("不支持的日K资产类型")
+    from app.data_providers import custom
+
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name != "tickflow" and custom.provider_has_dataset(provider_name, "daily"):
+        found = False
+        for frame in iter_custom_daily_frames(
+            custom.get_provider(provider_name), symbols, asset_type=asset_type,
+            start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done,
+        ):
+            if not frame.is_empty():
+                found = True
+                yield frame
+        # 非股票源沿用指数/ETF 原有的「明确不支持时回退」契约。
+        if found or asset_type == "stock":
+            return
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
+        raise RuntimeError("当前日K数据源不可用, 请检查数据源配置")
+    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH, default_batch=100)
+    failures: list[str] = []
+    frame = sync_daily_batch(
+        symbols, start_time=start_time, end_time=end_time,
+        batch_size=limit.batch, rpm=limit.rpm, on_chunk_done=on_chunk_done, failed_out=failures,
+    )
+    if failures:
+        raise RuntimeError(f"日K获取失败: {', '.join(failures[:10])}")
+    if not frame.is_empty():
+        yield frame
 
 
 def sync_and_persist_daily_batch(
@@ -859,7 +908,7 @@ def _enforce_minute_beijing_wallclock(df: pl.DataFrame, *, source: str) -> pl.Da
     return df
 
 
-def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
+def _normalize_minute(df_in, default_symbol: str | None = None, *, source: str = "tickflow") -> pl.DataFrame:
     """把 SDK 返回的分钟 K 数据规范成 canonical 列 (datetime 收口为北京墙钟)。"""
     if df_in is None or len(df_in) == 0:
         return pl.DataFrame()
@@ -899,7 +948,7 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
 
     if "datetime" in df.columns:
         # 时区契约守卫: 须在下方通用 us-cast 之前, 避免带时区列被静默剥成 UTC-naive
-        df = _enforce_minute_beijing_wallclock(df, source="tickflow")
+        df = _enforce_minute_beijing_wallclock(df, source=source)
 
     if "symbol" not in df.columns and default_symbol is not None:
         df = df.with_columns(pl.lit(default_symbol).alias("symbol"))
@@ -997,10 +1046,10 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
             touched = incoming["symbol"].unique().to_list()
             same = existing.filter(pl.col("symbol").is_in(touched))
             other = existing.filter(~pl.col("symbol").is_in(touched))
-            merged = pl.concat([same, incoming]).unique(
+            merged = pl.concat([same, incoming], how="diagonal_relaxed").unique(
                 subset=["symbol", "datetime"], keep="last",
             )
-            return pl.concat([other, merged]).sort(["symbol", "datetime"])
+            return pl.concat([other, merged], how="diagonal_relaxed").sort(["symbol", "datetime"])
 
         _, after = atomic_update_parquet(out, merge)
         written += after
@@ -1099,6 +1148,8 @@ def _try_custom_minute(
             symbols, start_time=start_time, end_time=end_time,
             asset_type=asset_type, freq=freq, on_chunk_done=wrapped_cb,
         )
+    except ProviderRequestError:
+        raise
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "custom minute provider %s call failed; not falling back to TickFlow: %s",
@@ -1107,7 +1158,7 @@ def _try_custom_minute(
         return (pl.DataFrame(), False)
     try:
         # 时区契约守卫: 插件/自定义源帧同样收口为北京墙钟 (CONTRIBUTING §3.3)
-        df = _enforce_minute_beijing_wallclock(df, source=provider_name)
+        df = _normalize_minute(df, source=provider_name)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "custom minute provider %s datetime 契约校验失败; not falling back to TickFlow: %s",

@@ -197,6 +197,10 @@ class _DynamicEngine:
     def realtime_matrix_stats(self, _cache_key: str) -> dict[str, int]:
         return {"generation": self.update_count, "build_count": 1, "update_count": self.update_count}
 
+    def release_realtime_matrix(self, _cache_key: str) -> None:
+        """回填用完即释放按日矩阵 (本地内存修复); 空实现即可。"""
+        return None
+
     def run_all(self, context, *_args, strategy_ids=None, **_kwargs):
         self.run_count += 1
         rows = []

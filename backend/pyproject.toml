@@ -1,6 +1,6 @@
 [project]
 name = "tickflow-stock-panel-backend"
-version = "0.3.20"
+version = "0.3.29"
 description = "A 股策略 + 监控 + 回测面板 — TickFlow 适配"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -32,6 +32,7 @@ dependencies = [
     "apscheduler>=3.10",
     # Config
     "pyyaml>=6.0",
+    "packaging>=24.0",          # 外部插件版本与依赖兼容范围
     "python-dotenv>=1.0",
     "pymysql>=1.1",
     # AI(可选,但默认装上)

@@ -42,7 +42,7 @@ export interface ToolCallRecord {
 
 export type ChatMessage =
   | { id: string; role: 'user'; content: string; ts: number }
-  | { id: string; role: 'assistant'; content: string; ts: number; streaming: boolean }
+  | { id: string; role: 'assistant'; content: string; ts: number; streaming: boolean; reasoningContent?: string; reasoningContext?: string }
   | { id: string; role: 'footprint'; calls: ToolCallRecord[]; ts: number }
   | { id: string; role: 'error'; kind: string; message: string; hint?: string; ts: number }
   | { id: string; role: 'notice'; content: string; ts: number }
@@ -200,6 +200,18 @@ function patchActiveSession(
   }, persist)
 }
 
+/** 定向修补指定会话 (不存在则忽略): 生成中途切换/删除会话后, 终态回落必须
+ * 落在发起生成的那一个会话里, 而不是追加到当前 activeId 指向的新会话。 */
+function patchSessionById(
+  sessionId: string,
+  patch: (session: AssistantSession) => AssistantSession,
+) {
+  if (!state.sessions.some(s => s.id === sessionId)) return
+  setState({
+    sessions: state.sessions.map(s => (s.id === sessionId ? patch(s) : s)),
+  })
+}
+
 function appendMessage(message: ChatMessage) {
   patchActiveSession(session => ({ ...session, messages: [...session.messages, message] }))
 }
@@ -216,7 +228,14 @@ function isTextMessage(m: ChatMessage): m is Extract<ChatMessage, { role: 'user'
 function buildHistory(messages: ChatMessage[]): ChatHistoryMessage[] {
   return messages
     .filter(isTextMessage)
-    .map(m => ({ role: m.role, content: m.content }))
+    .map(m => {
+      const message: ChatHistoryMessage = { role: m.role, content: m.content }
+      if (m.role === 'assistant' && m.reasoningContent !== undefined) {
+        message.reasoning_content = m.reasoningContent
+        message.reasoning_context = m.reasoningContext
+      }
+      return message
+    })
 }
 
 /** 一轮生成中的滚动游标: 当前正在写入的足迹卡与正文段。
@@ -228,12 +247,18 @@ function buildHistory(messages: ChatMessage[]): ChatHistoryMessage[] {
 interface TurnCursor {
   footprintId: string
   assistantId: string
+  /** 发起生成的会话: append 型流事件 (error/notice) 必须钉在它上面, 防止
+   *  中途切换会话后错投到 activeId 指向的新会话。 */
+  sessionId: string
 }
 
 /** 一轮生成的完整编排: 建占位 → 流事件落库 → 终态收敛。 */
 async function runGeneration() {
   const history = buildHistory(activeMessages())
-  const cursor: TurnCursor = { footprintId: uid(), assistantId: uid() }
+  // 生成的终态 (中断提示/流式收敛) 必须落在发起会话: 中途切换或删除会话时
+  // activeId 已变, 若按 activeId 追加会把"已中断"写进无关的新会话。
+  const generationSessionId = state.activeId
+  const cursor: TurnCursor = { footprintId: uid(), assistantId: uid(), sessionId: generationSessionId }
   appendMessage({ id: cursor.footprintId, role: 'footprint', calls: [], ts: Date.now() })
   appendMessage({ id: cursor.assistantId, role: 'assistant', content: '', ts: Date.now(), streaming: true })
   setState({ sending: true })
@@ -251,10 +276,13 @@ async function runGeneration() {
     const message: ChatMessage = aborted
       ? { id: uid(), role: 'notice', content: '已中断, 可点击重试继续。', ts: Date.now() }
       : { id: uid(), role: 'error', kind: 'network', message: error instanceof Error ? error.message : String(error), ts: Date.now() }
-    appendMessage(message)
+    patchSessionById(generationSessionId, session => ({
+      ...session,
+      messages: [...session.messages, message],
+    }))
   } finally {
     abortController = null
-    patchActiveSession(session => ({
+    patchSessionById(generationSessionId, session => ({
       ...session,
       messages: session.messages.map(m => (m.role === 'assistant' && m.streaming ? { ...m, streaming: false } : m)),
     }))
@@ -292,6 +320,16 @@ function rotateTurn(cursor: TurnCursor) {
 
 function applyEvent(event: AssistantEvent, cursor: TurnCursor) {
   switch (event.type) {
+    case 'assistant_context':
+      // Provider state belongs to the completed text segment, before a tool
+      // rotates it. It is persisted for follow-ups and never rendered as text.
+      patchSessionById(cursor.sessionId, session => ({
+        ...session,
+        messages: session.messages.map(m => m.id === cursor.assistantId && m.role === 'assistant'
+          ? { ...m, reasoningContent: event.reasoning_content, reasoningContext: event.reasoning_context }
+          : m),
+      }))
+      break
     case 'tool_call':
       // 工具调用就地把之前的正文封口, 卡片插在它被调用的位置
       rotateTurn(cursor)
@@ -377,10 +415,17 @@ function applyEvent(event: AssistantEvent, cursor: TurnCursor) {
       }), { persist: false })
       break
     case 'error':
-      appendMessage({ id: uid(), role: 'error', kind: event.kind, message: event.message, hint: event.hint, ts: Date.now() })
+      // append 型事件钉在发起会话 (map 型分支落错会话时是 no-op, 安全)
+      patchSessionById(cursor.sessionId, session => ({
+        ...session,
+        messages: [...session.messages, { id: uid(), role: 'error', kind: event.kind, message: event.message, hint: event.hint, ts: Date.now() } as ChatMessage],
+      }))
       break
     case 'notice':
-      appendMessage({ id: uid(), role: 'notice', content: event.message, ts: Date.now() })
+      patchSessionById(cursor.sessionId, session => ({
+        ...session,
+        messages: [...session.messages, { id: uid(), role: 'notice', content: event.message, ts: Date.now() } as ChatMessage],
+      }))
       break
     case 'done':
       // 流结束: 仍处于 awaiting 的确认(后端超时未执行)收敛为已取消, 卡片不再悬挂。

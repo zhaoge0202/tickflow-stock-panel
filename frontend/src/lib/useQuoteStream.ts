@@ -207,7 +207,9 @@ export function useQuoteStream(
               for (const query of queries) {
                 const start = String(query.queryKey[2] ?? '')
                 const end = String(query.queryKey[3] ?? '')
-                if (latestDate < start || latestDate > end) continue
+                // 空串边界 = 滚动"最近 N 根"窗口 (无日期边界): 尾部合并总是适用,
+                // 不得因 latestDate > '' 被跳过 — 否则这类看板收不到实时修补
+                if ((start && latestDate < start) || (end && latestDate > end)) continue
                 qc.setQueryData<KlineDailyResponse>(
                   query.queryKey,
                   current => mergeLatestKlineRow(current, latest),
@@ -222,6 +224,11 @@ export function useQuoteStream(
         // 策略结果和竞价确认共用候选池，确认查询也要随策略结果更新失效。
         qc.invalidateQueries({ queryKey: ['screener-cached'] })
         qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+      })
+
+      es.addEventListener('daily_integrity_updated', () => {
+        qc.invalidateQueries({ queryKey: QK.dataIntegrity })
+        qc.invalidateQueries({ queryKey: QK.dataStatus })
       })
 
       es.addEventListener('depth_updated', () => {

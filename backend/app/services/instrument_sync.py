@@ -19,6 +19,7 @@ import polars as pl
 
 from app.market_time import cn_today
 from app.services.fs_utils import atomic_write_parquet
+from app.tickflow import client as tf_client
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class InstrumentSyncError(RuntimeError):
     """维表同步结果不安全, 拒绝覆盖现有主数据。"""
 
 
-def _flatten_instruments(items: list[dict]) -> list[dict]:
+def _flatten_instruments(items: list[dict], *, current_limits: bool = True) -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
     rows = []
     for item in items:
@@ -62,8 +63,8 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
         row["tick_size"] = ext.get("tick_size")
-        row["limit_up"] = ext.get("limit_up")
-        row["limit_down"] = ext.get("limit_down")
+        row["limit_up"] = ext.get("limit_up") if current_limits else None
+        row["limit_down"] = ext.get("limit_down") if current_limits else None
         rows.append(row)
     return rows
 
@@ -99,12 +100,14 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
 def _fetch_instruments_via_tickflow() -> list[dict]:
     """走 TickFlow 免费 instruments 元数据接口拉全量股票维表。"""
     tf = get_client()
+    # 免费接口的限价来自历史行情, 不能盖上同步日期当作当日权威价 (上游 v0.3.2x 修复)。
+    current_limits = tf_client.current_mode() == "api_key"
     all_rows: list[dict] = []
     for ex in _EXCHANGES:
         try:
             items = tf.exchanges.get_instruments(ex, instrument_type="stock")
             if items:
-                rows = _flatten_instruments(items)
+                rows = _flatten_instruments(items, current_limits=current_limits)
                 all_rows.extend(rows)
                 logger.info("instruments %s: %d stocks", ex, len(rows))
         except Exception as e:
@@ -367,6 +370,7 @@ def sanitize_limit_prices(
     prev_close_by_symbol: dict[str, float],
     as_of: date,
     base_date: date | None = None,
+    paid_limits: bool = False,
 ) -> tuple[list[dict], dict[str, int]]:
     """校验/重算 limit_up/down, 返回新行列表与统计。
 
@@ -375,6 +379,8 @@ def sanitize_limit_prices(
       2. 上游价与理论价差 ≤ 1 分: 保留上游 (source=provider)
       3. 否则改写为理论价 (source=theoretical)
       4. 无昨收: 清空 limit, 避免脏值入库
+      5. paid_limits=True (付费元数据源提供的当日限价) 时无昨收也按原值入库,
+         因为这类上游价本身就是当日权威值, 不是历史行情推断出来的
     """
     stats = {
         "total": 0,
@@ -393,6 +399,17 @@ def sanitize_limit_prices(
             continue
         row["symbol"] = symbol
         prev = prev_close_by_symbol.get(symbol)
+        src_up = _finite_price(row.get("limit_up"))
+        src_down = _finite_price(row.get("limit_down"))
+        if prev is None and paid_limits and src_up is not None and src_down is not None:
+            # 付费元数据自带当日限价: 昨收缺失也只影响理论价复算, 不影响权威值
+            row["limit_up"] = round(src_up, 2)
+            row["limit_down"] = round(src_down, 2)
+            row["limit_source"] = "provider"
+            row["limit_base_date"] = as_of.isoformat()
+            stats["kept_provider"] += 1
+            out.append(row)
+            continue
         if prev is None:
             row["limit_up"] = None
             row["limit_down"] = None
@@ -406,8 +423,6 @@ def sanitize_limit_prices(
         pct = _limit_pct_for_symbol(symbol, row.get("name"), as_of)
         theo_up = _limit_price_value(prev, pct, up=True)
         theo_down = _limit_price_value(prev, pct, up=False)
-        src_up = _finite_price(row.get("limit_up"))
-        src_down = _finite_price(row.get("limit_down"))
 
         up_ok = src_up is not None and abs(src_up - theo_up) <= _LIMIT_PRICE_TOLERANCE
         down_ok = src_down is not None and abs(src_down - theo_down) <= _LIMIT_PRICE_TOLERANCE
@@ -432,8 +447,12 @@ def sync_instruments(data_dir: Path) -> int:
     返回写入的行数。
     """
     provider_rows = _fetch_instruments_via_provider()
+    # 付费元数据源 (api_key) 的限价是当日权威值; 免费源给的是历史行情推断值,
+    # 只能作为兜底元数据, 不能盖上同步日期当作当日限价 (上游 v0.3.2x 口径)。
+    paid_limits = False
     if provider_rows is None:
         all_rows = _fetch_instruments_via_tickflow()
+        paid_limits = tf_client.current_mode() == "api_key"
         fallback_rows: list[dict] = []
     else:
         all_rows = provider_rows
@@ -500,6 +519,7 @@ def sync_instruments(data_dir: Path) -> int:
         prev_close_by_symbol=prev_close,
         as_of=as_of,
         base_date=base_date,
+        paid_limits=paid_limits,
     )
     logger.info(
         "instruments limit sanitize: base_date=%s prev_close=%d kept=%d rewritten=%d cleared=%d",
@@ -522,12 +542,12 @@ def sync_instruments(data_dir: Path) -> int:
     return df.height
 
 
-# 股本与交易规则字段: 部分行情源的标的维表只有代码/名称/市场/类型。
-# 这些字段缺失会让 enriched 的 turnover_rate / 市值 / 涨跌停判定全空, 进而使
+# 股本与静态交易规则字段: 部分行情源的标的维表只有代码/名称/市场/类型。
+# 这些字段缺失会让 enriched 的 turnover_rate / 市值为空, 进而使
 # 依赖换手率与流通市值的策略筛不出任何标的 —— 因此绝不能用 null 覆盖已有值。
+# 涨跌停价随交易日变化，不从历史维表继承。
 _SHARE_FIELDS = (
     "listing_date", "total_shares", "float_shares", "tick_size",
-    "limit_up", "limit_down",
 )
 
 

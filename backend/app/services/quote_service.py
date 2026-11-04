@@ -29,8 +29,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, suppress
-from datetime import date, datetime, time as dt_time
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
+from pathlib import Path
 from typing import ClassVar
 
 import polars as pl
@@ -95,13 +97,31 @@ REALTIME_RECORD_SCHEMA_OVERRIDES = {
 # 失败由 webhook_adapter 记 WARNING(可见), 但绝不阻塞热路径。
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="feishu-webhook")
 
+# 系统通知投递专用单线程池 —— 同因隔离。notify_adapter 底层是 subprocess
+# (osascript/notify-send, 每条最长 5s 超时), 在 _poll_loop 上同步逐条执行的话,
+# 告警风暴会让一轮监控评估阻塞数十秒, 拖慢行情拉取与 SSE 推送。
+# 单 worker 保序且限制并发, fire-and-forget。
+_SYSNOTIFY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sys-notify")
 
-def shutdown_webhook_executor() -> None:
-    """应用关闭时放弃仍在排队的投递并关闭线程池 (lifespan shutdown 调用)。
 
-    不调用则 daemon 工作线程随进程退出, 排队中的 webhook 静默丢失。
+def shutdown_delivery_executors() -> None:
+    """应用关闭时放弃仍在排队的投递并关闭投递线程池 (lifespan shutdown 调用)。
+
+    不调用则 daemon 工作线程随进程退出, 排队中的 webhook/系统通知静默丢失。
     """
     _WEBHOOK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _SYSNOTIFY_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+def _deliver_system_notify(title: str, body: str) -> None:
+    """在线程池里投递一条系统通知; 异常静默 (与同步路径的容错口径一致)。"""
+    from app.services import notify_adapter
+
+    try:
+        notify_adapter.notify(title, body)
+    except Exception:  # noqa: BLE001
+        logger.debug("系统通知发送异常 (不影响告警主流程)")
+
 def _is_trade_price_record(record: dict) -> bool:
     """是否可写入日 K/enriched 的真实成交快照。
 
@@ -142,6 +162,7 @@ class QuoteSubscriber:
         self._quote_updated = False
         self._strategy_results_updated = False
         self._depth_updated = False
+        self._daily_integrity_updated: bool | None = None
         self._alerts: list[dict] = []
         self._reviews: list[str] = []
 
@@ -160,6 +181,9 @@ class QuoteSubscriber:
                 "alerts": self._alerts,
                 "reviews": self._reviews,
             }
+            if self._daily_integrity_updated is not None:
+                out["daily_integrity_updated"] = self._daily_integrity_updated
+            self._daily_integrity_updated = None
             self._quote_updated = False
             self._strategy_results_updated = False
             self._depth_updated = False
@@ -190,6 +214,7 @@ class QuoteSubscriber:
                 not self._quote_updated
                 and not self._strategy_results_updated
                 and not self._depth_updated
+                and self._daily_integrity_updated is None
                 and not self._reviews
             ):
                 self._event.clear()
@@ -197,6 +222,11 @@ class QuoteSubscriber:
     def notify_quote(self) -> None:
         with self._lock:
             self._quote_updated = True
+            self._event.set()
+
+    def notify_daily_integrity(self, data_changed: bool) -> None:
+        with self._lock:
+            self._daily_integrity_updated = bool(self._daily_integrity_updated or data_changed)
             self._event.set()
 
     def notify_strategy_results(self) -> None:
@@ -271,6 +301,10 @@ class QuoteService:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # 生命周期锁: 串行化 start/stop/enable 的 check-then-act。两个并发开关
+        # (双标签页 PUT /preferences + boot_check) 无锁交错会各起一条轮询线程
+        # (双倍拉取配额 + 重复 SSE 广播)。锁内不做 IO (join/偏好读写都在锁外)。
+        self._lifecycle_lock = threading.Lock()
         # 串行化行情拉取: 手动 POST /refresh 与后台轮询线程可能并发调用
         # _fetch_quotes, 两者同时写同一批 parquet/缓存会互相覆盖
         self._fetch_lock = threading.Lock()
@@ -341,6 +375,7 @@ class QuoteService:
         # prev 不早于本时段开盘时计算
         self._volume_delta: dict[str, tuple[float, float]] = {}
         self._volume_delta_span_s: float = 0.0
+        self._etf_history_cache: tuple[tuple, pl.DataFrame] | None = None
 
     # ================================================================
     # 生命周期
@@ -348,18 +383,23 @@ class QuoteService:
 
     def start(self, interval: float = 0.0) -> None:
         """启动后台行情轮询线程。"""
-        if self._running:
-            return
         if interval <= 0:
             from app.services import preferences
             interval = preferences.get_realtime_quote_interval()
-        self._interval = self._clamp_interval(interval)
+        clamped = self._clamp_interval(interval)
+        # 预热在持锁前完成: 内部抓一轮全市场行情(数秒~数十秒),
+        # 放在锁内会让并发的 stop()/enable() 长时间等待。
         self._prime_quotes_once()
-        self._running = True
-        self._enabled = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
-        self._start_monitor_worker()
+        with self._lifecycle_lock:
+            if self._running:
+                return
+            self._interval = clamped
+            self._running = True
+            self._enabled = True
+            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._thread.start()
+            # 监控评估线程与行情线程同生命周期 (上游 _lifecycle_lock 保护启停)
+            self._start_monitor_worker()
         self._save_enabled(True)
         logger.info("行情服务已启动, 轮询间隔 %.1fs", self._interval)
 
@@ -368,12 +408,15 @@ class QuoteService:
 
         persist_enabled=False 用于进程退出/热重载清理线程, 不代表用户关闭实时行情。
         """
-        self._running = False
-        self._enabled = False
-        self._stop_monitor_worker()
-        if self._thread:
-            self._thread.join(timeout=10)
+        with self._lifecycle_lock:
+            self._running = False
+            self._enabled = False
+            self._stop_monitor_worker()
+            thread = self._thread
             self._thread = None
+        if thread:
+            thread.join(timeout=10)
+        self._etf_history_cache = None
         # 此处不持久化关闭: lifespan shutdown (容器停止/重启) 也调用 stop,
         # 持久化 False 会让每次重启后实时行情都变关闭、需手动再开。
         # 持久化语义归 disable() (用户主动关闭)。
@@ -390,14 +433,18 @@ class QuoteService:
             return False
         self._enabled = True
         self._save_enabled(True)
+        from app.services import preferences
+        interval = self._clamp_interval(preferences.get_realtime_quote_interval())
         if not self._running:
-            from app.services import preferences
-            self._interval = self._clamp_interval(preferences.get_realtime_quote_interval())
+            # 预热在持锁前完成: 内部会抓一轮全市场行情, 持锁期间 stop() 会被阻塞。
             self._prime_quotes_once()
-            self._running = True
-            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-            self._thread.start()
-            self._start_monitor_worker()
+        with self._lifecycle_lock:
+            if not self._running:
+                self._interval = interval
+                self._running = True
+                self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+                self._thread.start()
+                self._start_monitor_worker()
         logger.info("行情服务已启用, 轮询间隔 %.1fs", self._interval)
         return True
 
@@ -471,6 +518,7 @@ class QuoteService:
     def set_repo(self, repo) -> None:
         """注入 KlineRepository, 用于实时落盘。"""
         self._repo = repo
+        self._etf_history_cache = None
 
     def set_app_state(self, app_state) -> None:
         """注入 FastAPI app.state, 用于获取 strategy_monitor 等单例。"""
@@ -521,6 +569,23 @@ class QuoteService:
         """策略结果缓存更新后调用，仅刷新策略页结果缓存。"""
         for sub in self._snapshot_subscribers():
             sub.notify_strategy_results()
+
+    def notify_daily_integrity_updated(self, assets: list[str], *, data_changed: bool) -> None:
+        if data_changed:
+            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+            affected = set(assets)
+            if "index" in affected:
+                affected.update({"stock", "etf"})
+            if engine is not None:
+                for asset in affected:
+                    engine.invalidate_daily_asset(asset)
+            from app.api.overview import invalidate_overview_cache
+            from app.api.regime import invalidate_regime_cache
+
+            invalidate_overview_cache()
+            invalidate_regime_cache()
+        for sub in self._snapshot_subscribers():
+            sub.notify_daily_integrity(data_changed)
 
     def notify_depth_updated(self) -> None:
         """五档盘口修正完成后调用: 通知 SSE 推送 depth_updated, 触发连板梯队刷新。
@@ -742,8 +807,10 @@ class QuoteService:
     # ================================================================
 
     def _poll_loop(self) -> None:
-        while self._running and self._enabled:
-            sleep_s = self._interval
+        # 线程身份检查: stop() 清标志 → 释放锁 → join 前, 另一线程 start() 可能把
+        # _running 置回 True, 老线程只看共享标志会永不退出 (join 超时 + 双轮询)。
+        # _thread 指向新线程/None 时, 老循环在下一轮检查点自行退出。
+        while self._running and self._enabled and self._thread is threading.current_thread():
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 if self._paused:
@@ -1140,7 +1207,6 @@ class QuoteService:
         只更新展示缓存, 不写 daily/enriched、不评估监控 —— 防止收盘后数据源仍
         返回竞价前旧价时把陈旧收盘价固化到当日分区。
         """
-        from app.services import preferences
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
         core_index_symbols = set(DEFAULT_CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
@@ -2551,9 +2617,10 @@ class QuoteService:
         - 开关开启: 逐条发系统通知; 失败静默, 不阻断主流程
         - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
         - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
+        - 投递在专用线程池执行 (subprocess 每条最长 5s), 不阻塞行情轮询线程
         """
         try:
-            from app.services import notify_adapter, preferences
+            from app.services import preferences
 
             if not preferences.get_system_notify_enabled():
                 return
@@ -2576,8 +2643,8 @@ class QuoteService:
                 body = _body_with_quote(body, ev)
 
                 title = f"TickFlow · {source_label}"
-                notify_adapter.notify(title, body)
-        except Exception as e:
+                _SYSNOTIFY_EXECUTOR.submit(_deliver_system_notify, title, body)
+        except Exception as e:  # noqa: BLE001
             logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
 
     @staticmethod
@@ -2651,6 +2718,44 @@ class QuoteService:
         ).start()
         logger.info("enriched 全量重建已转后台 (asset_type=%s)", asset_type)
 
+    @staticmethod
+    def _etf_history_files(root: Path, today: date) -> tuple:
+        # Daily storage uses date partitions. Probe only the existing 150-day
+        # warmup horizon, so old years and today's repeated writes cost no scan.
+        files = []
+        for offset in range(150, 0, -1):
+            folder = root / f"date={today - timedelta(days=offset)}"
+            for path in sorted(folder.glob("*.parquet")):
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                files.append((str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino))
+        return tuple(files)
+
+    def _etf_live_history(self, today: date, columns: list[str]) -> pl.DataFrame | None:
+        root = self._repo.store.data_dir / "kline_etf_daily"
+        files = self._etf_history_files(root, today)
+        if not files:
+            self._etf_history_cache = None
+            return None  # Preserve the original empty-history fallback.
+        key = (str(root), today, files)
+        cached = self._etf_history_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        frame = guarded_collect(
+            scan_daily_parquet([entry[0] for entry in files])
+            .select(columns)
+            .filter((pl.col("date") >= today - timedelta(days=150)) & (pl.col("date") != today))
+            .sort(["symbol", "date"]),
+            priority="background",
+        )
+        # A bounded immutable input cache only: formulas, adjustment factors and
+        # signals are still evaluated on each tick by the original pipeline.
+        self._etf_history_cache = None
+        if frame.estimated_size() <= 64 * 1024**2 and files == self._etf_history_files(root, today):
+            self._etf_history_cache = (key, frame)
+        return frame
     def _flush_live_enriched(
         self,
         daily_df: pl.DataFrame,
@@ -2771,6 +2876,9 @@ class QuoteService:
                 # 分区命名与预期不符时回退到全量 glob, 保持兼容。
                 hist_source = hist_paths if hist_paths else str(daily_dir / "**" / "*.parquet")
                 ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
+                # ETF 全量回退的历史帧按日线文件指纹缓存 (上游 v0.3.29):
+                # 盘中每轮都要重扫 150 天分区, 缓存命中时直接用不可变帧。
+                etf_hist = self._etf_live_history(today, ohlcv_cols) if asset_type == "etf" else None
                 daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
                 if daily_ohlcv.is_empty() or "symbol" not in daily_ohlcv.columns:
                     return
@@ -2782,12 +2890,24 @@ class QuoteService:
                 factor_path = self._repo.store.data_dir / factor_dir / "all.parquet" if factor_dir else None
                 factors = pl.DataFrame()
                 if factor_path and factor_path.exists():
-                    with suppress(Exception):
+                    try:
                         factors = pl.read_parquet(factor_path)
+                    except Exception as e:  # noqa: BLE001
+                        # fail-visible: 复权因子读失败继续算会让本轮 enriched 以
+                        # 不复权口径落盘并进缓存, 后续增量轮以此为基准 — 必须留痕
+                        logger.warning(
+                            "%s 复权因子读取失败, 本轮 enriched 退化为不复权口径: %s",
+                            asset_type, e,
+                        )
+
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
                 today_parts: list[pl.DataFrame] = []
-                hist_lf = scan_daily_parquet(hist_source).filter(
+                # ETF 命中上游的日线历史帧缓存时直接复用, 否则按 date= 分区拼路径扫描。
+                hist_lf = (
+                    etf_hist.lazy() if etf_hist is not None
+                    else scan_daily_parquet(hist_source)
+                ).filter(
                     # 多读一段自然日, 再按交易日计数确定窗口起点
                     # (长假前后 90 个自然日不足 60 个交易日)
                     (pl.col("date") >= cutoff - timedelta(days=60)) & (pl.col("date") != today)

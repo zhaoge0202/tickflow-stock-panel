@@ -451,6 +451,10 @@ def run_now(
     universe = _resolve_universe(capset, repo)
     emit("resolve_universe", 10, f"标的池规模:{len(universe)} 只")
 
+    # 已知异常不能先进入指标计算, 再在末尾才报失败。修补与自检页面共用链路。
+    from app.services.integrity_check import repair_known_data
+    repair_known_data(repo, capset, on_progress=emit)
+
     # Step 1: 日 K 同步
     #   override_start_date 传入 → 强制 batch 拉取 [override_start_date ~ safe_end] (数据修正)
     #   付费档 + 今天有数据 → 实时行情接口拉一次覆写（1请求全市场）
@@ -479,6 +483,7 @@ def run_now(
             integrity_issues = data_integrity.scan_recent_integrity(
                 repo.store.data_dir, today=today,
             )
+            integrity_issues = [i for i in integrity_issues if i.table in data_integrity.active_daily_tables()]
             # 当天的股票日K由盘后行情快照定版(见 Step 1 的快照分支), 不参与
             # 完整性修复判定: 实时行情写出的当天分区必然带 quote_ts, 每天都会被
             # 判成盘中快照, 管道就会永远走"从坏日逐只重拉", 快照分支永不生效。
@@ -920,7 +925,12 @@ def run_now(
     pull_index = _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
-    if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
+    from app.data_providers import custom as custom_sources
+    daily_provider = _prefs.get_daily_data_provider()
+    daily_allowed = capset.has(Cap.KLINE_DAILY_BATCH) or (
+        daily_provider != "tickflow" and custom_sources.provider_has_dataset(daily_provider, "daily")
+    )
+    if daily_allowed and (pull_index or pull_etf):
         _types = []
         if pull_index:
             _types.append("指数")
@@ -998,7 +1008,10 @@ def run_now(
                     d.name[5:] for d in etf_dir.glob("date=*")
                     if d.is_dir() and d.name.startswith("date=")
                 ) if etf_dir.exists() else []
-                etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
+                if override_start_date is not None:
+                    etf_start = override_start_date
+                else:
+                    etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
                 # 同指数: 完整性修复时把 ETF 起点提前到最早坏日
                 if etf_stale_day is not None and etf_start > etf_stale_day:
                     etf_start = etf_stale_day
@@ -1181,14 +1194,17 @@ def run_now(
             from app.services import data_integrity as _di
 
             remaining_issues = _di.scan_recent_integrity(repo.store.data_dir, today=today)
+            checked_tables = set(_di.active_daily_tables())
+            remaining_issues = [i for i in remaining_issues if i.table in checked_tables]
             if remaining_issues:
                 stage_errors.append(
                     f"数据修复后完整性仍不通过: {_di.describe_issues(remaining_issues)}"
-                    f" (剩余 {len(remaining_issues)} 个坏分区, 多为数据源拉取失败;"
-                    " 可稍后重试或到 数据→修正数据 手动执行)"
+                    f" (剩余 {len(remaining_issues)} 个不完整分区;"
+                    " 请查看同步日志, 或到 数据→修正数据 手动执行)"
                 )
                 logger.warning(
-                    "integrity: post-repair scan found %d remaining issues", len(remaining_issues),
+                    "integrity: post-repair scan found %d remaining issues: %s",
+                    len(remaining_issues), _di.describe_issues(remaining_issues),
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("integrity: post-repair scan failed (soft): %s", e)
