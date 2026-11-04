@@ -18,6 +18,7 @@ from app.api import (
     alerts,
     analysis,
     backtest,
+    candidate_watch as candidate_watch_api,
     config_backup,
     data,
     decision,
@@ -218,6 +219,17 @@ async def _application_lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    # 候选池高频盯盘 (A 方案): 全市场低频选池 + 候选池 3~6s 盯盘。
+    # 独立线程, 与行情轮/监控中心互不阻塞; 只在连续竞价时段工作。
+    try:
+        from app.services.candidate_watch import get_candidate_watch
+
+        candidate_watch = get_candidate_watch()
+        candidate_watch.set_repo(repo)
+        app.state.candidate_watch = candidate_watch
+    except Exception as e:  # noqa: BLE001
+        logger.warning("candidate watch init failed: %s", e)
+        app.state.candidate_watch = None
     from app.services.quote_snapshot_ingest import quote_snapshot_ingestor
     quote_snapshot_ingestor.start()
     app.state.quote_snapshot_ingestor = quote_snapshot_ingestor
@@ -242,6 +254,14 @@ async def _application_lifespan(app: FastAPI):
     strategy_monitor = StrategyMonitorService()
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
+    # 候选池盯盘在 app.state 就绪后启动 (需要 quote_service 做推送)
+    try:
+        cw = getattr(app.state, "candidate_watch", None)
+        if cw is not None:
+            cw.set_app_state(app.state)
+            cw.start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("candidate watch start failed: %s", e)
 
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
@@ -570,6 +590,9 @@ async def _application_lifespan(app: FastAPI):
         if qs:
             # 进程退出/热重载只是清理后台线程, 不能把用户的实时行情开关写成关闭。
             qs.stop(persist_enabled=False)
+        cw = getattr(app.state, "candidate_watch", None)
+        if cw:
+            cw.stop()
         qsi = getattr(app.state, "quote_snapshot_ingestor", None)
         if qsi:
             qsi.stop()
@@ -730,6 +753,7 @@ app.include_router(mining.router)
 app.include_router(guardian.router)
 app.include_router(lab.router)
 app.include_router(intraday.router)
+app.include_router(candidate_watch_api.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
 app.include_router(pages_admin.router)
