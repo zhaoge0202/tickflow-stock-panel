@@ -154,6 +154,8 @@ def test_digest_revision_version_and_compatibility_guards(tmp_path):
 
 @pytest.mark.parametrize("name", ["../escape.py", "/tmp/evil.py", "a\\evil.py", "a/../x.py", "CON.py", "x.dll", "backend/extension.py/child.py"])
 def test_invalid_archive_paths_and_payloads_are_rejected(tmp_path, name):
+    if "\\" in name and sys.platform == "win32":
+        pytest.skip("Windows 的 zipfile.ZipInfo 会把 os.sep 归一为 '/', 无法构造含反斜杠的条目名")
     with pytest.raises(ValueError):
         ExtensionPackageStore(tmp_path).inspect(bundle(extra={name: "pass"}))
 
