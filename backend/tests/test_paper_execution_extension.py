@@ -568,7 +568,7 @@ class Native:
     def compute_signals(self, market, params):
         return make_signal_matrix(market.shape, entry=(market.close > params["threshold"]).astype(np.uint8), exit=np.zeros(market.shape, dtype=np.uint8))
 MATRIX_STRATEGY = Native()
-""")
+""", encoding="utf-8")
     env.engine.reload()
     env.screener.frame = env.screener.frame.with_columns(
         pl.lit(10.0).alias("open"),
