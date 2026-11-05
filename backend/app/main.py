@@ -524,7 +524,6 @@ async def _application_lifespan(app: FastAPI):
         _schedule_matrix_cache_prewarm()
 
     # 通用监控规则引擎: 启动时 reload 规则到内存态 (修复重启后告警失效)
-    from app.services import preferences
     from app.services.sector_monitor import SectorMonitorService
     from app.strategy import monitor_rules as mr_store
     from app.strategy.monitor import MonitorRuleEngine
@@ -542,20 +541,9 @@ async def _application_lifespan(app: FastAPI):
     # 单日分区直读 + quote_ticks 聚合兜底, 让分钟策略也能盘中触发通知。
     monitor_engine.set_minute_loader(_screener_svc._load_minute_history)
 
-    # 自动迁移: 把旧 strategy_monitor_ids 同步为 type=strategy 规则 (统一到监控页)
-    try:
-        if preferences.get_strategy_monitor_enabled():
-            ids = preferences.get_strategy_monitor_ids()
-            if ids:
-                names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
-                mr_store.migrate_strategy_monitors(
-                    store.data_dir, ids, names,
-                    default_channels=preferences.get_webhook_default_channels(),
-                )
-                logger.info("strategy monitor migrated: %d strategies", len(ids))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("strategy monitor migration failed: %s", e)
-
+    # 监控规则文件 (user_data/monitor_rules/*.json) 是唯一真相: 不再启动时用旧
+    # preferences.strategy_monitor_ids 回填 type=strategy 规则 — 那会把用户在监控中心
+    # 删除/停用的策略规则重新建出来 (且不在旧偏好里的规则会被停用), 重启即复活。
     try:
         rules = mr_store.load_all(store.data_dir)
         monitor_engine.set_rules(rules)
