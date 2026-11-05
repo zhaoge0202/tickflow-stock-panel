@@ -306,7 +306,7 @@ def test_precise_repair_does_not_take_over_unrelated_incomplete_publication(env)
     report = integrity_check.run_check(env.root, asset_types=["stock"])
     with pytest.raises(EnrichedGenerationUnavailableError, match="其他未完成"):
         integrity_check.run_repair(env.repo, env.caps, report["id"])
-    marker = json.loads((env.root / ".matrix_generation_stock.json").read_text())
+    marker = json.loads((env.root / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "publishing"
 
 

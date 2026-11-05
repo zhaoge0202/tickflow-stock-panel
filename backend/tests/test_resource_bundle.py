@@ -205,7 +205,7 @@ def test_identical_definitions_reuse_and_different_content_requires_explicit_rep
     assert not (dest / "strategies/custom/custom_a.py").exists()
     result = apply(blob, preview, overwrite=["factor:uf_shared"])
     assert result["reused"] == 1
-    assert json.loads((dest / "user_data/custom_factors/uf_shared.json").read_text())["formula"] == "close"
+    assert json.loads((dest / "user_data/custom_factors/uf_shared.json").read_text(encoding="utf-8"))["formula"] == "close"
     assert registry.get_factor("uf_shared").formula_text == "close"
 
 
@@ -235,7 +235,7 @@ def test_write_failure_rolls_back_the_entire_selected_batch(env, tmp_path, monke
     monkeypatch.setattr(resource_bundle.config_backup, "_write_payload", fail_signal)
     with pytest.raises(resource_bundle.ResourceBundleError, match="回滚"):
         apply(blob, preview, overwrite=["factor:uf_shared"])
-    assert json.loads((dest / "user_data/custom_factors/uf_shared.json").read_text()) == original
+    assert json.loads((dest / "user_data/custom_factors/uf_shared.json").read_text(encoding="utf-8")) == original
     assert not (dest / "strategies/custom/custom_a.py").exists()
     assert not (dest / "user_data/custom_signals/shared.json").exists()
 
@@ -316,7 +316,7 @@ def test_plain_zip_preserves_exported_paths_and_saved_settings(env, tmp_path, mo
     dest = fresh(tmp_path, monkeypatch)
     preview = inspect(blob)
     apply(blob, preview, selected=["strategy:custom_a"])
-    assert json.loads((dest / "user_data/strategy_overrides/custom_a.json").read_text()) == {"params": {"n": 5}}
+    assert json.loads((dest / "user_data/strategy_overrides/custom_a.json").read_text(encoding="utf-8")) == {"params": {"n": 5}}
     assert (dest / "strategies/custom/_helper.py").exists()
     assert not (dest / "strategies/custom/custom_b.py").exists()
 
@@ -455,7 +455,7 @@ def test_disabled_signal_can_be_imported_without_enabling_it(env, tmp_path, monk
     uploads = [("factor.json", json.dumps(FACTOR).encode()), ("signal.json", json.dumps({**SIGNAL, "enabled": False}).encode())]
     preview = resource_bundle.inspect_resources(uploads)
     resource_bundle.apply_resources(uploads, selected=["signal:shared"], overwrite=[], revision=preview["revision"])
-    assert json.loads((settings.data_dir / "user_data/custom_signals/shared.json").read_text())["enabled"] is False
+    assert json.loads((settings.data_dir / "user_data/custom_signals/shared.json").read_text(encoding="utf-8"))["enabled"] is False
 
 
 @pytest.mark.parametrize("name", ["../escape.json", "/tmp/escape.json", "user_data/custom_factors/../escape.json", "user_data/preferences.json"])
@@ -587,7 +587,7 @@ def test_user_ai_drafts_can_be_exported_and_remain_drafts_after_import(env, tmp_
     preview = inspect(blob)
     result = apply(blob, preview)
     assert result["drafts"] == ["ai_draft"]
-    assert AIStrategyGenerator._extract_meta((dest / "strategies/ai/ai_draft.py").read_text())["research_only"] is True
+    assert AIStrategyGenerator._extract_meta((dest / "strategies/ai/ai_draft.py").read_text(encoding="utf-8"))["research_only"] is True
 
 
 def test_loose_ai_file_without_publish_state_defaults_to_draft(env, tmp_path, monkeypatch):
@@ -595,7 +595,7 @@ def test_loose_ai_file_without_publish_state_defaults_to_draft(env, tmp_path, mo
     uploads = [("ai_loose.py", strategy("ai_loose").encode()), ("factor.json", json.dumps(FACTOR).encode()), ("signal.json", json.dumps(SIGNAL).encode())]
     preview = resource_bundle.inspect_resources(uploads)
     resource_bundle.apply_resources(uploads, selected=["strategy:ai_loose"], overwrite=[], revision=preview["revision"])
-    assert AIStrategyGenerator._extract_meta((dest / "strategies/ai/ai_loose.py").read_text())["research_only"] is True
+    assert AIStrategyGenerator._extract_meta((dest / "strategies/ai/ai_loose.py").read_text(encoding="utf-8"))["research_only"] is True
 
 
 def test_inspect_never_executes_source_and_runtime_failure_rolls_back(env, tmp_path, monkeypatch):
