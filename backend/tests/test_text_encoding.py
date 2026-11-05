@@ -49,14 +49,14 @@ def _text_io_without_encoding() -> list[str]:
             args = _call_args(source, match.end())
             if args is None or "encoding=" in args:
                 continue
-            if args.strip().startswith(('"', "'")):
-                continue  # encoding 走位置参数
+            if re.fullmatch(r"\s*[rbuRBU]*(['\"]).{0,20}\1\s*", args, re.S):
+                continue  # 位置参数传 encoding (只认短字面量; 多行三引号是内容)
             if match.group(0).endswith("open("):
                 # 只在参数里出现字面量时按文件 IO 处理: `open(0)` 这类同名遮蔽不算
                 if '"' not in args and "'" not in args:
                     continue
-                if re.search(r"['\"][rwx]?[ab]\+?['\"]", args):
-                    continue  # 二进制模式, 不需要 encoding
+                if re.search(r"['\"][rwxab+]*b[rwxab+]*['\"]", args):
+                    continue  # 二进制模式 ("rb"/"r+b"/"wb"...), 不需要 encoding
             line = source.count("\n", 0, match.start()) + 1
             offenders.append(f"{path.relative_to(APP_DIR.parent)}:{line}: {match.group(0)}{args[:60]}")
     return offenders

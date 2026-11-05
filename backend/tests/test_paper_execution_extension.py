@@ -27,7 +27,7 @@ ENTRY_SIGNALS = ["entry"]
 EXIT_SIGNALS = ["exit"]
 def filter(df, params):
     return pl.col("close") > params["threshold"]
-""")
+""", encoding="utf-8")
     engine = StrategyEngine([directory])
     frame = pl.DataFrame(
         {
