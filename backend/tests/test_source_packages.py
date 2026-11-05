@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -183,6 +184,8 @@ def test_pending_replacement_preview_rejects_stale_install_state(isolated):
 
 @pytest.mark.parametrize("filename", ["../escape.py", "/escape.py", "a\\b.py", "a/../b.py", "CON.py", "client.PY", "x.dll", "a./b.py"])
 def test_archive_paths_and_payload_limits(isolated, filename):
+    if "\\" in filename and sys.platform == "win32":
+        pytest.skip("Windows 的 zipfile.ZipInfo 会把 os.sep 归一为 '/', 无法构造含反斜杠的条目名")
     with pytest.raises(ValueError):
         packages.inspect_archive(bundle(extra={filename: "pass"}))
     assert not (isolated.parent / "escape.py").exists()

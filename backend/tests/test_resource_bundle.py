@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import json
 import stat
 import zipfile
@@ -332,6 +333,8 @@ def test_plain_zip_can_supply_dependencies_for_separately_uploaded_strategy(env,
 
 @pytest.mark.parametrize("name", ["../策略.py", "/策略.py", "包/../策略.py", "包\\策略.py"])
 def test_plain_zip_rejects_unsafe_paths(env, name):
+    if "\\" in name and sys.platform == "win32":
+        pytest.skip("Windows 的 zipfile.ZipInfo 会把 os.sep 归一为 '/', 无法构造含反斜杠的条目名")
     with pytest.raises(resource_bundle.ResourceBundleError, match=r"路径|条目"):
         inspect(loose_zip({name: strategy("custom_a").encode()}))
 
