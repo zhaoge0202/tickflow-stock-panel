@@ -21,7 +21,10 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
     只读位, 失败不该让写入失败, 所以吞掉 OSError, 与原调用处的处理一致。
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    # newline="": 原样写入, 不做平台换行翻译。Windows 默认会把 "\n" 译成 "\r\n",
+    # 于是"读文件→解码→写入"的导入路径会把 CRLF 变成 CRLF+CR ("\r\r\n"), 导入资源
+    # 与导出源不再字节一致 (test_py_file_import_through_resource_api 的回归点)。
+    tmp.write_text(text, encoding="utf-8", newline="")
     if mode is not None:
         try:
             os.chmod(tmp, mode)

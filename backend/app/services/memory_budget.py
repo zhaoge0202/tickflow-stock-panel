@@ -22,7 +22,7 @@ class MemoryBudget:
 
 def _read_int(path: Path) -> int | None:
     try:
-        value = int(path.read_text().strip())
+        value = int(path.read_text(encoding="utf-8").strip())
         return value if value >= 0 else None
     except (OSError, ValueError):
         return None
@@ -34,8 +34,8 @@ def _unescape(value: str) -> str:
 
 def _memory_groups() -> list[tuple[Path, Path, bool]]:
     try:
-        membership = _PROC_SELF.joinpath("cgroup").read_text().splitlines()
-        mounts = _PROC_SELF.joinpath("mountinfo").read_text().splitlines()
+        membership = _PROC_SELF.joinpath("cgroup").read_text(encoding="utf-8").splitlines()
+        mounts = _PROC_SELF.joinpath("mountinfo").read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     groups = []

@@ -282,7 +282,7 @@ def uninstall_plugin(name: str) -> tuple[bool, str]:
             return False, "Python 型插件缺少 requirements.txt, 无法自动卸载"
         # 读 requirements.txt 拿包名, 逐个 pip uninstall -y
         pkgs = [l.strip().split("==")[0].split(">=")[0].strip()
-                for l in req.read_text().splitlines()
+                for l in req.read_text(encoding="utf-8").splitlines()
                 if l.strip() and not l.startswith("#")]
         if not pkgs:
             return True, "requirements.txt 无有效包名"

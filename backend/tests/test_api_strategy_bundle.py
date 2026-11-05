@@ -153,5 +153,5 @@ def test_both_export_formats_import_through_current_api(client, tmp_path_factory
     assert applied.status_code == 200
     assert applied.json()["imported"] == 3
     assert client.app.state.strategy_engine.get("custom_standalone").file_path == destination / "strategies/custom/custom_standalone.py"
-    assert json.loads((destination / "user_data/custom_factors/uf_dep.json").read_text()) == UF_DEP
-    assert json.loads((destination / "user_data/strategy_overrides/custom_standalone.json").read_text()) == {"params": {"n": 5}}
+    assert json.loads((destination / "user_data/custom_factors/uf_dep.json").read_text(encoding="utf-8")) == UF_DEP
+    assert json.loads((destination / "user_data/strategy_overrides/custom_standalone.json").read_text(encoding="utf-8")) == {"params": {"n": 5}}
