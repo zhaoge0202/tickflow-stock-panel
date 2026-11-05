@@ -118,7 +118,7 @@ def test_wait_for_confirmed_current_bar_and_do_not_replay_past_signal(env):
 
 def test_changed_strategy_pauses_instead_of_using_new_code(env):
     bind(env)
-    env.path.write_text(env.path.read_text() + "\n# changed\n")
+    env.path.write_text(env.path.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
     env.service.tick(NOW)
     assert paper.load_orders(env.root) == []
     assert env.service.get("default")["status"] == "blocked"
@@ -168,7 +168,7 @@ def test_existing_rules_require_explicit_takeover_and_new_conflict_blocks(env):
 def test_preview_revision_prevents_stale_binding(env):
     source = {"strategy_id": "demo"}
     preview = env.service.preview(source)
-    env.path.write_text(env.path.read_text() + "\n# edit\n")
+    env.path.write_text(env.path.read_text(encoding="utf-8") + "\n# edit\n", encoding="utf-8")
     with pytest.raises(ValueError, match="预览"):
         env.service.bind("default", source, preview["revision"], now=NOW)
 
@@ -486,7 +486,7 @@ def test_definition_change_during_evaluation_prevents_orders(env, monkeypatch):
 
     def changed(*args, **kwargs):
         result = original_run(*args, **kwargs)
-        env.path.write_text(env.path.read_text() + "\n# changed while evaluating\n")
+        env.path.write_text(env.path.read_text(encoding="utf-8") + "\n# changed while evaluating\n", encoding="utf-8")
         return result
 
     monkeypatch.setattr(env.engine, "run", changed)
@@ -508,11 +508,12 @@ def test_dependency_fingerprint_uses_original_files_not_export_serialization(env
         "conditions": [{"left": "close", "op": ">", "right": 0}],
     }
     path = signal_dir / "qa_entry.json"
-    path.write_text(json.dumps(definition, separators=(",", ":")))
+    path.write_text(json.dumps(definition, separators=(",", ":")), encoding="utf-8")
     env.path.write_text(
-        env.path.read_text().replace(
+        env.path.read_text(encoding="utf-8").replace(
             'ENTRY_SIGNALS = ["entry"]', 'ENTRY_SIGNALS = ["csg_qa_entry"]'
-        )
+        ),
+        encoding="utf-8",
     )
     env.engine.reload()
     env.screener.frame = env.screener.frame.with_columns(pl.lit(True).alias("csg_qa_entry"))
@@ -521,7 +522,7 @@ def test_dependency_fingerprint_uses_original_files_not_export_serialization(env
     assert len(paper.load_orders(env.root)) == 6
     assert env.service.get("default")["enabled"] is True
     definition["conditions"][0]["right"] = 100
-    path.write_text(json.dumps(definition))
+    path.write_text(json.dumps(definition), encoding="utf-8")
     env.service.tick(NOW)
     assert env.service.get("default")["status"] == "blocked"
     assert "依赖已变更" in env.service.get("default")["message"]
