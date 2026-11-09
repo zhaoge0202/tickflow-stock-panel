@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import polars as pl
+
 from app.services.quote_service import QuoteService
 
 
@@ -15,6 +17,13 @@ class _Repo:
 
     def get_etf_symbol_set(self):
         return set(self._etf_symbols)
+
+    # 行情需求解析 (QuoteDemand) 会读指数维表与 ETF 维表, 桩需同步提供。
+    def get_index_symbol_set(self):
+        return set()
+
+    def get_etf_instruments(self):
+        return pl.DataFrame({"symbol": sorted(self._etf_symbols)})
 
 
 class FakeProvider:
