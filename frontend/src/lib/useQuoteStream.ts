@@ -202,6 +202,7 @@ export function useQuoteStream(
         if (!revisions.accept('quotes', e.data)) return
         // 实时行情未开启时不处理行情刷新
         if (!enabledRef.current) return
+        invalidateQuoteQueries()
         // 焦点股票日K增量刷新: 只取内存中的当日行并合并缓存尾部。
         if (document.visibilityState !== 'hidden') for (const symbol of focusSymbols()) {
           void qc.fetchQuery({ ...klineDailyLatestQueryOptions(symbol), staleTime: 0 })

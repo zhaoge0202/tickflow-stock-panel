@@ -4289,15 +4289,7 @@ export const api = {
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
     ),
-  screenerCachedSummary: () =>
-    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
 
-  screenerCachedResult: (strategyId: string, extColumns?: string) =>
-    request<ScreenerCachedResult>(
-      extColumns
-        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
-        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
-    ),
   screenerAuctionConfirmation: (
     asOf?: string,
     tradeDate?: string,
