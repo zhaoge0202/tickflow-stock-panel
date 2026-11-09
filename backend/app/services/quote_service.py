@@ -57,10 +57,22 @@ SOURCE_LABELS = {
 # final 定版确认容差: 快照时间戳允许早于边界 5s 内 (供应商时间戳精度不一)
 _FINAL_CONFIRM_SLACK_MS = 5_000
 
-# 全量 enriched 重建转后台的最小行数: 只有全市场体量才值得异步化。
-# 单票/自选/回放等小样本必须同轮写完 —— 读侧(个股详情、看板)在本轮返回后
-# 立即要能读到刚推的行情, 转后台会把这份数据推迟到下一轮甚至丢失。
-_FULL_ENRICHED_DEFER_MIN_ROWS = 500
+def _has_enriched_history(repo, asset_type: str) -> bool:
+    """本地是否已有该资产的 enriched 历史分区 (冷启动判定, 只列目录不读文件)。
+
+    热路径能否同步全量, 取决于本地有没有可用的历史: 冷启动时同步全量要扫盘,
+    会阻塞行情轮, 只能转后台预热; 已有历史则能立刻算出当日行, 必须同轮写完 ——
+    读侧(个股详情、看板)在本轮返回后立即要读到刚推的行情。
+    """
+    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+    if data_dir is None:
+        return False
+    from app.tickflow.repository import enriched_dirname
+
+    try:
+        return next(iter((data_dir / enriched_dirname(asset_type)).glob("date=*")), None) is not None
+    except OSError:
+        return False
 
 # final 定版边界与重试窗口终点 (北京时间)。收盘窗口终点 15:30, 恰与盘后管道
 # 启动同时: 管道运行期间轮询本就被暂停, 此后未确认的定版不再写盘, 当日分区
@@ -3021,7 +3033,7 @@ class QuoteService:
                 not use_incremental
                 and not _background
                 and asset_type == "stock"
-                and daily_df.height >= _FULL_ENRICHED_DEFER_MIN_ROWS
+                and not _has_enriched_history(self._repo, asset_type)
             ):
                 self._schedule_full_enriched_rebuild(
                     daily_df,
