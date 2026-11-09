@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.db_safe import is_valid_ext_ident, quote_ident
+from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now
 from app.services import strategy_cache, strategy_run_queue
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
@@ -745,6 +746,24 @@ def focus_versions(
     return payload
 
 
+def _realtime_overlay_allowed(strategy_date: date | None) -> bool:
+    """定版之后是否还允许用监控引擎的盘中快照覆盖正式策略缓存。
+
+    监控快照是最后一轮行情轮询算出的中间态: 14:59 达标、15:00 集合竞价被砸回
+    的票会留在快照里 (例如国光电器 14:56-14:59 收盘价 10.43 达标, 15:00 被砸到
+    10.37 又不达标)。收盘定版 (15:30) 之后继续叠加, 会让 /cached 列表与
+    focus-versions 的收盘定版不一致 —— 列表 2 只、点进去 1 只。
+
+    盘中 (含集合竞价、午休) 与跨日的旧快照一律放行, 行为保持不变。
+    """
+    if strategy_date is None:
+        return True
+    now = cn_now()
+    if strategy_date != now.date():
+        return True
+    return now.time() < DAILY_STRATEGY_READY_TIME
+
+
 def _cached_with_realtime(request: Request) -> dict:
     """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
     repo = request.app.state.repo
@@ -781,7 +800,7 @@ def _cached_with_realtime(request: Request) -> dict:
 
     # 叠加监控引擎内存里的实时结果 (若有), 用新鲜数据覆盖同策略的盘后结果
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
-    if monitor_engine is not None:
+    if monitor_engine is not None and _realtime_overlay_allowed(allowed):
         realtime_results = monitor_engine.latest_strategy_results()
         if allowed is not None:
             # 监控引擎可以继续产生盘中快照，但不能把当天快照伪装成正式日线
