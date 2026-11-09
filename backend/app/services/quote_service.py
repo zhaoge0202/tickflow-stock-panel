@@ -57,6 +57,11 @@ SOURCE_LABELS = {
 # final 定版确认容差: 快照时间戳允许早于边界 5s 内 (供应商时间戳精度不一)
 _FINAL_CONFIRM_SLACK_MS = 5_000
 
+# 全量 enriched 重建转后台的最小行数: 只有全市场体量才值得异步化。
+# 单票/自选/回放等小样本必须同轮写完 —— 读侧(个股详情、看板)在本轮返回后
+# 立即要能读到刚推的行情, 转后台会把这份数据推迟到下一轮甚至丢失。
+_FULL_ENRICHED_DEFER_MIN_ROWS = 500
+
 # final 定版边界与重试窗口终点 (北京时间)。收盘窗口终点 15:30, 恰与盘后管道
 # 启动同时: 管道运行期间轮询本就被暂停, 此后未确认的定版不再写盘, 当日分区
 # 由管道按官方日线值级校正 —— 避免定版重试与权威重建互相覆盖。
@@ -3012,7 +3017,12 @@ class QuoteService:
             # 全量重建转后台是本地 single-flight 优化(股票全市场体量才值得);
             # ETF/指数没有 live_agg, 每轮本就走同步全量回退, 不能被转后台吞掉
             # (上游契约: 同一轮内完成 flush)。
-            if not use_incremental and not _background and asset_type == "stock":
+            if (
+                not use_incremental
+                and not _background
+                and asset_type == "stock"
+                and daily_df.height >= _FULL_ENRICHED_DEFER_MIN_ROWS
+            ):
                 self._schedule_full_enriched_rebuild(
                     daily_df,
                     quote_extra,
