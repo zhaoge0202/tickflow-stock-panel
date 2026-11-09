@@ -65,7 +65,7 @@ export interface IntradayPoint {
   sourceTimes?: string[]
 }
 
-export function buildIntradayModel(sessions: MinuteKlineSession[], showAverage = true, assetType?: 'stock' | 'etf' | 'index') {
+export function buildIntradayModel(sessions: MinuteKlineSession[], showAverage = true, assetType?: string) {
   const series: PlotSeries[] = []
   const points = new Map<string, IntradayPoint>()
   const timeline: WhitespaceData<Time>[] = []
