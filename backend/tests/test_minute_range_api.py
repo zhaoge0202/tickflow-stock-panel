@@ -123,7 +123,7 @@ def test_sync_minute_single_passes_selected_date(monkeypatch):
     assert result["rows"] == 240
     sync.assert_called_once_with(
         ["600177.SH"], repo, capset, days=5,
-        force_full_days=True, target_date=date(2026, 7, 15),
+        force_full_days=True, target_date=date(2026, 7, 15), asset_type="stock",
     )
     refresh.assert_called_once_with(repo, "kline_minute")
 

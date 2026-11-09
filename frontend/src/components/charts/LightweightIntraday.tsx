@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { MinuteKlineRow, MinuteKlineSession, PriceLimitInfo } from '@/lib/api'
+import { isCryptoAssetType, type MinuteKlineRow, type MinuteKlineSession, type PriceLimitInfo } from '@/lib/api'
 import type { ChartPriceLine } from '@/lib/chart-types'
 import { buildIntradayModel, CHART_COLORS as C, minuteTime, type PlotSeries } from '@/lib/lightweight-model'
 import { getLimitPrices, summarizeMinutes, type DailySummary } from '@/lib/intraday-chart'
@@ -12,7 +12,8 @@ import type { AnnotationData } from './ChartAnnotations'
 
 interface Props {
   symbol: string
-  assetType?: 'stock' | 'etf' | 'index'
+  /** 资产类别; crypto 无涨跌停带 (走自适应), 缺省按 A 股/ETF/指数处理。 */
+  assetType?: string
   data?: MinuteKlineRow[]
   sessions?: MinuteKlineSession[]
   date?: string
@@ -107,8 +108,8 @@ export function LightweightIntraday({ symbol, assetType, data, sessions: supplie
         <span className="ml-2 font-mono text-[10px] text-muted">{supplied ? `${sessions.length} 个交易日` : date}</span>
       </span>
       {sessions.length === 1 && scale && !reference && <span className="text-[10px] text-muted">昨收缺失 · 仅价格轴</span>}
-      {showLimitLines && assetType === 'index' && <span className="text-[10px] text-muted" title={scale?.centered ? '以昨收为中轴，按最大涨跌幅对称适配' : '按分时最高、最低点自动适配'}>自适应</span>}
-      {showLimitLines && assetType !== 'index' && <div className="inline-flex rounded border border-border/70 p-0.5" role="group" aria-label="分时纵轴范围">
+      {showLimitLines && (assetType === 'index' || isCryptoAssetType(assetType)) && <span className="text-[10px] text-muted" title={scale?.centered ? '以昨收为中轴，按最大涨跌幅对称适配' : '按分时最高、最低点自动适配'}>自适应</span>}
+      {showLimitLines && assetType !== 'index' && !isCryptoAssetType(assetType) && <div className="inline-flex rounded border border-border/70 p-0.5" role="group" aria-label="分时纵轴范围">
         {(['adaptive', 'limit'] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
           disabled={option === 'limit' && !limits} title={option === 'adaptive'
             ? scale?.centered ? '以昨收为中轴，按最大涨跌幅对称适配' : '按分时最高、最低点自动适配'
