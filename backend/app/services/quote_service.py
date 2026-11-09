@@ -1493,13 +1493,6 @@ class QuoteService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("指数日K写盘失败: %s", e)
             self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
-            index_daily_df = self._build_daily(index_records)
-            if not index_daily_df.is_empty():
-                try:
-                    self._repo.merge_live_daily_asset("index", index_daily_df)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("指数日K写盘失败: %s", e)
-                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
