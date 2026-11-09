@@ -9,6 +9,7 @@ import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { DailyDataHealthNotice } from '@/components/data/DailyDataHealthNotice'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
+import { StockPreviewHost } from '@/components/StockPreviewHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import { StopLossPiPHost } from '@/components/stop-loss/StopLossPiPHost'
 import { useMonitoredPositions, togglePipOpen, useIsPipOpen } from '@/lib/stopLossStore'
@@ -1201,6 +1202,7 @@ export function Layout() {
       <StockAnalysisHost />
       <StockAnalysisBubble />
       <StopLossPiPHost />
+      <StockPreviewHost />
 
       {/* 开启实时行情 + 排队中的挖掘任务 → 冲突确认 */}
       {miningQueuedWarning != null && (

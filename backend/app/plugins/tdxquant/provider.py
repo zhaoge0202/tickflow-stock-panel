@@ -83,6 +83,8 @@ _MINUTE_SCHEMA = {
 _MINUTE_BARS_PER_DAY = 240  # A 股 1m 一交易日根数(含收盘集合竞价分钟)
 _MINUTE_MAX_COUNT = 9600    # 实测单次 count=9600(40 交易日)正常返回
 _MINUTE_INTERVAL_S = 0.08   # 单标的分钟请求节流(与日K同档)
+_MINUTE_OUTPUT_ROWS = 100_000
+_MINUTE_OUTPUT_SYMBOLS = 50  # 输出合并控制写放大,上游仍按自己的单票接口取数
 
 
 def get_api_key() -> str:
@@ -474,6 +476,22 @@ class TdxQuantProvider:
             logger.info("TdxQuant 实时行情拉取完成: %d 条(丢弃 %d 行无价快照)", len(records), dropped)
         return records
 
+    def get_realtime_symbols(self, symbols: list[str], *, asset_type: str = "stock") -> list[dict] | None:
+        """Targeted stock/ETF demand, using the same native snapshot and unit mapper."""
+        records = []
+        fallback_ms = int(time.time() * 1000)
+        for i in range(0, len(symbols), _SNAPSHOT_BATCH):
+            try:
+                rows = self._get_client().snapshot_batch(symbols[i:i + _SNAPSHOT_BATCH])
+            except TdxQuantError as exc:
+                logger.warning("TdxQuant 订阅行情补拉失败: %s", exc)
+                return records or None
+            for code, row in rows.items():
+                rec = _map_snapshot_row(code, row, fallback_ms)
+                if rec is not None:
+                    records.append(rec)
+        return records
+
     def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
         """指数实时快照(可选插件协议, quote_service 鸭子类型调用)。
 
@@ -708,16 +726,29 @@ class TdxQuantProvider:
         if end_dt.tzinfo is not None:
             end_dt = end_dt.astimezone(_BEIJING).replace(tzinfo=None)
         count = _minute_count_for_window(start_time, end_dt)
+        parts: list[pl.DataFrame] = []
+        pending_rows = 0
         for i, symbol in enumerate(symbols):
             # 请求失败应中止历史同步并标记失败, 不得作为无数据继续遍历全市场。
             raw = client.his_dats(symbol, end_dt, count, period="1m")
             rows = _minute_rows(symbol, raw, start_time, end_dt)
             if not rows and raw.get("Date") and not _minute_rows(symbol, raw, None, None):
                 _warn_minute_unparsed(symbol, raw)  # 去掉窗口过滤仍 0 行才是解析失败
-            yield pl.DataFrame(rows, schema=_MINUTE_SCHEMA)
+            part = pl.DataFrame(rows, schema=_MINUTE_SCHEMA)
+            if parts and pending_rows + part.height > _MINUTE_OUTPUT_ROWS:
+                yield pl.concat(parts, how="diagonal_relaxed")
+                parts, pending_rows = [], 0
+            if not part.is_empty():
+                parts.append(part)
+                pending_rows += part.height
+            if len(parts) >= _MINUTE_OUTPUT_SYMBOLS or pending_rows >= _MINUTE_OUTPUT_ROWS:
+                yield pl.concat(parts, how="diagonal_relaxed")
+                parts, pending_rows = [], 0
             if on_chunk_done:
                 on_chunk_done(i + 1, len(symbols))
             time.sleep(_MINUTE_INTERVAL_S)
+        if parts:
+            yield pl.concat(parts, how="diagonal_relaxed")
 
     def get_intraday_batch(
         self, symbols: list[str], count: int = 300, asset_type: str = "stock",

@@ -9,15 +9,18 @@ import { ExtSparkChart } from '@/components/screener/ExtSparkChart'
 import { fetchMinuteBatchIncremental, MINUTE_SEED_MAX } from '@/lib/minuteBatchIncremental'
 import { fetchDailyBatchChunked } from '@/lib/klineBatchChunked'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
+import { extendDailyTail } from '@/lib/dailyTailExtend'
+import { useWatchlistPrepare } from '@/lib/useWatchlistPrepare'
 import { reuseUnchangedSeries, EMPTY_ROWS } from '@/lib/series-identity'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
+import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber, fmtAssetPrice } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { QuoteFreshnessBadge } from '@/components/QuoteFreshnessBadge'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import {
   DimensionMembersDialog,
@@ -605,6 +608,7 @@ const StockCard = React.memo(function StockCard({
           {name && (
             <span className="text-xs text-secondary truncate">{name}</span>
           )}
+          <QuoteFreshnessBadge freshness={r.quote_freshness} compact />
           {board && (
             <span className={`shrink-0 inline-flex items-center justify-center px-1 h-[16px] rounded text-[9px] font-bold leading-none ${board.color}`}>
               {board.label}
@@ -621,7 +625,7 @@ const StockCard = React.memo(function StockCard({
         {/* 第二行: 大价格 + 涨跌幅胶囊 */}
         <div className="flex items-end justify-between gap-2 mb-2">
           <span className={`text-xl tabular-nums tracking-tighter leading-none ${priceColorClass(pct)}`}>
-            {fmtPrice(price)}
+            {fmtAssetPrice(price, r.asset_type)}
           </span>
           {pct != null && (
             <span className={`shrink-0 inline-flex items-center px-1.5 py-[2px] rounded text-[11px] tabular-nums ${pctBg}`}>
@@ -789,7 +793,7 @@ export function Watchlist() {
   }, [columns])
 
   // 计算 ext 列参数
-  const extColumnsParam = useMemo(() => buildExtColumnsParam(columns), [columns])
+  const extColumnsParam = useMemo(() => buildExtColumnsParam(columns, extSchema.data?.items), [columns, extSchema.data])
 
   const toggleView = useCallback(() => {
     setGroupCardsOpen(false)
@@ -892,6 +896,7 @@ export function Watchlist() {
     refetchInterval: watchlistRefreshInterval,
     refetchIntervalInBackground: false,
   })
+  const preparation = useWatchlistPrepare(enriched.data?.rows)
 
   // symbol 派生只依赖 enriched.data: 旧写法 symbols 每次渲染都是新引用 (击穿 memo)
   // 且 filter×find 为 O(n²), 实时行情每 tick 重渲染时放大为每秒全量比较。
@@ -924,30 +929,13 @@ export function Watchlist() {
   const klineData = useMemo(() => {
     const base = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
     const liveRows = enriched.data?.rows
-    const asOf = enriched.data?.as_of
     // 无可修补数据时直接返回查询缓存对象 — 它是 react-query 持有的外来引用,
     // 只能作为后续 tick 的比较参照 (prev), 不得进收敛 (next 会被原地改写)。
-    if (!dailyKVisible || !liveRows?.length || !asOf) {
+    if (!dailyKVisible || !liveRows?.length) {
       prevKlineSeriesRef.current = base
       return base
     }
-    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
-    const patched: Record<string, KlineRow[]> = {}
-    for (const sym of Object.keys(base)) {
-      const arr = base[sym]
-      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
-      const live = liveBySymbol.get(sym)
-      const { open, high, low, close } = live ?? {}
-      if (open == null || high == null || low == null || close == null) { patched[sym] = arr; continue }
-      const last = arr[arr.length - 1]
-      if (last.date === asOf) {
-        patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
-      } else if (last.date < asOf) {
-        patched[sym] = [...arr, { date: asOf, open, high, low, close }]
-      } else {
-        patched[sym] = arr
-      }
-    }
+    const patched = extendDailyTail(base, liveRows, enriched.data?.dates)
     const merged = reuseUnchangedSeries(prevKlineSeriesRef.current, patched)
     prevKlineSeriesRef.current = merged
     return merged
@@ -1350,8 +1338,7 @@ export function Watchlist() {
     [filteredRows, sortRows, columns],
   )
 
-  // 日内多盘扩展列 (集合竞价等) 迷你图: 每个 bar/line 图列按列表标的拉当日序列
-  // (与策略页同口径; 人气排行等每日截面表无时间列, 不会出现图列)
+  // 扩展列迷你图按本列显示周期读取, 未指定时跟随数据表默认。
   const extChartColumns = useMemo(
     () => columns.filter(c =>
       c.visible && c.source.type === 'ext'
@@ -1359,7 +1346,12 @@ export function Watchlist() {
     [columns],
   )
   const extChartColsKey = extChartColumns
-    .map(c => `${(c.source as { configId: string }).configId}.${(c.source as { fieldName: string }).fieldName}:${c.extDisplay?.chartDays ?? 10}`)
+    .map(c => {
+      const src = c.source as { configId: string; fieldName: string }
+      const granularity = c.extDisplay?.seriesGranularity
+        ?? extSchema.data?.items.find(t => t.id === src.configId)?.granularity ?? 'auto'
+      return `${src.configId}.${src.fieldName}:${c.extDisplay?.chartDays ?? 10}:${granularity}`
+    })
     .join(',')
   const extChartSymbolsKey = useMemo(
     () => sortedRows.map(r => r.symbol as string).sort().join(','),
@@ -1371,14 +1363,14 @@ export function Watchlist() {
       const symbols = extChartSymbolsKey ? extChartSymbolsKey.split(',') : []
       const entries = await Promise.all(extChartColumns.map(async c => {
         const src = c.source as { type: 'ext'; configId: string; fieldName: string }
-        const r = await api.extDataSeries(src.configId, src.fieldName, undefined, symbols, c.extDisplay?.chartDays || 10)
+        const r = await api.extDataSeries(src.configId, src.fieldName, undefined, symbols, c.extDisplay?.chartDays || 10, c.extDisplay?.seriesGranularity)
         return [`${src.configId}.${src.fieldName}`, r.items ?? {}] as const
       }))
       return Object.fromEntries(entries) as Record<string, Record<string, [string, number][]>>
     },
     enabled: extChartColumns.length > 0 && extChartSymbolsKey.length > 0,
     staleTime: 5 * 60_000,
-    placeholderData: prev => prev,
+    placeholderData: (prev, previousQuery) => previousQuery?.queryKey[1] === extChartColsKey ? prev : undefined,
   })
   const extSeriesData = extChartColumns.length ? (extSeriesQuery.data ?? {}) : {}
 
@@ -1520,13 +1512,17 @@ export function Watchlist() {
             </span>
             {/* 数据未就绪提示: 自选了但 enriched 缓存未覆盖 (新股/冷门/新用户未同步), 指标全为 null */}
             {pendingCount > 0 && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted/15 text-muted border border-border/50 whitespace-nowrap"
-                title={`当前有 ${pendingCount} 只指标暂未就绪 (新股/冷门股或数据尚未同步), 等待每日数据更新后自动补全`}
+              <button
+                type="button"
+                disabled={preparation.isFetching}
+                onClick={() => { void preparation.refetch() }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted/15 text-muted border border-border/50 whitespace-nowrap disabled:cursor-wait"
+                title={preparation.isFetching ? '正在按需补齐自选日K，已有数据仍可查看' :
+                  `${preparation.data?.filter(r => r.status !== 'ready').map(r => `${r.symbol}：${r.message}`).join('\n') || '日K暂未就绪，请检查数据源配置'}\n点击重试补齐`}
               >
                 <Clock className="h-2.5 w-2.5" />
-                待数据 {pendingCount}
-              </span>
+                {preparation.isFetching ? '补齐中' : preparation.data?.some(r => r.status === 'unsupported') ? '待配置' : '待数据'} {pendingCount}
+              </button>
             )}
             {/* 过滤提示: 仅在有筛选隐藏时出现, 柔和橙色融入整体 */}
             {hiddenCount > 0 && (
@@ -1934,6 +1930,7 @@ export function Watchlist() {
                           ) : null}
                           {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
+                        <QuoteFreshnessBadge freshness={r.quote_freshness} compact />
                         {/* 删除入口：从分组移除 + 从自选移除(二次确认) + 移到顶部 */}
                         <div className="ml-auto pl-1 shrink-0">
                           {confirmRemove === r.symbol ? (
@@ -1998,7 +1995,7 @@ export function Watchlist() {
                 // 实时行情列：price/pct/amount 使用 rt_ 回退（自选页有实时推送）
                 const numCls = 'px-2 py-1.5 text-right num tabular-nums'
                 if (key === 'price') {
-                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPrice(price)}</td>
+                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtAssetPrice(price, r.asset_type)}</td>
                 }
                 if (key === 'pct') {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>

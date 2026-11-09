@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
+import { useQueryClient } from '@tanstack/react-query'
 import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History, Layers, X, Database } from 'lucide-react'
 import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth } from '@/lib/api'
 import { toast } from '@/components/Toast'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { invalidateExtDataQueries } from '@/lib/ext-data-cache'
 import { SectionHead, INPUT_CLS } from './dialogShared'
 
 const AUTH_TYPE_LABELS: Record<ExtPullAuth['type'], string> = {
@@ -35,6 +37,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
   config: ExtDataConfig
   onSaved: () => void
 }) {
+  const queryClient = useQueryClient()
   const pull = config.pull
   const [showConfig, setShowConfig] = useState(false)
   const [toggling, setToggling] = useState(false)
@@ -42,6 +45,10 @@ export function ExtDataPullPanel({ config, onSaved }: {
   const [running, setRunning] = useState(false)
   const [runResult, setRunResult] = useState<{ rows: number; date: string } | null>(null)
   const [error, setError] = useState('')
+  const handleSaved = () => {
+    onSaved()
+    void invalidateExtDataQueries(queryClient)
+  }
 
   const enabled = optimistic ?? (pull?.enabled ?? false)
 
@@ -106,7 +113,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
     setToggling(true); setError(''); setOptimistic(next)
     api.extDataPullConfig(config.id, payload)
       .then(() => {
-        onSaved()
+        handleSaved()
         toast(next ? '定时拉取已启用 · 立即执行首次拉取' : '定时拉取已关闭', 'success')
       })
       .catch(e => setError(e.message || '切换失败'))
@@ -118,7 +125,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
     api.extDataPullRun(config.id, effTimeoutSec)
       .then(r => {
         setRunResult({ rows: r.rows, date: r.date })
-        onSaved()
+        handleSaved()
         toast(`拉取成功 · ${r.rows} 行`, 'success')
       })
       .catch(e => setError(e.message || '执行失败'))
@@ -229,7 +236,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       {showConfig && (
         <ExtPullConfigDialog
           config={config}
-          onSaved={onSaved}
+          onSaved={handleSaved}
           onClose={() => setShowConfig(false)}
         />
       )}
@@ -817,11 +824,11 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
               </div>
               <div>
                 <div className="text-[11px] font-medium text-secondary mb-1.5">
-                  序列粒度
-                  <span className="ml-1.5 text-[10px] font-normal text-muted">决定列表迷你图口径: 当日逐盘 / 近N日每日一值</span>
+                  默认显示周期
+                  <span className="ml-1.5 text-[10px] font-normal text-muted">列表中每一列还可单独选择</span>
                 </div>
                 <select
-                  aria-label="序列粒度"
+                  aria-label="默认显示周期"
                   value={granularity} onChange={e => setGranularity(e.target.value as 'auto' | 'intraday' | 'daily')}
                   title="列表迷你图列与序列接口按此口径取数; 自动判断依据时间列数据形态"
                   className="h-9 w-full rounded-lg border border-border bg-base px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-accent/25 focus:border-accent/50"
@@ -831,9 +838,10 @@ function ExtPullConfigDialog({ config, onSaved, onClose }: {
                       ? `（当前: ${config.granularity_effective === 'intraday' ? '日内多盘' : '日级别'}${config.granularity_effective === 'intraday' && config.plate ? ` · ${config.plate.plates} 盘` : ''}）`
                       : '（暂无数据）'}`}
                   </option>
-                  <option value="intraday">日内多盘（当日逐盘序列）</option>
-                  <option value="daily">日级别（近 N 日每日一值）</option>
+                  <option value="intraday" disabled={!timeField.trim()}>按日内（当天全部盘次）</option>
+                  <option value="daily">按日（近 N 日，每天一值）</option>
                 </select>
+                <p className="mt-1 text-[10px] text-muted/70">显示周期不改变原始记录；按日展示时，同一天取最后一个有效值。</p>
                 {granularity === 'auto' && (
                   <div className="mt-1 text-[10px] text-muted/70">
                     按时间列数据形态判断: 存在非零时刻 → 日内多盘; 日期形态 / 00:00:00 / 未配时间字段 → 日级别

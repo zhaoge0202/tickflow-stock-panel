@@ -1,6 +1,6 @@
 """扶摇(同花顺金融数据 API) HTTP 客户端。
 
-职责: 认证、统一信封解包、快照分页、单标的日K、市场 dump 下载。不知道 provider / services 层。
+职责: 认证、统一信封解包、快照分页、单标的/批量日K、市场 dump 下载。不知道 provider / services 层。
 文档: https://fuyao.aicubes.cn/docs — REST + X-api-key, 响应信封 {code, message, data}。
 
 时间字段口径: 所有 *ms 字段(含 start/end 入参与 date_ms/ex_date_ms 出参)均为
@@ -18,6 +18,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://fuyao.aicubes.cn"
+HISTORICAL_BATCH_LIMIT = 10
 
 # 单页 6000 覆盖全市场(实测 ~5600 含北交所, 2026-08 服务端不截断 limit=6000),
 # 一次请求拉完; 分页循环兜底未来标的扩容或服务端改为截断的场景。
@@ -28,6 +29,19 @@ _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
+
+    def __init__(self, message: str = "", *, code: int | str | None = None, api_message: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.api_message = api_message
+
+
+class FuyaoUnknownSymbolError(FuyaoError):
+    """单标的历史接口明确拒绝当前代码;不代表整个数据源不可用。"""
+
+    def __init__(self, symbol: str, message: str) -> None:
+        super().__init__(message, code=1002, api_message=f"Unknown thscode: {symbol}")
+        self.symbol = symbol
 
 
 class FuyaoClient:
@@ -61,7 +75,9 @@ class FuyaoClient:
             raise FuyaoError(f"响应不是 JSON: {path}") from e
         code = payload.get("code")
         if code not in (0, "0", None):
-            raise FuyaoError(f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})")
+            message = payload.get("message", "")
+            raise FuyaoError(f"扶摇接口错误 code={code}: {message} ({path})",
+                             code=code, api_message=message if isinstance(message, str) else "")
         return payload.get("data") or {}
 
     # ---- 快照 ----
@@ -148,18 +164,63 @@ class FuyaoClient:
         返回 data.item 原始行: {date_ms, open_price, high_price, low_price,
         close_price, volume(股), turnover(元)}。
         """
-        data = self._get(
-            "/api/a-share/prices/historical",
-            {
-                "thscode": thscode,
-                "interval": "1d",
-                "adjust": adjust,
-                "start": int(start_ms),
-                "end": int(end_ms),
-            },
-        )
+        try:
+            data = self._get(
+                "/api/a-share/prices/historical",
+                {
+                    "thscode": thscode,
+                    "interval": "1d",
+                    "adjust": adjust,
+                    "start": int(start_ms),
+                    "end": int(end_ms),
+                },
+            )
+        except FuyaoError as err:
+            # 1002 也用于参数错误,只有明确匹配当前代码的响应才表示未覆盖。
+            if str(err.code) == "1002" and err.api_message.strip() == f"Unknown thscode: {thscode}":
+                raise FuyaoUnknownSymbolError(thscode, str(err)) from err
+            raise
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
+
+    def historical_kline_batch(
+        self, thscodes: list[str], start_ms: int, end_ms: int
+    ) -> dict[str, list[dict]]:
+        """股票原始日K,每次最多10只。空组保留,缺组由 provider 单独补查。
+
+        批量默认前复权,必须同时锁定请求与响应的 none/1d 契约。
+        拒绝异常分组或记录,避免把错资产、错窗口或复权价写入原始日K。
+        """
+        if not thscodes:
+            return {}
+        if len(thscodes) > HISTORICAL_BATCH_LIMIT:
+            raise FuyaoError("批量历史日K每次最多10个代码")
+        data = self._get("/api/a-share/prices/historical-batch", {
+            "thscodes": ",".join(thscodes), "interval": "1d", "adjust": "none",
+            "start": int(start_ms), "end": int(end_ms),
+        })
+        if not isinstance(data, dict) or data.get("interval") != "1d" or data.get("adjust") != "none":
+            raise FuyaoError("批量历史日K响应未确认不复权日线口径")
+        groups = data.get("item")
+        if not isinstance(groups, list):
+            raise FuyaoError("批量历史日K缺少有效分组")
+        required = {"date_ms", "open_price", "high_price", "low_price", "close_price", "volume", "turnover"}
+        wanted = set(thscodes)
+        out: dict[str, list[dict]] = {}
+        for group in groups:
+            if not isinstance(group, dict):
+                raise FuyaoError("批量历史日K分组格式异常")
+            symbol, bars = group.get("thscode"), group.get("item")
+            if not isinstance(symbol, str) or symbol not in wanted or symbol in out or not isinstance(bars, list):
+                raise FuyaoError("批量历史日K返回未知、重复或无效分组")
+            for bar in bars:
+                if not isinstance(bar, dict) or not required.issubset(bar):
+                    raise FuyaoError(f"批量历史日K记录缺少必要字段: {symbol}")
+                timestamp = bar["date_ms"]
+                if isinstance(timestamp, bool) or not isinstance(timestamp, int) or not start_ms <= timestamp <= end_ms:
+                    raise FuyaoError(f"批量历史日K日期无效或超出请求窗口: {symbol}")
+            out[symbol] = bars
+        return out
 
     # ---- 财务 ----
     # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,

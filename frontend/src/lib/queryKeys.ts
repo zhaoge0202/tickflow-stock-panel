@@ -19,7 +19,15 @@ export const MINUTE_DATA_QUERY_PREFIXES = new Set([
   'minute-gaps', 'minute-batch', 'kline-minute', 'kline-minute-range',
 ])
 
+/** 扩展数据写入后的结构、序列和列表消费方。日K仅刷新携带扩展列的查询。 */
+export const EXT_DATA_QUERY_PREFIXES = new Set([
+  'ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'ext-series',
+  'watchlist-enriched', 'screener-cached', 'dimension-members', 'dimension-intraday',
+  'table-schema', 'custom-signals-options',
+])
+
 export const QK = {
+  dataVersions: ['data-versions'] as const,
   extensionPackages: ['extension-packages'] as const,
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
@@ -38,6 +46,7 @@ export const QK = {
   // Watchlist
   watchlist:            ['watchlist'] as const,
   watchlistGroups:      ['watchlist-groups'] as const,
+  watchlistPrepare:     (symbols: string[]) => ['watchlist-prepare', symbols] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext ?? ''] as const,
   // 异动边缘总览 (开启监控时才查询, 参数为 min_closeness/limit)
@@ -77,7 +86,8 @@ export const QK = {
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       (asOf?: string | null, asOfTs?: number | 'live' | null) =>
                            ['market-snapshot', asOf ?? 'latest', asOfTs ?? 'latest'] as const,
-  /** 日内多盘扩展列迷你图序列 (集合竞价等): 列集 + 日期 + 标的集 */
+  /** 扩展列迷你图: 列集 (含显示周期和天数) + 日期 + 标的集。 */
+  extSeriesAll:        ['ext-series'] as const,
   extSeries:           (colsKey: string, date?: string | null, symbolsKey?: string) => ['ext-series', colsKey, date ?? '', symbolsKey ?? ''] as const,
   marketDates:          (limit?: number) => ['market-dates', limit ?? 120] as const,
   marketIntradayTimeline: (asOf?: string | null, stepSeconds?: number) =>

@@ -7,10 +7,10 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Literal, Optional
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_today
+from app.services.data_status_cache import DataStatusCache
 from app.services.local_strategy_config import focus_default_strategy_id
 from app.services.pipeline_jobs import job_store
 from app.services.strategy_date import latest_strategy_date
@@ -26,6 +27,26 @@ from app.services.strategy_date import latest_strategy_date
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
+
+
+@router.get("/workload")
+def get_workload(request: Request) -> dict:
+    """进程级请求/实际计算计数, 不含用户参数; 沿用面板认证。"""
+    from app.services import minute_shared_pull, screener_work, strategy_run_queue
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
+    from app.services.workload import workload
+
+    result = workload.snapshot()
+    result["resources"] = {
+        "heavy_jobs": shared_heavy_job_limiter.snapshot(),
+        "strategy_queue": strategy_run_queue.MANAGER.snapshot(),
+        "strategy_results": screener_work.batch_results.cache_info(),
+        "minute_results": minute_shared_pull.cache_info(),
+    }
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is not None:
+        result["resources"]["sse"] = qs.stream_versions()
+    return result
 
 
 class IntegrityScanIn(BaseModel):
@@ -131,141 +152,26 @@ def repair_integrity(body: IntegrityRepairIn, request: Request) -> dict:
         state.repo, state.capabilities, body.report_id, on_progress=progress,
     ), repair=True)
 
-# ===== 缓存:storage(文件扫描) + 每张表 aggregate 各自缓存 =====
-# 同步期间前端 2s 轮一次 status,每张表 aggregate 全表 count + min/max + distinct
-# 太重,加 TTL + 事件失效。stage 写完只清对应那张表的缓存。
-
-_TABLE_TTL = 30.0  # 兜底 TTL,即使没人调 invalidate 也会过期
-_TABLE_TTL_LARGE = 120.0  # 大表(分钟K等)单独 TTL，避免多分区聚合反复重算
-_STORAGE_TTL = 60.0  # storage 文件扫描独立 TTL,stage 写完不触发重算
-
-# 聚合慢的大表（分区数多、行数多），使用更长的 TTL
-_LARGE_TABLES = {"minute"}
-
-_storage_cache: dict[str, Any] | None = None
-_storage_cache_ts: float = 0.0
-_storage_cache_stale: dict[str, Any] | None = None
-_storage_lock = threading.Lock()
-
-_table_cache: dict[str, dict | None] = {
-    "daily": None,
-    "enriched": None,
-    "index_daily": None,
-    "index_enriched": None,
-    "index_instruments": None,
-    "etf_daily": None,
-    "etf_enriched": None,
-    "etf_instruments": None,
-    "minute": None,
-    "adj_factor": None,
-    "instruments": None,
-    "financials": None,
+# 表统计仍沿用 TTL + 写入事件失效; 请求只返回快照, 重统计由单个后台线程执行。
+_TABLE_TTLS = {
+    name: 120.0 if name == "minute" else 30.0
+    for name in (
+        "daily", "enriched", "index_daily", "index_enriched", "index_instruments",
+        "etf_daily", "etf_enriched", "etf_instruments", "minute", "adj_factor",
+        "instruments", "financials",
+    )
 }
-_table_cache_ts: dict[str, float] = {k: 0.0 for k in _table_cache}
-# 最后一次非空统计 (失效事件不清空): 同步任务期间 /status 的兜底展示 —
-# 宁可数字旧一点, 也不能让重聚合在 DuckDB 锁上排队到前端超时
-_table_cache_stale: dict[str, dict | None] = {}
-_table_cache_lock = threading.Lock()
-_status_refresh_executor = ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="data-status-refresh",
-)
-_status_refreshing: set[str] = set()
-_status_refreshing_lock = threading.Lock()
-_status_generation = 0
-
-_last_finished_cache: dict[str, str | None] | None = None
-_last_finished_lock = threading.Lock()
+_status_cache = DataStatusCache({**_TABLE_TTLS, "storage": 60.0, "last_runs": float("inf")})
 
 
-def invalidate_data_cache(table: str | None = None) -> None:
-    """数据写入/清除后调用。
-
-    table=None 时清所有表 cache + storage(粗粒度,用于 pipeline 完成/clear);
-    指定 table 时只清那张表,不影响 storage(细粒度,用于单 stage 写完)。
-    """
-    global _status_generation
-    with _table_cache_lock:
-        _status_generation += 1
-        if table is None:
-            global _storage_cache, _storage_cache_ts, _last_finished_cache
-            _storage_cache = None
-            _storage_cache_ts = 0.0
-            _last_finished_cache = None
-            for k in _table_cache:
-                _table_cache[k] = None
-                _table_cache_ts[k] = 0.0
-        elif table in _table_cache:
-            _table_cache[table] = None
-            _table_cache_ts[table] = 0.0
+def invalidate_data_cache(table: str | None = None, *, discard_stale: bool = False) -> None:
+    """写入后标记统计过期; 普通刷新保留旧快照, 清空数据时丢弃旧值。"""
+    _status_cache.invalidate(table, discard_stale=discard_stale)
 
 
 def invalidate_storage_cache() -> None:
     """向后兼容入口 — 清全部缓存。新代码请用 invalidate_data_cache(table)。"""
     invalidate_data_cache(None)
-
-
-def _get_table_stats(
-    name: str, fetch: Callable[[], dict | None], *, busy: bool = False
-) -> dict | None:
-    """走 TTL+事件 双重缓存。fetch 在锁外执行避免阻塞别的请求。
-
-    busy (同步任务运行中 / 指标预热未完成) 时完全不重算, 直接回最后一次非空值
-    (可能为 None): 这些聚合夹着 DuckDB 查询, 与同步管道共用 repository 的
-    DuckDB 单连接全局锁 — 管道持锁跑长查询时重算会在锁上排队, 2s 的 /status
-    轮询堆积后触发前端 30s 超时 (2026-10-28 用户反馈)。任务结束的失效事件
-    会清 TTL 缓存, 结束后第一次调用即恢复正常重算。
-
-    空闲时冷缓存同步取一次 (首个 /status 调用, 无并发压力); 已有旧快照但过期
-    则转后台刷新并立即回旧快照 — 既有 TTL 语义不变, 请求也永不阻塞。
-    """
-    ttl = _TABLE_TTL_LARGE if name in _LARGE_TABLES else _TABLE_TTL
-    now = time.time()
-    with _table_cache_lock:
-        if busy:
-            return _table_cache_stale.get(name)
-        cached = _table_cache.get(name)
-        cached_ts = _table_cache_ts.get(name, 0.0)
-
-    if cached is not None:
-        if (now - cached_ts) < ttl:
-            return cached
-        with _status_refreshing_lock:
-            if name not in _status_refreshing:
-                _status_refreshing.add(name)
-                with _table_cache_lock:
-                    generation = _status_generation
-                _status_refresh_executor.submit(_refresh_table_stats, name, fetch, generation)
-        # status 接口不能因为过期重算阻塞 HTTP: 先回旧快照, 后台刷新完成后切新值。
-        return cached
-
-    fresh = fetch()
-    with _table_cache_lock:
-        _table_cache[name] = fresh
-        _table_cache_ts[name] = now
-        if fresh is not None:
-            _table_cache_stale[name] = fresh
-    return fresh
-
-
-def _refresh_table_stats(
-    name: str,
-    fetch: Callable[[], dict | None],
-    generation: int,
-) -> None:
-    try:
-        fresh = fetch()
-        with _table_cache_lock:
-            if generation == _status_generation:
-                _table_cache[name] = fresh
-                _table_cache_ts[name] = time.time()
-                if fresh is not None:
-                    _table_cache_stale[name] = fresh
-    except Exception:  # noqa: BLE001
-        logger.warning("后台刷新数据状态失败: %s", name, exc_info=True)
-    finally:
-        with _status_refreshing_lock:
-            _status_refreshing.discard(name)
 
 
 def _safe_aggregate(repo, view: str) -> dict | None:
@@ -734,123 +640,69 @@ def _next_cron_run(scheduler, job_id: str) -> str | None:
     return None
 
 
-def _get_storage(data_dir: Path, *, busy: bool = False) -> dict | None:
-    """返回缓存的 storage 统计；走独立 TTL，stage 写完不触发重算。
-
-    busy 时同样不重算 (目录 du 在同步写盘期间会显著变慢), 回最后一次值;
-    首次调用 (尚无缓存) 返回 None — 契约测试断言 is None, 注解勿再写 dict。"""
-    global _storage_cache, _storage_cache_ts, _storage_cache_stale
-    now = time.time()
-    with _storage_lock:
-        if busy:
-            return _storage_cache_stale
-        cached = _storage_cache
-        if cached is not None and (now - _storage_cache_ts) < _STORAGE_TTL:
-            return cached
-    if cached is not None:
-        with _status_refreshing_lock:
-            if "storage" not in _status_refreshing:
-                _status_refreshing.add("storage")
-                with _table_cache_lock:
-                    generation = _status_generation
-                _status_refresh_executor.submit(_refresh_storage, data_dir, generation)
-        # 过期但已有旧值: 先回旧值, 后台刷新完成后切新值 (不阻塞 /status)。
-        return cached
-
-    fresh = _compute_storage(data_dir)
-    with _storage_lock:
-        _storage_cache = fresh
-        _storage_cache_ts = now
-        _storage_cache_stale = fresh
-    return fresh
-
-
-def _refresh_storage(data_dir: Path, generation: int) -> None:
-    global _storage_cache, _storage_cache_ts, _storage_cache_stale
-    try:
-        fresh = _compute_storage(data_dir)
-        with _storage_lock:
-            if generation == _status_generation:
-                _storage_cache = fresh
-                _storage_cache_ts = time.time()
-                _storage_cache_stale = fresh
-    except Exception:  # noqa: BLE001
-        logger.warning("后台刷新 storage 状态失败", exc_info=True)
-    finally:
-        with _status_refreshing_lock:
-            _status_refreshing.discard("storage")
-
-
-def _last_finished(job_label: str) -> str | None:
-    """从 JobStore 读最近一次该类型任务的完成时间（缓存到 pipeline 终态失效）。"""
-    global _last_finished_cache
-    with _last_finished_lock:
-        if _last_finished_cache is not None:
-            return _last_finished_cache.get(job_label)
-
-    from app.services.pipeline_jobs import job_store
-    jobs = job_store.list_recent(limit=50)
-    cache: dict[str, str | None] = {}
-    for j in jobs:
-        if j["status"] not in ("succeeded", "failed"):
+def _load_last_runs() -> dict[str, str | None]:
+    """只在后台扫描任务记录, 与表统计一起发布。"""
+    cache: dict[str, str | None] = {"last_instruments_run": None, "last_pipeline_run": None}
+    for job in job_store.list_recent(limit=50):
+        if job["status"] not in ("succeeded", "failed"):
             continue
-        if "instruments_rows" in (j.get("result") or {}) and "instruments" not in cache:
-            cache["instruments"] = j["finished_at"]
-        if "daily_days" in (j.get("result") or {}) and "pipeline" not in cache:
-            cache["pipeline"] = j["finished_at"]
-    with _last_finished_lock:
-        _last_finished_cache = cache
-    return cache.get(job_label)
+        result = job.get("result") or {}
+        if "instruments_rows" in result and cache["last_instruments_run"] is None:
+            cache["last_instruments_run"] = job["finished_at"]
+        if "daily_days" in result and cache["last_pipeline_run"] is None:
+            cache["last_pipeline_run"] = job["finished_at"]
+    return cache
 
 
 def _data_pipeline_busy(request: Request) -> bool:
     """同步任务运行中或指标预热未完成 — /status 的重聚合应退化为纯缓存读。"""
     if not getattr(request.app.state, "indicators_ready", True):
         return True
-    active_id = job_store.active_id()
-    if not active_id:
-        return False
-    active = job_store.get(active_id) or {}
-    return active.get("status") in ("pending", "running")
+    return job_store.active_status() in ("pending", "running")
+
+
+def _last_finished(job_label: str) -> str | None:
+    """最近一次该类型任务的完成时间 (focus 诊断用, 与 /status 的同名口径一致)。"""
+    return _load_last_runs().get(f"last_{job_label}_run")
 
 
 @router.get("/status")
-def status(request: Request) -> dict:
+async def status(request: Request) -> dict:
     repo = request.app.state.repo
     scheduler = getattr(request.app.state, "scheduler", None)
     data_dir = repo.store.data_dir
     latest_formal_date = latest_strategy_date(data_dir, "stock")
-    busy = _data_pipeline_busy(request)
 
+    aggregates = {
+        "daily": _safe_aggregate_daily,
+        "enriched": _safe_aggregate_enriched,
+        "index_daily": _safe_aggregate_index_daily,
+        "index_enriched": _safe_aggregate_index_enriched,
+        "index_instruments": _safe_aggregate_index_instruments,
+        "etf_daily": _safe_aggregate_etf_daily,
+        "etf_enriched": _safe_aggregate_etf_enriched,
+        "etf_instruments": _safe_aggregate_etf_instruments,
+        "minute": _safe_aggregate_minute,
+        "adj_factor": _safe_aggregate_adj_factor,
+        "instruments": _safe_aggregate_instruments,
+        "financials": _safe_aggregate_financials,
+    }
+    loaders = {name: lambda fetch=fetch: fetch(repo) for name, fetch in aggregates.items()}
+    loaders["storage"] = lambda: _compute_storage(repo.store.data_dir)
+    loaders["last_runs"] = _load_last_runs
+    snapshot = _status_cache.snapshot(loaders, is_busy=lambda: _data_pipeline_busy(request))
+    last_runs = snapshot.pop("last_runs") or {
+        "last_instruments_run": None, "last_pipeline_run": None,
+    }
     return {
-        "daily":       _get_table_stats("daily",       lambda: _safe_aggregate_daily(repo), busy=busy),
-        "enriched":    _get_table_stats("enriched",    lambda: _safe_aggregate_enriched(repo), busy=busy),
-    "index_daily":       _get_table_stats("index_daily",       lambda: _safe_aggregate_index_daily(repo), busy=busy),
-    "index_enriched":    _get_table_stats("index_enriched",    lambda: _safe_aggregate_index_enriched(repo), busy=busy),
-    "index_instruments": _get_table_stats("index_instruments", lambda: _safe_aggregate_index_instruments(repo), busy=busy),
-    "etf_daily":         _get_table_stats("etf_daily",         lambda: _safe_aggregate_etf_daily(repo), busy=busy),
-    "etf_enriched":      _get_table_stats("etf_enriched",      lambda: _safe_aggregate_etf_enriched(repo), busy=busy),
-    "etf_instruments":   _get_table_stats("etf_instruments",   lambda: _safe_aggregate_etf_instruments(repo), busy=busy),
-    "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo), busy=busy),
-        "adj_factor":  _get_table_stats("adj_factor",  lambda: _safe_aggregate_adj_factor(repo), busy=busy),
-        "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo), busy=busy),
-        "financials":  _get_table_stats("financials",  lambda: _safe_aggregate_financials(repo), busy=busy),
-
-        # 文件层面信息(缓存)
-        "storage": _get_storage(data_dir, busy=busy),
-
-        # 调度
+        **snapshot,
+        **last_runs,
         "next_instruments_run": _next_cron_run(scheduler, "pre_market_instruments"),
-        "next_pipeline_run":    _next_cron_run(scheduler, "daily_pipeline"),
+        "next_pipeline_run": _next_cron_run(scheduler, "daily_pipeline"),
         "next_minute_run":      _next_cron_run(scheduler, "minute_pipeline"),
-        "last_instruments_run": _last_finished("instruments"),
-        "last_pipeline_run":    _last_finished("pipeline"),
         # enriched.latest_date 可能是盘中实时半成品；正式日线策略使用独立口径。
         "latest_strategy_date": latest_formal_date.isoformat() if latest_formal_date else None,
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        # 同步/修复期间同样可能返回 null 统计, 不可把它当成无本地数据。
-        "stats_pending": busy,
-        # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }
 
@@ -1232,7 +1084,7 @@ def _clear_data_impl(request: Request):
     repo.rebuild_views()
 
     logger.info("数据已清除: 删除 %d 个 parquet 文件", deleted)
-    invalidate_data_cache(None)
+    invalidate_data_cache(None, discard_stale=True)
     return {"deleted_files": deleted}
 
 

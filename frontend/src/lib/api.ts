@@ -18,12 +18,20 @@ type RequestOptions = RequestInit & {
 
 export class ApiError extends Error {
   readonly status: number
+  readonly retryAfterMs?: number
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, retryAfterMs?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.retryAfterMs = retryAfterMs
   }
+}
+
+export interface WatchlistPrepareResult {
+  symbol: string
+  status: 'ready' | 'no_data' | 'unsupported' | 'failed' | 'busy'
+  message: string
 }
 
 /**
@@ -106,7 +114,8 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     const msg = detail || `${res.status} ${res.statusText}`
     // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
     if (res.status !== 401 && !quiet) toast(msg, 'error')
-    throw new ApiError(msg, res.status)
+    const retryAfter = Number(res.headers.get('Retry-After'))
+    throw new ApiError(msg, res.status, retryAfter > 0 && Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined)
   }
   return (responseType === 'blob' ? res.blob() : res.json()) as Promise<T>
 }
@@ -366,6 +375,11 @@ export interface KlineRow {
   low: number
   close: number
   volume?: number
+  /** 图表异动判定使用未复权价格与引擎的当日判定价，不与复权 OHLC 混用。 */
+  raw_low?: number | null
+  raw_close?: number | null
+  limit_down_price?: number | null
+  signal_limit_down_recovery?: boolean | null
   change_pct?: number
   ma5?: number | null
   ma20?: number | null
@@ -378,18 +392,31 @@ export interface KlineRow {
   [key: string]: any
 }
 
+export interface QuoteFreshness {
+  state: 'live' | 'delayed' | 'stale' | 'historical' | 'unknown' | 'missing' | 'paused' | 'disabled'
+  message: string
+  data_date: string | null
+  quote_ts: number | null
+  checked_at: number
+  max_age_ms: number
+}
+
 export interface KlineDailyResponse {
   symbol: string
+  asset_type?: 'stock' | 'etf' | 'index'
   name?: string
   stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
   rows: KlineRow[]
   source?: string
+  quote_freshness?: QuoteFreshness | null
 }
 
 export interface KlineDailyLatestResponse {
   symbol: string
+  asset_type?: 'stock' | 'etf' | 'index'
   row: KlineRow | null
   source: 'live' | 'none'
+  quote_freshness?: QuoteFreshness | null
 }
 
 // ===== Watchlist =====
@@ -514,6 +541,7 @@ export interface ScreenerResultSummary {
   as_of: string
   /** 渐进式 run_all 写入的计算时间戳 (Unix ms); 监控实时叠加等来源无此字段 */
   computed_at?: number | null
+  available_at?: number | null
 }
 
 export interface ScreenerCachedSummary {
@@ -523,6 +551,7 @@ export interface ScreenerCachedSummary {
   updated_at: number | null
   /** 分钟策略后台批量计算中尚未完成的策略 (结果不落盘, 由 handle 快照合入) */
   minute_pending?: string[]
+  task?: { id: string; pending: string[]; errors: Record<string, string>; error: string | null; complete: boolean } | null
 }
 
 export interface ScreenerAuctionConfirmationResult {
@@ -627,8 +656,10 @@ export interface ScreenerRunAllSummary {
   complete?: boolean
   /** 后台执行出错时的错误信息 (部分结果仍会返回) */
   error?: string | null
+  errors?: Record<string, string>
   /** 本次执行起点 (Unix ms, 后端时钟), 用于判断缓存结果是否属于本轮 */
   started_at?: number | null
+  task_id?: string
   /** 已跳过的失效策略 ID (策略池残留, 前端应从池中移除) */
   skipped_unknown?: string[]
 }
@@ -637,6 +668,7 @@ export interface ScreenerCachedResult {
   result: ScreenerResult | null
   today_ever_rows: Record<string, any> | null
   strategy_ids_by_symbol: Record<string, string[]>
+  updated_at?: number | null
 }
 
 export type StrategyHistoryEventType =
@@ -1213,25 +1245,6 @@ export interface StrategyParamDef {
   visible_if?: ParamVisibleIf
   /** UI 元数据: select 各选项被选中时批量应用的参数值 (如标的池预设 → 开关+默认值) */
   option_applies?: Record<string, Record<string, string | number | boolean>>
-}
-
-export interface ScreenerResultSummary {
-  total: number
-  as_of: string
-}
-
-export interface ScreenerCachedSummary {
-  as_of: string | null
-  results: Record<string, ScreenerResultSummary>
-  today_ever_counts: Record<string, number>
-  updated_at: number | null
-}
-
-export interface ScreenerCachedResult {
-  result: ScreenerResult | null
-  today_ever_rows: Record<string, any> | null
-  strategy_ids_by_symbol: Record<string, string[]>
-  updated_at: number | null
 }
 
 export interface CompositeChildInfo {
@@ -3719,6 +3732,14 @@ export const api = {
       { method: 'PUT', body: JSON.stringify({ interval }) },
     ),
   intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
+  subscribeQuotes: (clientId: string, symbols: string[]) =>
+    request<{ lease_seconds: number }>(`/api/intraday/subscriptions/${encodeURIComponent(clientId)}`, {
+      method: 'PUT', body: JSON.stringify({ symbols }), quiet: true, timeoutMs: 10_000,
+    }),
+  unsubscribeQuotes: (clientId: string) =>
+    request<{ status: string }>(`/api/intraday/subscriptions/${encodeURIComponent(clientId)}`, {
+      method: 'DELETE', quiet: true, keepalive: true, timeoutMs: 10_000,
+    }),
   indexQuotes: (symbols?: string[]) =>
     request<{ rows: IndexQuote[]; count: number; source: 'realtime' | 'index_daily' }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
@@ -3940,6 +3961,7 @@ export const api = {
 
   capabilities: () => request<CapabilitiesResponse>('/api/capabilities'),
   version: () => request<{ version: string }>('/api/data/version'),
+  workload: () => request<{ uptime_s: number; groups: Record<string, Record<string, number>>; resources: Record<string, Record<string, number | string>> }>('/api/data/workload'),
   redetectCapabilities: () =>
     request<CapabilitiesResponse>('/api/capabilities/redetect', { method: 'POST' }),
 
@@ -4220,6 +4242,11 @@ export const api = {
         ? `/api/watchlist/enriched?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/watchlist/enriched',
     ),
+  watchlistPrepare: (symbols: string[]) => request<{ results: WatchlistPrepareResult[] }>(
+    '/api/watchlist/prepare',
+    { method: 'POST', body: JSON.stringify({ symbols }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, quiet: true },
+  ),
+  dataVersions: () => request<{ versions: Record<string, string> }>('/api/intraday/data-versions', { quiet: true }),
 
   // timeframe='all' 时不传参数 → 后端不过滤周期, 返回日线+分钟合并列表
   screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', timeframe: '1d' | '1m' | 'all' = '1d') => {
@@ -4232,11 +4259,11 @@ export const api = {
     )
     return { presets: data.strategies, load_errors: data.load_errors, legacy_migration: data.legacy_migration }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false) =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe }),
+      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe, ensure }),
     }),
   screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run', {
@@ -4244,9 +4271,17 @@ export const api = {
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
     }),
-  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
+  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d', ensure = false) =>
     request<ScreenerRunAllSummary>(
-      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true }) },
+      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true, ensure }) },
+    ),
+  screenerCachedSummary: (taskId?: string) =>
+    request<ScreenerCachedSummary>('/api/screener/cached-summary' + (taskId ? `?task_id=${encodeURIComponent(taskId)}` : '')),
+  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+    request<ScreenerCachedResult>(
+      extColumns
+        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
+        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
   screenerCached: (extColumns?: string) =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
@@ -5007,6 +5042,22 @@ export const api = {
   extDataDelete: (id: string) =>
     request<{ status: string }>(`/api/ext-data/${id}`, { method: 'DELETE' }),
 
+  extDataConfigExport: (id: string) =>
+    request<Blob>(`/api/ext-data/${encodeURIComponent(id)}/config/export`, { responseType: 'blob', quiet: true }),
+
+  extDataConfigInspect: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<ExtDataConfigPreview>('/api/ext-data/config/inspect', { method: 'POST', body, quiet: true })
+  },
+
+  extDataConfigImport: (file: File, id: string) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('config_id', id)
+    return request<ExtDataConfig>('/api/ext-data/config/import', { method: 'POST', body, quiet: true })
+  },
+
   extDataUpload: (id: string, file: File, snapshotDate?: string) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -5025,13 +5076,14 @@ export const api = {
   extDataSchemaAll: () =>
     request<{ items: { id: string; label: string; mode: string; time_field?: string | null; granularity?: 'intraday' | 'daily' | null; columns: { name: string; type: string; label: string }[] }[] }>('/api/ext-data/schema-all'),
 
-  /** 日内多盘序列 (列表迷你图列): 每标的一天的 [HH:MM:SS, value] 点列 */
-  extDataSeries: (configId: string, field: string, date?: string | null, symbols?: string[], days?: number) =>
+  /** 列表扩展序列: 按日 / 按日内读取, 不指定显示周期时跟随数据表。 */
+  extDataSeries: (configId: string, field: string, date?: string | null, symbols?: string[], days?: number, granularity?: 'daily' | 'intraday') =>
     request<{ config_id: string; field: string; date: string | null; granularity?: 'intraday' | 'daily'; days?: number; items: Record<string, [string, number][]> }>(
       `/api/ext-data/${configId}/series?field=${encodeURIComponent(field)}`
         + (date ? `&date=${date}` : '')
         + (symbols?.length ? `&symbols=${encodeURIComponent(symbols.join(','))}` : '')
-        + (days ? `&days=${days}` : ''),
+        + (days ? `&days=${days}` : '')
+        + (granularity ? `&granularity=${granularity}` : ''),
     ),
 
   extDataPullConfig: (id: string, body: {
@@ -6104,7 +6156,7 @@ export interface DataStatus {
     ext_data_files?: number
     ext_data_size_mb?: number
     total_size_mb: number
-  } | null  // busy 降级 (预热/同步/修复期间) 且冷启动缓存未热时为 null, 不代表无数据
+  } | null  // 后台统计尚未生成快照时为 null, 不代表无数据
   next_pipeline_run: string | null
   next_minute_run: string | null
   next_instruments_run: string | null
@@ -6112,7 +6164,7 @@ export interface DataStatus {
   last_instruments_run: string | null
   latest_strategy_date: string | null
   checked_at: string
-  /** 预热/同步/修复期间统计暂不可用或仅为旧缓存, 空值不代表无数据。 */
+  /** 后台刷新或预热/同步/修复期间统计暂不可用或仅为旧缓存, 空值不代表无数据。 */
   stats_pending?: boolean
   indicators_ready?: boolean
 }
@@ -6314,6 +6366,20 @@ export interface ExtDataConfig {
   /** 生效序列粒度 (显式声明 > 数据形态判断): intraday | daily; snapshot 表为 null */
   granularity_effective?: 'intraday' | 'daily' | null
   pull?: PullConfig | null
+}
+
+export interface ExtDataConfigPreview {
+  id: string
+  label: string
+  mode: 'snapshot' | 'timeseries'
+  fields: ExtDataField[]
+  field_count: number
+  conflict: boolean
+  requires_key: boolean
+  has_pull: boolean
+  pull_url?: string | null
+  pull_method?: string | null
+  warnings: string[]
 }
 
 export interface ExtDataRowsResult {

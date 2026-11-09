@@ -1,14 +1,19 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import { api, type MinuteKlineSession } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
-import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
+import type { ChartRenderer } from '@/lib/chart-types'
+
+const EChartsMultiDayIntraday = lazy(() => import('./EChartsMultiDayIntraday').then(m => ({ default: m.EChartsMultiDayIntraday })))
+const LightweightIntraday = lazy(() => import('./charts/LightweightIntraday').then(m => ({ default: m.LightweightIntraday })))
 
 interface Props {
   symbol: string
+  renderer?: ChartRenderer
   days: number
   height?: number
   refetchIntervalMs?: number
@@ -22,6 +27,7 @@ function errorMessage(error: unknown): string {
 
 export function StockMultiDayIntradayChart({
   symbol,
+  renderer = 'echarts',
   days,
   height = 420,
   refetchIntervalMs,
@@ -48,11 +54,15 @@ export function StockMultiDayIntradayChart({
     const latestRows = latest.data?.rows ?? []
     if (latestDate && latestRows.length > 0) {
       const existing = byDate.get(latestDate)
-      byDate.set(latestDate, {
-        date: latestDate,
-        prev_close: latest.data?.prev_close ?? existing?.prev_close ?? null,
-        rows: latestRows,
-      })
+      // 补齐落盘后，短缓存/延迟响应中的实时序列可能比本地历史尾部更旧。
+      const existingTail = existing?.rows.at(-1)?.datetime
+      if (!existingTail || existingTail <= latestRows.at(-1)!.datetime) {
+        byDate.set(latestDate, {
+          date: latestDate,
+          prev_close: latest.data?.prev_close ?? existing?.prev_close ?? null,
+          rows: latestRows,
+        })
+      }
     }
 
     return Array.from(byDate.values())
@@ -66,6 +76,7 @@ export function StockMultiDayIntradayChart({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: QK.klineMinuteRange(symbol, days) }),
         queryClient.invalidateQueries({ queryKey: QK.klineMinute(symbol, '') }),
+        queryClient.invalidateQueries({ queryKey: QK.minuteBatch() }),
       ])
     },
     onError: (e: Error) => {
@@ -111,6 +122,7 @@ export function StockMultiDayIntradayChart({
   }, [symbol, days, localSessionCount, loading, isIndex, history.error, history.isPlaceholderData, syncMinute.isPending])
 
   const chartHeight = Math.max(260, height - (showCoverage || syncMinute.isPending ? 32 : 0))
+  const Chart = renderer === 'lightweight' ? LightweightIntraday : EChartsMultiDayIntraday
 
   if (loading) {
     return (
@@ -166,7 +178,7 @@ export function StockMultiDayIntradayChart({
   }
 
   return (
-    <div style={{ height }}>
+    <div className={renderer === 'lightweight' ? 'min-w-0 overflow-hidden rounded-lg border border-border/70 bg-base/20' : undefined} style={{ height: renderer === 'lightweight' ? undefined : height, minHeight: height }}>
       {(showCoverage || (syncMinute.isPending && !isIndex)) && (
         <div className="flex h-8 items-center justify-between gap-3 border-b border-border/60 bg-elevated/40 px-3 text-[11px]">
           {syncMinute.isPending ? (
@@ -194,13 +206,21 @@ export function StockMultiDayIntradayChart({
           )}
         </div>
       )}
-      <EChartsMultiDayIntraday
+      <Suspense fallback={<div className="text-xs text-muted py-4">正在加载图表…</div>}>
+      <Chart
+        assetType={history.data?.asset_type ?? latest.data?.asset_type}
+        {...(renderer === 'lightweight' ? {
+          priceLimit: sessions.length === 1 && sessions[0].date === latest.data?.date ? latest.data?.price_limit ?? undefined : undefined,
+        } : {})}
+        symbol={symbol}
+        showLimitLines={false}
         sessions={sessions}
         height={chartHeight}
         assetType={chartAssetType}
         onPriceDoubleClick={onPriceDoubleClick}
         priceLines={priceLines}
       />
+      </Suspense>
       {syncMinute.isError && (
         <div className="px-3 pt-1 text-center text-[11px] text-danger">{errorMessage(syncMinute.error)}</div>
       )}
