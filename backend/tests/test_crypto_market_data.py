@@ -10,6 +10,7 @@ provider 的字段映射与时区换算在 tests/test_okx_provider.py; 本文件
 from __future__ import annotations
 
 from datetime import date, datetime
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -113,9 +114,14 @@ def test_crypto_daily_written_and_read_back(repo):
 
 def test_crypto_minute_glob_is_isolated_from_a_share_minute(tmp_path):
     repo = KlineRepository(DataStore(tmp_path))
-    assert repo._minute_glob_for("crypto").endswith("kline_crypto_minute/**/*.parquet")
-    assert repo._minute_glob_for("stock").endswith("kline_minute/**/*.parquet")
-    assert repo._minute_glob_for("etf").endswith("kline_etf_minute/**/*.parquet")
+
+    def tail(glob_path: str) -> tuple[str, ...]:
+        # Windows 用反斜杠拼接路径, 只能按分段比较 (写死 "/" 在 Windows 上必失败)
+        return Path(glob_path).parts[-3:]
+
+    assert tail(repo._minute_glob_for("crypto")) == ("kline_crypto_minute", "**", "*.parquet")
+    assert tail(repo._minute_glob_for("stock")) == ("kline_minute", "**", "*.parquet")
+    assert tail(repo._minute_glob_for("etf")) == ("kline_etf_minute", "**", "*.parquet")
 
 
 def test_crypto_enriched_dir_is_separate_from_a_share():
