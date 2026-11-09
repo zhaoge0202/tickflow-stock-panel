@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import time
 from collections.abc import Callable
 from datetime import date as _date
 from datetime import timedelta as _td
@@ -1492,6 +1494,103 @@ def _run_tracked(fn, job_label: str, *, long_running: bool = False) -> bool:
     return succeeded
 
 
+def _json_safe_rows(rows: list[dict]) -> list[dict]:
+    """NaN/inf → None（与 api/screener._safe 同口径，避免写出非法 JSON）。"""
+    return [
+        {
+            key: (None if isinstance(value, float) and not math.isfinite(value) else value)
+            for key, value in row.items()
+        }
+        for row in rows
+    ]
+
+
+def _refresh_strategy_cache() -> None:
+    """盘后定版后按策略池重算并写入 strategy_cache。
+
+    页面只在「进入策略页」时触发 runAll，收盘后没人开页面时 strategy_cache 会停留
+    在盘中那份（as_of 还是上一交易日 / total=0），页面只能靠监控引擎内存快照兜底，
+    后端一重启数字就归零（2026-11-09 实测：列表 2 只、详情 1 只、重启后 0 只）。
+
+    策略池的真实来源是浏览器 localStorage（strategy-pool），后端读不到，因此以
+    strategy_cache 里已有的策略 ID 为准（即用户上次在页面跑过的那批）；空缓存时
+    回落到 focus 系列 + 监控池。分钟策略结果不落日线缓存，一律剔除。
+    """
+    from dataclasses import asdict
+
+    from app.services import strategy_cache
+    from app.services.local_strategy_config import focus_strategy_ids
+    from app.services.screener import ScreenerService
+    from app.services.strategy_date import latest_strategy_date
+    from app.strategy import config as strategy_config
+
+    app_state = _get_app_state()
+    engine = getattr(app_state, "strategy_engine", None)
+    repo = getattr(app_state, "repo", None)
+    if engine is None or repo is None:
+        return
+    data_dir = repo.store.data_dir
+    as_of = latest_strategy_date(data_dir, "stock")
+    if as_of is None:
+        logger.info("scheduled strategy cache refresh skipped: 无可用策略日期")
+        return
+
+    metas = {meta.get("id"): meta for meta in engine.list_strategies()}
+    cached = strategy_cache.read_cache(data_dir) or {}
+    pool_ids = [
+        sid for sid in (cached.get("results") or {})
+        if isinstance(sid, str) and sid in metas
+    ]
+    if not pool_ids:
+        fallback = focus_strategy_ids(data_dir) + list(_prefs.get_strategy_monitor_ids())
+        pool_ids = [sid for sid in fallback if sid in metas]
+    strategy_ids = [
+        sid for sid in dict.fromkeys(pool_ids)
+        if "1d" in (metas[sid].get("timeframes") or ["1d"])
+    ]
+    if not strategy_ids:
+        logger.info("scheduled strategy cache refresh skipped: 策略池为空")
+        return
+
+    started = time.perf_counter()
+    all_overrides = strategy_config.list_overrides(data_dir)
+    params_map = {
+        sid: dict((all_overrides.get(sid) or {}).get("params") or {})
+        for sid in strategy_ids
+    }
+    overrides_map = {sid: all_overrides.get(sid, {}) for sid in strategy_ids}
+    svc = ScreenerService(repo, asset_type="stock")
+    context = svc.build_strategy_context(
+        engine,
+        as_of,
+        strategy_ids,
+        timeframe="1d",
+        params_map=params_map,
+        overrides_map=overrides_map,
+    )
+    results = engine.run_all(
+        context,
+        params_map=params_map,
+        overrides_map=overrides_map,
+        strategy_ids=strategy_ids,
+    )
+    payload: dict[str, dict] = {}
+    for sid, result in results.items():
+        payload[sid] = {
+            "total": result.total,
+            "as_of": str(as_of),
+            "rows": _json_safe_rows(asdict(result).get("rows", [])),
+        }
+    if not payload:
+        logger.info("scheduled strategy cache refresh skipped: 无结果")
+        return
+    strategy_cache.write_cache(data_dir, str(as_of), payload)
+    logger.info(
+        "scheduled strategy cache refreshed: as_of=%s strategies=%d elapsed=%.1fs",
+        as_of, len(payload), time.perf_counter() - started,
+    )
+
+
 def _scheduled_pipeline_task(pipeline_fn) -> None:
     """Run the scheduled lab cycle (weekly mining + daily guardian) after pipeline success."""
     if not _run_tracked(pipeline_fn, "daily_pipeline"):
@@ -1520,6 +1619,13 @@ def _scheduled_pipeline_task(pipeline_fn) -> None:
             logger.info("scheduled focus three versions snapshot generated successfully")
     except Exception as e:
         logger.warning("scheduled focus three versions snapshot failed (soft): %s", e)
+
+    # 定版后补写策略缓存: 否则收盘后没人重进策略页, cache 会一直停在盘中那份,
+    # 页面只靠监控引擎内存快照显示, 后端重启即归零。
+    try:
+        _refresh_strategy_cache()
+    except Exception:
+        logger.exception("scheduled strategy cache refresh failed (soft)")
 
 
 # ================================================================
