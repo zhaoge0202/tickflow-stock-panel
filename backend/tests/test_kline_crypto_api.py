@@ -279,7 +279,9 @@ def test_daily_crypto_uses_contract_day_default_and_skips_live_path(monkeypatch)
     repo = _Repo(daily=local)
     monkeypatch.setattr(kline, "date", _FrozenDate)  # 服务器本地日期 10-20
     monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 10, 15, 4, 0, tzinfo=CN_TZ))  # 合约日 10-15
-    monkeypatch.setattr(kline, "_compute_live_daily_rows", _forbidden("crypto 不应实时补拉日K"))
+    from app.services import daily_bootstrap
+
+    monkeypatch.setattr(daily_bootstrap, "ensure_history", _forbidden("crypto 不应实时补拉日K"))
     monkeypatch.setattr(kline, "_maybe_inject_live_candle", _forbidden("crypto 不应注入实时蜡烛"))
     monkeypatch.setattr(kline.kline_sync, "sync_daily_batch", _forbidden("crypto 不应走 TickFlow 单票补拉"))
 
@@ -295,7 +297,9 @@ def test_daily_crypto_uses_contract_day_default_and_skips_live_path(monkeypatch)
 
 def test_daily_crypto_empty_local_returns_empty_rows_not_error(monkeypatch):
     repo = _Repo()
-    monkeypatch.setattr(kline, "_compute_live_daily_rows", _forbidden("crypto 不应实时补拉日K"))
+    from app.services import daily_bootstrap
+
+    monkeypatch.setattr(daily_bootstrap, "ensure_history", _forbidden("crypto 不应实时补拉日K"))
 
     resp = kline.get_daily(_request(repo), CRYPTO_SYMBOL, 120, "2026-09-01", "2026-10-14", None)
 
@@ -425,9 +429,11 @@ def test_daily_stock_path_keeps_enriched_and_live_fill(monkeypatch):
     assert resp["source"] == "enriched"
     assert resp["rows"] == local.to_dicts()
 
-    # 本地空 → 仍走 A 股实时补拉路径 (crypto 分支未泄漏)
+    # 本地空 → 仍走 A 股按需补齐路径 (crypto 分支未泄漏)
     filled: list[str] = []
-    monkeypatch.setattr(kline, "_compute_live_daily_rows", lambda *a, **k: filled.append("fill") or [])
+    from app.services import daily_bootstrap
+
+    monkeypatch.setattr(daily_bootstrap, "ensure_history", lambda *a, **k: filled.append("fill") or pl.DataFrame())
     fallback = kline.get_daily(_request(_Repo(asset_type="stock")), STOCK_SYMBOL, 120, "2026-10-10", "2026-10-12", None)
 
     assert filled == ["fill"]
