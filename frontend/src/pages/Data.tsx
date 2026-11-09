@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   Info,
   WandSparkles,
+  Upload,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
@@ -61,6 +62,7 @@ import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 import { FocusPipelineHealthCard } from '@/components/data/FocusPipelineHealthCard'
+import { ExtConfigImportDialog } from '@/components/ext-data/ExtConfigTransfer'
 
 export function Data() {
   const qc = useQueryClient()
@@ -76,8 +78,8 @@ export function Data() {
   const status = useDataStatus({
     refetchInterval: (query) => {
       const data = query.state.data
-      // 指标异步预热中 或 有活跃 job → 加快轮询到 2s
-      if (activeJobId || data?.indicators_ready === false) return 2_000
+      // 指标预热、统计后台刷新或活跃 job 期间加快轮询。
+      if (activeJobId || data?.indicators_ready === false || data?.stats_pending) return 2_000
       return 30_000
     },
   })
@@ -166,6 +168,7 @@ export function Data() {
   const [schemaTable, setSchemaTable] = useState<string | null>(null)
   const [showEndpointTest, setShowEndpointTest] = useState(false)
   const [showCreateExt, setShowCreateExt] = useState(false)
+  const [showImportExt, setShowImportExt] = useState(false)
   const [showRepair, setShowRepair] = useState(false)
   const [editingExt, setEditingExt] = useState<ExtDataConfig | null>(null)
   const [indexBatchInput, setIndexBatchInput] = useState('100')
@@ -947,7 +950,13 @@ export function Data() {
 
         {/* 数据画像 */}
         <div>
-          <SectionTitle icon={Database}>数据画像</SectionTitle>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SectionTitle icon={Database}>数据画像</SectionTitle>
+            <button type="button" onClick={() => setShowImportExt(true)}
+              className="inline-flex min-h-8 items-center gap-1.5 rounded-btn border border-border px-3 text-xs text-secondary transition-colors hover:bg-elevated hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+              <Upload className="h-3.5 w-3.5" />导入扩展配置
+            </button>
+          </div>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-stretch">
             {getCardOrder().filter(k => cardVisible[k]).map((k: CardKey) => (
               <Fragment key={k}>{renderStatCard(k)}</Fragment>
@@ -1020,6 +1029,7 @@ export function Data() {
       )}
 
       <AnimatePresence>
+        {showImportExt && <ExtConfigImportDialog onClose={() => setShowImportExt(false)} />}
         {showCreateExt && (
           <CreateExtDialog onClose={() => setShowCreateExt(false)} />
         )}

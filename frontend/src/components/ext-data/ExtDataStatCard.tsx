@@ -4,9 +4,11 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Settings, Tag, Upload, Code, RefreshCw, CheckCircle2, Loader2, Pencil, ChevronDown, ChevronUp, AlertTriangle, Trash2 } from 'lucide-react'
 import { api, type ExtDataConfig } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { invalidateExtDataQueries } from '@/lib/ext-data-cache'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ExtDataPullPanel } from './ExtDataPullPanel'
 import { ExtDataApiPanel } from './ExtDataApiPanel'
+import { ExtConfigExportButton } from './ExtConfigTransfer'
 
 export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
   config: ExtDataConfig
@@ -75,7 +77,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
     onMutate: () => { setUploading(true); setUploadResult(null) },
     onSuccess: (data) => {
       setUploadResult({ rows: data.rows, date: data.date })
-      qc.invalidateQueries({ queryKey: QK.extData })
+      void invalidateExtDataQueries(qc)
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       setTimeout(() => setUploadResult(null), 3000)
     },
@@ -137,6 +139,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
         </div>
         <button
           onClick={() => setSettingsOpen(v => !v)}
+          aria-label={`${config.label}设置`}
           className="shrink-0 p-1.5 rounded-md hover:bg-elevated/70 transition-colors text-muted hover:text-secondary"
         >
           <Settings className="h-3.5 w-3.5" />
@@ -326,8 +329,8 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
               )}
 
               {/* 管理操作: 低频, 收到底部一行 */}
-              <div className="flex items-center justify-between pt-2.5 border-t border-border/40">
-                <div className="flex items-center gap-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-border/40">
+                <div className="flex flex-wrap items-center gap-1">
                   {onEdit && (
                     <button
                       onClick={() => { setSettingsOpen(false); onEdit() }}
@@ -338,6 +341,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
                       编辑配置
                     </button>
                   )}
+                  <ExtConfigExportButton id={config.id} label={config.label} />
                   <button
                     onClick={() => {
                       api.extDataFixSymbol(config.id).then((res) => {

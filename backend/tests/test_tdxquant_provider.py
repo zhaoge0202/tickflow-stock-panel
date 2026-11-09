@@ -412,6 +412,21 @@ def test_realtime_indices_none_on_failure():
     assert _provider(fake).get_realtime_indices(["000001.SH"]) is None
 
 
+def test_realtime_symbols_can_supplement_etf_without_rounding_price():
+    fake = _FakeClient()
+    fake.snapshot_results = [{"159558.SZ": _snap_row(Now="0.827", LastClose="0.826")}]
+    records = _provider(fake).get_realtime_symbols(["159558.SZ"], asset_type="etf")
+    assert fake.snapshot_calls == [["159558.SZ"]]
+    assert records[0]["last_price"] == .827
+    assert records[0]["symbol"] == "159558.SZ"
+
+
+def test_realtime_symbols_failure_does_not_fake_empty_success():
+    fake = _FakeClient()
+    fake.snapshot_results = [tc.TdxQuantError("unavailable")]
+    assert _provider(fake).get_realtime_symbols(["159558.SZ"], asset_type="etf") is None
+
+
 # ---------------------------------------------------------------- provider: daily
 def _his_raw(*, dates=("20260102", "20260105"), volume="3123935.00", amount="386731.09") -> dict:
     return {
@@ -594,6 +609,18 @@ def _minute_raw(rows: list[tuple[str, object, float, float, float, float, float,
         "Low": [r[4] for r in rows], "Close": [r[5] for r in rows],
         "Volume": [r[6] for r in rows], "Amount": [r[7] for r in rows],
     }
+
+
+def test_minute_stream_groups_small_frames_without_changing_request_policy(monkeypatch):
+    fake = _FakeClient()
+    fake.his_default = _minute_raw([("20261106", "093100", 10, 11, 9, 10.5, 10000, 10.5)])
+    monkeypatch.setattr(tp, "_MINUTE_INTERVAL_S", 0)
+    source = _provider(fake)
+    stream = source.iter_minute([f"{i:06d}.SZ" for i in range(120)], None, datetime(2026, 11, 6, 15))
+    first = next(stream)
+    assert first.height == 50 and len(fake.his_calls) == 50
+    assert [part.height for part in stream] == [50, 20]
+    assert len(fake.his_calls) == 120
 
 
 def test_minute_units_and_wallclock_datetime():

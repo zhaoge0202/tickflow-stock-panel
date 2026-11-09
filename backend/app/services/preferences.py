@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -34,6 +35,23 @@ def _invalidate_cache() -> None:
     global _cache, _cache_sig
     _cache = None
     _cache_sig = None
+
+
+def data_source_stamp() -> tuple:
+    """Opaque config version; routine last-fetch persistence must not invalidate pulls."""
+    from app.config import settings
+
+    data = load()
+    data.pop("last_fetch_ms", None)
+    result = [hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()]
+    for name in ("secrets.json",):
+        path = settings.data_dir / "user_data" / name
+        try:
+            stat = path.stat()
+            result.append((stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            result.append(None)
+    return (str(settings.data_dir.resolve()), *result)
 
 
 def load() -> dict:

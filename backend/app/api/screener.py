@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import glob as _glob
 import logging
 import math
@@ -15,14 +16,15 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.config import settings
-from app.db_safe import is_valid_ext_ident, quote_ident
+from app.db_safe import quote_ident
 from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now
-from app.services import strategy_cache, strategy_run_queue
+from app.services import screener_work, strategy_cache, strategy_run_queue
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
 from app.services.focus_versions import build_focus_three_versions
 from app.services.local_strategy_config import focus_default_strategy_id
 from app.services.screener import ScreenerService
+from app.services.shared_work import WorkBusyError
 from app.services.strategy_date import (
     cache_generated_after_cutoff,
     reject_intraday_strategy_date,
@@ -32,6 +34,13 @@ from app.strategy import config as strategy_config
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
+
+
+def _admit_submission(request: Request) -> None:
+    from app.api.auth import COOKIE_NAME
+    from app.services.workload import admit_request
+
+    admit_request(request, COOKIE_NAME)
 
 
 class CustomRequest(BaseModel):
@@ -51,6 +60,7 @@ class PresetRequest(BaseModel):
     ext_columns: Optional[str] = None
     asset_type: str = "stock"
     timeframe: str = "1d"
+    ensure: bool = False
 
 
 class AuctionConfirmRequest(BaseModel):
@@ -458,7 +468,7 @@ def _cached_with_live_quotes(request: Request) -> dict:
     return payload
 
 
-def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict) -> None:
+def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict, *, validate=None) -> None:
     """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
     from app.services import strategy_cache
     cached = strategy_cache.read_cache(data_dir)
@@ -475,7 +485,13 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             # 数据不足提示 (#303) 随缓存下发 (get_cached 原样读出),
             # 单跑刷新不得冲掉 run_all 写入的提示
             results[strategy_id]["warnings"] = safe_data["warnings"]
-        strategy_cache.write_cache(data_dir, as_of, results)
+        # write_cache already merges by strategy under its lock; do not replay other
+        # strategies read before a concurrent writer published a newer result.
+        try:
+            strategy_cache.write_cache(data_dir, as_of, {strategy_id: results[strategy_id]},
+                                       validate=validate, strict=validate is not None)
+        except OSError as exc:
+            raise WorkBusyError("策略结果暂时无法保存，请稍后重试") from exc
 
 
 def _record_strategy_selections(
@@ -543,14 +559,21 @@ def run_custom(req: CustomRequest, request: Request):
     if not as_of:
         raise HTTPException(status_code=400,
                             detail="无可用数据日期 — enriched 表为空,请先运行盘后管道")
-    result = svc.run(
-        as_of=as_of,
-        conditions=req.conditions,
-        order_by=req.order_by,
-        limit=req.limit,
-        pool=req.pool,
-    )
-    safe_data = _safe(asdict(result))
+    identity = screener_work.hard_identity(repo, None, req.asset_type)
+    key = (str(as_of), identity,
+           screener_work.source_version(repo, req.asset_type, "1d", as_of),
+           screener_work.digest(req.model_dump()))
+    def compute():
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+        _admit_submission(request)
+        with shared_heavy_job_limiter.slot("exclusive"):
+            result = svc.run(as_of=as_of, conditions=req.conditions, order_by=req.order_by,
+                             limit=req.limit, pool=req.pool)
+            screener_work.assert_current(repo, None, req.asset_type, identity)
+            return _safe(asdict(result))
+
+    safe_data = copy.deepcopy(screener_work.custom_work.run(key, compute))
     warnings = _coverage_warnings(svc, as_of)
     if warnings:
         safe_data["warnings"] = warnings
@@ -583,6 +606,8 @@ def run_preset(req: PresetRequest, request: Request):
     # ext 投影取结果日分区: 结果表里展示的扩展值(如人气) 必须与叠加条件过滤时用的同一天
     ext_values = _load_ext_value_maps(repo, req.ext_columns, as_of=str(as_of))
     overrides = strategy_config.load_override(data_dir, req.strategy_id)
+    identity = screener_work.identity_for_inputs(repo, getattr(request.app.state, "strategy_engine", None),
+                                                req.asset_type, {req.strategy_id: overrides}, normalized_inputs=True)
     engine = getattr(request.app.state, "strategy_engine", None)
     if not engine:
         raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
@@ -593,21 +618,21 @@ def run_preset(req: PresetRequest, request: Request):
         if engine.get(req.strategy_id).meta.get("research_only"):
             raise ValueError(f"unknown strategy: {req.strategy_id}")
         params = dict(overrides.get("params") or {})
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            [req.strategy_id],
-            timeframe=req.timeframe,
-            params_map={req.strategy_id: params},
-            overrides_map={req.strategy_id: overrides or {}},
-        )
-        result = engine.run(
-            req.strategy_id,
-            context,
-            pool=req.pool,
-            params=params,
-            overrides=overrides or None,
-        )
+        key = (str(as_of), identity, screener_work.source_version(repo, req.asset_type, req.timeframe, as_of),
+               screener_work.digest(req.model_dump(exclude={"ensure"})))
+
+        def compute():
+            _admit_submission(request)
+            with strategy_run_queue.MANAGER.execution():
+                context = svc.build_strategy_context(
+                    engine, as_of, [req.strategy_id], timeframe=req.timeframe,
+                    params_map={req.strategy_id: params}, overrides_map={req.strategy_id: overrides or {}},
+                )
+                result = engine.run(req.strategy_id, context, pool=req.pool, params=params, overrides=overrides or None)
+                screener_work.assert_current(repo, engine, req.asset_type, identity)
+                return result
+
+        result = copy.deepcopy(screener_work.single_work.run(key, compute, ttl_s=6 if req.ensure else 0))
     except ValueError as e:
         status_code = 404 if "unknown strategy" in str(e) else 400
         raise HTTPException(status_code=status_code, detail=str(e)) from e
@@ -624,7 +649,9 @@ def run_preset(req: PresetRequest, request: Request):
         )
         if warnings:
             safe_data["warnings"] = warnings
-        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+        screener_work.assert_current(repo, engine, req.asset_type, identity)
+        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data,
+                               validate=lambda: screener_work.assert_current(repo, engine, req.asset_type, identity))
         _record_strategy_selections(
             data_dir,
             engine,
@@ -867,8 +894,11 @@ def get_cached(
 
 
 @router.get("/cached-summary")
-def get_cached_summary(request: Request):
+def get_cached_summary(request: Request, task_id: str | None = None):
     """返回策略卡片所需的轻量摘要，不序列化股票明细。"""
+    # Observe task completion before reading its published cache, so a result
+    # committed during this request cannot stop polling with an older snapshot.
+    task = strategy_run_queue.MANAGER.task_status(task_id) if task_id else None
     cached = _cached_with_realtime(request)
     results = cached.get("results") or {}
     summary = {
@@ -878,6 +908,7 @@ def get_cached_summary(request: Request):
             # 渐进式 run_all 写入的计算时间戳; 监控实时叠加/旧缓存无此字段 → None,
             # 前端视为新鲜 (有值即为最新一轮实时结果)
             "computed_at": result.get("computed_at"),
+            **({"available_at": result["available_at"]} if result.get("available_at") is not None else {}),
         }
         for sid, result in results.items()
         if isinstance(result, dict)
@@ -899,11 +930,14 @@ def get_cached_summary(request: Request):
     # 分钟策略结果不落 strategy_cache (日线语义), 渐进式转后台算完后在这里
     # 以 handle 快照合入 (仅 as_of 与日线缓存同日的), 前端轮询本端点点亮卡片。
     minute_pending: list[str] = []
-    for m in strategy_run_queue.MANAGER.minute_summaries():
+    identity = screener_work.hard_identity(request.app.state.repo, getattr(request.app.state, "strategy_engine", None), "stock")
+    for m in strategy_run_queue.MANAGER.minute_summaries(identity=identity, asset_type="stock"):
         if m.get("as_of") != cached_as_of:
             continue
         for sid, item in (m.get("results") or {}).items():
-            summary[sid] = item
+            previous = summary.get(sid) or {}
+            if (item.get("computed_at") or 0) >= (previous.get("computed_at") or 0):
+                summary[sid] = item
         minute_pending.extend(m.get("pending") or [])
 
     return {
@@ -912,6 +946,7 @@ def get_cached_summary(request: Request):
         "today_ever_counts": ever_counts,
         "updated_at": cached.get("updated_at"),
         "minute_pending": minute_pending,
+        **({"task": task} if task_id else {}),
     }
 
 
@@ -1527,6 +1562,8 @@ def _run_all_progressive(
     overrides_map: dict,
     first_return_s: float,
     t_total: float,
+    ensure: bool = False,
+    on_submit=None,
 ) -> dict:
     """run_all 渐进式执行: 快策略随响应先返回, 慢策略后台算完逐个落缓存。
 
@@ -1534,12 +1571,15 @@ def _run_all_progressive(
     搭车现有执行, 不同请求排队; HTTP 侧只轮询状态快照到首返时限。
     """
     data_dir = repo.store.data_dir
-    key = (asset_type, timeframe, str(as_of), tuple(sorted(all_ids)))
+    identity = screener_work.identity_for_inputs(repo, engine, asset_type, overrides_map)
+    version = screener_work.source_version(repo, asset_type, timeframe, as_of)
+    key = (asset_type, timeframe, str(as_of), tuple(sorted(all_ids)), identity)
     ordered_ids = strategy_run_queue.order_strategy_ids(
         all_ids, strategy_run_queue.load_run_timings(data_dir)
     )
 
     def job(handle: strategy_run_queue.StrategyRunHandle) -> None:
+        screener_work.assert_current(repo, engine, asset_type, identity)
         context = svc.build_strategy_context(
             engine,
             as_of,
@@ -1569,24 +1609,26 @@ def _run_all_progressive(
             # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
             # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
             try:
-                single = engine.run_all(
-                    context,
-                    params_map=params_map,
-                    overrides_map=overrides_map,
-                    strategy_ids=[sid],
-                    parallel=False,
-                )
-                result = single[sid]
+                def compute(sid=sid):
+                    single = engine.run_all(
+                        context, params_map=params_map, overrides_map=overrides_map,
+                        strategy_ids=[sid], parallel=False,
+                    )
+                    result = single[sid]
+                    return {"total": result.total, "as_of": str(as_of),
+                            "rows": _safe(asdict(result)).get("rows", []),
+                            "computed_at": int(time.time() * 1000)}
+
+                payload = copy.deepcopy(screener_work.batch_results.run(
+                    (identity, asset_type, timeframe, str(as_of), sid, version),
+                    compute, ttl_s=6 if ensure else 0,
+                ))
             except Exception as e:
                 logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
                 handle.fail_one(sid, str(e))
                 continue
-            payload = {
-                "total": result.total,
-                "as_of": str(as_of),
-                "rows": _safe(asdict(result)).get("rows", []),
-                "computed_at": int(time.time() * 1000),
-            }
+            screener_work.assert_current(repo, engine, asset_type, identity)
+            payload["available_at"] = int(time.time() * 1000)
             if timeframe == "1d":
                 w = _coverage_warnings(
                     svc, as_of, engine=engine, strategy_ids=[sid],
@@ -1600,18 +1642,33 @@ def _run_all_progressive(
             # 分钟结果不落盘 (strategy_cache 为日线语义), 改经 handle 快照合入 summary
             if timeframe == "1d":
                 try:
-                    strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
-                except Exception:
+                    strategy_cache.write_cache(
+                        data_dir, str(as_of), {sid: payload},
+                        validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
+                        strict=True,
+                    )
+                except WorkBusyError:
+                    raise
+                except Exception:  # noqa: BLE001 -- failed publication must not report availability
                     logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
+                    all_results.pop(sid, None)
+                    handle.fail_one(sid, "策略结果暂时无法保存，请稍后重试")
+                    continue
             handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
         # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序 (分钟不落盘)
         if all_results and timeframe == "1d":
+            screener_work.assert_current(repo, engine, asset_type, identity)
             with contextlib.suppress(Exception):
-                strategy_cache.write_cache(data_dir, str(as_of), all_results)
+                strategy_cache.write_cache(
+                    data_dir, str(as_of), all_results,
+                    validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
+                )
         strategy_run_queue.record_run_timings(data_dir, elapsed_map)
 
-    handle = strategy_run_queue.MANAGER.get_or_submit(key, ordered_ids, job)
-    deadline = time.perf_counter() + first_return_s
+    handle = strategy_run_queue.MANAGER.get_or_submit(
+        key, ordered_ids, job, reuse_completed_ms=6000 if ensure else 0, source_version=version, on_submit=on_submit,
+    )
+    deadline = time.perf_counter() + (min(first_return_s, 0.25) if ensure else first_return_s)
     snap = handle.snapshot()
     while not snap["done"] and time.perf_counter() < deadline:
         time.sleep(0.2)
@@ -1619,7 +1676,8 @@ def _run_all_progressive(
 
     done_results = snap["results"]
     if snap["error"] and not done_results:
-        raise HTTPException(status_code=500, detail=snap["error"])
+        raise HTTPException(status_code=snap["error_status"], detail=snap["error"],
+                            headers={"Retry-After": "3"} if snap["error_status"] == 503 else None)
     logger.info(
         "run_all: first return %.1fms (%d done, %d pending)",
         (time.perf_counter() - t_total) * 1000,
@@ -1634,6 +1692,7 @@ def _run_all_progressive(
         "complete": snap["done"] and not snap["error"],
         "error": snap["error"],
         "started_at": snap["started_at_ms"],
+        "task_id": handle.id,
     }
 
 
@@ -1690,7 +1749,7 @@ def run_all(request: Request, body: Optional[dict] = None):
         # 跑全部策略 —— 前端任何一次空池/空数组请求都会静默升级成全市场
         # 计算 (58 个策略各自重扫历史), 表现为"没选的策略也在跑"。
         source = "client"
-        all_ids = [str(sid) for sid in requested_ids]
+        all_ids = list(dict.fromkeys(str(sid) for sid in requested_ids))
         # 宽容降级: 策略池可能残留已不存在的策略 ID (如内置策略移除后的
         # 旧数据目录) —— 跳过未知项继续跑, 响应带回 skipped_unknown 供前端
         # 清池; 全部未知才整体 404 (避免空跑被当成成功)。
@@ -1754,25 +1813,29 @@ def run_all(request: Request, body: Optional[dict] = None):
             overrides_map=overrides_map,
             first_return_s=first_return_s,
             t_total=t_total,
+            ensure=body.get("ensure") is True,
+            on_submit=lambda: _admit_submission(request),
         )
         if skipped_unknown:
             progressive["skipped_unknown"] = skipped_unknown
         return progressive
 
+    identity = screener_work.identity_for_inputs(repo, engine, asset_type, overrides_map)
+    version = screener_work.source_version(repo, asset_type, timeframe, as_of)
+
+    def compute():
+        _admit_submission(request)
+        with strategy_run_queue.MANAGER.execution():
+            context = svc.build_strategy_context(engine, as_of, all_ids, timeframe=timeframe,
+                                                 params_map=params_map, overrides_map=overrides_map)
+            result = engine.run_all(context, params_map=params_map, overrides_map=overrides_map, strategy_ids=all_ids)
+            screener_work.assert_current(repo, engine, asset_type, identity)
+            return result
+
     try:
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            all_ids,
-            timeframe=timeframe,
-            params_map=params_map,
-            overrides_map=overrides_map,
-        )
-        engine_results = engine.run_all(
-            context,
-            params_map=params_map,
-            overrides_map=overrides_map,
-            strategy_ids=all_ids,
+        engine_results = screener_work.full_batch_work.run(
+            (identity, asset_type, timeframe, str(as_of), tuple(sorted(all_ids)), version), compute,
+            ttl_s=6 if body.get("ensure") is True else 0,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1799,9 +1862,15 @@ def run_all(request: Request, body: Optional[dict] = None):
     # 写入策略缓存 (供页面秒加载); 分钟周期结果不落盘 (日线语义缓存)
     if results and timeframe == "1d":
         try:
-            strategy_cache.write_cache(data_dir, str(as_of), results)
-        except Exception:  # noqa: BLE001
-            pass
+            strategy_cache.write_cache(data_dir, str(as_of), results,
+                                       validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
+                                       strict=True)
+        except WorkBusyError:
+            raise
+        except Exception as exc:  # Legacy full-detail callers still receive computed rows.
+            if body.get("summary_only"):
+                raise WorkBusyError("策略结果暂时无法保存，请稍后重试") from exc
+            logger.warning("策略结果缓存写入失败", exc_info=True)
         _record_strategy_selections(data_dir, engine, str(as_of), results)
 
     if body.get("summary_only"):
@@ -2133,31 +2202,10 @@ def limit_ladder(
 
 
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str, str | None]]:
-    """解析 'config_id1.field1@09:20,config_id2.field2' 为 [(config_id, field_name, at), ...]。
+    """解析并去重扩展列；同一输出列存在歧义时返回 400。"""
+    from app.services.ext_data import parse_ext_columns
 
-    可选 "@HH:MM[:SS]" 后缀: 日内多盘表取「该时刻或之前最近一盘」的值;
-    时刻非法时整条 spec 丢弃 (fail-closed, 不静默回退末盘造成口径混淆)。
-    """
-    from app.services.ext_data import norm_ext_snapshot_at
-
-    result = []
-    for part in ext_columns.split(","):
-        part = part.strip()
-        if "." not in part:
-            continue
-        config_id, field_name = part.split(".", 1)
-        at: str | None = None
-        if "@" in field_name:
-            field_name, at_raw = field_name.rsplit("@", 1)
-            try:
-                at = norm_ext_snapshot_at(at_raw)
-            except ValueError:
-                continue
-        config_id = config_id.strip()
-        field_name = field_name.strip()
-        if not config_id or not field_name:
-            continue
-        if not is_valid_ext_ident(config_id) or "\x00" in field_name:
-            continue
-        result.append((config_id, field_name, at))
-    return result
+    try:
+        return parse_ext_columns(ext_columns)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc

@@ -7,12 +7,14 @@ import {
   formatIntradayVolume,
   formatMinuteTime,
   FULL_DAY_TIMES,
+  getLimitPrices,
   intradayAxisTimes,
   intradayPriceDigits,
   summarizeMinutes,
   type DailySummary,
 } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
+import { intradayScale } from '@/lib/intraday-scale'
 
 type YMode = 'adaptive' | 'limit'
 
@@ -64,34 +66,12 @@ function axisIndexFromValue(value: unknown, axisTimes: string[]): number | null 
   return null
 }
 
-/** 计算实际涨跌停价 (四舍五入到2位小数) 和实际涨跌停幅度 */
-function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
-  limitUp: number      // 涨停价 (四舍五入)
-  limitDown: number    // 跌停价 (四舍五入)
-  upPct: number        // 实际涨停幅度 (如 9.97)
-  downPct: number      // 实际跌停幅度 (如 -9.97)
-} {
-  const pct = priceLimit && Number.isFinite(priceLimit.rate) ? priceLimit.rate : 0.10
-  const rawUp = prevClose * (1 + pct)
-  const rawDown = prevClose * (1 - pct)
-  // A股涨跌停价四舍五入到分 (2位小数)
-  const limitUp = isValidPrice(priceLimit?.limit_up)
-    ? priceLimit.limit_up
-    : Math.round(rawUp * 100) / 100
-  const limitDown = isValidPrice(priceLimit?.limit_down)
-    ? priceLimit.limit_down
-    : Math.round(rawDown * 100) / 100
-  const upPct = (limitUp - prevClose) / prevClose * 100
-  const downPct = (limitDown - prevClose) / prevClose * 100
-  return { limitUp, limitDown, upPct, downPct }
-}
-
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, assetType?: string, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], assetType?: string): EChartsOption {
   const isCrypto = isCryptoAssetType(assetType)
-  // 无涨跌幅标的: crypto (后端 price_limit=null) 与注册制新股上市初期窗口 (后端
-  // no_limit 标记) 都不存在可信涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称
-  // 范围, 也不画涨跌停虚线
-  const limitLinesActive = showLimitLines && !isCrypto && !priceLimit?.no_limit
+  // 无涨跌幅标的: crypto (后端 price_limit=null)、指数 (点位无涨跌停) 与注册制新股上市
+  // 初期窗口 (后端 no_limit 标记) 都不存在可信涨跌停带, 自适应/涨跌停两类模式都退化为
+  // 纯数据对称范围, 也不画涨跌停虚线
+  const limitLinesActive = showLimitLines && !isCrypto && assetType !== 'index' && !priceLimit?.no_limit
   const priceDigits = intradayPriceDigits(assetType, data.map(row => row.high))
   // crypto 时轴 = 数据自身时间点 (行序即轴序), A 股/ETF/指数 = 固定全天 242 槽
   const axisTimes = intradayAxisTimes(assetType, data)
@@ -170,64 +150,21 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     })
   }
 
-  let yMin: number | undefined
-  let yMax: number | undefined
-  let maxDiff = 0
-  if (isValidPrice(prevClose) && data.length > 0) {
-    const priceArrays = showAvgLine ? [closes, highs, lows, avgData] : [closes, highs, lows]
-    for (const arr of priceArrays) {
-      for (const v of arr) {
-        if (!isValidPrice(v)) continue
-        const diff = Math.abs(v - prevClose)
-        if (diff > maxDiff) maxDiff = diff
-      }
-    }
-
-    const monitoredDiff = priceLines.reduce((largest, line) => (
-      Number.isFinite(line.value) && line.value > 0
-        ? Math.max(largest, Math.abs(line.value - prevClose))
-        : largest
-    ), 0) * 1.05
-
-    if (limitLinesActive && yMode === 'limit') {
-      const { limitUp, limitDown } = getLimitPrices(prevClose, priceLimit)
-      const limitDiffUp = limitUp - prevClose
-      const limitDiffDown = prevClose - limitDown
-      const limitDiff = Math.max(limitDiffUp, limitDiffDown)
-      // 涨跌停模式: Y 轴按实际涨跌停价, 但不小于实际数据范围 (数据超带 =
-      // 涨跌幅规则不适用或数据异常, 钳制会把曲线推出图外)
-      maxDiff = Math.max(limitDiff, maxDiff, monitoredDiff)
-      yMin = prevClose - maxDiff
-      yMax = prevClose + maxDiff
-      // 加 markLine 标注涨停价和跌停价 (仅虚线, 不显示文字)
-      markLineData.push(
-        {
-          yAxis: limitUp,
-          lineStyle: { color: 'rgba(199,64,64,0.4)', type: 'dashed', width: 1 },
-          label: { show: false },
-          symbol: 'none',
-        },
-        {
-          yAxis: limitDown,
-          lineStyle: { color: 'rgba(45,155,101,0.4)', type: 'dashed', width: 1 },
-          label: { show: false },
-          symbol: 'none',
-        },
-      )
-    } else {
-      // 自适应模式: Y 轴按实际涨跌幅对称。不做涨跌停带上限钳制 — 带内数据
-      // maxDiff 本就 ≤ limitDiff (钳制是恒等), 而数据超带时 (无涨跌幅新股/
-      // 数据异常) 钳制会把曲线推出图外 (issue: C沈鼓 分时被夹在 ±10% 内)
-      if (!limitLinesActive && maxDiff > 0) {
-        maxDiff *= 1.1
-      }
-      // 至少保证一个可视范围 (防止数据平时 maxDiff=0)。指数不使用涨跌停范围，最小范围要更紧，否则低波动指数会被压成横线。
-      const minDiff = limitLinesActive ? prevClose * 0.01 : prevClose * 0.001
-      if (maxDiff < minDiff) maxDiff = minDiff
-      maxDiff = Math.max(maxDiff, monitoredDiff)
-      yMin = prevClose - maxDiff
-      yMax = prevClose + maxDiff
-    }
+  const limits = limitLinesActive && isValidPrice(prevClose) ? getLimitPrices(prevClose, priceLimit, assetType) : undefined
+  const mode = limits ? yMode : 'adaptive'
+  const scale = intradayScale([
+    ...closes, ...highs, ...lows,
+    ...(mode === 'limit' && limits ? [limits.limitDown, limits.limitUp] : []),
+  ], prevClose, priceDigits, limits ? { min: limits.limitDown, max: limits.limitUp } : undefined, mode)
+  const yMin = scale?.range.min
+  const yMax = scale?.range.max
+  const interval = scale ? (scale.range.max - scale.range.min)
+    / (scale.range.max - scale.range.min < 10 ** -priceDigits * 4 ? 2 : 4) : undefined
+  if (mode === 'limit' && limits) {
+    markLineData.push(
+      { yAxis: limits.limitUp, lineStyle: { color: 'rgba(199,64,64,0.4)', type: 'dashed', width: 1 }, label: { show: false }, symbol: 'none' },
+      { yAxis: limits.limitDown, lineStyle: { color: 'rgba(45,155,101,0.4)', type: 'dashed', width: 1 }, label: { show: false }, symbol: 'none' },
+    )
   }
 
   // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
@@ -333,12 +270,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         type: 'value',
         min: yMin,
         max: yMax,
-        // 上市首日无 prevClose 时 min/max 为 undefined, scale 避免 value 轴
-        // 默认从 0 锚定把曲线挤到图上部 (有 min/max 时本属性无影响)。
-        // 区间过宽时 (无涨跌幅新股, maxDiff 远超昨收) interval 减半让昨收
-        // 落在刻度上; 正常涨跌停带内保持原 interval 行为
         scale: true,
-        interval: prevClose != null && maxDiff > prevClose * 0.5 ? maxDiff / 2 : maxDiff || undefined,
+        interval,
         splitArea: { show: false },
         axisLine: { show: false },
         axisTick: { show: false },
@@ -373,7 +306,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         gridIndex: 0,
         min: yMin,
         max: yMax,
-        interval: maxDiff || undefined,
+        interval,
         splitArea: { show: false },
         axisLine: { show: false },
         axisTick: { show: false },
@@ -438,6 +371,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
 
 export function EChartsIntraday({
   data,
+  assetType,
   height = 320,
   prevClose,
   date,
@@ -451,6 +385,7 @@ export function EChartsIntraday({
   showLimitLines = true,
   showAvgLine = true,
 }: Props) {
+  const averageVisible = showAvgLine && assetType !== 'index'
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const roRef = useRef<ResizeObserver | null>(null)
@@ -478,7 +413,7 @@ export function EChartsIntraday({
   const isCrypto = isCryptoAssetType(assetType)
   // crypto 无涨跌停价 (后端 price_limit=null): 不显示涨跌停/自适应切换; 无涨跌幅
   // 新股仍保留切换 (buildOption 内退化处理), 与 A 股口径一致
-  const limitLines = showLimitLines && !isCrypto
+  const limitLines = showLimitLines && !isCrypto && assetType !== 'index'
   const axisTimes = useMemo(() => intradayAxisTimes(assetType, data), [assetType, data])
   const axisTimesRef = useRef(axisTimes)
   axisTimesRef.current = axisTimes
@@ -639,12 +574,12 @@ export function EChartsIntraday({
       }
       axisIdxToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, assetType, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, averageVisible, priceLines, assetType), true)
     } else {
       axisIdxToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, assetType, isCrypto, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, averageVisible, priceLines, assetType])
 
   useEffect(() => {
     return () => {
@@ -683,7 +618,7 @@ export function EChartsIntraday({
 
   return (
     <div className="w-full">
-      {/* 按钮行: 切换式按钮组, 居右 (crypto 无涨跌停价, 不显示) */}
+      {/* 按钮行: 切换式按钮组, 居右 (crypto/指数无涨跌停价, 不显示) */}
       {limitLines && <div className="flex items-center justify-end px-1 pb-0.5">
         <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
@@ -736,7 +671,7 @@ export function EChartsIntraday({
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
                 <span style={{ color: priceClr }}>{d.close.toFixed(priceDigits)}</span>
               </span>
-              {showAvgLine && <span className="flex items-center gap-x-1">
+              {averageVisible && <span className="flex items-center gap-x-1">
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
                 <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(priceDigits) : '—'}</span>
               </span>}
