@@ -6,26 +6,28 @@ import time
 import polars as pl
 
 from app.api import data as data_api
+from app.services.data_status_cache import DataStatusCache
 from app.services.quote_service import QuoteService
 
 
 def test_data_status_returns_stale_snapshot_while_refresh_runs(monkeypatch):
+    """已过期的旧统计仍要立即返回: 重算转后台, 不阻塞 /status。"""
+    cache = DataStatusCache({**data_api._TABLE_TTLS, "storage": 60, "last_runs": float("inf")})
+    monkeypatch.setattr(data_api, "_status_cache", cache)
+    old = {"latest_date": "2026-09-20"}
+    cache._values["daily"] = old
+    cache._expires["daily"] = 0.0
     started = threading.Event()
     release = threading.Event()
-    old = {"latest_date": "2026-09-20"}
-    previous_cache = data_api._table_cache["daily"]
-    previous_ts = data_api._table_cache_ts["daily"]
+
+    def fetch():
+        started.set()
+        release.wait(2.0)
+        return {"latest_date": "2026-09-21"}
+
     try:
-        data_api._table_cache["daily"] = old
-        data_api._table_cache_ts["daily"] = 0.0
-
-        def fetch():
-            started.set()
-            release.wait(2.0)
-            return {"latest_date": "2026-09-21"}
-
         t0 = time.perf_counter()
-        result = data_api._get_table_stats("daily", fetch)
+        result = cache.snapshot({"daily": fetch}, is_busy=lambda: False)["daily"]
         elapsed = time.perf_counter() - t0
 
         assert result == old
@@ -33,12 +35,9 @@ def test_data_status_returns_stale_snapshot_while_refresh_runs(monkeypatch):
         assert started.wait(1.0)
     finally:
         release.set()
-        for _ in range(20):
-            if "daily" not in data_api._status_refreshing:
-                break
-            time.sleep(0.01)
-        data_api._table_cache["daily"] = previous_cache
-        data_api._table_cache_ts["daily"] = previous_ts
+        thread = cache._thread
+        if thread is not None:
+            thread.join(4)
 
 
 def test_quote_service_full_rebuild_is_single_flight(monkeypatch):
