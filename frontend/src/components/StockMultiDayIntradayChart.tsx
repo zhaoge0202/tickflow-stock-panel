@@ -4,7 +4,6 @@ import { Download, Loader2, RefreshCw } from 'lucide-react'
 import { api, type MinuteKlineSession } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions, minuteRefetchInterval } from '@/lib/kline'
-import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import type { ChartRenderer } from '@/lib/chart-types'
 
@@ -208,7 +207,6 @@ export function StockMultiDayIntradayChart({
       )}
       <Suspense fallback={<div className="text-xs text-muted py-4">正在加载图表…</div>}>
       <Chart
-        assetType={history.data?.asset_type ?? latest.data?.asset_type}
         {...(renderer === 'lightweight' ? {
           priceLimit: sessions.length === 1 && sessions[0].date === latest.data?.date ? latest.data?.price_limit ?? undefined : undefined,
         } : {})}

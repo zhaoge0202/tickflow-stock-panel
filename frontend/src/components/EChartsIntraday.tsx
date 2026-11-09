@@ -376,7 +376,6 @@ export function EChartsIntraday({
   prevClose,
   date,
   dailySummary,
-  assetType,
   priceLimit,
   onPriceHover,
   onPriceDoubleClick,

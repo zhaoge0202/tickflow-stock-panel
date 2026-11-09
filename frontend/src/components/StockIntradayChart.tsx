@@ -188,7 +188,6 @@ export function StockIntradayChart({
             prevClose={minute.data?.prev_close ?? prevClose}
             dailySummary={dailySummary}
             date={date}
-            assetType={minute.data?.asset_type}
             priceLimit={minute.data?.price_limit ?? undefined}
             onPriceHover={onPriceHover}
             onPriceDoubleClick={onPriceDoubleClick}

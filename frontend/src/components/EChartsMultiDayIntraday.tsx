@@ -23,7 +23,6 @@ const COLORS = {
 }
 
 interface Props {
-  assetType?: 'stock' | 'etf' | 'index'
   sessions: MinuteKlineSession[]
   height?: number
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -164,7 +163,6 @@ export function EChartsMultiDayIntraday({
   height = 420,
   onPriceDoubleClick,
   priceLines = [],
-  assetType,
 }: Props) {
   const digits = pricePrecision(assetType)
   const containerRef = useRef<HTMLDivElement>(null)
