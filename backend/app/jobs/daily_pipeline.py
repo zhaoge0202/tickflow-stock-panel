@@ -761,6 +761,11 @@ def run_now(
         skipped.append("sync_adj")
         logger.info("sync_adj skipped: no ADJ_FACTOR capability")
 
+    # 分段计时: 盘后管道在这里出现过「回补完成 → enriched 开始」之间约 8 分钟
+    # 无日志的空隙, 而按代码路径这段只有 glob + 两个 prune (实测全库 12.6s)。
+    # 打点用于区分「卡在等锁/GIL」与「prune 本身变慢」, 定位后再决定并行方案。
+    _t_step2 = time.perf_counter()
+
     # Step 2: 计算 enriched
     #   判断策略:
     #     - 首次 (enriched 目录不存在) → 全量
@@ -775,13 +780,27 @@ def run_now(
     daily_dir = repo.store.data_dir / "kline_daily"
     daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
     prev_enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_exists else 0
+    logger.info(
+        "compute_enriched: 分区计数 %.3fs (daily=%d, enriched=%d)",
+        time.perf_counter() - _t_step2, daily_days, prev_enriched_days,
+    )
 
     # 部分分区修复 (#223) + 收盘价过期分区修复: 删除被实时合并提前创建、覆盖不全
     # 或收盘价停留在竞价前快照的 enriched 分区, 让下方计数比较与增量计算把它们
     # 重新当新日期处理 (值级比对以官方日线为准, 实时源不纠错也能自愈)
     if enriched_exists:
+        _t_prune = time.perf_counter()
         partial_pruned = _prune_partial_enriched_partitions(daily_dir, enriched_dir)
+        logger.info(
+            "compute_enriched: prune_partial %.2fs (pruned=%d)",
+            time.perf_counter() - _t_prune, len(partial_pruned),
+        )
+        _t_stale = time.perf_counter()
         stale_pruned = _prune_stale_price_partitions(daily_dir, enriched_dir)
+        logger.info(
+            "compute_enriched: prune_stale %.2fs (pruned=%d)",
+            time.perf_counter() - _t_stale, len(stale_pruned),
+        )
         pruned_dates = sorted(set(partial_pruned) | set(stale_pruned))
         if pruned_dates:
             logger.warning(
@@ -809,6 +828,12 @@ def run_now(
             # 包含中间被删的异常分区; 没有新增末日也必须补算。
             # 往前扩展仍由下方优先走全量分支。
             forward_incremental = True
+
+    logger.info(
+        "compute_enriched: 分支判定完成 %.3fs (forward=%s, backward=%s, new_dates=%s)",
+        time.perf_counter() - _t_step2, forward_incremental, backward_extension,
+        "n/a" if not forward_incremental else "见上",
+    )
 
     def _enriched_batch_progress(cur: int, tot: int) -> None:
         emit("compute_enriched", 65 + int(23 * cur / tot),
