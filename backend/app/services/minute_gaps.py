@@ -374,8 +374,12 @@ def refresh_day_minutes(
                     frames.append(frame)
 
     written = 0
+    write_elapsed = 0.0
     if frames:
         merged = pl.concat(frames, how="diagonal_relaxed")
+        import time as _time
+
+        _tw = _time.perf_counter()
         try:
             with repo._write_lock:
                 written = kline_sync._write_minute_partition(merged, minute_dir)
@@ -386,10 +390,12 @@ def refresh_day_minutes(
                 "written_rows": 0, "fetched_symbols": len(frames),
                 "empty": len(empty), "failed": len(failed), "error": str(exc),
             }
+        write_elapsed = _time.perf_counter() - _tw
 
     logger.info(
-        "全市场分钟覆盖 %s: 目标 %d, 取到 %d, 写入 %d 行, 上游空 %d, 失败 %d",
-        trade_date, len(targets), len(frames), written, len(empty), len(failed),
+        "全市场分钟覆盖 %s: 目标 %d, 取到 %d, 写入 %d 行 (写盘 %.1fs), 上游空 %d, 失败 %d",
+        trade_date, len(targets), len(frames), written, write_elapsed,
+        len(empty), len(failed),
     )
     source_changed = preferences.data_source_stamp() != source_stamp
     if source_changed:
@@ -401,6 +407,7 @@ def refresh_day_minutes(
         "date": trade_date.isoformat(),
         "requested": len(targets),
         "written_rows": written,
+        "write_seconds": round(write_elapsed, 1),
         "fetched_symbols": len(frames),
         "empty": len(empty),
         "failed": len(failed),

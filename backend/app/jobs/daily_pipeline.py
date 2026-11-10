@@ -1440,16 +1440,31 @@ def run_minute_sync(
     # 先做全市场严格覆盖 (解决 237~239 根够不到容差门槛的残根), 再按缺口清单兜底。
     day_refresh: dict = {}
     try:
-        from app.services.minute_gaps import refresh_day_minutes
+        from app.services.minute_gaps import FULL_DAY_BARS, refresh_day_minutes
 
-        emit("sync_minute", 96, "全市场分钟覆盖…")
-        day_refresh = refresh_day_minutes(repo, capset, today, concurrency=4)
-        logger.info(
-            "sync_minute 全市场覆盖: 目标 %d, 取到 %d, 写入 %d 行, 上游空 %d, 失败 %d",
-            day_refresh.get("requested", 0), day_refresh.get("fetched_symbols", 0),
-            day_refresh.get("written_rows", 0), day_refresh.get("empty", 0),
-            day_refresh.get("failed", 0),
-        )
+        # 全市场覆盖是「清底」手段: 逐票拉 5580 只实测 17 分钟 (tdxapi 逐票限速),
+        # 天天跑不值当。先看当日分区有多少标的不足 240 根, 残根面超过 5% 才清底;
+        # 平时只走下面的缺口清单补齐 (几百只, 1~2 分钟)。
+        part = repo.store.data_dir / "kline_minute" / f"date={today.isoformat()}" / "part.parquet"
+        short_ratio = 0.0
+        if part.exists():
+            counts = pl.read_parquet(part, columns=["symbol"]).group_by("symbol").len()
+            total_symbols = counts.height
+            short_symbols = counts.filter(pl.col("len") < FULL_DAY_BARS).height
+            short_ratio = short_symbols / total_symbols if total_symbols else 0.0
+        if short_ratio > 0.05:
+            emit("sync_minute", 96, f"全市场分钟覆盖 (残根 {short_ratio:.0%})…")
+            day_refresh = refresh_day_minutes(repo, capset, today, concurrency=4)
+            logger.info(
+                "sync_minute 全市场覆盖: 残根 %.1f%%, 目标 %d, 写入 %d 行 (写盘 %.1fs), 失败 %d",
+                short_ratio * 100, day_refresh.get("requested", 0),
+                day_refresh.get("written_rows", 0), day_refresh.get("write_seconds", 0),
+                day_refresh.get("failed", 0),
+            )
+        else:
+            logger.info(
+                "sync_minute 跳过全市场覆盖: 残根比例 %.1f%% (阈值 5%%)", short_ratio * 100,
+            )
     except Exception as e:  # noqa: BLE001 -- 覆盖失败不影响主同步结果
         logger.warning("sync_minute 全市场覆盖失败: %s", e)
 
