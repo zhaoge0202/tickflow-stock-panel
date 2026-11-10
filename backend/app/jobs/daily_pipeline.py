@@ -1433,11 +1433,30 @@ def run_minute_sync(
     minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
     emit("sync_minute", 95, f"分钟K完成,覆盖 {minute_cover_days} 天")
     logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
+
+    # 当日缺口回补: 分钟数据靠增量轮次累积, 某轮错过某一分钟就会留洞
+    # (低流动性标的 + 偶发漏轮)。上游对当日有完整数据, 这里按缺口清单逐票
+    # 幂等补齐; 上游本身没有的记录计入 no_data, 不算失败。
+    gap_fill: dict = {}
+    try:
+        from app.services.minute_gaps import fill_minute_gaps
+
+        emit("sync_minute", 96, "回补当日分钟缺口…")
+        gap_fill = fill_minute_gaps(repo, capset, today, limit=600, concurrency=3)
+        logger.info(
+            "sync_minute 缺口回补: 目标 %d, 补齐 %d, 上游无数据 %d, 失败 %d",
+            gap_fill.get("requested", 0), gap_fill.get("filled", 0),
+            gap_fill.get("no_data", 0), gap_fill.get("failed", 0),
+        )
+    except Exception as e:  # noqa: BLE001 -- 回补失败不影响主同步结果
+        logger.warning("sync_minute 缺口回补失败: %s", e)
+
     _invalidate("minute")
     return {
         "minute_rows": written,
         "universe_size": len(minute_symbols),
         "minute_cover_days": minute_cover_days,
+        "minute_gap_fill": gap_fill,
     }
 
 

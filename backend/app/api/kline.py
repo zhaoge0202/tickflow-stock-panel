@@ -2004,6 +2004,36 @@ def get_minute_gaps(
     )
 
 
+@router.post("/minute-gaps/fill")
+def fill_minute_gaps_endpoint(
+    request: Request,
+    trade_date: Optional[str] = Query(None, alias="date", description="交易日 YYYY-MM-DD, 默认今天"),
+    symbols: Optional[str] = Query(None, description="逗号分隔; 指定则跳过扫描直接补这些标的"),
+    limit: int = Query(300, ge=1, le=2000, description="单次最多回补的标的数"),
+    concurrency: int = Query(3, ge=1, le=6, description="并发拉取数, 过高会触发上游限速"),
+):
+    """按缺口清单回补单个交易日的分钟 K (盘后使用)。
+
+    只补「上游有完整数据、本地漏写」的缺口。低流动性标的 (北交所为主) 的
+    无成交分钟上游也不返回, 这部分记在 no_data 里, 属于数据源边界而非故障。
+    """
+    from app.services.minute_gaps import fill_minute_gaps
+
+    repo = request.app.state.repo
+    if trade_date:
+        try:
+            target = date.fromisoformat(trade_date.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD") from exc
+    else:
+        target = cn_today()
+    picked = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    return fill_minute_gaps(
+        repo, request.app.state.capabilities, target,
+        symbols=picked, limit=limit, concurrency=concurrency,
+    )
+
+
 @router.post("/minute-migrate")
 async def minute_migrate(request: Request):
     """存量分钟K迁移为原始口径并启用读取时复权 (幂等, 见 services/minute_adjust)。

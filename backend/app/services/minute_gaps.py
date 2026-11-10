@@ -218,3 +218,85 @@ def scan_minute_gaps(
         "truncated": truncated,
         "limit": limit,
     }
+
+
+def fill_minute_gaps(
+    repo,
+    capset,
+    trade_date: _date,
+    *,
+    symbols: list[str] | None = None,
+    limit: int = 300,
+    concurrency: int = 3,
+) -> dict:
+    """按缺口清单逐票回补单个交易日的分钟 K。
+
+    补的是「上游有完整数据、本地漏写」这一类缺口 (增量轮次错过某分钟、
+    写盘被并发覆盖等)。低流动性标的 (北交所为主) 的无成交分钟上游同样不返回,
+    这类补不动, 计入 no_data 而不是 failed。
+
+    逐票 fetch + 幂等 upsert: 完全不改已有分钟, 只补缺失时间点。写盘持仓库
+    写锁, 与实时落盘同纪律; 单票失败只记日志, 不阻断整批。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from app.services import kline_sync, minute_adjust
+
+    data_dir = repo.store.data_dir
+    minute_dir = data_dir / "kline_minute"
+    raw_basis = minute_adjust.minute_basis_is_raw(data_dir)
+
+    if symbols:
+        targets = [s for s in dict.fromkeys(symbols) if s][:limit]
+    else:
+        scanned = scan_minute_gaps(
+            minute_dir,
+            today=trade_date,
+            now_hm=(23, 59),          # 回补是盘后行为, 按全天口径判定
+            dates=[trade_date.isoformat()],
+            limit=limit,
+        )
+        targets = [g["symbol"] for g in scanned.get("gaps") or []]
+
+    filled: list[str] = []
+    no_data: list[str] = []
+    failed: list[str] = []
+
+    def _one(symbol: str) -> tuple[str, int]:
+        frame = kline_sync.fetch_minute_single(
+            symbol, trade_date, "stock", capset=capset, raw_basis=raw_basis,
+        )
+        if frame is None or frame.is_empty():
+            return symbol, 0
+        with repo._write_lock:
+            return symbol, kline_sync._write_minute_partition(frame, minute_dir)
+
+    if targets:
+        with ThreadPoolExecutor(
+            max_workers=max(1, concurrency), thread_name_prefix="minute-gap-fill",
+        ) as pool:
+            futures = {pool.submit(_one, symbol): symbol for symbol in targets}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    _, written = future.result()
+                except Exception as exc:  # noqa: BLE001 -- 单票失败不阻断整批
+                    logger.warning("分钟缺口回补失败 %s: %s", symbol, exc)
+                    failed.append(symbol)
+                    continue
+                (filled if written else no_data).append(symbol)
+
+    logger.info(
+        "分钟缺口回补 %s: 目标 %d, 补齐 %d, 上游无数据 %d, 失败 %d",
+        trade_date, len(targets), len(filled), len(no_data), len(failed),
+    )
+    return {
+        "date": trade_date.isoformat(),
+        "requested": len(targets),
+        "filled": len(filled),
+        "no_data": len(no_data),
+        "failed": len(failed),
+        "filled_symbols": filled[:50],
+        "no_data_symbols": no_data[:20],
+        "failed_symbols": failed[:20],
+    }
