@@ -325,11 +325,16 @@ def refresh_day_minutes(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.services import kline_sync, minute_adjust
+    from app.services import kline_sync, minute_adjust, preferences
 
     data_dir = repo.store.data_dir
     minute_dir = data_dir / "kline_minute"
     raw_basis = minute_adjust.minute_basis_is_raw(data_dir)
+    # 长批量拉取(数百至上万次请求)期间不能沿用 fetch_minute_single 的逐次
+    # stamp 复检 —— 期间任何一次 preferences 写入(行情轮落 last_fetch_ms、
+    # 设置页保存等)都会让在飞请求全部抛 WorkBusyError (实测整轮 15 分钟作废)。
+    # 改为整轮只取一次, 结束时比对并告警: 混源风险可知, 但不打断主流程。
+    source_stamp = preferences.data_source_stamp()
 
     if symbols:
         targets = list(dict.fromkeys(symbols))
@@ -346,7 +351,7 @@ def refresh_day_minutes(
     failed: list[str] = []
 
     def _one(symbol: str) -> pl.DataFrame | None:
-        return kline_sync.fetch_minute_single(
+        return kline_sync._fetch_minute_single(
             symbol, trade_date, "stock", capset=capset, raw_basis=raw_basis,
         )
 
@@ -386,6 +391,12 @@ def refresh_day_minutes(
         "全市场分钟覆盖 %s: 目标 %d, 取到 %d, 写入 %d 行, 上游空 %d, 失败 %d",
         trade_date, len(targets), len(frames), written, len(empty), len(failed),
     )
+    source_changed = preferences.data_source_stamp() != source_stamp
+    if source_changed:
+        logger.warning(
+            "全市场分钟覆盖 %s 期间数据源配置发生变化, 本轮结果可能混源, 建议重新执行一次",
+            trade_date,
+        )
     return {
         "date": trade_date.isoformat(),
         "requested": len(targets),
@@ -393,5 +404,6 @@ def refresh_day_minutes(
         "fetched_symbols": len(frames),
         "empty": len(empty),
         "failed": len(failed),
+        "source_changed": source_changed,
         "failed_symbols": failed[:20],
     }
