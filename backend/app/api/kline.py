@@ -2010,7 +2010,7 @@ def fill_minute_gaps_endpoint(
     trade_date: Optional[str] = Query(None, alias="date", description="交易日 YYYY-MM-DD, 默认今天"),
     symbols: Optional[str] = Query(None, description="逗号分隔; 指定则跳过扫描直接补这些标的"),
     limit: int = Query(300, ge=1, le=2000, description="单次最多回补的标的数"),
-    concurrency: int = Query(3, ge=1, le=6, description="并发拉取数, 过高会触发上游限速"),
+    concurrency: int = Query(8, ge=1, le=16, description="并发拉取数; 实测 8 打满上游, 16 无额外收益"),
 ):
     """按缺口清单回补单个交易日的分钟 K (盘后使用)。
 
@@ -2038,7 +2038,7 @@ def fill_minute_gaps_endpoint(
 def refresh_day_minutes_endpoint(
     request: Request,
     trade_date: Optional[str] = Query(None, alias="date", description="交易日 YYYY-MM-DD, 默认今天"),
-    concurrency: int = Query(4, ge=1, le=8, description="并发拉取数, 过高会触发上游限速"),
+    concurrency: int = Query(8, ge=1, le=16, description="并发拉取数; 实测 8 打满上游, 16 无额外收益"),
 ):
     """全市场当天分钟严格覆盖 (盘后)。
 

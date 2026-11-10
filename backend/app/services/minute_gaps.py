@@ -227,7 +227,7 @@ def fill_minute_gaps(
     *,
     symbols: list[str] | None = None,
     limit: int = 300,
-    concurrency: int = 3,
+    concurrency: int = 8,
 ) -> dict:
     """按缺口清单逐票回补单个交易日的分钟 K。
 
@@ -308,7 +308,7 @@ def refresh_day_minutes(
     trade_date: _date,
     *,
     symbols: list[str] | None = None,
-    concurrency: int = 4,
+    concurrency: int = 8,
 ) -> dict:
     """全市场当天分钟严格覆盖 (盘后用)。
 

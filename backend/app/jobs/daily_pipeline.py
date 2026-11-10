@@ -1454,7 +1454,7 @@ def run_minute_sync(
             short_ratio = short_symbols / total_symbols if total_symbols else 0.0
         if short_ratio > 0.05:
             emit("sync_minute", 96, f"全市场分钟覆盖 (残根 {short_ratio:.0%})…")
-            day_refresh = refresh_day_minutes(repo, capset, today, concurrency=4)
+            day_refresh = refresh_day_minutes(repo, capset, today, concurrency=8)
             logger.info(
                 "sync_minute 全市场覆盖: 残根 %.1f%%, 目标 %d, 写入 %d 行 (写盘 %.1fs), 失败 %d",
                 short_ratio * 100, day_refresh.get("requested", 0),
@@ -1473,7 +1473,7 @@ def run_minute_sync(
         from app.services.minute_gaps import fill_minute_gaps
 
         emit("sync_minute", 96, "回补当日分钟缺口…")
-        gap_fill = fill_minute_gaps(repo, capset, today, limit=600, concurrency=3)
+        gap_fill = fill_minute_gaps(repo, capset, today, limit=600, concurrency=8)
         logger.info(
             "sync_minute 缺口回补: 目标 %d, 补齐 %d, 上游无数据 %d, 失败 %d",
             gap_fill.get("requested", 0), gap_fill.get("filled", 0),
