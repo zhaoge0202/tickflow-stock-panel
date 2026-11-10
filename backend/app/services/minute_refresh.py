@@ -45,6 +45,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 import polars as pl
@@ -63,6 +64,16 @@ REFRESH_INTERVAL_MAX = 120
 _LOOP_STEP_S = 2.0
 # 当日覆盖滞后超过该分钟数 (≈ universe 单请求 3 根余量) → 触发全天修复轮。
 _REPAIR_LAG_MINUTES = 3.0
+
+# 最近 N 分钟的连续性检查窗口: 增量轮只拉每只标的最近 count(3) 根, 某一轮
+# 延迟/失败后, 下一轮拿到的是新的三根, 中间那根被挤出窗口 → 永久留洞;
+# 而 lag 判定只看"距最新一根多久", 这种 1~2 根的洞它看不见。
+# 因此每轮额外检查最近窗口是否连续, 不连续就升级为全天修复轮幂等覆盖。
+_RECENT_GAP_LOOKBACK_MINUTES = 6
+
+# 两次全天修复轮之间的最小间隔: 修复轮是全市场批量 (28 请求级), 洞检测本身
+# 也可能因修复轮自身漏根而持续为真, 无护栏会退化成"每轮都全量打"。
+_FULL_REPAIR_MIN_GAP_S = 300
 # 连续空轮达到该次数 → 强制全天修复轮 (自愈 universe 端点持续异常)。
 _EMPTY_ROUNDS_TO_REPAIR = 2
 # 仅修复轮的自定义源 (无 get_intraday_latest 廉价增量): 全天批量节奏下限,
@@ -106,6 +117,7 @@ class MinuteRefreshService:
         self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
         self._last_quote_snapshot_minute: str | None = None
         self._last_quote_snapshot_fingerprint: int | None = None
+        self._last_full_round_at: float | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -308,7 +320,43 @@ class MinuteRefreshService:
         lag = self._today_coverage_lag_minutes()
         if lag is None or lag > _REPAIR_LAG_MINUTES:
             return "full"
+        # 护栏: 修复轮刚跑过就维持在增量, 避免洞检测与修复轮互相触发。
+        if (
+            self._last_full_round_at is not None
+            and time.time() - self._last_full_round_at < _FULL_REPAIR_MIN_GAP_S
+        ):
+            return "increment"
+        # 滞后正常但最近窗口内有洞 (增量轮错过某分钟) → 也要走全天修复,
+        # 否则那个洞永远不会被补 (increment 只覆盖最新 count 根)。
+        if self._recent_window_has_gap():
+            return "full"
         return "increment"
+
+    def _recent_window_has_gap(self, lookback_minutes: int = _RECENT_GAP_LOOKBACK_MINUTES) -> bool:
+        """最近 N 分钟里是否缺了不止一根 (增量轮漏根检测)。
+
+        只看当日分区的尾部, 读一列毫秒级; 任何异常按"无洞"处理, 不阻断增量轮
+        (真断档由 lag 判定兜底)。
+        """
+        with contextlib.suppress(Exception):
+            part = (
+                self._repo.store.data_dir / "kline_minute"
+                / f"date={cn_today().isoformat()}" / "part.parquet"
+            )
+            if not part.exists():
+                return False
+            series = pl.read_parquet(part, columns=["datetime"])["datetime"]
+            if series.is_empty():
+                return False
+            newest = series.max()
+            if newest is None:
+                return False
+            window_start = newest - timedelta(minutes=lookback_minutes)
+            distinct = series.filter(series >= window_start).n_unique()
+            # 窗口内理论上应有 lookback_minutes+1 根; 允许 1 根容差
+            # (集合竞价/收盘瞬间偶发少一根不算洞, 否则每轮都会升级成修复轮)。
+            return distinct + 1 < lookback_minutes + 1
+        return False
 
     def _run_round(self) -> None:
         from app.services import kline_sync
@@ -328,6 +376,8 @@ class MinuteRefreshService:
         if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
             # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
             mode = "full"
+        if mode == "full":
+            self._last_full_round_at = time.time()
         mode_label = "增量" if mode == "increment" else "全天修复"
         with self._round_lock:
             if mode == "increment":
