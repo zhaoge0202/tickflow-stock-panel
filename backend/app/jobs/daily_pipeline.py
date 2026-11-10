@@ -1433,62 +1433,11 @@ def run_minute_sync(
     minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
     emit("sync_minute", 95, f"分钟K完成,覆盖 {minute_cover_days} 天")
     logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
-
-    # 当日缺口回补: 分钟数据靠增量轮次累积, 某轮错过某一分钟就会留洞
-    # (低流动性标的 + 偶发漏轮)。上游对当日有完整数据, 这里按缺口清单逐票
-    # 幂等补齐; 上游本身没有的记录计入 no_data, 不算失败。
-    # 先做全市场严格覆盖 (解决 237~239 根够不到容差门槛的残根), 再按缺口清单兜底。
-    day_refresh: dict = {}
-    try:
-        from app.services.minute_gaps import FULL_DAY_BARS, refresh_day_minutes
-
-        # 全市场覆盖是「清底」手段: 逐票拉 5580 只实测 17 分钟 (tdxapi 逐票限速),
-        # 天天跑不值当。先看当日分区有多少标的不足 240 根, 残根面超过 5% 才清底;
-        # 平时只走下面的缺口清单补齐 (几百只, 1~2 分钟)。
-        part = repo.store.data_dir / "kline_minute" / f"date={today.isoformat()}" / "part.parquet"
-        short_ratio = 0.0
-        if part.exists():
-            counts = pl.read_parquet(part, columns=["symbol"]).group_by("symbol").len()
-            total_symbols = counts.height
-            short_symbols = counts.filter(pl.col("len") < FULL_DAY_BARS).height
-            short_ratio = short_symbols / total_symbols if total_symbols else 0.0
-        if short_ratio > 0.05:
-            emit("sync_minute", 96, f"全市场分钟覆盖 (残根 {short_ratio:.0%})…")
-            day_refresh = refresh_day_minutes(repo, capset, today, concurrency=8)
-            logger.info(
-                "sync_minute 全市场覆盖: 残根 %.1f%%, 目标 %d, 写入 %d 行 (写盘 %.1fs), 失败 %d",
-                short_ratio * 100, day_refresh.get("requested", 0),
-                day_refresh.get("written_rows", 0), day_refresh.get("write_seconds", 0),
-                day_refresh.get("failed", 0),
-            )
-        else:
-            logger.info(
-                "sync_minute 跳过全市场覆盖: 残根比例 %.1f%% (阈值 5%%)", short_ratio * 100,
-            )
-    except Exception as e:  # noqa: BLE001 -- 覆盖失败不影响主同步结果
-        logger.warning("sync_minute 全市场覆盖失败: %s", e)
-
-    gap_fill: dict = {}
-    try:
-        from app.services.minute_gaps import fill_minute_gaps
-
-        emit("sync_minute", 96, "回补当日分钟缺口…")
-        gap_fill = fill_minute_gaps(repo, capset, today, limit=600, concurrency=8)
-        logger.info(
-            "sync_minute 缺口回补: 目标 %d, 补齐 %d, 上游无数据 %d, 失败 %d",
-            gap_fill.get("requested", 0), gap_fill.get("filled", 0),
-            gap_fill.get("no_data", 0), gap_fill.get("failed", 0),
-        )
-    except Exception as e:  # noqa: BLE001 -- 回补失败不影响主同步结果
-        logger.warning("sync_minute 缺口回补失败: %s", e)
-
     _invalidate("minute")
     return {
         "minute_rows": written,
         "universe_size": len(minute_symbols),
         "minute_cover_days": minute_cover_days,
-        "minute_day_refresh": day_refresh,
-        "minute_gap_fill": gap_fill,
     }
 
 
