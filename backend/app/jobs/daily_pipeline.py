@@ -1437,6 +1437,22 @@ def run_minute_sync(
     # 当日缺口回补: 分钟数据靠增量轮次累积, 某轮错过某一分钟就会留洞
     # (低流动性标的 + 偶发漏轮)。上游对当日有完整数据, 这里按缺口清单逐票
     # 幂等补齐; 上游本身没有的记录计入 no_data, 不算失败。
+    # 先做全市场严格覆盖 (解决 237~239 根够不到容差门槛的残根), 再按缺口清单兜底。
+    day_refresh: dict = {}
+    try:
+        from app.services.minute_gaps import refresh_day_minutes
+
+        emit("sync_minute", 96, "全市场分钟覆盖…")
+        day_refresh = refresh_day_minutes(repo, capset, today, concurrency=4)
+        logger.info(
+            "sync_minute 全市场覆盖: 目标 %d, 取到 %d, 写入 %d 行, 上游空 %d, 失败 %d",
+            day_refresh.get("requested", 0), day_refresh.get("fetched_symbols", 0),
+            day_refresh.get("written_rows", 0), day_refresh.get("empty", 0),
+            day_refresh.get("failed", 0),
+        )
+    except Exception as e:  # noqa: BLE001 -- 覆盖失败不影响主同步结果
+        logger.warning("sync_minute 全市场覆盖失败: %s", e)
+
     gap_fill: dict = {}
     try:
         from app.services.minute_gaps import fill_minute_gaps
@@ -1456,6 +1472,7 @@ def run_minute_sync(
         "minute_rows": written,
         "universe_size": len(minute_symbols),
         "minute_cover_days": minute_cover_days,
+        "minute_day_refresh": day_refresh,
         "minute_gap_fill": gap_fill,
     }
 

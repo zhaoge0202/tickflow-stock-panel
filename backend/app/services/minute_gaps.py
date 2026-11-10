@@ -300,3 +300,98 @@ def fill_minute_gaps(
         "no_data_symbols": no_data[:20],
         "failed_symbols": failed[:20],
     }
+
+
+def refresh_day_minutes(
+    repo,
+    capset,
+    trade_date: _date,
+    *,
+    symbols: list[str] | None = None,
+    concurrency: int = 4,
+) -> dict:
+    """全市场当天分钟严格覆盖 (盘后用)。
+
+    与 fill_minute_gaps 的分工: 那个只补跌破 90% 容差的缺口 (scan_minute_gaps
+    的判定口径), 而实测全市场 83% 的标的停在 237~239 根 —— 够不到容差门槛,
+    永远进不了清单也永远补不到 (用户反馈"康冠怎么还有缺的"就是这个)。
+    本函数对所有标的逐票拉全天 240 根, 一次性幂等覆盖。
+
+    两个必要的实现约束 (都来自实测):
+    - 必须并发: tdxapi 的 get_intraday_batch 内部是逐票请求, 300 只串行 28.2s,
+      串行覆盖全市场要 8.75 分钟; 并发 4 约 2 分钟。
+    - 必须「拉完一次性写盘」: _write_minute_partition 是读整分区 + concat +
+      unique + 原子写, 逐票调用会反复读 130 万行, 慢到不可用。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from app.services import kline_sync, minute_adjust
+
+    data_dir = repo.store.data_dir
+    minute_dir = data_dir / "kline_minute"
+    raw_basis = minute_adjust.minute_basis_is_raw(data_dir)
+
+    if symbols:
+        targets = list(dict.fromkeys(symbols))
+    else:
+        part = minute_dir / f"date={trade_date.isoformat()}" / "part.parquet"
+        targets = (
+            pl.read_parquet(part, columns=["symbol"])["symbol"].unique().to_list()
+            if part.exists()
+            else []
+        )
+
+    frames: list[pl.DataFrame] = []
+    empty: list[str] = []
+    failed: list[str] = []
+
+    def _one(symbol: str) -> pl.DataFrame | None:
+        return kline_sync.fetch_minute_single(
+            symbol, trade_date, "stock", capset=capset, raw_basis=raw_basis,
+        )
+
+    if targets:
+        with ThreadPoolExecutor(
+            max_workers=max(1, concurrency), thread_name_prefix="minute-day-refresh",
+        ) as pool:
+            futures = {pool.submit(_one, symbol): symbol for symbol in targets}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    frame = future.result()
+                except Exception as exc:  # noqa: BLE001 -- 单票失败不阻断整批
+                    logger.warning("全市场分钟覆盖失败 %s: %s", symbol, exc)
+                    failed.append(symbol)
+                    continue
+                if frame is None or frame.is_empty():
+                    empty.append(symbol)
+                else:
+                    frames.append(frame)
+
+    written = 0
+    if frames:
+        merged = pl.concat(frames, how="diagonal_relaxed")
+        try:
+            with repo._write_lock:
+                written = kline_sync._write_minute_partition(merged, minute_dir)
+        except Exception as exc:  # noqa: BLE001 -- 写盘失败如实上报, 不静默
+            logger.warning("全市场分钟覆盖写盘失败: %s", exc)
+            return {
+                "date": trade_date.isoformat(), "requested": len(targets),
+                "written_rows": 0, "fetched_symbols": len(frames),
+                "empty": len(empty), "failed": len(failed), "error": str(exc),
+            }
+
+    logger.info(
+        "全市场分钟覆盖 %s: 目标 %d, 取到 %d, 写入 %d 行, 上游空 %d, 失败 %d",
+        trade_date, len(targets), len(frames), written, len(empty), len(failed),
+    )
+    return {
+        "date": trade_date.isoformat(),
+        "requested": len(targets),
+        "written_rows": written,
+        "fetched_symbols": len(frames),
+        "empty": len(empty),
+        "failed": len(failed),
+        "failed_symbols": failed[:20],
+    }

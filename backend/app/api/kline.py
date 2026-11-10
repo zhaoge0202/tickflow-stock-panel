@@ -2034,6 +2034,32 @@ def fill_minute_gaps_endpoint(
     )
 
 
+@router.post("/minute-gaps/refresh-day")
+def refresh_day_minutes_endpoint(
+    request: Request,
+    trade_date: Optional[str] = Query(None, alias="date", description="交易日 YYYY-MM-DD, 默认今天"),
+    concurrency: int = Query(4, ge=1, le=8, description="并发拉取数, 过高会触发上游限速"),
+):
+    """全市场当天分钟严格覆盖 (盘后)。
+
+    逐票拉全天 240 根后一次性幂等写盘, 解决「237~239 根够不到缺口容差、
+    永远补不到」的系统性残根。实测 tdxapi 全市场串行 8.75 分钟, 并发 4 约 2 分钟。
+    """
+    from app.services.minute_gaps import refresh_day_minutes
+
+    repo = request.app.state.repo
+    if trade_date:
+        try:
+            target = date.fromisoformat(trade_date.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD") from exc
+    else:
+        target = cn_today()
+    return refresh_day_minutes(
+        repo, request.app.state.capabilities, target, concurrency=concurrency,
+    )
+
+
 @router.post("/minute-migrate")
 async def minute_migrate(request: Request):
     """存量分钟K迁移为原始口径并启用读取时复权 (幂等, 见 services/minute_adjust)。
