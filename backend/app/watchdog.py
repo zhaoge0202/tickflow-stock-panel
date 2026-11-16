@@ -32,10 +32,15 @@ def default_probe(write_lock: threading.Lock | None = None) -> None:
     """探测关键共享资源: polars collect 闸 + 仓库全局写锁。
 
     任一被悬死线程占住即超时 — 正是 2026-09-07 冻结事故中被毒化的两条路径。
+
+    写锁试探超时取 settings.watchdog_write_lock_timeout_s (默认 5s): 真死锁是
+    永久占锁, 5s 一样能抓到; 而分钟分区一次性重写 (130 万行, 实测 0.5~0.7s,
+    与快照落盘/上游重连叠加时更久) 属于正常慢写, 用 1.0s 判死会误杀进程
+    (2026-11-16 事故: 连续两次撞上回补写盘 → os._exit(70) 后无人拉起)。
     """
     guarded_collect(pl.LazyFrame({"probe": [1]}).sum())
     if write_lock is not None:
-        acquired = write_lock.acquire(timeout=1.0)
+        acquired = write_lock.acquire(timeout=settings.watchdog_write_lock_timeout_s)
         if not acquired:
             raise TimeoutError("repository write lock unavailable")
         write_lock.release()

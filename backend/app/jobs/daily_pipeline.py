@@ -1433,11 +1433,43 @@ def run_minute_sync(
     minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
     emit("sync_minute", 95, f"分钟K完成,覆盖 {minute_cover_days} 天")
     logger.info("sync_minute: [%s ~ %s] done, %d days", minute_start, today, minute_cover_days)
+
+    # 当日分钟完整性兜底: 盘中分钟 K 靠行情快照聚合累积 (quote_snapshot), 快照
+    # 整分钟断流就留下永久洞 —— 实测一个交易日 782 条快照/243 分钟 (≈19s 一轮,
+    # 不是配置的 3s), 全市场 5580 只无一满 240 根。这类残根卡在 237~239 根,
+    # 够不到缺口清单的 0.9 容差, 分时图上表现为"每只票都缺一小段"。
+    # 按 min_ratio=1.0 体检后只拉残根标的: 快照正常的日子 0 次上游请求,
+    # 不再固定多花 8 分钟拉全市场 (2026-11-16 实测全量 5579 次请求)。
+    day_repair: dict = {}
+    if settings.minute_gap_repair_enabled:
+        try:
+            from app.services.minute_gaps import fill_day_gaps
+
+            emit("sync_minute", 96, "当日分钟缺口回补…")
+            day_repair = fill_day_gaps(
+                repo, capset, today,
+                concurrency=settings.minute_gap_repair_concurrency,
+                max_rounds=settings.minute_gap_repair_max_rounds,
+            )
+            remaining = day_repair.get("remaining")
+            if remaining:
+                # 静默失败是历史事故的共性 (见 docs/system-issues-findings.md):
+                # 补不动就要在日志里留痕, 否则下次只能靠用户发现"分时图不对"。
+                logger.warning(
+                    "sync_minute 当日分钟仍残 %d 只 (上游无数据或补不动), 日期 %s",
+                    remaining, day_repair.get("date"),
+                )
+        except Exception as e:  # noqa: BLE001 -- 回补失败不影响主同步结果
+            logger.warning("sync_minute 当日分钟缺口回补失败: %s", e)
+    else:
+        logger.info("sync_minute 当日分钟缺口回补: 已按配置关闭")
+
     _invalidate("minute")
     return {
         "minute_rows": written,
         "universe_size": len(minute_symbols),
         "minute_cover_days": minute_cover_days,
+        "minute_day_repair": day_repair,
     }
 
 

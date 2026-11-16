@@ -83,3 +83,29 @@ async def test_default_probe_passes_on_healthy_resources() -> None:
     lock = threading.Lock()
     default_probe(lock)  # 不抛即通过
     default_probe(None)
+
+
+async def test_default_probe_lock_timeout_is_configurable(monkeypatch) -> None:
+    """回归 (2026-11-16): 写锁等待曾硬编码 1.0s, 分钟分区一次性重写 (实测
+    0.5~0.7s, 叠加快照落盘更久) 被连续判死 → os._exit(70) 且无 supervisor 拉起。
+    超时改为可配置且默认 5s, 真死锁仍能抓住, 正常慢写不再误杀。
+    """
+    import threading
+    import time
+
+    import pytest
+
+    from app import watchdog as wd
+
+    monkeypatch.setattr(wd.settings, "watchdog_write_lock_timeout_s", 0.2)
+    lock = threading.Lock()
+    lock.acquire()
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError):
+            default_probe(lock)
+        waited = time.monotonic() - t0
+    finally:
+        lock.release()
+    assert waited >= 0.18, f"应按配置的 0.2s 等待, 实际 {waited:.2f}s"
+

@@ -105,10 +105,14 @@ def scan_minute_gaps(
     symbols: list[str] | None = None,
     dates: list[str] | None = None,
     limit: int = MAX_GAP_ROWS,
+    min_ratio: float = COMPLETE_RATIO,
 ) -> dict:
     """扫描分钟分区, 返回缺口清单与按日/按股票的汇总。
 
     symbols / dates 为可选过滤 (前端点某只股票或某一天时收窄); 都不传 = 全量扫描。
+    min_ratio 为完整性门槛系数 (期望根数 × 系数): 体检用默认 0.9 容差, 盘后自动
+    回补传 1.0 —— 实测全市场多数残根停在 237~239 根, 在 0.9 口径下永远进不了
+    清单, 也就永远补不到 (分时图上是"每只票都缺一小段")。
     """
     if not minute_dir.exists():
         return {
@@ -178,7 +182,7 @@ def scan_minute_gaps(
                 agg = agg.filter(~pl.col("symbol").is_in(inactive))
         if agg.is_empty():
             continue  # 无成交记录不标记为完整交易日, 也没有可补齐的分钟缺口
-        threshold = expected * COMPLETE_RATIO
+        threshold = expected * min_ratio
         bad = agg.filter(pl.col("n") < threshold)
         if bad.is_empty():
             complete_dates.append(date_str)
@@ -228,6 +232,7 @@ def fill_minute_gaps(
     symbols: list[str] | None = None,
     limit: int = 300,
     concurrency: int = 8,
+    min_ratio: float = COMPLETE_RATIO,
 ) -> dict:
     """按缺口清单逐票回补单个交易日的分钟 K。
 
@@ -255,6 +260,7 @@ def fill_minute_gaps(
             now_hm=(23, 59),          # 回补是盘后行为, 按全天口径判定
             dates=[trade_date.isoformat()],
             limit=limit,
+            min_ratio=min_ratio,
         )
         targets = [g["symbol"] for g in scanned.get("gaps") or []]
 
@@ -413,4 +419,111 @@ def refresh_day_minutes(
         "failed": len(failed),
         "source_changed": source_changed,
         "failed_symbols": failed[:20],
+    }
+
+
+def fill_day_gaps(
+    repo,
+    capset,
+    trade_date: _date,
+    *,
+    concurrency: int = 8,
+    max_rounds: int = 3,
+    limit: int = 20000,
+) -> dict:
+    """盘后按缺口回补当日分钟 K: 只拉残根标的, 拉完一次性写盘。
+
+    与 refresh_day_minutes 的分工:
+    - refresh_day_minutes 无条件逐票拉全市场 240 根 (实测 5579 次上游请求、约
+      8 分钟), 用于手动重建或首次建当日分区;
+    - 本函数先用 min_ratio=1.0 体检当日残根, 只对残根标的拉取。盘中快照正常
+      的日子缺口为 0 —— 一次上游请求都不发, 盘后任务不再固定多花 8 分钟。
+
+    写盘沿用「拉完一次性写盘」的纪律: fill_minute_gaps 是逐票持锁原子写, 缺口
+    上百只时会反复读 130 万行分区 (实测不可用); 这里每轮只写一次。
+
+    上游本身没有的分钟 (低流动性标的无成交分钟) 补不动, 计入 no_data; 补完仍
+    残的标的数由 remaining 如实报出, 由调用方决定是否告警。
+    """
+    data_dir = repo.store.data_dir
+    minute_dir = data_dir / "kline_minute"
+    part = minute_dir / f"date={trade_date.isoformat()}" / "part.parquet"
+    date_str = trade_date.isoformat()
+
+    if not part.exists():
+        # 当日分区缺失说明增量阶段没落盘 (不是"少几根"的问题), 单靠缺口回补
+        # 无从比较 —— 如实报告, 交给增量阶段/人工介入。
+        logger.warning("分钟缺口回补 %s: 当日分区不存在, 跳过", date_str)
+        return {
+            "date": date_str, "mode": "missing_partition", "rounds": 0,
+            "requested": 0, "repaired": 0, "no_data": 0, "failed": 0,
+            "written_rows": 0, "remaining": None,
+        }
+
+    rounds = 0
+    requested = 0
+    repaired = 0
+    no_data = 0
+    failed = 0
+    written_rows = 0
+    remaining: int | None = None
+    prev_remaining: int | None = None
+
+    for rnd in range(1, max_rounds + 1):
+        scanned = scan_minute_gaps(
+            minute_dir,
+            today=trade_date,
+            now_hm=(23, 59),          # 盘后行为, 按全天口径判定
+            dates=[date_str],
+            limit=limit,
+            min_ratio=1.0,
+        )
+        gaps = scanned.get("gaps") or []
+        remaining = len(gaps)
+        if not gaps:
+            break
+        if prev_remaining is not None and remaining >= prev_remaining:
+            # 上一轮补过但残余没减少: 上游对这些标的同样只给残缺数据, 再拉只会
+            # 重复消耗上游配额 (2026-11-11 实测: 两轮回执完全一致, 1722 只不动)。
+            logger.info(
+                "分钟缺口回补 %s: 上轮结束后残根仍有 %d 只, 无进展, 提前结束",
+                date_str, remaining,
+            )
+            break
+        prev_remaining = remaining
+        rounds = rnd
+        targets = [g["symbol"] for g in gaps][:limit]
+        # 每轮的 requested 取该轮清单长度: 多轮收敛时累加会重复计数同一标的
+        requested = len(targets)
+        res = refresh_day_minutes(
+            repo, capset, trade_date, symbols=targets, concurrency=concurrency,
+        )
+        written_rows = int(res.get("written_rows") or 0)
+        fetched = int(res.get("fetched_symbols") or 0)
+        repaired += fetched
+        no_data = int(res.get("empty") or 0)
+        failed = int(res.get("failed") or 0)
+        logger.info(
+            "分钟缺口回补 %s 第 %d/%d 轮: 残根 %d, 取到 %d, 失败 %d",
+            date_str, rnd, max_rounds, len(targets), fetched, failed,
+        )
+        if fetched == 0:
+            # 上游对这些标的同样没有数据, 再扫一遍只会拿到同一份清单
+            break
+
+    logger.info(
+        "分钟缺口回补 %s: 轮次 %d, 累计修复 %d, 上游无数据 %d, 失败 %d, 仍残 %s",
+        date_str, rounds, repaired, no_data, failed,
+        "未知" if remaining is None else remaining,
+    )
+    return {
+        "date": date_str,
+        "mode": "gap_fill",
+        "rounds": rounds,
+        "requested": requested,
+        "repaired": repaired,
+        "no_data": no_data,
+        "failed": failed,
+        "written_rows": written_rows,
+        "remaining": remaining,
     }

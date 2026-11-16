@@ -213,7 +213,19 @@ class Settings(BaseSettings):
     watchdog_enabled: bool = True
     watchdog_interval_s: float = 30.0
     watchdog_probe_timeout_s: float = 15.0
-    watchdog_failure_threshold: int = 2
+    watchdog_failure_threshold: int = 3
+    # 写锁探测的 acquire 超时 (秒)。2026-11-16 事故: 分钟回补一次性重写 130 万行
+    # 分区 (实测写盘 0.5~0.7s, 与快照落盘叠加时更久) 被 1.0s 硬编码超时连续判死,
+    # 进程 os._exit(70) 且 Windows 上无 supervisor → 服务停到现在。真死锁是永久
+    # 占锁, 5s 同样能抓住; 慢而正常的写入不该被当成僵死。
+    watchdog_write_lock_timeout_s: float = 5.0
+
+    # 盘后分钟缺口回补 — 当日分钟 K 靠快照聚合累积, 断流留下 237~239 根的残根,
+    # 缺口清单的 0.9 容差命中不到。开启后盘后按 min_ratio=1.0 体检, 只拉残根
+    # 标的 (快照正常的日子 0 次上游请求)。并发沿用实测可打满上游的 8。
+    minute_gap_repair_enabled: bool = True
+    minute_gap_repair_concurrency: int = 8
+    minute_gap_repair_max_rounds: int = 3
 
     # 策略批量执行 (run_all / 策略页全量跑) 的并发 worker 上限。实测 2026-09-07:
     # polars eager 操作内部已多线程并行, 外层再并发 4 worker 属超订, 41 策略
