@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal, History, ChevronLeft, ChevronRight, Target, AlertTriangle, Activity, Info } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
+import { api, genRuleId, type FocusVersionsResponse, type ScreenerPreselectResponse, type ScreenerStrategy, type ScreenerResult, type StrategyHistoryEvent, type StrategyPurchaseMark } from '@/lib/api'
 import {
   addOrUpdateMonitoredPosition,
   removeMonitoredPosition,
@@ -379,18 +379,23 @@ export function Screener() {
   const isLatestStockDate = assetType === 'stock'
     && !!asOf
     && asOf === dataStatus.data?.latest_strategy_date
+  const preselectQueryKey = QK.screenerPreselect(asOf, auctionTradeDate, auctionStrategyIdsKey, 5, extColumnsParam || undefined)
   const preselectQuery = useQuery({
-    queryKey: QK.screenerPreselect(asOf, auctionTradeDate, auctionStrategyIdsKey, 5, extColumnsParam || undefined),
-    queryFn: () => api.screenerPreselect(
-      asOf,
-      auctionTradeDate,
-      visiblePool,
-      5,
-      extColumnsParam || undefined,
-      assetType,
-    ),
+    queryKey: preselectQueryKey,
+    queryFn: async () => {
+      const next = await api.screenerPreselect(asOf, auctionTradeDate, visiblePool, 5, extColumnsParam || undefined, assetType, true)
+      const previous = qc.getQueryData<ScreenerPreselectResponse>(preselectQueryKey)
+      // 仅保留相同查询条件的有效结果, pending 的空占位不能抹掉已有观察池。
+      if (next.calculation?.status === 'pending' && previous?.as_of === asOf && previous.trade_date === auctionTradeDate
+        && previous.calculation?.task_id === next.calculation.task_id) {
+        return { ...previous, calculation: next.calculation }
+      }
+      return next
+    },
     enabled: isLatestStockDate && visiblePool.length > 0,
     staleTime: 300_000,
+    refetchInterval: query => query.state.status !== 'error' && query.state.data?.calculation?.status === 'pending'
+      ? pollingInterval(2000, false, documentVisible) : false,
   })
   const auctionConfirmationQuery = useQuery({
     queryKey: QK.screenerAuctionConfirmation(asOf, auctionTradeDate, auctionStrategyIdsKey, extColumnsParam || undefined),
@@ -479,15 +484,30 @@ export function Screener() {
 
   // Focus 策略三版本查询
   const isFocusStrategy = activeStrategy === 'custom_dual_edge_focus'
+  const focusQueryKey = ['screenerFocusVersions', activeStrategy, asOf, extColumnsParam]
   const focusVersionsQuery = useQuery({
-    queryKey: ['screenerFocusVersions', activeStrategy, asOf, extColumnsParam],
-    queryFn: () => api.screenerFocusVersions(activeStrategy!, asOf, 5, extColumnsParam || undefined),
+    queryKey: focusQueryKey,
+    queryFn: async () => {
+      const next = await api.screenerFocusVersions(activeStrategy!, asOf, 5, extColumnsParam || undefined, true)
+      const previous = qc.getQueryData<FocusVersionsResponse>(focusQueryKey)
+      if (next.calculation?.status === 'pending' && previous?.as_of === asOf && previous.strategy_id === activeStrategy
+        && previous.calculation?.task_id === next.calculation.task_id) {
+        return { ...previous, calculation: next.calculation }
+      }
+      return next
+    },
     enabled: isFocusStrategy && !!asOf,
     staleTime: 30_000,
+    refetchInterval: query => query.state.status !== 'error' && query.state.data?.calculation?.status === 'pending'
+      ? pollingInterval(2000, false, documentVisible) : false,
   })
+  const focusVersionsPending = !focusVersionsQuery.isError && isFocusStrategy && focusVersionsQuery.data?.as_of === asOf
+    && focusVersionsQuery.data.calculation?.status === 'pending'
 
   // Focus 策略三版本数据（严格限制在当前选中日期，防止跨天读取历史缓存）
   const focusDataValid = isFocusStrategy && focusVersionsQuery.data?.as_of === asOf
+    && (focusVersionsQuery.data.calculation?.status !== 'pending'
+      || Object.values(focusVersionsQuery.data.versions).some(version => version.status !== 'pending'))
     ? focusVersionsQuery.data
     : null
 
@@ -833,6 +853,7 @@ export function Screener() {
   const preselectResults = useMemo<Record<string, any> | null>(() => {
     if (
       !preselectPayload
+      || (preselectPayload.calculation?.status === 'pending' && Object.keys(preselectPayload.results).length === 0)
       || preselectPayload.mode !== 'preselect'
       || preselectPayload.as_of !== asOf
       || preselectPayload.trade_date !== auctionTradeDate
@@ -864,6 +885,12 @@ export function Screener() {
     return Object.values(preselectResults).reduce((sum, item) => sum + (item.total ?? 0), 0)
   }, [preselectResults])
   const activeStrategySupportsPreselect = !!activeStrategy && PRESELECT_STRATEGY_IDS.has(activeStrategy)
+  const preselectPending = !preselectQuery.isError && preselectPayload?.as_of === asOf && preselectPayload.trade_date === auctionTradeDate
+    && preselectPayload.calculation?.status === 'pending'
+  const viewCalculationPending = focusVersionsPending || (preselectPending && (showAll || activeStrategySupportsPreselect))
+  const viewCalculationError = isFocusStrategy && focusVersionsQuery.isError
+    ? focusVersionsQuery.error
+    : (showAll || activeStrategySupportsPreselect) && preselectQuery.isError ? preselectQuery.error : null
   const activePreselectRows = useMemo(() => {
     if (showAll || !activeStrategy || !preselectResults) return []
     return preselectResults[activeStrategy]?.rows ?? []
@@ -950,9 +977,16 @@ export function Screener() {
 
   // Focus 策略三版本专属同步逻辑: 用户切换版本 Tab 时即时展示该版本结果
   useEffect(() => {
-    if (!isFocusStrategy || !focusVersionsQuery.data || showAll) return
-    const vData = focusVersionsQuery.data
-    if (vData.as_of !== asOf) return
+    if (!isFocusStrategy || showAll) return
+    if (!focusDataValid) {
+      if (focusVersionsPending) {
+        // 新任务身份代表输入已变化, 不把上一任务结果留在当前明细中。
+        const cached = singleCachedQuery.data?.result
+        setResult(cached?.as_of === asOf && cached.strategy === activeStrategy ? cached : null)
+      }
+      return
+    }
+    const vData = focusDataValid
     const curVerInfo = vData.versions[focusActiveVersion]
     if (!curVerInfo) return
     setResult((prev) => {
@@ -971,7 +1005,7 @@ export function Screener() {
       }
     })
     setHitCounts(prev => ({ ...prev, [activeStrategy]: curVerInfo.total ?? 0 }))
-  }, [isFocusStrategy, focusVersionsQuery.data, focusActiveVersion, asOf, activeStrategy, showAll, singleCachedQuery.data?.result])
+  }, [isFocusStrategy, focusDataValid, focusVersionsPending, focusActiveVersion, asOf, activeStrategy, showAll, singleCachedQuery.data?.result])
 
   // 盘中 14:50 到 15:00 之间，若 Focus 尾盘初选已就绪且用户未手动切换过版本，自动切到 preview
   const focusUserSelectedVersion = useRef(false)
@@ -1324,15 +1358,15 @@ export function Screener() {
     staleTime: 60_000,
   })
 
-  // 后台静默预热历史淘汰节点，不阻塞前台策略渲染
-  const backfilledRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    if (!activeStrategy || backfilledRef.current.has(activeStrategy)) return
-    backfilledRef.current.add(activeStrategy)
-    api.strategyHistoryBackfill([activeStrategy]).then(() => {
-      qc.invalidateQueries({ queryKey: QK.strategyHistory(activeStrategy, 180) })
-    }).catch(() => {})
-  }, [activeStrategy, qc])
+  // 回填会重算多个历史交易日, 仅在用户明确点击时执行。
+  const backfillHistory = useMutation({
+    mutationFn: (strategyId: string) => api.strategyHistoryBackfill([strategyId]),
+    onSuccess: (_data, strategyId) => {
+      qc.invalidateQueries({ queryKey: QK.strategyHistory(strategyId, 180) })
+      toast('历史已补齐', 'success')
+    },
+    onError: (error: Error) => toast(`历史补齐失败：${error.message}`, 'error'),
+  })
   const strategyHistoryEvents = strategyHistoryQuery.data?.events ?? []
   const recommendationHistoryEvents = useMemo(() => {
     const recommendationTypes = new Set<StrategyHistoryEvent['event_type']>([
@@ -1801,6 +1835,17 @@ export function Screener() {
 
         {/* 结果 */}
         <section>
+          {viewCalculationError && (
+            <div role="alert" className="mb-3 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+              结果计算失败：{viewCalculationError.message}
+            </div>
+          )}
+          {viewCalculationPending && (
+            <div role="status" className="mb-3 flex items-center gap-2 rounded-btn border border-accent/25 bg-accent/5 px-3 py-2 text-sm text-secondary">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" />
+              {focusVersionsPending ? '策略版本正在计算，结果就绪后自动更新。' : '盘后预选正在计算，结果就绪后自动更新。'}
+            </div>
+          )}
           {run.isError && (
             <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
               {String((run.error as any).message)}
@@ -1999,7 +2044,7 @@ export function Screener() {
                         }`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                        14:50 尾盘初选 ({focusPreviewCount})
+                        14:50 尾盘初选 ({focusVersionsPending && !focusDataValid ? '计算中' : focusPreviewCount})
                       </button>
                       <button
                         type="button"
@@ -2011,7 +2056,7 @@ export function Screener() {
                         }`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                        次日竞价预选 ({focusPreselectCount})
+                        次日竞价预选 ({focusVersionsPending && !focusDataValid ? '计算中' : focusPreselectCount})
                       </button>
                     </div>
                     <div className="flex items-center gap-2 pr-1">
@@ -2091,7 +2136,9 @@ export function Screener() {
                 <EmptyState
                   icon={ScanSearch}
                   title={
-                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                    viewCalculationPending
+                      ? '正在计算'
+                      : isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
                       ? (focusDataValid.versions[focusActiveVersion].empty_title || '今日无命中')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? auctionWaitingHint
@@ -2112,7 +2159,9 @@ export function Screener() {
                               : (filterActive(filter) ? '筛选后无命中' : '今日无命中')
                   }
                   hint={
-                    isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
+                    viewCalculationPending
+                      ? '结果就绪后会自动更新，计算期间可继续使用其他页面。'
+                      : isFocusStrategy && asOf === todayIso && focusDataValid?.versions[focusActiveVersion]
                       ? (focusDataValid.versions[focusActiveVersion].empty_hint || '暂无数据')
                       : displayMode === 'preselect' && preselectTotal > 0
                         ? '预选不是最终结果，次交易日竞价确认后会自动切换。'
@@ -2407,14 +2456,27 @@ export function Screener() {
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              aria-label="关闭"
-              onClick={() => setShowHistoryDialog(false)}
-              className="rounded-lg p-1.5 transition hover:bg-elevated"
-            >
-              <X className="h-4 w-4 text-muted" />
-            </button>
+            <div className="flex items-center gap-2">
+              {assetType === 'stock' && (
+                <button
+                  type="button"
+                  disabled={backfillHistory.isPending}
+                  onClick={() => backfillHistory.mutate(activeStrategy)}
+                  className="inline-flex items-center gap-1.5 rounded-btn border border-border px-2.5 py-1.5 text-xs text-secondary hover:bg-elevated disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3 w-3 ${backfillHistory.isPending ? 'animate-spin' : ''}`} />
+                  {backfillHistory.isPending ? '补齐中…' : '补齐历史'}
+                </button>
+              )}
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setShowHistoryDialog(false)}
+                className="rounded-lg p-1.5 transition hover:bg-elevated"
+              >
+                <X className="h-4 w-4 text-muted" />
+              </button>
+            </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">

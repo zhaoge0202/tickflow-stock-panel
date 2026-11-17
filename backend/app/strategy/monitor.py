@@ -1400,6 +1400,15 @@ class MonitorRuleEngine:
             if s.minute_daily_bars > 0 and self._history_loader is not None:
                 try:
                     daily_window = self._history_loader(cn_today(), s.minute_daily_bars)
+                    if daily_window is not None and not daily_window.is_empty():
+                        # 暖机加载器只读当日前历史; 分钟策略的日线闸仍按扫描契约
+                        # 接收“历史 + 最新当日行”, 不能因缓存拆分丢掉今日数据。
+                        daily_window = pl.concat([
+                            daily_window.filter(pl.col("date") < cn_today()), df,
+                        ], how="diagonal_relaxed").unique(subset=["symbol", "date"], keep="last")
+                        days = daily_window["date"].drop_nulls().unique().sort()
+                        cutoff = days[-min(len(days), s.minute_daily_bars + 1)]
+                        daily_window = daily_window.filter(pl.col("date") >= cutoff).sort(["symbol", "date"])
                 except Exception:  # noqa: BLE001
                     daily_window = None
             current_context = StrategyDataContext(

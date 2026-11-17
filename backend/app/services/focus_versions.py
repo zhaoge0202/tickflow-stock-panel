@@ -131,6 +131,8 @@ def generate_preview_1450_from_context(
     data_dir: Path,
     params: dict,
     overrides: dict,
+    *,
+    persist: bool = True,
 ) -> list[dict[str, Any]]:
     """极速生成 14:50 尾盘初选（复用已有的 base_ctx 历史数据，避免重跑指标计算）。"""
     d_str = target_date.isoformat()
@@ -236,7 +238,8 @@ def generate_preview_1450_from_context(
     rows = res.rows or []
 
     # 存入快照
-    save_preview_snapshot(data_dir, strategy_id, d_str, rows, total=res.total)
+    if persist:
+        save_preview_snapshot(data_dir, strategy_id, d_str, rows, total=res.total)
     return rows
 
 
@@ -247,6 +250,9 @@ def build_focus_three_versions(
     as_of: date | None = None,
     preselect_limit: int = 5,
     force_refresh: bool = False,
+    *,
+    persist: bool = True,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """极速计算并聚合 Focus 策略的三版本出票结果，并注入状态标记。"""
     target_date = as_of or cn_today()
@@ -355,6 +361,7 @@ def build_focus_three_versions(
             timeframe="1d",
             params_map={strategy_id: params},
             overrides_map={strategy_id: overrides},
+            **({"live_snapshot": True} if target_date == now.date() and now.time() < DAILY_STRATEGY_READY_TIME else {}),
         )
         # 如果当天已经收盘 (>=15:00) 且盘后管道尚未生成完整日线数据 (base_ctx.current 样本过小)，
         # 自动利用本地完整 kline_minute 聚合出 15:00 全量数据，确保收盘选股完整准确！
@@ -390,6 +397,8 @@ def build_focus_three_versions(
                     )
     except Exception as e:
         logger.warning("build_strategy_context 失败: %s", e)
+        if strict:
+            raise
         base_ctx = None
 
     # 3. 运行收盘正式版 (Final)
@@ -400,6 +409,8 @@ def build_focus_three_versions(
             final_rows = res_final.rows or []
         except Exception as e:
             logger.warning("运行收盘正式版失败 %s on %s: %s", strategy_id, target_date, e)
+            if strict:
+                raise
 
     # 4. 运行竞价预选版 (Preselect) — 复用同一个 base_ctx
     preselect_rows: list[dict[str, Any]] = []
@@ -419,6 +430,8 @@ def build_focus_three_versions(
             preselect_rows = p_rows or []
         except Exception as e:
             logger.warning("运行竞价预选版失败 %s on %s: %s", strategy_id, target_date, e)
+            if strict:
+                raise
 
     # 5. 运行 14:50 尾盘初选版 (Preview) — 复用同一个 base_ctx
     preview_data = load_preview_snapshot(data_dir, strategy_id, d_str)
@@ -432,7 +445,8 @@ def build_focus_three_versions(
     else:
         if preview_ready and base_ctx is not None:
             preview_rows = generate_preview_1450_from_context(
-                base_ctx, engine, strategy_id, target_date, data_dir, params, overrides
+                base_ctx, engine, strategy_id, target_date, data_dir, params, overrides,
+                persist=persist,
             )
         else:
             preview_rows = []
@@ -592,7 +606,7 @@ def build_focus_three_versions(
     }
 
     # 盘后历史结果持久化保存，供后续直接毫秒级秒开
-    if not is_today_unclosed:
+    if persist and not is_today_unclosed:
         try:
             full_cache_path.parent.mkdir(parents=True, exist_ok=True)
             full_cache_path.write_text(

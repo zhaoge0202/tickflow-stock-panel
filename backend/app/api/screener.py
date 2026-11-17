@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.db_safe import quote_ident
 from app.market_time import DAILY_STRATEGY_READY_TIME, cn_now
-from app.services import screener_work, strategy_cache, strategy_run_queue
+from app.services import screener_views, screener_work, strategy_cache, strategy_run_queue
 from app.services.auction_confirmation import confirm_cached_strategy_results
 from app.services.auction_preselect import build_preselect_payload
 from app.services.focus_versions import build_focus_three_versions
@@ -79,6 +79,7 @@ class PreselectRequest(BaseModel):
     ext_columns: str | None = None
     asset_type: str = "stock"
     timeframe: str = "1d"
+    background: bool = False
 
 
 def _safe(result_dict: dict) -> dict:
@@ -359,7 +360,10 @@ def _live_quote_overlay(repo) -> tuple[dict[str, dict[str, Any]], str | None]:
     缓存为空 (启动预热中) 或 repo 不支持该接口时返回空映射, 调用方原样返回
     策略结果 —— 拿不到实时数据时不能伪造新价格。
     """
-    loader = getattr(repo, "get_enriched_latest", None)
+    # 缓存读取只叠加已发布快照, 不把冷指标重建拉回HTTP请求线程。
+    loader = getattr(repo, "peek_enriched_latest", None)
+    if not callable(loader):
+        loader = getattr(repo, "get_enriched_latest", None)
     if not callable(loader):
         return {}, None
     try:
@@ -421,7 +425,7 @@ def _rows_with_live_quotes(
     return merged
 
 
-def _cached_with_live_quotes(request: Request) -> dict:
+def _cached_with_live_quotes(request: Request, *, strategy_id: str | None = None) -> dict:
     """盘后缓存 + 监控实时结果 + 当前行情展示字段覆盖。
 
     与 `_cached_with_realtime` 的区别: 后者只覆盖「加入监控的策略」(每轮行情
@@ -450,7 +454,11 @@ def _cached_with_live_quotes(request: Request) -> dict:
             if isinstance(result, dict) else result
         )
         for sid, result in results.items()
+        if strategy_id is None or sid == strategy_id
     }
+    # 保留其他策略的只读引用供成员关系查询, 不遍历/复制它们的行情字段。
+    if strategy_id is not None:
+        payload["results"] = {**results, **payload["results"]}
 
     if isinstance(ever_rows, dict):
         # 「今日曾命中」行是逐行的历史快照 (各自带 date), 一律按行日期判断
@@ -464,6 +472,7 @@ def _cached_with_live_quotes(request: Request) -> dict:
                 if isinstance(sym_map, dict) else sym_map
             )
             for sid, sym_map in ever_rows.items()
+            if strategy_id is None or sid == strategy_id
         }
     return payload
 
@@ -703,22 +712,55 @@ def preselect(req: PreselectRequest, request: Request):
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
 
-    try:
-        preselect_payload = build_preselect_payload(
-            request.app.state.repo,
+    repo = request.app.state.repo
+    as_of = req.as_of
+    trade_date = (req.trade_date or cn_now().date()) if req.background else req.trade_date
+    if req.background and as_of is None:
+        svc = ScreenerService(repo, asset_type=req.asset_type)
+        as_of = svc.latest_strategy_date()
+
+    def compute():
+        payload = build_preselect_payload(
+            repo,
             engine,
-            as_of=req.as_of,
-            trade_date=req.trade_date,
+            as_of=as_of,
+            trade_date=trade_date,
             strategy_ids=req.strategy_ids,
             limit_per_strategy=req.limit_per_strategy,
             asset_type=req.asset_type,
             timeframe=req.timeframe,
+            **({"persist": False, "bypass_cache": True} if req.background else {}),
         )
+        if req.background and payload.get("error"):
+            raise ValueError(str(payload["error"]))
+        return payload
+
+    try:
+        if req.background and as_of is not None and req.asset_type == "stock" and req.timeframe == "1d":
+            preselect_payload = screener_views.background_view(
+                repo, engine, kind="preselect", as_of=as_of, asset_type=req.asset_type,
+                timeframe=req.timeframe,
+                parameters={
+                    **req.model_dump(exclude={"background", "ext_columns"}),
+                    "trade_date": trade_date,
+                },
+                compute=compute,
+                pending={
+                    "mode": "preselect", "as_of": as_of.isoformat(),
+                    "trade_date": trade_date.isoformat(),
+                    "updated_at": None, "results": {}, "status": "pending",
+                },
+                on_submit=lambda: _admit_submission(request),
+            )
+        else:
+            preselect_payload = compute()
     except ValueError as exc:
         status_code = 404 if "unknown strategy" in str(exc) else 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
-    ext_values = _load_ext_value_maps(request.app.state.repo, req.ext_columns)
+    if preselect_payload.get("calculation", {}).get("status") == "pending":
+        return preselect_payload
+    ext_values = _load_ext_value_maps(repo, req.ext_columns)
     results = {}
     for sid, item in (preselect_payload.get("results") or {}).items():
         if not isinstance(item, dict):
@@ -737,6 +779,7 @@ def focus_versions(
     as_of: Optional[date] = Query(None),
     preselect_limit: int = Query(5),
     ext_columns: Optional[str] = Query(None),
+    background: bool = False,
 ):
     """获取 Focus 策略三版本出票（14:50 尾盘初选、收盘正式版、次日竞价预选版）及其状态标签。"""
     engine = getattr(request.app.state, "strategy_engine", None)
@@ -755,13 +798,52 @@ def focus_versions(
         resolver = getattr(svc, "latest_strategy_date", None)
         as_of = resolver() if resolver is not None else svc.latest_date()
 
-    payload = build_focus_three_versions(
-        repo,
-        engine,
-        strategy_id=strategy_id,
-        as_of=as_of,
-        preselect_limit=preselect_limit,
-    )
+    def compute():
+        return build_focus_three_versions(
+            repo,
+            engine,
+            strategy_id=strategy_id,
+            as_of=as_of,
+            preselect_limit=preselect_limit,
+            **({"force_refresh": True, "persist": False, "strict": True} if background else {}),
+        )
+
+    if background and as_of is not None:
+        now = cn_now()
+        stage = (
+            "final" if as_of != now.date() or (now.hour, now.minute) >= (15, 0)
+            else "preview" if (now.hour, now.minute) >= (14, 50) else "waiting_preview"
+        )
+        payload = screener_views.background_view(
+            repo, engine, kind="focus", as_of=as_of, asset_type="stock", timeframe="1d",
+            parameters={
+                "strategy_id": strategy_id, "preselect_limit": preselect_limit, "stage": stage,
+                "live_snapshot": as_of == now.date() and now.time() < DAILY_STRATEGY_READY_TIME,
+            },
+            compute=compute,
+            pending={
+                "as_of": as_of.isoformat(), "strategy_id": strategy_id, "strategy_name": "",
+                "current_stage": "waiting_preview", "is_unclosed": stage != "final",
+                "versions": {
+                    name: {"label": label, "time": at, "status": "pending", "total": 0, "rows": []}
+                    for name, label, at in (
+                        ("preview", "14:50 尾盘初选", "14:50"),
+                        ("final", "收盘正式版", "15:35"),
+                        ("preselect", "次日竞价预选", "15:35"),
+                    )
+                },
+                "dropped_from_preview": [],
+                "summary": dict.fromkeys((
+                    "preview_total", "final_total", "preselect_total", "confirmed_count",
+                    "dropped_count", "late_entrant_count",
+                ), 0),
+            },
+            on_submit=lambda: _admit_submission(request),
+        )
+    else:
+        payload = compute()
+    if payload.get("calculation", {}).get("status") == "pending":
+        return payload
     ext_values = _load_ext_value_maps(repo, ext_columns)
     if ext_values:
         for v_name, v_info in payload.get("versions", {}).items():
@@ -961,7 +1043,7 @@ def get_cached_result(
     与 /cached 一致: 价格类展示字段用当前实时快照覆盖 (同日才覆盖), 保证
     详情里的涨跌幅与列表、以及个股详情弹窗同源。
     """
-    cached = _cached_with_live_quotes(request)
+    cached = _cached_with_live_quotes(request, strategy_id=strategy_id)
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {

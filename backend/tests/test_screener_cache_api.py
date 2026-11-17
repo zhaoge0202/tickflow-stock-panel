@@ -339,3 +339,49 @@ def test_cached_result_overlays_live_quotes(monkeypatch, tmp_path):
     assert row["change_pct"] == 0.04483
     assert row["score"] == 50.0
     assert payload["today_ever_rows"]["002543.SZ"]["close"] == 8.39
+
+
+def test_single_result_does_not_overlay_unrelated_strategy_rows(monkeypatch, tmp_path):
+    """单策略每6秒轮询, 不应复制其他策略的全部价格和曾命中行。"""
+    cached = _cached_payload()
+    cached["results"]["unrelated"] = {
+        "as_of": "2026-10-20", "total": 1000,
+        "rows": [{"symbol": "OTHER"}] * 1000,
+    }
+    cached["today_ever_rows"]["unrelated"] = {"OTHER": {"symbol": "OTHER"}}
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_: cached)
+    monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})
+    original = screener_api._rows_with_live_quotes
+    seen = []
+
+    def overlay(rows, *args):
+        seen.extend(row.get("symbol") for row in rows)
+        return original(rows, *args)
+
+    monkeypatch.setattr(screener_api, "_rows_with_live_quotes", overlay)
+    payload = screener_api.get_cached_result(
+        "everbloom_qibao", _request(tmp_path, live=_live_frame(), live_date="2026-10-20"),
+        ext_columns=None,
+    )
+
+    assert "OTHER" not in seen
+    assert payload["result"]["rows"][0]["close"] == 8.39
+    assert cached["results"]["everbloom_qibao"]["rows"][0]["close"] == 8.23
+
+
+def test_cache_overlay_uses_published_snapshot_without_cold_history_rebuild(monkeypatch, tmp_path):
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_: _cached_payload())
+    request = _request(tmp_path)
+    request.app.state.repo.peek_enriched_latest = lambda: (pl.DataFrame(), None)
+
+    def cold_getter():
+        raise AssertionError("结果读取不能同步重建历史指标")
+
+    request.app.state.repo.get_enriched_latest = cold_getter
+    # 旧实现吞掉getter异常后也返回旧价, 因此需断言旧入口完全不被调用。
+    calls = []
+    monkeypatch.setattr(request.app.state.repo, "get_enriched_latest", lambda: calls.append(1) or cold_getter())
+    payload = screener_api.get_cached(request, ext_columns=None)
+
+    assert calls == []
+    assert payload["results"]["everbloom_qibao"]["rows"][0]["close"] == 8.23

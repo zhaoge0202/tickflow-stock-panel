@@ -536,9 +536,9 @@ async def _application_lifespan(app: FastAPI):
     monitor_engine.set_sector_monitor_service(sector_monitor_service)
     # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
     # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑策略 → 盘中触发通知。
-    monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
+    monitor_engine.set_history_loader(_screener_svc.load_monitor_history)
     # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (读 kline_etf_enriched)。
-    monitor_engine.set_history_loader_etf(_etf_screener_svc._load_enriched_history)
+    monitor_engine.set_history_loader_etf(_etf_screener_svc.load_monitor_history)
     # 当日分钟K加载器: minute_filter(1m) 策略的实时监控用。复用 ScreenerService 的
     # 单日分区直读 + quote_ticks 聚合兜底, 让分钟策略也能盘中触发通知。
     monitor_engine.set_minute_loader(_screener_svc._load_minute_history)
@@ -711,10 +711,20 @@ async def workload_middleware(request: Request, call_next):
     if group is None:
         return await call_next(request)
     started = time.perf_counter()
+    response = None
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        return response
     finally:
-        workload.record(f"http.{group}", "request", elapsed_s=time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        workload.record(f"http.{group}", "request", elapsed_s=elapsed)
+        if elapsed >= 5:
+            # 只记路由路径, 不把查询参数、请求正文或凭据写入慢请求日志。
+            logger.warning(
+                "慢请求: %s %s %.1fs status=%s",
+                request.method, request.url.path, elapsed,
+                response.status_code if response is not None else "error",
+            )
 
 
 @app.middleware("http")

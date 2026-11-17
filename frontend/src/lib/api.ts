@@ -598,6 +598,7 @@ export interface ScreenerPreselectResponse {
   trade_date: string | null
   updated_at: number | null
   results: Record<string, ScreenerPreselectResult>
+  calculation?: { status: 'pending' | 'ready'; task_id: string }
 }
 
 export interface FocusVersionTag {
@@ -622,6 +623,7 @@ export interface FocusVersionsResponse {
   strategy_name: string
   current_stage: 'preview' | 'final' | 'waiting_preview'
   is_unclosed: boolean
+  calculation?: { status: 'pending' | 'ready'; task_id: string }
   versions: {
     preview: FocusVersionDetail
     final: FocusVersionDetail
@@ -4326,6 +4328,7 @@ export const api = {
     limitPerStrategy = 5,
     extColumns?: string,
     assetType: 'stock' | 'etf' = 'stock',
+    background = false,
   ) =>
     request<ScreenerPreselectResponse>('/api/screener/preselect', {
       method: 'POST',
@@ -4337,6 +4340,7 @@ export const api = {
         limit_per_strategy: limitPerStrategy,
         ext_columns: extColumns || null,
         asset_type: assetType,
+        background,
       }),
     }),
   screenerFocusVersions: (
@@ -4344,12 +4348,14 @@ export const api = {
     asOf?: string,
     preselectLimit = 5,
     extColumns?: string,
+    background = false,
   ) => {
     const params = new URLSearchParams()
     if (strategyId) params.append('strategy_id', strategyId)
     if (asOf) params.append('as_of', asOf)
     if (preselectLimit) params.append('preselect_limit', String(preselectLimit))
     if (extColumns) params.append('ext_columns', extColumns)
+    if (background) params.append('background', 'true')
     return request<FocusVersionsResponse>(`/api/screener/focus-versions?${params.toString()}`, {
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
     })

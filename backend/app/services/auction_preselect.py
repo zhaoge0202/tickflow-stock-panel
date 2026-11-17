@@ -38,6 +38,8 @@ def build_preselect_payload(
     limit_per_strategy: int = DEFAULT_LIMIT_PER_STRATEGY,
     asset_type: str = "stock",
     timeframe: str = "1d",
+    persist: bool = True,
+    bypass_cache: bool = False,
 ) -> dict:
     """Build a read-only post-close preselect pool.
 
@@ -110,7 +112,7 @@ def build_preselect_payload(
         limit,
         requested_overrides,
     )
-    cached = _cache_get(cache_key)
+    cached = None if bypass_cache else _cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -158,6 +160,8 @@ def build_preselect_payload(
         }
 
     payload = {**base, "status": "ready", "results": results}
+    if not persist:
+        return payload
     _cache_set(cache_key, payload)
     try:
         from app.services import strategy_history

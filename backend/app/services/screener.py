@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import wraps
@@ -18,6 +19,7 @@ from pathlib import Path
 import polars as pl
 
 from app.parquet import scan_enriched_parquet
+from app.services.shared_work import WorkBusyError
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
@@ -47,15 +49,18 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 
 
 # ── 进程级有界历史数据缓存 (避免 run_all/preselect 短时间内重复计算) ──
-# 键只到 (资产, 日期), 窗口长度记在值里: 同一天 41/81 两个窗口各算一次会把
-# 单日成本翻倍 (实测 12s + 30s), 且 4 个槽位被两个窗口挤满后反复淘汰重算。
-_history_cache: dict[tuple[str, date], tuple[float, int, pl.DataFrame]] = {}
+# 同一数据根/资产/日期/版本只保留最大窗口; 小窗口在锁外裁剪复用。
+_history_cache: dict[tuple, tuple[float, int, pl.DataFrame]] = {}
 # enriched 历史窗口是「T-1 及更早」的日级数据, 盘中本身不变; 5 分钟 TTL 会让
 # 行情轮询/监控每 5 分钟触发一次 ~51s 的同步重算, 直接拖死行情线程(实测一天
 # 69 次 × 51s ≈ 58 分钟)。改为 1 小时: 一天交易时段最多重算 4 次, 且重算与
 # 当日快照新鲜度无关(当日行由 enriched 增量单独维护)。
 _HISTORY_CACHE_TTL = 3600.0  # 秒 (1小时)
-_HISTORY_CACHE_MAX_ENTRIES = 2  # 每个日期只留一份最大窗口, 两个日期足够轮换
+# 每个日期只留一份最大窗口。策略池一次要看 6 个交易日, 只留 2 份会互相挤掉,
+# 导致同一日期每几分钟就重算一次指标 (单次 4~14s, 页面就卡在那里)。留 6 份后
+# 一轮选股内不再抖动; 每份约 200~300MB, 由 _HISTORY_CACHE_TTL 与容量共同回收。
+_HISTORY_CACHE_MAX_ENTRIES = 6
+_HISTORY_CACHE_MAX_BYTES = 512 * 1024 * 1024
 # 计算窗口下限: 策略池常见的最大回看 (矩阵 warmup 40 + 评分 warmup 40)。
 # 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加扫描量, 却能让同一天
 # 的 41/81 两个请求共用同一份缓存。
@@ -66,14 +71,125 @@ _HISTORY_CACHE_MAX_ENTRIES = 2  # 每个日期只留一份最大窗口, 两个�
 _HISTORY_LOOKBACK_FLOOR = 81
 _HISTORY_SYMBOL_BATCH_SIZE = 256
 _history_compute_lock = threading.Lock()
+_history_state_lock = threading.Lock()
+_history_pending: dict[tuple, Future] = {}
+_history_epoch = 0
+_history_asset_epochs: dict[str, int] = {}
+_HISTORY_MAX_PENDING = 32
+_HISTORY_WAIT_SECONDS = 120.0
+
+
+def _history_clear_epoch(asset_type: str) -> tuple[int, int]:
+    return _history_epoch, _history_asset_epochs.get(asset_type, 0)
+
+
+def _trim_history_cache() -> None:
+    """调用方持状态锁; 失效和内存淘汰都不做磁盘 IO 或指标计算。"""
+    now = time.monotonic()
+    for key, (started, _lookback, _frame) in list(_history_cache.items()):
+        if now - started >= _HISTORY_CACHE_TTL:
+            del _history_cache[key]
+    while _history_cache and (
+        len(_history_cache) > _HISTORY_CACHE_MAX_ENTRIES
+        or sum(frame.estimated_size() for _, _, frame in _history_cache.values()) > _HISTORY_CACHE_MAX_BYTES
+    ):
+        oldest = min(_history_cache, key=lambda key: _history_cache[key][0])
+        del _history_cache[oldest]
 
 
 def _singleflight_history_load(fn):
-    """历史指标计算同一时刻只允许一个，防止并发请求叠加大 DataFrame。"""
+    """缓存命中只用短锁; miss 按输入合并, 真实计算仍全局单飞以控制内存。"""
     @wraps(fn)
-    def wrapped(*args, **kwargs):
-        with _history_compute_lock:
-            return fn(*args, **kwargs)
+    def wrapped(self, target_date: date, lookback_days: int):
+        self._assert_integrity(target_date, enriched_only=True)
+        cache_key = self._history_cache_identity(target_date)
+        # repository 的预计算缓存按原请求窗口读取, 不让 fallback 的 floor 抬高
+        # 覆盖要求, 也不把已经裁剪的小窗口错误标记成较大窗口缓存。
+        with _history_state_lock:
+            repo_epoch = _history_clear_epoch(self.asset_type)
+        repository_frame = self._repository_history(target_date, lookback_days)
+        if repository_frame is not None:
+            if self._history_cache_identity(target_date) != cache_key:
+                raise WorkBusyError("历史数据版本已变化，请重新计算")
+            with _history_state_lock:
+                if _history_clear_epoch(self.asset_type) != repo_epoch:
+                    raise WorkBusyError("历史数据已刷新，请重新计算")
+            return repository_frame
+        while True:
+            with _history_state_lock:
+                _trim_history_cache()
+                epoch = _history_clear_epoch(self.asset_type)
+                cached = _history_cache.get(cache_key)
+                if cached is not None and cached[1] >= lookback_days:
+                    frame = cached[2]
+                    future = None
+                    owner = False
+                else:
+                    pending_key = (cache_key, epoch)
+                    future = _history_pending.get(pending_key)
+                    owner = future is None
+                    if owner:
+                        if len(_history_pending) >= _HISTORY_MAX_PENDING:
+                            raise WorkBusyError("历史计算等待过多，请稍后重试")
+                        future = Future()
+                        _history_pending[pending_key] = future
+                    frame = None
+            if frame is not None:
+                cropped = self._crop_history_cache(frame, lookback_days)
+                if cropped is not None:
+                    self._assert_history_input_current(target_date, cache_key, epoch)
+                    return cropped
+                with _history_state_lock:
+                    if _history_cache.get(cache_key) is cached:
+                        del _history_cache[cache_key]
+                continue
+            if owner:
+                compute_lookback = max(lookback_days, _HISTORY_LOOKBACK_FLOOR)
+                try:
+                    # 状态锁不参与等待: 日期 A 正在重算时, 日期 B 的有效缓存立即可读。
+                    with _history_compute_lock:
+                        with _history_state_lock:
+                            if _history_clear_epoch(self.asset_type) != epoch:
+                                raise WorkBusyError("历史数据已刷新，请重新计算")
+                        if self._history_cache_identity(target_date) != cache_key:
+                            raise WorkBusyError("历史数据版本已变化，请重新计算")
+                        frame = fn(self, target_date, compute_lookback)
+                        if self._history_cache_identity(target_date) != cache_key:
+                            raise WorkBusyError("历史数据版本已变化，请重新计算")
+                        with _history_state_lock:
+                            if _history_clear_epoch(self.asset_type) != epoch:
+                                raise WorkBusyError("历史数据已刷新，请重新计算")
+                            # 同窗口旧版本不再可复用, 及时释放它占用的内存。
+                            for key in list(_history_cache):
+                                if key[:3] == cache_key[:3] and key != cache_key:
+                                    del _history_cache[key]
+                            if frame.estimated_size() <= _HISTORY_CACHE_MAX_BYTES and not frame.is_empty():
+                                _history_cache[cache_key] = (time.monotonic(), compute_lookback, frame)
+                                _trim_history_cache()
+                    future.set_result((compute_lookback, frame))
+                except BaseException as exc:
+                    future.set_exception(exc)
+                    raise
+                finally:
+                    with _history_state_lock:
+                        if _history_pending.get(pending_key) is future:
+                            del _history_pending[pending_key]
+            else:
+                try:
+                    compute_lookback, frame = future.result(timeout=_HISTORY_WAIT_SECONDS)
+                except TimeoutError as exc:
+                    raise WorkBusyError("历史数据仍在计算，请稍后重试") from exc
+                self._assert_integrity(target_date, enriched_only=True)
+                if self._history_cache_identity(target_date) != cache_key:
+                    raise WorkBusyError("历史数据版本已变化，请重新计算")
+                with _history_state_lock:
+                    if _history_clear_epoch(self.asset_type) != epoch:
+                        raise WorkBusyError("历史数据已刷新，请重新计算")
+                if compute_lookback < lookback_days:
+                    continue  # 同一日期的大窗口接续扩展, 不并发计算第二份。
+            cropped = self._crop_history_cache(frame, lookback_days)
+            self._assert_history_input_current(target_date, cache_key, epoch)
+            return cropped if cropped is not None else frame
     return wrapped
 
 # load_prior_consecutive 最多回看多少个已存在的日分区 (缺列时继续往前找的上限)
@@ -102,15 +218,35 @@ class ScreenerService:
 
         清除数据后调用, 避免内存里的旧历史窗口残留导致策略/看板仍命中旧数据。
         """
-        # 与历史窗口计算共用同一把锁, 防止清理与慢计算并发时旧结果在清理后
-        # 又被写回缓存。管道刷新宁可等待当前计算结束, 也不能继续消费旧快照。
-        with _history_compute_lock:
+        global _history_epoch
+        # 失效不等待计算; 代际变化会拒绝正在运行的旧结果回填或返回。
+        with _history_state_lock:
             if asset_type is None:
+                _history_epoch += 1
                 _history_cache.clear()
             else:
+                _history_asset_epochs[asset_type] = _history_asset_epochs.get(asset_type, 0) + 1
                 for key in list(_history_cache):
-                    if key[0] == asset_type:
-                        _history_cache.pop(key, None)
+                    if key[1] == asset_type:
+                        del _history_cache[key]
+
+    def _history_cache_identity(self, target_date: date) -> tuple:
+        """将数据根、完整性修正与截至目标日的指标代次纳入缓存身份。"""
+        from app.services.daily_health import revision
+
+        root = Path(self.repo.store.data_dir).resolve()
+        getter = getattr(self.repo, "get_enriched_generation_snapshot", None)
+        generation = getter(self.asset_type).through(target_date) if callable(getter) else None
+        return str(root), self.asset_type, target_date, revision(root, self.asset_type), generation
+
+    def _assert_history_input_current(self, target_date: date, cache_key: tuple, epoch: tuple) -> None:
+        """裁剪和快照拼接期间也可能发生修正, 返回前复核同一历史输入。"""
+        self._assert_integrity(target_date, enriched_only=True)
+        if self._history_cache_identity(target_date) != cache_key:
+            raise WorkBusyError("历史数据版本已变化，请重新计算")
+        with _history_state_lock:
+            if _history_clear_epoch(self.asset_type) != epoch:
+                raise WorkBusyError("历史数据已刷新，请重新计算")
 
     @staticmethod
     def _crop_history_cache(
@@ -358,15 +494,8 @@ class ScreenerService:
             )
         return result.sort(["symbol", "date"])
 
-    @_singleflight_history_load
-    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
-        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
-
-        repository 不常驻完整历史；这里按需 scan_parquet + compute_indicators，
-        并仅保留最近一次结果的短 TTL 缓存。
-        """
-        self._assert_integrity(target_date, enriched_only=True)
-        # 兼容 repository 接口；当前实现主动返回 None，不再命中常驻历史缓存。
+    def _repository_history(self, target_date: date, lookback_days: int) -> pl.DataFrame | None:
+        """优先复用 repository 的已预计算窗口, 不触发额外指标重算。"""
         t0 = time.perf_counter()
         if self.asset_type == "stock":
             cached = self.repo.get_enriched_history(target_date, lookback_days)
@@ -382,31 +511,17 @@ class ScreenerService:
                             target_date, lookback_days, elapsed, len(cached))
                 return cached
 
-        # 优先级 2: 进程级 history_cache (按日期缓存一份最大窗口, 小窗口裁剪复用)
-        cache_key = (self.asset_type, target_date)
-        now = time.monotonic()
-        expired = [
-            key for key, (ts, _lookback, _frame) in _history_cache.items()
-            if now - ts >= _HISTORY_CACHE_TTL
-        ]
-        for key in expired:
-            del _history_cache[key]
+        return None
 
-        cached_entry = _history_cache.get(cache_key)
-        if cached_entry is not None:
-            _, cached_lookback, cached_frame = cached_entry
-            # 只有缓存窗口不小于请求时才可裁剪复用; 请求更大窗口只能重算。
-            if cached_lookback >= lookback_days:
-                cropped = self._crop_history_cache(cached_frame, lookback_days)
-                if cropped is not None:
-                    logger.debug(
-                        "history TTL cache hit: %s lookback=%d (cached %d)",
-                        target_date,
-                        lookback_days,
-                        cached_lookback,
-                    )
-                    return cropped
+    @_singleflight_history_load
+    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
 
+        repository 不常驻完整历史；这里按需 scan_parquet + compute_indicators，
+        并仅保留最近一次结果的短 TTL 缓存。
+        """
+        self._assert_integrity(target_date, enriched_only=True)
+        t0 = time.perf_counter()
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         # 计算窗口抬到 floor: 扫描范围本来就被 180 自然日封顶, 抬到这一档不增加
         # 扫描量, 却能让同一天的 41/81 两个请求共用同一份缓存。
@@ -484,24 +599,15 @@ class ScreenerService:
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
                     target_date, compute_lookback, elapsed, len(df_full))
 
-        # TTL 先清一轮; 仍超上限时按最旧无条件淘汰 — 否则短时间内出现多个
-        # 不同 (asset_type, date) 键时全部新鲜、零逐出, 数 GB 宽帧驻留。
-        if cache_key not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
-            now = time.monotonic()
-            expired = [
-                k for k, (ts, _lookback, _frame) in _history_cache.items()
-                if now - ts > _HISTORY_CACHE_TTL
-            ]
-            for k in expired:
-                del _history_cache[k]
-            while len(_history_cache) >= _HISTORY_CACHE_MAX_ENTRIES:
-                oldest = min(_history_cache, key=lambda k: _history_cache[k][0])
-                del _history_cache[oldest]
-        # 长计算期间不应消耗 TTL; 从计算完成时开始计时, 保证刚算好的窗口有完整的复用周期。
-        _history_cache[cache_key] = (time.monotonic(), compute_lookback, df_full)
+        return df_full
 
-        cropped = self._crop_history_cache(df_full, lookback_days)
-        return cropped if cropped is not None else df_full
+    def load_monitor_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        """监控只加载当日前历史, 当日数据由监控引擎拼入当前行情。
+
+        减一天是截止上界, 不是用自然日替代 N 个交易日; 窗口仍由加载器按
+        实际交易日期裁剪。这样今日实时写盘不会失效稳定的历史暖机输入。
+        """
+        return self._load_enriched_history(target_date - timedelta(days=1), lookback_days)
 
     def run(
         self,
@@ -584,11 +690,23 @@ class ScreenerService:
         current: pl.DataFrame | None = None,
         market=None,
         cache_key: str | None = None,
+        live_snapshot: bool = False,
     ):
-        """按调用方要求装配标准策略数据上下文，不解释策略公式。"""
+        """按调用方要求装配标准策略数据上下文，不解释策略公式。
+
+        live_snapshot 仅用于日线实时预览: 历史截止到昨日, 当日只用本次捕获的
+        current, 禁止按日级代次复用整份实时矩阵。默认仍严格读取 as_of 窗口。
+        """
         from app.strategy.engine import StrategyDataContext
 
         self._assert_integrity(as_of)
+        use_live_snapshot = live_snapshot and timeframe == "1d"
+        live_history_key = None
+        if use_live_snapshot:
+            history_end = as_of - timedelta(days=1)
+            live_history_key = self._history_cache_identity(history_end)
+            with _history_state_lock:
+                live_history_epoch = _history_clear_epoch(self.asset_type)
         if current is None:
             current = self._load_enriched_for_date(as_of)
         if timeframe == "1m":
@@ -619,13 +737,34 @@ class ScreenerService:
         )
         history = None
         if history_bars > 1:
-            history = self._load_enriched_history(as_of, history_bars)
+            if use_live_snapshot:
+                # 只共享稳定历史输入, 本次捕获的 current 是本次实时计算的唯一当日行。
+                # 无论历史加载期间行情软更新多少次, 都不能将两个当日时点混进一份矩阵。
+                prior = self.load_monitor_history(as_of, history_bars)
+                if current is None or current.is_empty() or "date" not in current.columns:
+                    raise ValueError("实时策略缺少目标日期的行情快照")
+                current_day = current.filter(pl.col("date") == as_of)
+                if current_day.is_empty():
+                    raise ValueError("实时策略缺少目标日期的行情快照")
+                parts = [current_day]
+                if prior is not None and not prior.is_empty():
+                    parts.insert(0, prior.filter(pl.col("date") < as_of))
+                history = pl.concat(parts, how="diagonal_relaxed").sort(["symbol", "date"])
+                cropped = self._crop_history_cache(history, history_bars)
+                history = cropped if cropped is not None else history
+            else:
+                history = self._load_enriched_history(as_of, history_bars)
         # enriched 换代号: 供 engine.build_shared_matrix 的矩阵缓存做失效指纹
         # (取不到时 None → 缓存 fail-closed 不启用)
-        try:
-            data_generation = self.repo.get_matrix_data_generation(self.asset_type)
-        except Exception:  # noqa: BLE001
+        if use_live_snapshot:
+            # 不能用同一个历史代次缓存不同 current 快照构建出的共享矩阵。
+            self._assert_history_input_current(history_end, live_history_key, live_history_epoch)
             data_generation = None
+        else:
+            try:
+                data_generation = self.repo.get_matrix_data_generation(self.asset_type)
+            except Exception:  # noqa: BLE001
+                data_generation = None
         return StrategyDataContext(
             asset_type=self.asset_type,
             timeframe=timeframe,

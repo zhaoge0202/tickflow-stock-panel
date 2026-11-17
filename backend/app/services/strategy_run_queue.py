@@ -199,6 +199,7 @@ class StrategyRunManager:
         reuse_completed_ms: float = 0,
         source_version: object = None,
         on_submit: Callable[[], None] | None = None,
+        failure_reuse_ms: float = 1000,
     ) -> StrategyRunHandle:
         now_ms = time.time() * 1000
         with self._lock:
@@ -223,7 +224,8 @@ class StrategyRunManager:
             if done is not None and reuse_completed_ms > 0:
                 snap = done.snapshot()
                 if (done.source_version == source_version and (snap["error"] or snap["errors"])
-                        and done.finished_at_ms is not None and now_ms - done.finished_at_ms < 1000):
+                        and done.finished_at_ms is not None
+                        and now_ms - done.finished_at_ms < failure_reuse_ms):
                     return done
                 if (done.source_version == source_version and not snap["error"] and not snap["errors"]
                         and done.finished_at_ms is not None

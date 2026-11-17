@@ -499,13 +499,16 @@ def test_minute_context_rejects_non_stock_asset():
         assert "A 股" in str(e)
 
 
-def test_minute_context_loads_daily_history_for_declared_strategies():
+def test_minute_context_loads_daily_history_for_declared_strategies(tmp_path):
     class _FakeEngine:
         def minute_daily_history_bars(self, strategy_ids):
             return 5
 
     daily = _daily("600001.SH", 6, {1})
     repo = _FakeMinuteRepo({date(2026, 8, 25): _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3)})
+    from types import SimpleNamespace
+
+    repo.store = SimpleNamespace(data_dir=tmp_path)
     repo.get_enriched_history = lambda target_date, lookback_days: daily  # type: ignore[method-assign]
     repo.get_instruments_asset = lambda asset_type: None  # type: ignore[method-assign]
     svc = ScreenerService(repo, asset_type="stock")  # type: ignore[arg-type]
