@@ -189,6 +189,7 @@ def _run_watchlist_fetch(monkeypatch, flush_daily_today: bool) -> _WatchRepo:
     svc._index_quotes_cache = None
     svc._broadcast_quote_updated = lambda: None
     svc._evaluate_monitors = lambda *a, **k: None
+    svc._evaluate_lock = threading.Lock()
     svc._flush_live_enriched = (
         lambda df, extra, asset_type="stock", merge=False: repo.enriched_merges.append(asset_type)
     )

@@ -16,6 +16,7 @@ import logging
 import math
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -330,6 +331,13 @@ class MonitorRuleEngine:
     """
 
     def __init__(self, alert_handler: Callable[[dict], None] | None = None):
+        # 只保护配置版本与结果提交, 不持锁计算策略或投递通知。
+        self._state_lock = threading.RLock()
+        self._strategy_generation = 0
+        self._daily_strategy_generations: dict[str, int] = {}
+        self._strategy_rule_revisions: dict[str, int] = {}
+        self._strategy_matrix_cache_key: str | None = None
+        self._successful_strategy_runs: set[str] = set()
         self._alert_handler = alert_handler
         self._rules: dict[str, dict] = {}  # rule_id → rule
         # (rule_id, symbol, event_type) → 上次触发时间戳(秒)。用于 cooldown 去重。
@@ -378,7 +386,10 @@ class MonitorRuleEngine:
 
     def set_strategy_engine(self, engine) -> None:
         """注入 StrategyEngine, type=strategy 规则据此跑策略。"""
-        self._strategy_engine = engine
+        with self._state_lock:
+            if self._strategy_engine is not engine:
+                self._strategy_generation += 1
+            self._strategy_engine = engine
 
     def set_data_dir(self, data_dir) -> None:
         """注入数据目录, 用于加载策略的用户覆盖配置。"""
@@ -401,13 +412,15 @@ class MonitorRuleEngine:
 
     def invalidate_strategy_state(self) -> None:
         """策略注册表变更后清除策略池、结果和矩阵快照。"""
-        self._strategy_pools.clear()
-        self._strategy_signal_state.clear()
-        self._strategy_signal_seen.clear()
-        self._latest_strategy_results = {}
-        self._building_strategy_results = {}
-        self._latest_strategy_result_ids.clear()
-        self._active_matrix_snapshots.clear()
+        with self._state_lock:
+            self._strategy_generation += 1
+            self._strategy_pools.clear()
+            self._strategy_signal_state.clear()
+            self._strategy_signal_seen.clear()
+            self._latest_strategy_results = {}
+            self._building_strategy_results = {}
+            self._latest_strategy_result_ids.clear()
+            self._active_matrix_snapshots.clear()
 
     def set_history_loader(self, fn) -> None:
         """注入历史窗口加载器, 用于声明 filter_history 的策略跑实时监控。
@@ -478,10 +491,30 @@ class MonitorRuleEngine:
         先构建完整 dict 再原子替换 self._rules, 避免评估线程 (行情轮询)
         读到装载了一半的规则表。
         """
+        with self._state_lock:
+            self._set_rules_locked(rules)
+
+    def _set_rules_locked(self, rules: list[dict]) -> None:
         new_rules: dict[str, dict] = {}
         for r in rules:
             if r.get("enabled") is not False:
-                new_rules[r["id"]] = r
+                new_rules[r["id"]] = deepcopy(r)
+        obsolete_strategies: set[str] = set()
+        for rule_id in self._rules.keys() | new_rules.keys():
+            old, new = self._rules.get(rule_id), new_rules.get(rule_id)
+            if old != new:
+                self._strategy_rule_revisions[rule_id] = self._strategy_rule_revisions.get(rule_id, 0) + 1
+                if old and old.get("type") == "strategy":
+                    obsolete_strategies.add(str(old.get("strategy_id") or ""))
+        active_strategies = {
+            str(rule.get("strategy_id")) for rule in new_rules.values()
+            if rule.get("type") == "strategy" and rule.get("asset_type", "stock") == "stock"
+        }
+        self._latest_strategy_results = {
+            sid: result for sid, result in self._latest_strategy_results.items()
+            if sid in active_strategies and sid not in obsolete_strategies
+        }
+        self._latest_strategy_result_ids.intersection_update(self._latest_strategy_results)
         changed_ids = {
             rule_id
             for rule_id, rule in new_rules.items()
@@ -521,41 +554,22 @@ class MonitorRuleEngine:
         self._rules_version += 1
 
     def add_rule(self, rule: dict) -> None:
-        if rule.get("enabled") is not False:
-            self._rules[rule["id"]] = rule
-        else:
-            self._rules.pop(rule["id"], None)
-        self._rules_version += 1
+        with self._state_lock:
+            self._set_rules_locked([
+                *(old for rid, old in self._rules.items() if rid != rule["id"]), rule,
+            ])
 
     def remove_rule(self, rule_id: str) -> None:
-        self._rules.pop(rule_id, None)
-        self._last_fire = {k: v for k, v in list(self._last_fire.items()) if k[0] != rule_id}
-        self._strategy_pools = {
-            k: v for k, v in list(self._strategy_pools.items()) if k[0] != rule_id
-        }
-        self._strategy_signal_state = {
-            k: v for k, v in list(self._strategy_signal_state.items()) if k[0] != rule_id
-        }
-        self._strategy_signal_seen = {
-            k: v for k, v in list(self._strategy_signal_seen.items()) if k[0] != rule_id
-        }
-        self._sector_condition_state = {
-            k: v for k, v in self._sector_condition_state.items() if k[0] != rule_id
-        }
-        self._rules_version += 1
+        with self._state_lock:
+            self._set_rules_locked([rule for rid, rule in self._rules.items() if rid != rule_id])
 
     def clear(self) -> None:
-        self._rules.clear()
-        self._last_fire.clear()
-        self._strategy_pools.clear()
-        self._strategy_signal_state.clear()
-        self._strategy_signal_seen.clear()
-        self._sector_condition_state.clear()
-        self._rules_version += 1
+        self.set_rules([])
 
     @property
     def rules(self) -> dict[str, dict]:
-        return dict(self._rules)
+        with self._state_lock:
+            return deepcopy(self._rules)
 
     @property
     def rule_count(self) -> int:
@@ -577,15 +591,110 @@ class MonitorRuleEngine:
 
     def invalidate_daily_asset(self, asset_type: str) -> None:
         """历史价格修正后失效计算快照; 保留告警去重和入选池, 避免重复通知。"""
-        self._active_matrix_snapshots.pop(asset_type, None)
-        if asset_type == "stock":
-            self._latest_strategy_results = {}
+        with self._state_lock:
+            self._daily_strategy_generations[asset_type] = self._daily_strategy_generations.get(asset_type, 0) + 1
+            self._active_matrix_snapshots.pop(asset_type, None)
+            if asset_type == "stock":
+                self._latest_strategy_results = {}
+                self._latest_strategy_result_ids.clear()
 
     def consume_strategy_result_updates(self) -> bool:
         """返回并清除本轮成功写入的股票策略实时结果标记。"""
-        updated = bool(self._latest_strategy_result_ids)
-        self._latest_strategy_result_ids.clear()
-        return updated
+        with self._state_lock:
+            updated = bool(self._latest_strategy_result_ids)
+            self._latest_strategy_result_ids.clear()
+            return updated
+
+    def _strategy_data_revision(self, asset_type: str) -> str | None:
+        if self._data_dir is None:
+            return None
+        from app.services.daily_health import revision
+
+        return revision(self._data_dir, asset_type)
+
+    def _claim_cooldown(self, key: tuple[str, str, str], now: float, cooldown: float) -> bool:
+        """原子检查并记录触发时间, 与规则重载及子引擎状态复制使用同一短锁。"""
+        with self._state_lock:
+            last = self._last_fire.get(key)
+            if last is not None and now - last < cooldown:
+                return False
+            self._last_fire[key] = now
+            return True
+
+    def _strategy_worker_token_locked(self, asset_type: str, strategy_id: str, revision) -> tuple | None:
+        rules = [
+            rule for rule in self._rules.values()
+            if rule.get("type") == "strategy" and rule.get("enabled", True)
+            and rule.get("asset_type", "stock") == asset_type
+            and rule.get("strategy_id") == strategy_id
+        ]
+        if not rules:
+            return None
+        return (
+            self._strategy_generation, self._daily_strategy_generations.get(asset_type, 0),
+            cn_today(), id(self._strategy_engine),
+            getattr(self._strategy_engine, "definition_revision", 0), revision,
+            str(self._data_dir), id(self._history_loader), id(self._history_loader_etf),
+            id(self._minute_loader),
+            tuple(sorted((rule["id"], self._strategy_rule_revisions.get(rule["id"], 0)) for rule in rules)),
+        )
+
+    def strategy_worker_groups(self, asset_type: str) -> dict[str, tuple[tuple, list[dict]]]:
+        """读取策略任务配置与代际。磁盘 revision 读取不占用状态锁。"""
+        revision = self._strategy_data_revision(asset_type)
+        with self._state_lock:
+            groups: dict[str, list[dict]] = {}
+            for rule in self._rules.values():
+                sid = rule.get("strategy_id")
+                if (sid and rule.get("type") == "strategy" and rule.get("enabled", True)
+                        and rule.get("asset_type", "stock") == asset_type):
+                    groups.setdefault(str(sid), []).append(deepcopy(rule))
+            return {
+                sid: (self._strategy_worker_token_locked(asset_type, sid, revision), rules)
+                for sid, rules in groups.items()
+            }
+
+    def create_strategy_worker(self, rules: list[dict], cache_key: str) -> MonitorRuleEngine:
+        """共享数据依赖, 隔离评估临时态; 从最后成功提交的去重状态接续。"""
+        worker = MonitorRuleEngine()
+        ids = {rule["id"] for rule in rules}
+        with self._state_lock:
+            worker.set_strategy_engine(self._strategy_engine)
+            worker.set_data_dir(self._data_dir)
+            worker.set_history_loader(self._history_loader)
+            worker.set_history_loader_etf(self._history_loader_etf)
+            worker.set_minute_loader(self._minute_loader)
+            worker.set_name_map(self._name_map)
+            worker.set_rules(rules)
+            worker._strategy_matrix_cache_key = cache_key
+            for name in ("_last_fire", "_strategy_pools", "_strategy_signal_state", "_strategy_signal_seen"):
+                setattr(worker, name, deepcopy({
+                    key: value for key, value in getattr(self, name).items() if key[0] in ids
+                }))
+        return worker
+
+    def commit_strategy_worker(
+        self, asset_type: str, strategy_id: str, token: tuple, worker: MonitorRuleEngine,
+    ) -> bool:
+        """成功任务按策略合并, 过期任务丢弃。返回值决定是否投递其事件。"""
+        if strategy_id not in worker._successful_strategy_runs:
+            return False
+        revision = self._strategy_data_revision(asset_type)
+        with self._state_lock:
+            if self._strategy_worker_token_locked(asset_type, strategy_id, revision) != token:
+                return False
+            ids = set(worker._rules)
+            for name in ("_last_fire", "_strategy_pools", "_strategy_signal_state", "_strategy_signal_seen"):
+                getattr(self, name).update(deepcopy({
+                    key: value for key, value in getattr(worker, name).items() if key[0] in ids
+                }))
+            if asset_type == "stock" and strategy_id in worker._latest_strategy_results:
+                self._latest_strategy_results = {
+                    **self._latest_strategy_results,
+                    strategy_id: worker._latest_strategy_results[strategy_id],
+                }
+                self._latest_strategy_result_ids.add(strategy_id)
+            return True
 
     def has_rule_type(self, rtype: str) -> bool:
         """是否存在指定类型的 (已启用) 规则。供 quote_service 判断是否需要注入特殊数据。"""
@@ -621,7 +730,7 @@ class MonitorRuleEngine:
         )
 
     def evaluate(self, df: pl.DataFrame, asset_type: str = "stock",
-                 reset_strategy_results: bool = True) -> list[dict]:
+                 reset_strategy_results: bool = True, *, include_strategies: bool = True) -> list[dict]:
         """行情更新后评估规则。
 
         按 asset_type 只评估匹配资产类型的规则; ETF 规则应传 ETF enriched 快照。
@@ -632,9 +741,12 @@ class MonitorRuleEngine:
             df: 实时 enriched 数据 (含 signal_/csg_/指标列)
             asset_type: 只评估该资产类型的规则 (默认 stock, 向后兼容)
             reset_strategy_results: 是否重置策略结果缓存 (多轮评估时仅首轮 True)
+            include_strategies: False 仅跑轻规则, 不改策略结果, 供独立策略 worker 并行使用。
         Returns:
             触发的 AlertEvent dict 列表 (含 ts/rule_id/source/type/symbol/...)
         """
+        if include_strategies:
+            self._successful_strategy_runs.clear()
         if not self._rules or df.is_empty():
             return []
 
@@ -651,14 +763,14 @@ class MonitorRuleEngine:
         # _latest_strategy_results。这样 /cached 并发读取永远拿到完整结果,
         # 不会在「清空 → 逐个回填」窗口里读到空中间态 (曾导致策略页闪烁)。
         # 非 reset 轮 (ETF 轮) 继续往同一临时容器追加 (_match_strategy 仅写 stock, 实际不追加)。
-        if reset_strategy_results:
+        if include_strategies and reset_strategy_results:
             self._building_strategy_results = {}
             self._latest_strategy_result_ids.clear()
 
         matrix_rules: list[dict] = []
         params_map: dict[str, dict] = {}
         overrides_map: dict[str, dict] = {}
-        if self._strategy_engine is not None:
+        if include_strategies and self._strategy_engine is not None:
             for rule in list(self._rules.values()):
                 if (
                     not rule.get("enabled", True)
@@ -701,7 +813,7 @@ class MonitorRuleEngine:
                     timeframe="1d",
                     as_of=cn_today(),
                     current=df,
-                    cache_key=f"monitor:{asset_type}",
+                    cache_key=self._strategy_matrix_cache_key or f"monitor:{asset_type}",
                     data_generation=data_revision,
                 )
                 try:
@@ -722,7 +834,7 @@ class MonitorRuleEngine:
                             as_of=cn_today(),
                             current=df,
                             history=history,
-                            cache_key=f"monitor:{asset_type}",
+                            cache_key=self._strategy_matrix_cache_key or f"monitor:{asset_type}",
                             data_generation=data_revision,
                         ),
                         matrix_ids,
@@ -743,6 +855,8 @@ class MonitorRuleEngine:
         for rule_id, rule in list(self._rules.items()):
             if rule.get("asset_type", "stock") != asset_type:
                 continue
+            if not include_strategies and rule.get("type") == "strategy":
+                continue
             if rule.get("type") in ("sector", "abnormal", "date"):
                 # 三者不走行情 DataFrame 评估, 各走 evaluate_sectors / evaluate_abnormal /
                 # evaluate_date_rules 专用路径
@@ -760,8 +874,10 @@ class MonitorRuleEngine:
 
         # 一次性提交本轮结果 (原子替换): /cached 读方要么拿到上一轮完整结果,
         # 要么拿到本轮完整结果, 不会读到空中间态。
-        self._latest_strategy_results = self._building_strategy_results
-        self._active_matrix_snapshots.pop(asset_type, None)
+        if include_strategies:
+            with self._state_lock:
+                self._latest_strategy_results = self._building_strategy_results
+                self._active_matrix_snapshots.pop(asset_type, None)
 
         return events
 
@@ -777,11 +893,13 @@ class MonitorRuleEngine:
         if self._date_eval_day == today_iso and self._date_eval_rules_version == self._rules_version:
             return []
         # 跨天首轮清掉已过期日期的按天 cooldown 键, 避免 _last_fire 无限累积
-        self._last_fire = {
-            key: value
-            for key, value in self._last_fire.items()
-            if not (key[1].startswith("_date_") and key[1] != f"_date_{today_iso}")
-        }
+        # 独立策略线程也会提交去重状态, 替换字典必须与其使用同一把短锁。
+        with self._state_lock:
+            self._last_fire = {
+                key: value
+                for key, value in self._last_fire.items()
+                if not (key[1].startswith("_date_") and key[1] != f"_date_{today_iso}")
+            }
 
         today_d = _dt.date.fromisoformat(today_iso)
         events: list[dict] = []
@@ -794,10 +912,8 @@ class MonitorRuleEngine:
             # 按天隔离: 窗口内每天最多触发一次
             key = (rule["id"], f"_date_{today_iso}", "date")
             cooldown = int(rule.get("cooldown_seconds") or 86400)
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            if not self._claim_cooldown(key, now, cooldown):
                 continue
-            self._last_fire[key] = now
 
             symbols = [s for s in rule.get("symbols", []) if s]
             single_symbol = symbols[0] if len(symbols) == 1 else None
@@ -909,11 +1025,9 @@ class MonitorRuleEngine:
 
             event_type = f"sector_{trigger}_{direction}"
             cooldown_key = (rule["id"], target_key, event_type)
-            last = self._last_fire.get(cooldown_key)
             cooldown = int(rule.get("cooldown_seconds", 3600))
-            if last is not None and now - last < cooldown:
+            if not self._claim_cooldown(cooldown_key, now, cooldown):
                 continue
-            self._last_fire[cooldown_key] = now
             message = rule.get("message", "") or self._sector_message(
                 snapshot, trigger, direction, threshold, window, value,
             )
@@ -1071,11 +1185,9 @@ class MonitorRuleEngine:
 
             event_type = f"abnormal_{'up' if best[2] > 0 else 'down'}"
             cooldown_key = (rule["id"], symbol, event_type)
-            last = self._last_fire.get(cooldown_key)
             cooldown = int(rule.get("cooldown_seconds", 3600))
-            if last is not None and now - last < cooldown:
+            if not self._claim_cooldown(cooldown_key, now, cooldown):
                 continue
-            self._last_fire[cooldown_key] = now
             event = {
                 "ts": int(now * 1000),
                 "rule_id": rule["id"],
@@ -1162,10 +1274,8 @@ class MonitorRuleEngine:
             is_batch = sym == "_batch"
             key_symbol = f"_{ev_type}_batch" if is_batch else sym
             key = (rule["id"], key_symbol, ev_type)
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            if not self._claim_cooldown(key, now, cooldown):
                 continue  # 冷却期内, 跳过
-            self._last_fire[key] = now
 
             # 批量事件: name 存放预构建的消息文本
             if is_batch:
@@ -1395,6 +1505,7 @@ class MonitorRuleEngine:
         except Exception as e:
             logger.warning("策略 %s 执行失败: %s", sid, e)
             return []
+        self._successful_strategy_runs.add(sid)
 
         # 记录本轮完整策略结果 (供策略页实时回显: /cached 端点直接读取, 不落盘)。
         # 与下面的事件无关, 无论是否产生通知结果都用于策略页实时回显。
@@ -1719,20 +1830,16 @@ class MonitorRuleEngine:
                 f"共 {len(hit_rows)} 只: {top}{suffix}"
             )
             key = (rule["id"], "_volume_delta_batch", "volume_delta")
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            if not self._claim_cooldown(key, now, cooldown):
                 return []
-            self._last_fire[key] = now
             return [_event("", "", message)]
 
         events: list[dict] = []
         for row in hit_rows:
             sym = row.get("symbol", "")
             key = (rule["id"], sym, "volume_delta")
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            if not self._claim_cooldown(key, now, cooldown):
                 continue
-            self._last_fire[key] = now
             delta = row.get(cmp_col)
             message = f"放量 · 单轮增量 {_fmt(delta)} >= {th_text}{span_text}"
             events.append(_event(
@@ -1779,10 +1886,8 @@ class MonitorRuleEngine:
         for row in hit.iter_rows(named=True):
             sym = row.get("symbol", "")
             key = (rule["id"], sym, "ladder")
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            if not self._claim_cooldown(key, now, cooldown):
                 continue
-            self._last_fire[key] = now
 
             name = row.get("name") or self._name_map.get(sym) or sym
             price = row.get("close")

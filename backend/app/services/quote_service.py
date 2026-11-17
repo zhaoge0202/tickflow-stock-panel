@@ -370,6 +370,7 @@ class QuoteService:
         self._monitor_wake = threading.Event()
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        self._strategy_workers = None
         # 全量 enriched 采用 single-flight: 行情轮询只负责提交一次后台任务,
         # 后续轮次合并掉, 不阻塞下一轮行情采集和 HTTP 请求。
         self._enriched_rebuild_lock = threading.Lock()
@@ -433,7 +434,7 @@ class QuoteService:
         # prev 不早于本时段开盘时计算
         self._volume_delta: dict[str, tuple[float, float]] = {}
         self._volume_delta_span_s: float = 0.0
-        self._etf_history_cache: tuple[tuple, pl.DataFrame] | None = None
+        self._live_history_cache: dict[str, tuple[tuple, pl.DataFrame]] = {}
         from app.services.quote_demand import QuoteDemand
         self._quote_demand = QuoteDemand()
 
@@ -476,7 +477,7 @@ class QuoteService:
             self._thread = None
         if thread:
             thread.join(timeout=10)
-        self._etf_history_cache = None
+        self._live_history_cache.clear()
         # 此处不持久化关闭: lifespan shutdown (容器停止/重启) 也调用 stop,
         # 持久化 False 会让每次重启后实时行情都变关闭、需手动再开。
         # 持久化语义归 disable() (用户主动关闭)。
@@ -578,7 +579,7 @@ class QuoteService:
     def set_repo(self, repo) -> None:
         """注入 KlineRepository, 用于实时落盘。"""
         self._repo = repo
-        self._etf_history_cache = None
+        self._live_history_cache = {}
 
     def set_app_state(self, app_state) -> None:
         """注入 FastAPI app.state, 用于获取 strategy_monitor 等单例。"""
@@ -836,6 +837,12 @@ class QuoteService:
             "final_sync_done": final_done,
             "final_sync_failed": final_failed,
             "last_fetch_ms": round(self._fetched_at, 0) if self._fetched_at else None,
+            "round_timing": dict(getattr(self, "_last_round_timing", {})),
+            "fetch_stages_ms": dict(getattr(self, "_last_fetch_stages_ms", {})),
+            "strategy_workers": (
+                self._strategy_workers.status()
+                if getattr(self, "_strategy_workers", None) is not None else []
+            ),
         }
 
     def refresh(self) -> dict:
@@ -1021,7 +1028,7 @@ class QuoteService:
             snapshot = None
             watchlist_eval = 0.0
             if self.realtime_mode() == "watchlist":
-                # Free 档自选模式: 只有自选(含指数监控标的)有实时数据, 评估在该方法内完成。
+                # 自选模式同样向异步监控调度器投递, 不让策略占用取数锁。
                 watchlist_eval = self._fetch_watchlist_quotes()
             else:
                 snapshot = self._fetch_full_market_quotes(final_boundary_ms=final_boundary_ms)
@@ -1039,7 +1046,7 @@ class QuoteService:
             # 这里摘出来单独呈现, 否则会被误读成"取数很慢"。
             eval_elapsed = watchlist_eval
             fetch_elapsed -= watchlist_eval
-            eval_async = False
+            eval_async = self._monitor_worker_alive()
         self._log_round_timing(fetch_elapsed, eval_elapsed, eval_async=eval_async)
         return updated
 
@@ -1061,6 +1068,16 @@ class QuoteService:
         worker 未启动时退回同步调用 —— 未调用 start()/enable() 的场景(单测、
         轻量替身)保持原有的同步语义。
         """
+        # boot_check 早于 app.state.monitor_engine 装配, 普通监控线程可能已启动。
+        # 引擎稍后就绪时补建策略调度器, 不依赖普通监控线程重新启动。
+        if getattr(self, "_running", False):
+            # 自动补建与 start/stop 使用同一生命周期锁, 防止手动刷新并发双建。
+            with self._lifecycle_lock:
+                engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+                needs_strategy_workers = getattr(self, "_strategy_workers", None) is None and engine is not None
+                if self._running and (not self._monitor_worker_alive() or needs_strategy_workers):
+                    self._start_monitor_worker()
+        self._submit_strategy_monitors()
         if not self._monitor_worker_alive():
             started = time.perf_counter()
             with self._evaluate_lock:
@@ -1070,12 +1087,13 @@ class QuoteService:
         self._monitor_wake.set()
         return 0.0, True
 
-    def _monitor_loop(self) -> None:
-        while not self._monitor_stop.is_set():
-            if not self._monitor_wake.wait(timeout=0.5):
+    def _monitor_loop(self, stop: threading.Event, wake: threading.Event) -> None:
+        # 捕获本次生命周期的事件, 超时退出的旧线程不能使用下一次启动的事件。
+        while not stop.is_set():
+            if not wake.wait(timeout=0.5):
                 continue
-            self._monitor_wake.clear()
-            if self._monitor_stop.is_set():
+            wake.clear()
+            if stop.is_set():
                 return
             started = time.perf_counter()
             try:
@@ -1087,24 +1105,60 @@ class QuoteService:
                 logger.info("监控线程评估 %.1fs", time.perf_counter() - started)
 
     def _start_monitor_worker(self) -> None:
+        from app.services.strategy_monitor_workers import StrategyMonitorWorkers
+
+        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+        if getattr(self, "_strategy_workers", None) is None and engine is not None:
+            self._strategy_workers = StrategyMonitorWorkers(engine, self._on_strategy_monitor_events)
+        if getattr(self, "_strategy_workers", None) is not None:
+            self._strategy_workers.start()
         if self._monitor_worker_alive():
+            self._monitor_stop.clear()
             return
         self._monitor_stop = threading.Event()
         self._monitor_wake = threading.Event()
         self._monitor_thread = threading.Thread(
-            target=self._monitor_loop, name="monitor-eval", daemon=True,
+            target=self._monitor_loop, args=(self._monitor_stop, self._monitor_wake),
+            name="monitor-eval", daemon=True,
         )
         self._monitor_thread.start()
         logger.info("监控评估线程已启动 (异步, 单槽 latest-wins)")
 
     def _stop_monitor_worker(self) -> None:
+        workers = getattr(self, "_strategy_workers", None)
+        if workers is not None:
+            workers.stop()
         thread = getattr(self, "_monitor_thread", None)
         if thread is None:
             return
         self._monitor_stop.set()
         self._monitor_wake.set()
         thread.join(timeout=5)
-        self._monitor_thread = None
+        # 慢轮仍在退出时保留引用, 防止再次启用产生第二个普通监控线程。
+        if not thread.is_alive():
+            self._monitor_thread = None
+
+    def _submit_strategy_monitors(self) -> None:
+        """从已发布的当日快照唤醒各策略, 不等普通监控中的慢 IO。"""
+        workers = getattr(self, "_strategy_workers", None)
+        if workers is None or not self._is_continuous_trading():
+            return
+        engine = getattr(self._app_state, "monitor_engine", None)
+        if engine is None:
+            return
+        try:
+            name_map = _monitor_name_map(self._repo)
+            if name_map:
+                engine.set_name_map(name_map)
+            frame, day = self.get_enriched_today()
+            if day == cn_today() and not frame.is_empty():
+                workers.submit(frame, asset_type="stock")
+            if engine.has_asset_rules("etf") and self._repo is not None:
+                frame, day = self._repo.get_enriched_latest_asset("etf", refresh=False)
+                if day == cn_today() and not frame.is_empty():
+                    workers.submit(frame, asset_type="etf")
+        except Exception:
+            logger.exception("独立策略监控提交失败")
 
     @staticmethod
     def _enriched_data_age_s(df: pl.DataFrame) -> float | None:
@@ -1129,15 +1183,18 @@ class QuoteService:
     ) -> None:
         """打印本轮分段耗时。
 
-        取数与监控评估在当前实现里是**同一线程串行**的, 所以行情轮周期 =
-        取数 + 评估。这两个数字必须分开看, 否则无法判断 8s 里有多少是取数、
-        多少被监控评估吃掉。监控段接近 0 说明非连续竞价时段直接早退了。
+        后台运行时监控独立推进, 取数耗时不包含策略执行时间。
         """
         now = time.perf_counter()
         last = getattr(self, "_last_round_perf", 0.0)
         period = f", 距上轮 {now - last:.1f}s" if last else ""
         self._last_round_perf = now
         total = fetch_elapsed + eval_elapsed
+        self._last_round_timing = {
+            "fetch_ms": round(fetch_elapsed * 1000, 1),
+            "monitor_ms": round(eval_elapsed * 1000, 1),
+            "monitor_async": eval_async,
+        }
         if eval_async:
             logger.info("行情轮 %.1fs (取数 %.1fs / 监控 异步)%s", total, fetch_elapsed, period)
             return
@@ -1426,6 +1483,8 @@ class QuoteService:
         ]
 
         fetch_ms = (time.perf_counter() - t0) * 1000
+        stages = {"network_ms": round(fetch_ms, 1)}
+        stage_started = time.perf_counter()
         fetched_at = time.time() * 1000
 
         # ---- 更新元信息 ----
@@ -1446,6 +1505,8 @@ class QuoteService:
 
         # MySQL 最新快照 + 关注标的 quote_ticks 先写; 之后不再需要完整 records 列表。
         self._append_quote_ticks_if_tdxapi(records)
+        stages["snapshot_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        stage_started = time.perf_counter()
 
         if confirmed_final is False:
             # 边界前的陈旧快照: 展示缓存已更新, 落盘与监控评估留待边界后快照。
@@ -1492,14 +1553,20 @@ class QuoteService:
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
         quote_extra = self._build_quote_extra(stock_records)
         etf_quote_extra = self._build_quote_extra(etf_records)
+        stages["daily_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        stage_started = time.perf_counter()
         # dict 列表已转成 Polars, 尽早释放, 降低与 enriched 计算重叠的峰值。
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock",
                                       merge=bool(partial_assets and "stock" in partial_assets))
+        stages["stock_enriched_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        stage_started = time.perf_counter()
         if not etf_daily_df.is_empty() and self._repo and flush_daily_today:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf",
                                       merge=bool(partial_assets and "etf" in partial_assets))
+        stages["etf_enriched_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        stage_started = time.perf_counter()
         # ---- 指数: 核心四只每轮已显式拉取, 与股票/ETF 同口径 merge 写盘 ----
         # 不能再门控 has_asset_rules("index"): 默认配置无指数监控规则, 否则
         # 盘中 kline_index_enriched 停在上一交易日, 读侧守卫直接跳过不注入。
@@ -1510,6 +1577,9 @@ class QuoteService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("指数日K写盘失败: %s", e)
             self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
+        stages["index_enriched_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        self._last_fetch_stages_ms = stages
+        logger.info("行情取数分段(ms): %s", " ".join(f"{name}={ms:.0f}" for name, ms in stages.items()))
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -1654,11 +1724,8 @@ class QuoteService:
             self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         self._broadcast_quote_updated()
-        # Watchlist 模式不走离锁快照路径: realtime_mode 为 watchlist 时
-        # _fetch_full_market_quotes 不会被调用, 这里在取数锁内评估即可。
-        eval_started = time.perf_counter()
-        self._evaluate_monitors(daily_df, quote_extra)
-        return time.perf_counter() - eval_started
+        elapsed, _ = self._dispatch_monitors(daily_df, quote_extra)
+        return elapsed
 
     # ================================================================
     # 工具
@@ -2109,10 +2176,12 @@ class QuoteService:
                 logger.debug("股票快照未就绪(空=%s, 日期=%s), 跳过股票轮",
                              enriched_today.is_empty(), enriched_date)
 
-            all_alerts: list[dict] = []
             rule_events: list[dict] = []
-            paper_watch_events: list[dict] = []  # 模拟盘合成规则的沙盒信号 (只喂模拟盘)
             engine = None
+            evaluate_options = (
+                {"include_strategies": False}
+                if getattr(getattr(self, "_strategy_workers", None), "active", False) else {}
+            )
 
             # 通用监控规则评估 (统一引擎: signal/price/market/strategy)
             if self._app_state:
@@ -2137,7 +2206,7 @@ class QuoteService:
                             eval_df = self._inject_volume_delta(eval_df)
                         eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
                         t0 = _mark("指标注入", t0)
-                        rule_events = engine.evaluate(eval_df, asset_type="stock")
+                        rule_events = engine.evaluate(eval_df, asset_type="stock", **evaluate_options)
                         t0 = _mark("股票引擎", t0)
                         if engine.consume_strategy_result_updates():
                             self.notify_strategy_results_updated()
@@ -2187,6 +2256,7 @@ class QuoteService:
                                 etf_enriched = self._inject_intraday_signals(etf_enriched, engine, "etf")
                                 rule_events = rule_events + engine.evaluate(
                                     etf_enriched, asset_type="etf", reset_strategy_results=False,
+                                    **evaluate_options,
                                 )
                         except Exception as e:
                             logger.warning("ETF 监控评估失败 (不影响股票告警): %s", e)
@@ -2202,128 +2272,17 @@ class QuoteService:
                                 index_enriched = self._inject_intraday_signals(index_enriched, engine, "index")
                                 rule_events = rule_events + engine.evaluate(
                                     index_enriched, asset_type="index", reset_strategy_results=False,
+                                    **evaluate_options,
                                 )
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
                         t0 = _mark("指数", t0)
-                    # 模拟盘「绑定即评估」的合成规则事件是沙盒信号: 只喂下面的
-                    # 模拟盘钩子, 不进告警流 (留痕/SSE/系统通知/webhook/扩展格式化)。
-                    from app.strategy.paper_watch import is_paper_watch_event
-
-                    paper_watch_events = [ev for ev in rule_events if is_paper_watch_event(ev)]
-                    rule_events = [ev for ev in rule_events if not is_paper_watch_event(ev)]
-                    t0 = time.perf_counter()
-                    if rule_events:
-                        rule_events = self._refresh_alert_quotes(rule_events, engine)
-                        rule_events = self._format_extension_notifications(rule_events)
-                        # 落盘到 alerts.jsonl
-                        try:
-                            from app.services import alert_store
-                            alert_store.append_many(
-                                self._app_state.repo.store.data_dir, rule_events,
-                            )
-                        except Exception as e:
-                            logger.warning("告警落盘失败: %s", e)
-                        try:
-                            from app.services import strategy_history
-                            strategy_history.record_monitor_events(
-                                self._app_state.repo.store.data_dir, rule_events,
-                            )
-                        except Exception as e:
-                            logger.warning("策略节点历史记录失败: %s", e)
-                        # 转为 SSE 推送格式 (兼容旧 alert schema)
-                        for ev in rule_events:
-                            alert = {
-                                "source": ev["source"],
-                                "type": ev["type"],
-                                "rule_id": ev.get("rule_id"),
-                                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
-                                "symbol": ev["symbol"],
-                                "name": ev["name"],
-                                "message": ev["message"],
-                                "price": ev["price"],
-                                "change_pct": ev["change_pct"],
-                                "signals": ev["signals"],
-                                "severity": ev.get("severity", "info"),
-                                "conditions": ev.get("conditions") or [],
-                                "logic": ev.get("logic") or "and",
-                            }
-                            for key in (
-                                "sector_kind", "sector_key", "sector_name",
-                                "sector_source_field", "sector_value", "sector_level",
-                                "window_change_pct", "coverage_ratio", "valid_count",
-                                "total_count", "up_count", "down_count", "leader",
-                                "abnormal_window", "abnormal_value", "abnormal_threshold",
-                                "abnormal_closeness", "volume_delta", "volume_delta_span",
-                                "volume_delta_amount",
-                            ):
-                                if key in ev:
-                                    alert[key] = ev[key]
-                            all_alerts.append(alert)
-                    t0 = _mark("告警处理", t0)
-
-            # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
-            # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
-            # (latest_strategy_results), 由 /api/screener/cached 端点直接叠加读取。
-
-            # 广播到所有 SSE 订阅者 (背压保护在订阅者队列内做)
-            if all_alerts:
-                # 按 symbol 富化行业/概念 ext 字段, 使 toast + 触发记录统一展示板块标签。
-                t0 = time.perf_counter()
-                self._enrich_alerts_ext(all_alerts)
-                self._broadcast_alerts(all_alerts)
-                logger.info("监控评估完成: %d 条通知", len(all_alerts))
-
-                # 系统通知 (可选通道, 由 preferences 开关控制)。
-                # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
-                self._maybe_send_system_notifications(all_alerts)
-                t0 = _mark("广播通知", t0)
-
-            # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
-            # 紧随系统通知, 同样静默降级不阻断主流程。
-            if rule_events:
-                t0 = time.perf_counter()
-                self._maybe_send_webhook(rule_events, engine)
-                t0 = _mark("Webhook", t0)
-
-            # 模拟盘钩子: 与监控评估同频 —— ① 用同一份实时快照撮合 pending 即时单;
-            # ② rule_events 喂给自动跟单规则触发自动下单。逐账户执行 (账户间规则与订单隔离)。
-            # 即时撮合仅股票 (ETF 即时单在下单时已转次日开盘); 独立 try ——
-            # 模拟盘任何异常只留痕, 不得影响监控告警链路。
+            t0 = time.perf_counter()
+            feed = self._deliver_monitor_events(rule_events, engine)
+            t0 = _mark("告警处理", t0)
             if stock_ready and self._app_state is not None:
-                t0 = time.perf_counter()
-                try:
-                    from app.strategy import paper as paper_trading
-                    from app.strategy import paper_auto
-                    data_dir = self._app_state.repo.store.data_dir
-                    snapshot = dict(zip(
-                        enriched_today["symbol"].to_list(),
-                        enriched_today["raw_close"].to_list(),
-                        strict=False,
-                    ))
-                    paper_events: list[dict] = []
-                    for acc_id in paper_trading.list_account_ids(data_dir):
-                        paper_events.extend(
-                            paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
-                        feed = rule_events + paper_watch_events
-                        if feed:
-                            created = paper_auto.on_rule_events(data_dir, feed, account_id=acc_id)
-                            paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
-                    # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
-                    # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /
-                    # Webhook。全部静默降级。
-                    if paper_events:
-                        self._broadcast_alerts(paper_events)
-                        try:
-                            from app.services import alert_store
-                            alert_store.append_many(data_dir, paper_events)
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning("模拟盘成交留痕失败: %s", e)
-                        self._maybe_send_system_notifications(paper_events)
-                        self._maybe_send_paper_webhook(paper_events)
-                except Exception as e:
-                    logger.warning("模拟盘钩子失败 (不影响监控): %s", e)
-                t0 = _mark("模拟盘", t0)
+                self._run_paper_hooks(enriched_today, feed, match_pending=True)
+                _mark("模拟盘", t0)
 
             if data_age_s is not None:
                 if data_age_s >= self.MONITOR_STALE_WARN_S:
@@ -2341,6 +2300,127 @@ class QuoteService:
                 logger.info("监控分段 %.1fs: %s", total, detail or "(各段均 <50ms)")
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
+
+    def _on_strategy_monitor_events(self, events: list[dict]) -> None:
+        """单策略完成即发布, 不等待其他策略或普通监控轮。"""
+        engine = getattr(self._app_state, "monitor_engine", None)
+        if engine is None:
+            return
+        if engine.consume_strategy_result_updates():
+            self.notify_strategy_results_updated()
+        feed = self._deliver_monitor_events(events, engine)
+        # 策略事件只触发自动跟单; pending 即时单仍由普通行情监控轮撮合一次。
+        if feed:
+            self._run_paper_hooks(pl.DataFrame(), feed, match_pending=False)
+
+    def _deliver_monitor_events(self, rule_events: list[dict], engine) -> list[dict]:
+        """复用落盘、SSE 和通知通道, 沙盒事件仅返回给模拟盘。"""
+        all_alerts: list[dict] = []
+        from app.strategy.paper_watch import is_paper_watch_event
+
+        paper_watch_events = [ev for ev in rule_events if is_paper_watch_event(ev)]
+        rule_events = [ev for ev in rule_events if not is_paper_watch_event(ev)]
+        if rule_events:
+            rule_events = self._refresh_alert_quotes(rule_events, engine)
+            rule_events = self._format_extension_notifications(rule_events)
+            # 落盘到 alerts.jsonl
+            try:
+                from app.services import alert_store
+                alert_store.append_many(
+                    self._app_state.repo.store.data_dir, rule_events,
+                )
+            except Exception as e:  # noqa: BLE001 -- 留痕失败不阻断其他通知通道
+                logger.warning("告警落盘失败: %s", e)
+            try:
+                from app.services import strategy_history
+                strategy_history.record_monitor_events(
+                    self._app_state.repo.store.data_dir, rule_events,
+                )
+            except Exception as e:  # noqa: BLE001 -- 记录历史失败不阻断实时推送
+                logger.warning("策略节点历史记录失败: %s", e)
+            # 转为 SSE 推送格式 (兼容旧 alert schema)
+            for ev in rule_events:
+                alert = {
+                    "source": ev["source"],
+                    "type": ev["type"],
+                    "rule_id": ev.get("rule_id"),
+                    "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
+                    "symbol": ev["symbol"],
+                    "name": ev["name"],
+                    "message": ev["message"],
+                    "price": ev["price"],
+                    "change_pct": ev["change_pct"],
+                    "signals": ev["signals"],
+                    "severity": ev.get("severity", "info"),
+                    "conditions": ev.get("conditions") or [],
+                    "logic": ev.get("logic") or "and",
+                }
+                for key in (
+                    "sector_kind", "sector_key", "sector_name",
+                    "sector_source_field", "sector_value", "sector_level",
+                    "window_change_pct", "coverage_ratio", "valid_count",
+                    "total_count", "up_count", "down_count", "leader",
+                    "abnormal_window", "abnormal_value", "abnormal_threshold",
+                    "abnormal_closeness", "volume_delta", "volume_delta_span",
+                    "volume_delta_amount",
+                ):
+                    if key in ev:
+                        alert[key] = ev[key]
+                all_alerts.append(alert)
+
+        # 广播到所有 SSE 订阅者 (背压保护在订阅者队列内做)
+        if all_alerts:
+            # 按 symbol 富化行业/概念 ext 字段, 使 toast + 触发记录统一展示板块标签。
+            self._enrich_alerts_ext(all_alerts)
+            self._broadcast_alerts(all_alerts)
+            logger.info("监控评估完成: %d 条通知", len(all_alerts))
+
+            # 系统通知 (可选通道, 由 preferences 开关控制)。
+            # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
+            self._maybe_send_system_notifications(all_alerts)
+
+        # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
+        # 紧随系统通知, 同样静默降级不阻断主流程。
+        if rule_events:
+            self._maybe_send_webhook(rule_events, engine)
+
+        return rule_events + paper_watch_events
+
+    def _run_paper_hooks(
+        self, enriched_today: pl.DataFrame, feed: list[dict], *, match_pending: bool,
+    ) -> None:
+        """事件跟单与行情撮合共用原模拟盘锁和校验。"""
+        try:
+            from app.strategy import paper as paper_trading
+            from app.strategy import paper_auto
+            data_dir = self._app_state.repo.store.data_dir
+            snapshot = dict(zip(
+                enriched_today["symbol"].to_list() if match_pending else [],
+                enriched_today["raw_close"].to_list() if match_pending else [],
+                strict=False,
+            ))
+            paper_events: list[dict] = []
+            for acc_id in paper_trading.list_account_ids(data_dir):
+                if match_pending:
+                    paper_events.extend(
+                        paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
+                if feed:
+                    created = paper_auto.on_rule_events(data_dir, feed, account_id=acc_id)
+                    paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
+            # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
+            # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /
+            # Webhook。全部静默降级。
+            if paper_events:
+                self._broadcast_alerts(paper_events)
+                try:
+                    from app.services import alert_store
+                    alert_store.append_many(data_dir, paper_events)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("模拟盘成交留痕失败: %s", e)
+                self._maybe_send_system_notifications(paper_events)
+                self._maybe_send_paper_webhook(paper_events)
+        except Exception as e:  # noqa: BLE001 -- 模拟盘与监控告警隔离
+            logger.warning("模拟盘钩子失败 (不影响监控): %s", e)
 
     def _format_extension_notifications(self, events: list[dict]) -> list[dict]:
         """Apply optional copy formatters after evaluation and before every output channel."""
@@ -2912,7 +2992,7 @@ class QuoteService:
         logger.info("enriched 全量重建已转后台 (asset_type=%s)", asset_type)
 
     @staticmethod
-    def _etf_history_files(root: Path, today: date) -> tuple:
+    def _live_history_files(root: Path, today: date) -> tuple:
         # Daily storage uses date partitions. Probe only the existing 150-day
         # warmup horizon, so old years and today's repeated writes cost no scan.
         files = []
@@ -2926,14 +3006,16 @@ class QuoteService:
                 files.append((str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino))
         return tuple(files)
 
-    def _etf_live_history(self, today: date, columns: list[str]) -> pl.DataFrame | None:
-        root = self._repo.store.data_dir / "kline_etf_daily"
-        files = self._etf_history_files(root, today)
+    def _live_asset_history(
+        self, asset_type: str, today: date, columns: list[str],
+    ) -> pl.DataFrame | None:
+        root = self._repo.store.data_dir / f"kline_{asset_type}_daily"
+        files = self._live_history_files(root, today)
         if not files:
-            self._etf_history_cache = None
+            self._live_history_cache.pop(asset_type, None)
             return None  # Preserve the original empty-history fallback.
-        key = (str(root), today, files)
-        cached = self._etf_history_cache
+        key = (str(root), today, tuple(columns), files)
+        cached = self._live_history_cache.get(asset_type)
         if cached is not None and cached[0] == key:
             return cached[1]
         frame = guarded_collect(
@@ -2945,10 +3027,11 @@ class QuoteService:
         )
         # A bounded immutable input cache only: formulas, adjustment factors and
         # signals are still evaluated on each tick by the original pipeline.
-        self._etf_history_cache = None
-        if frame.estimated_size() <= 64 * 1024**2 and files == self._etf_history_files(root, today):
-            self._etf_history_cache = (key, frame)
+        self._live_history_cache.pop(asset_type, None)
+        if frame.estimated_size() <= 64 * 1024**2 and files == self._live_history_files(root, today):
+            self._live_history_cache[asset_type] = (key, frame)
         return frame
+
     def _flush_live_enriched(
         self,
         daily_df: pl.DataFrame,
@@ -3074,9 +3157,12 @@ class QuoteService:
                 # 分区命名与预期不符时回退到全量 glob, 保持兼容。
                 hist_source = hist_paths if hist_paths else str(daily_dir / "**" / "*.parquet")
                 ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
-                # ETF 全量回退的历史帧按日线文件指纹缓存 (上游 v0.3.29):
-                # 盘中每轮都要重扫 150 天分区, 缓存命中时直接用不可变帧。
-                etf_hist = self._etf_live_history(today, ohlcv_cols) if asset_type == "etf" else None
+                # ETF/指数没有股票的 live_agg, 复用不含当日的历史输入,
+                # 避免每轮为少量指数重扫全指数历史; 当日价格仍逐轮重算。
+                asset_hist = (
+                    self._live_asset_history(asset_type, today, ohlcv_cols)
+                    if asset_type in {"etf", "index"} else None
+                )
                 daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
                 if daily_ohlcv.is_empty() or "symbol" not in daily_ohlcv.columns:
                     return
@@ -3101,9 +3187,9 @@ class QuoteService:
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
                 today_parts: list[pl.DataFrame] = []
-                # ETF 命中上游的日线历史帧缓存时直接复用, 否则按 date= 分区拼路径扫描。
+                # 命中历史输入缓存时直接复用, 否则按 date= 分区拼路径扫描。
                 hist_lf = (
-                    etf_hist.lazy() if etf_hist is not None
+                    asset_hist.lazy() if asset_hist is not None
                     else scan_daily_parquet(hist_source)
                 ).filter(
                     # 多读一段自然日, 再按交易日计数确定窗口起点

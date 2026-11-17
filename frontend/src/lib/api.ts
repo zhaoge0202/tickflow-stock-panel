@@ -3721,6 +3721,17 @@ export const api = {
       final_sync_done?: boolean
       final_sync_failed?: string | null
       last_fetch_ms: number | null
+      round_timing?: { fetch_ms: number; monitor_ms: number; monitor_async: boolean }
+      fetch_stages_ms?: Record<string, number>
+      strategy_workers?: {
+        asset_type: string
+        strategy_id: string
+        running: boolean
+        pending: boolean
+        last_elapsed_ms: number | null
+        data_age_s: number | null
+        last_error: string | null
+      }[]
     }>('/api/intraday/status'),
   quoteInterval: () =>
     request<{ interval: number; min_interval: number; max_interval: number }>(
