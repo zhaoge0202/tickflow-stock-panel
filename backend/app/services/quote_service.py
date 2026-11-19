@@ -51,7 +51,7 @@ SOURCE_LABELS = {
     "strategy": "策略", "signal": "信号", "price": "价格",
     "market": "异动", "ladder": "连板梯队", "sector": "板块",
     "volume_delta": "放量", "abnormal": "异动", "date": "日期提醒",
-    "paper": "模拟盘",
+    "paper": "模拟盘", "guardian": "持仓守护",
 }
 
 # final 定版确认容差: 快照时间戳允许早于边界 5s 内 (供应商时间戳精度不一)
@@ -2277,6 +2277,21 @@ class QuoteService:
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
                         t0 = _mark("指数", t0)
+            # 持仓守护: 独立于策略池/监控规则, 对最近推送过的买入信号做出场提醒。
+            # 重启后策略池为空也能工作 (状态落盘 + 首次从 alerts.jsonl 回填)。
+            if stock_ready and self._app_state is not None:
+                t0 = time.perf_counter()
+                try:
+                    from app.services import position_guard
+                    _data_dir = self._app_state.repo.store.data_dir
+                    if not getattr(self, "_guard_bootstrapped", False):
+                        self._guard_bootstrapped = True
+                        position_guard.bootstrap_from_alerts(_data_dir)
+                    rule_events = rule_events + position_guard.evaluate(_data_dir, enriched_today)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("持仓守护评估失败: %s", e)
+                t0 = _mark("持仓守护", t0)
+
             t0 = time.perf_counter()
             feed = self._deliver_monitor_events(rule_events, engine)
             t0 = _mark("告警处理", t0)
@@ -2338,6 +2353,22 @@ class QuoteService:
                 )
             except Exception as e:  # noqa: BLE001 -- 记录历史失败不阻断实时推送
                 logger.warning("策略节点历史记录失败: %s", e)
+            # 持仓守护: 买入信号入册, 之后按止损/破 MA5/落袋三条规则独立提醒。
+            try:
+                from app.services import position_guard
+                for ev in rule_events:
+                    if (ev.get("type") == "buy_signal" and ev.get("source") == "strategy"
+                            and ev.get("strategy_id")):
+                        position_guard.register(
+                            self._app_state.repo.store.data_dir,
+                            strategy_id=str(ev["strategy_id"]),
+                            symbol=str(ev.get("symbol") or ""),
+                            name=ev.get("name"),
+                            price=ev.get("price"),
+                            ts=ev.get("ts"),
+                        )
+            except Exception as e:  # noqa: BLE001 -- 登记失败不影响告警主流程
+                logger.warning("持仓守护登记失败: %s", e)
             # 转为 SSE 推送格式 (兼容旧 alert schema)
             for ev in rule_events:
                 alert = {
@@ -2718,6 +2749,9 @@ class QuoteService:
                 # webhook_channels 指定本规则需要投递的外部渠道。
                 # 空列表 = 该规则不推送。仅推送「渠道已选 + 对应地址已配置」的组合。
                 channels = rule.get("webhook_channels") if rule else None
+                if not channels and ev.get("source") == "guardian":
+                    # 持仓守护没有监控规则载体, 走全局默认渠道 (与规则默认值同口径)。
+                    channels = preferences.get_webhook_default_channels()
                 if not channels:
                     skipped_no_channel += 1
                     logger.debug(
