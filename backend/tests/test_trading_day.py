@@ -28,6 +28,7 @@ def _clean_cache():
 def _no_probes(monkeypatch):
     """探测函数替换为爆炸 — 用于验证未被打到。"""
     monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: (_ for _ in ()).throw(AssertionError("不应探测")))
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: (_ for _ in ()).throw(AssertionError("不应探测")))
     monkeypatch.setattr(trading_day, "_probe_tickflow", lambda now: (_ for _ in ()).throw(AssertionError("不应探测")))
 
 
@@ -57,13 +58,27 @@ def test_fuyao_calendar_is_authoritative_even_before_open(monkeypatch):
 def test_chain_falls_through_to_tickflow_when_fuyao_unknown(monkeypatch):
     monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
     monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: None)
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: None)
     monkeypatch.setattr(trading_day, "_probe_tickflow", lambda now: True)
+    assert is_trading_day(monday) is True
+
+
+def test_chain_prefers_tdxapi_over_tickflow(monkeypatch):
+    """本地 sidecar 有结论时不再打云端 tickflow。"""
+    monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
+    monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: None)
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: True)
+    monkeypatch.setattr(
+        trading_day, "_probe_tickflow",
+        lambda now: (_ for _ in ()).throw(AssertionError("tdxapi 已有结论不应继续探测")),
+    )
     assert is_trading_day(monday) is True
 
 
 def test_all_probes_unknown_returns_none(monkeypatch):
     monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
     monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: None)
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: None)
     monkeypatch.setattr(trading_day, "_probe_tickflow", lambda now: None)
     assert is_trading_day(monday) is None
 
@@ -214,6 +229,7 @@ def test_unknown_verdict_retries_after_short_ttl(monkeypatch):
         return None
 
     monkeypatch.setattr(trading_day, "_probe_fuyao", _counting_probe)
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: None)  # 隔离本地 sidecar
     monkeypatch.setattr(trading_day, "_probe_tickflow", lambda now: None)  # 隔离真实网络
     assert is_trading_day(monday) is None
     # 手动把缓存时间拨回 10 分钟前 (超过 unknown TTL 300s) → 重探
@@ -323,9 +339,110 @@ def test_unknown_verdict_is_cached_within_short_ttl(monkeypatch):
         return None
 
     monkeypatch.setattr(trading_day, "_probe_fuyao", _fuyao)
+    monkeypatch.setattr(trading_day, "_probe_tdxapi", lambda now: None)
     monkeypatch.setattr(trading_day, "_probe_tickflow", _tickflow)
 
     assert is_trading_day(monday) is None
     assert is_trading_day(monday) is None
     assert is_trading_day(monday) is None
     assert calls == {"fuyao": 1, "tickflow": 1}
+
+
+# ---- tdx-api 戳探针 (本地 sidecar, 优先于云端) ----
+
+def _fake_tdxapi(monkeypatch, stamps=None, error=None):
+    from app.plugins.tdxapi import provider as tdx_mod
+
+    calls = {"n": 0}
+
+    class _FakeProvider:
+        def probe_quote_timestamps(self, symbols):
+            calls["n"] += 1
+            if error is not None:
+                raise error
+            return list(stamps or [])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tdx_mod, "TDXAPIProvider", _FakeProvider)
+    return calls
+
+
+def test_tdxapi_fresh_stamp_is_trading_anytime(monkeypatch):
+    """开盘缓冲窗内只要 sidecar 戳翻新到今天即判交易日。"""
+    monday_920 = datetime(2026, 9, 7, 9, 20, tzinfo=CN)
+    _fake_tdxapi(monkeypatch, [int(monday_920.timestamp() * 1000)])
+    assert trading_day._probe_tdxapi(monday_920) is True
+
+
+def test_tdxapi_stale_stamp_before_buffer_is_unknown(monkeypatch):
+    monday_935 = datetime(2026, 9, 7, 9, 35, tzinfo=CN)
+    _fake_tdxapi(monkeypatch, [1787902251001])  # 上周五 15:30
+    assert trading_day._probe_tdxapi(monday_935) is None
+
+
+def test_tdxapi_stale_stamp_after_buffer_is_holiday(monkeypatch):
+    monday_1041 = datetime(2026, 9, 7, 10, 41, tzinfo=CN)
+    _fake_tdxapi(monkeypatch, [1787902251001])
+    assert trading_day._probe_tdxapi(monday_1041) is False
+
+
+def test_tdxapi_error_is_unknown(monkeypatch):
+    monday = datetime(2026, 9, 7, 10, 41, tzinfo=CN)
+    _fake_tdxapi(monkeypatch, error=RuntimeError("sidecar 不可用"))
+    assert trading_day._probe_tdxapi(monday) is None
+
+
+def test_tdxapi_empty_stamps_is_unknown(monkeypatch):
+    monday = datetime(2026, 9, 7, 10, 41, tzinfo=CN)
+    _fake_tdxapi(monkeypatch, [])
+    assert trading_day._probe_tdxapi(monday) is None
+
+
+# ---- 云端 tickflow 兜底: 超时与 403 熔断 ----
+
+def test_tickflow_403_trips_breaker_for_the_day(monkeypatch):
+    """免费档 403 是确定性失败: 熔断后当天不再打云端请求。"""
+    import app.tickflow.client as tf_client_mod
+
+    class _DeniedError(Exception):
+        status_code = 403
+
+    calls = {"n": 0}
+
+    def _client():
+        calls["n"] += 1
+        raise _DeniedError("无 batch 权限")
+
+    monkeypatch.setattr(tf_client_mod, "get_client", _client)
+    monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
+    assert trading_day._probe_tickflow(monday) is None
+    assert trading_day._probe_tickflow(monday) is None
+    assert calls["n"] == 1
+    assert trading_day._tickflow_probe_disabled() is True
+
+
+def test_tickflow_timeout_trips_breaker(monkeypatch):
+    """探测超过硬截止 → 立即放弃 (不阻塞行情轮) 并熔断。"""
+    import time as _time
+
+    monkeypatch.setattr(trading_day, "_PROBE_DEADLINE_S", 0.05)
+    monkeypatch.setattr(
+        trading_day, "_probe_tickflow_raw",
+        lambda now: (_time.sleep(1.0), True)[1],
+    )
+    monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
+    started = _time.monotonic()
+    assert trading_day._probe_tickflow(monday) is None
+    assert _time.monotonic() - started < 0.9
+    assert trading_day._tickflow_probe_disabled() is True
+
+
+def test_tickflow_breaker_skips_probe_without_network(monkeypatch):
+    monkeypatch.setattr(trading_day, "_TF_DISABLED_UNTIL", float("inf"))
+    monkeypatch.setattr(
+        trading_day, "_probe_tickflow_raw",
+        lambda now: (_ for _ in ()).throw(AssertionError("熔断后不应探测")),
+    )
+    assert trading_day._probe_tickflow(datetime(2026, 9, 7, 10, 0, tzinfo=CN)) is None

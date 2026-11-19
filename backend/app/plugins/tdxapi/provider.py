@@ -497,6 +497,25 @@ class TDXAPIProvider:
                 rows.append(row)
         return rows
 
+    def probe_quote_timestamps(self, symbols: list[str]) -> list[int]:
+        """单次 batch-quote 取原始快照时间戳 (ms), 供交易日探针复用。
+
+        不加载名称表、不做失效代码二分重试: 探针只要「快照翻新到哪天」一个事实,
+        失败由调用方 (trading_day) 按未知处理。调用方负责客户端生命周期与超时。
+        """
+        codes = [code for code in (_to_tdx_code(s) for s in symbols if s) if code]
+        if not codes:
+            return []
+        data = self._request("POST", "/api/batch-quote", json={"codes": codes})
+        stamps: list[int] = []
+        for item in data or []:
+            if not isinstance(item, dict):
+                continue
+            ms = _server_time_ms(item.get("ServerTime"))
+            if ms:
+                stamps.append(int(ms))
+        return stamps
+
     def _filter_invalid_quote_symbols(self, symbols: list[str]) -> tuple[list[str], list[str]]:
         pairs = [(symbol, _to_tdx_code(symbol)) for symbol in symbols]
         with self._invalid_quote_codes_lock:
