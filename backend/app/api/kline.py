@@ -2011,6 +2011,12 @@ def fill_minute_gaps_endpoint(
     symbols: Optional[str] = Query(None, description="逗号分隔; 指定则跳过扫描直接补这些标的"),
     limit: int = Query(300, ge=1, le=2000, description="单次最多回补的标的数"),
     concurrency: int = Query(8, ge=1, le=16, description="并发拉取数; 实测 8 打满上游, 16 无额外收益"),
+    min_ratio: float = Query(
+        1.0, ge=0.5, le=1.0,
+        description="完整性门槛系数 (期望根数 × 系数)。默认 1.0 = 缺一根就补, "
+                    "与体检端点 (/minute-gaps) 的 0.9 容差不同: 残根多停在 237~239 根, "
+                    "0.9 口径下进不了清单",
+    ),
 ):
     """按缺口清单回补单个交易日的分钟 K (盘后使用)。
 
@@ -2030,7 +2036,7 @@ def fill_minute_gaps_endpoint(
     picked = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     return fill_minute_gaps(
         repo, request.app.state.capabilities, target,
-        symbols=picked, limit=limit, concurrency=concurrency,
+        symbols=picked, limit=limit, concurrency=concurrency, min_ratio=min_ratio,
     )
 
 
@@ -2577,6 +2583,51 @@ async def extend_minute_history(request: Request):
         raise
     except Exception as e:
         logger.error("extend_minute_history error: %s\n%s", e, _tb.format_exc())
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/rebuild_minute_from_ticks")
+def rebuild_minute_from_ticks(request: Request, body: dict):
+    """用分笔成交重建某票某日的分钟 K (补齐上游分钟 K 整段缺失的时段)。
+
+    body: { "symbol": "002611.SZ", "date": "2026-10-23", "overwrite": false }
+
+    通达信分钟 K 偶发整天缺失 (如 2026-10-23 只回 13:41 之后 80 根), 但同日分笔
+    成交完整; 这里按分钟聚合成 1 分钟 K 写入 kline_minute。默认只补缺失的分钟,
+    overwrite=true 则用分笔派生值整票覆盖当日 (库里那几根来自别的口径时用)。
+    """
+    from app.services.minute_from_ticks import rebuild_minute_from_ticks as _rebuild
+
+    symbol = str(body.get("symbol") or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol 不能为空")
+    try:
+        trade_date = date.fromisoformat(str(body.get("date") or "").strip()[:10])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD 字符串") from e
+    if trade_date > cn_today():
+        raise HTTPException(status_code=400, detail="date 不能晚于今天")
+    # 盘中当日分钟K正在被分钟策略 / 分钟刷新读写, 禁止任何重建 (含只补缺):
+    # 只允许重建历史日期, 或收盘以后处理今天。
+    if trade_date == cn_today() and in_continuous_session():
+        raise HTTPException(
+            status_code=409,
+            detail="盘中不允许重建当日分钟 K (分钟策略实时上下文正在读它); 请收盘后重建, 或改用历史日期",
+        )
+
+    repo = request.app.state.repo
+    if repo.resolve_asset_type(symbol) == "index":
+        raise HTTPException(
+            status_code=400, detail="指数分钟 K 不支持落库重建 (走 /api/index/minute)",
+        )
+    if not _minute_allowed(request.app.state.capabilities):
+        raise HTTPException(status_code=403, detail="当前分钟 K 数据源不可用, 请先检查数据源配置")
+    try:
+        return _rebuild(
+            repo.store.data_dir, symbol, trade_date, overwrite=bool(body.get("overwrite")),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("rebuild_minute_from_ticks error: %s", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
