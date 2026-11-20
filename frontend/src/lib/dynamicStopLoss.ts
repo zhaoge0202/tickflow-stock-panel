@@ -1,10 +1,14 @@
-/** Dynamic exit calculations consume local runtime configuration. */
+/**
+ * 动态出场与止损止盈计算引擎。
+ *
+ * 动态出场计算只消费运行时传入的策略参数，不在公开前端保存任何策略默认值。
+ */
 
 export interface StopLossParams {
-  trailingStopPct?: number
-  stopLossPct?: number
-  maxHoldDays?: number
-  useMa5?: boolean
+  trailingStopPct: number
+  stopLossPct: number
+  maxHoldDays: number
+  useMa5: boolean
 }
 
 export interface StopLossInput {
@@ -35,19 +39,42 @@ export interface StopLossCalculation {
   holdingDays: number
   maxHoldDays: number
   isOverHold: boolean
+  configured: boolean
 }
-
-export const RUNTIME_STOP_LOSS_PARAMS: Required<StopLossParams> = {} as Required<StopLossParams>
 
 /**
  * 计算动态出场价位与安全垫
  */
 export function calculateDynamicStopLoss(input: StopLossInput): StopLossCalculation {
-  const params = { ...RUNTIME_STOP_LOSS_PARAMS, ...input.params }
   const cost = input.costPrice > 0 ? input.costPrice : input.currentPrice
   const current = input.currentPrice
   // Peak 必须至少不低于买入成本价和当前价
   const peak = Math.max(input.peakPrice || 0, cost, current)
+
+  const params = input.params
+  if (!params || !Number.isFinite(params.trailingStopPct) || params.trailingStopPct <= 0 || params.trailingStopPct >= 1
+    || !Number.isFinite(params.stopLossPct) || params.stopLossPct <= 0 || params.stopLossPct >= 1
+    || !Number.isInteger(params.maxHoldDays) || params.maxHoldDays < 1 || typeof params.useMa5 !== 'boolean') {
+    return {
+      costPrice: cost,
+      currentPrice: current,
+      peakPrice: peak,
+      trailingStopPrice: Number.NaN,
+      hardStopPrice: Number.NaN,
+      ma5Price: null,
+      effectiveStopPrice: Number.NaN,
+      effectiveExitReason: 'none',
+      isProfitLock: false,
+      trailingLabel: '未配置',
+      safetyMarginPct: Number.NaN,
+      pnlPct: cost > 0 ? ((current - cost) / cost) * 100 : 0,
+      state: 'NORMAL',
+      holdingDays: input.holdingDays ?? 0,
+      maxHoldDays: 0,
+      isOverHold: false,
+      configured: false,
+    }
+  }
 
   const trailingStopPrice = peak * (1 - params.trailingStopPct)
   const hardStopPrice = cost * (1 - params.stopLossPct)
@@ -107,5 +134,6 @@ export function calculateDynamicStopLoss(input: StopLossInput): StopLossCalculat
     holdingDays,
     maxHoldDays: params.maxHoldDays,
     isOverHold,
+    configured: true,
   }
 }

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -104,3 +105,31 @@ def focus_strategy_ids(data_dir: Path) -> list[str]:
 def focus_default_strategy_id(data_dir: Path) -> str | None:
     """Focus 三版本的默认策略 ID (本地配置, 缺失时为 None)。"""
     return load_auction_config(data_dir)["focus_default_strategy_id"]
+
+
+def load_stop_loss_monitor_config(data_dir: Path) -> dict | None:
+    """读取本机盯盘参数；公开代码不携带用户策略默认值。"""
+    path = Path(data_dir) / "local_config" / "stop_loss_monitor.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.warning("本地盯盘配置无法读取，暂停参数相关提醒")
+        return None
+    if not isinstance(raw, dict):
+        return None
+    ratios = [raw.get("trailingStopPct"), raw.get("stopLossPct")]
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        or not math.isfinite(value) or not 0 < value < 1
+        for value in ratios
+    ):
+        return None
+    days = raw.get("maxHoldDays")
+    if type(days) is not int or days < 1 or type(raw.get("useMa5")) is not bool:
+        return None
+    return {
+        "trailingStopPct": ratios[0], "stopLossPct": ratios[1],
+        "maxHoldDays": days, "useMa5": raw["useMa5"],
+    }

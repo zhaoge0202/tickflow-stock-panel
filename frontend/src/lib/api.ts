@@ -2676,6 +2676,12 @@ export interface SponsorModelItem {
 }
 
 export interface SettingsState {
+  stop_loss_monitor?: {
+    trailingStopPct: number
+    stopLossPct: number
+    maxHoldDays: number
+    useMa5: boolean
+  } | null
   mode: 'none' | 'free' | 'api_key'
   tickflow_api_key_masked: string
   has_tickflow_key: boolean

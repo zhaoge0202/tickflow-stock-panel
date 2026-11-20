@@ -57,6 +57,7 @@ def get_settings() -> dict:
     """返回当前配置概况(Key 脱敏)。"""
     from app.config import settings
     from app.services import preferences
+    from app.services.local_strategy_config import load_stop_loss_monitor_config
     from app.services.ai_provider import (
         ai_configured,
         current_ai_context_window,
@@ -75,6 +76,7 @@ def get_settings() -> dict:
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
     return {
         "mode": tf_client.current_mode(),
+        "stop_loss_monitor": load_stop_loss_monitor_config(settings.data_dir),
         "tickflow_api_key_masked": secrets_store.mask(key),
         "has_tickflow_key": bool(key),
         "tier_label": tier_label(),

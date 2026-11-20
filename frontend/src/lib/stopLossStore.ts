@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { calculateDynamicStopLoss, type StopLossCalculation } from './dynamicStopLoss'
+import { calculateDynamicStopLoss, type StopLossCalculation, type StopLossParams } from './dynamicStopLoss'
 import { playNotificationSound } from './notificationSound'
 import { speakAlerts } from './voiceBroadcast'
 import type { AlertEvent } from './api'
@@ -28,6 +28,18 @@ const PIP_OPEN_KEY = 'tf_stop_loss_pip_open'
 let _positions: MonitoredPosition[] = loadPositionsFromStorage()
 let _isPipOpen: boolean = loadPipOpenFromStorage()
 const _listeners = new Set<() => void>()
+let _stopLossParams: StopLossParams | undefined
+
+export function getStopLossParams(): StopLossParams | undefined {
+  return _stopLossParams
+}
+
+/** 本机配置只在运行时保留，不把参数值写入版本库或浏览器持仓档案。 */
+export function setStopLossParams(params: StopLossParams | null | undefined) {
+  if (JSON.stringify(params ?? null) === JSON.stringify(_stopLossParams ?? null)) return
+  _stopLossParams = params ? { ...params } : undefined
+  _emit()
+}
 
 function _emit() {
   _listeners.forEach((fn) => fn())
@@ -217,23 +229,24 @@ export function updateMonitoredQuotes(
       peakPrice: newHigh,
       ma5: newMa5,
       holdingDays: item.holdingDays,
+      params: _stopLossParams,
     })
 
     // 检查状态迁移以触发告警
     const prevState = item.lastTriggeredState || 'NORMAL'
     let lastAlertedAt = item.lastAlertedAt || 0
 
-    if (calc.state === 'TRIGGERED' && (prevState !== 'TRIGGERED' || now - lastAlertedAt > 300_000)) {
+    if (calc.configured && calc.state === 'TRIGGERED' && (prevState !== 'TRIGGERED' || now - lastAlertedAt > 300_000)) {
       // 触发警报音与语音播报 (防抖: 5分钟内同一只不重复轰炸)
       lastAlertedAt = now
       const reasonDesc =
         calc.effectiveExitReason === 'trailing_stop'
-          ? `触及移动止盈线 ${calc.trailingStopPrice} 元 (本机移动止盈)`
+          ? `触及移动止盈线 ${calc.trailingStopPrice} 元`
           : calc.effectiveExitReason === 'stop_loss'
-            ? `跌破底线止损 ${calc.hardStopPrice} 元 `
+            ? `跌破底线止损 ${calc.hardStopPrice} 元`
             : calc.effectiveExitReason === 'ma5_breakdown'
               ? `跌破 MA5 均线 ${calc.ma5Price} 元`
-              : '持仓达到本机上限'
+              : '持仓达到运行时上限'
 
       alertsToSpeak.push({
         ts: now,
@@ -252,7 +265,7 @@ export function updateMonitoredQuotes(
       newCurrent !== item.currentPrice ||
       newHigh !== item.peakPrice ||
       q.changePct !== item.changePct ||
-      calc.state !== item.lastTriggeredState
+      (calc.configured && calc.state !== item.lastTriggeredState)
     ) {
       changed = true
       return {
@@ -261,7 +274,7 @@ export function updateMonitoredQuotes(
         peakPrice: newHigh,
         changePct: q.changePct ?? item.changePct,
         ma5: newMa5,
-        lastTriggeredState: calc.state,
+        lastTriggeredState: calc.configured ? calc.state : item.lastTriggeredState,
         lastAlertedAt,
       }
     }

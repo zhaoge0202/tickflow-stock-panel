@@ -6,11 +6,14 @@ import {
   setPipOpen,
   removeMonitoredPosition,
   addOrUpdateMonitoredPosition,
+  getStopLossParams,
+  setStopLossParams,
   updateMonitoredQuotes,
   type MonitoredPosition,
 } from '@/lib/stopLossStore'
 import { calculateDynamicStopLoss, type StopLossCalculation } from '@/lib/dynamicStopLoss'
 import { api } from '@/lib/api'
+import { useSettings } from '@/lib/useSharedQueries'
 import { fmtPrice, fmtPct } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { toast } from '@/components/Toast'
@@ -117,6 +120,7 @@ function renderStopLossCanvas(
       peakPrice: item.peakPrice,
       ma5: item.ma5,
       holdingDays: item.holdingDays,
+      params: getStopLossParams(),
     })
 
     const isTriggered = calc.state === 'TRIGGERED'
@@ -167,7 +171,11 @@ function renderStopLossCanvas(
     // 核心出场防守线
     ctx.fillStyle = isTriggered ? '#F87171' : isWarning ? '#FDE047' : '#F8FAFC'
     ctx.font = 'bold 11px sans-serif'
-    ctx.fillText(`出场线: ${calc.effectiveStopPrice.toFixed(2)}`, 215, y + 42)
+    ctx.fillText(
+      calc.configured ? `出场线: ${calc.effectiveStopPrice.toFixed(2)}` : '出场线: 未配置',
+      215,
+      y + 42,
+    )
 
     // 安全垫进度条与状态
     const barWidth = logicalWidth - 40
@@ -179,7 +187,11 @@ function renderStopLossCanvas(
     ctx.roundRect(20, barY, barWidth, barHeight, 2.5)
     ctx.fill()
 
-    const fillRatio = isTriggered ? 1 : Math.max(0.05, Math.min(1, calc.safetyMarginPct / 5))
+    const fillRatio = isTriggered
+      ? 1
+      : calc.configured
+        ? Math.max(0.05, Math.min(1, calc.safetyMarginPct / 5))
+        : 0
     ctx.fillStyle = isTriggered ? '#EF4444' : isWarning ? '#EAB308' : '#10B981'
     ctx.beginPath()
     ctx.roundRect(20, barY, barWidth * fillRatio, barHeight, 2.5)
@@ -192,7 +204,9 @@ function renderStopLossCanvas(
       ? '🚨 触及出场线，建议立即离场！'
       : isWarning
         ? `⚠️ 安全垫仅剩 +${calc.safetyMarginPct}% (预警)`
-        : `安全垫 +${calc.safetyMarginPct}% · ${calc.trailingLabel} ${calc.trailingStopPrice.toFixed(2)}`
+        : !calc.configured
+          ? '未配置策略参数'
+          : `安全垫 +${calc.safetyMarginPct}% · ${calc.trailingLabel} ${calc.trailingStopPrice.toFixed(2)}`
     ctx.fillText(statusText, 20, y + 74)
 
     // 盈亏
@@ -212,6 +226,8 @@ function renderStopLossCanvas(
 export function StopLossPiPHost() {
   const positions = useMonitoredPositions()
   const isPipOpen = useIsPipOpen()
+  const { data: settings } = useSettings()
+  const stopLossParams = settings?.stop_loss_monitor
 
   const [pipWindow, setPipWindow] = useState<Window | null>(null)
   const [minimized, setMinimized] = useState(false)
@@ -234,6 +250,11 @@ export function StopLossPiPHost() {
   const [pos, setPos] = useState({ x: 24, y: 72 })
   const draggingRef = useRef(false)
   const dragStartRef = useRef({ mx: 0, my: 0, ox: 0, oy: 0 })
+
+  // 本机私有配置沿用同一计算口径，包含没有关联策略的手动盯盘持仓。
+  useEffect(() => {
+    setStopLossParams(stopLossParams)
+  }, [stopLossParams])
 
   // ===== 0. 自动补齐股票名称 (解决历史数据或快捷标记只有代码没有名称的问题) =====
   useEffect(() => {
@@ -264,7 +285,7 @@ export function StopLossPiPHost() {
     return () => {
       active = false
     }
-  }, [positions])
+  }, [positions, stopLossParams])
 
   // ===== 1. 实时行情高频轮询 (每 2.5 秒更新一次盯盘标的) =====
   useEffect(() => {
@@ -359,7 +380,7 @@ export function StopLossPiPHost() {
     } else if (v.paused) {
       v.play().catch(() => {})
     }
-  }, [positions])
+  }, [positions, stopLossParams])
 
   // ===== 3. DOM 原生画中画 / 独立小窗管理 =====
   const copyStylesToWindow = (targetWin: Window) => {
@@ -753,6 +774,7 @@ export function StopLossPiPHost() {
                 peakPrice: item.peakPrice,
                 ma5: item.ma5,
                 holdingDays: item.holdingDays,
+                params: stopLossParams ?? undefined,
               })
 
               const isTriggered = calc.state === 'TRIGGERED'
@@ -917,17 +939,17 @@ export function StopLossPiPHost() {
                         )}
                         出场防守线:
                         <b className="font-mono text-foreground font-semibold">
-                          {fmtPrice(calc.effectiveStopPrice)}
+                          {calc.configured ? fmtPrice(calc.effectiveStopPrice) : '—'}
                         </b>
-                        <span className="text-[9px] text-muted">
+                        {calc.configured && <span className="text-[9px] text-muted">
                           ({calc.effectiveExitReason === 'trailing_stop'
-                            ? '移动防守线'
+                            ? '运行时移动线'
                             : calc.effectiveExitReason === 'stop_loss'
-                              ? '本机止损线'
+                              ? '运行时止损线'
                               : calc.effectiveExitReason === 'ma5_breakdown'
                                 ? '破MA5'
-                                : '持仓上限'})
-                        </span>
+                                : '运行时持仓上限'})
+                        </span>}
                       </span>
 
                       <span
@@ -940,7 +962,9 @@ export function StopLossPiPHost() {
                               : 'bg-bull/15 text-bull',
                         )}
                       >
-                        {isTriggered
+                        {!calc.configured
+                          ? '未配置策略参数'
+                          : isTriggered
                           ? '🚨 立即离场'
                           : `安全垫: +${calc.safetyMarginPct}%`}
                       </span>
@@ -960,7 +984,9 @@ export function StopLossPiPHost() {
                         style={{
                           width: isTriggered
                             ? '100%'
-                            : `${Math.max(5, Math.min(100, (calc.safetyMarginPct / 5) * 100))}%`,
+                            : calc.configured
+                              ? `${Math.max(5, Math.min(100, (calc.safetyMarginPct / 5) * 100))}%`
+                              : '0%',
                         }}
                       />
                     </div>
@@ -979,11 +1005,13 @@ export function StopLossPiPHost() {
                         </b>
                       </span>
                       <span>
-                        {calc.trailingLabel}线:{' '}
-                        <span className="font-mono text-secondary">{fmtPrice(calc.trailingStopPrice)}</span>
-                        <span className="text-[9px] text-muted ml-0.5">
-                          ({calc.isProfitLock ? '锁定利润' : '高点防守'})
-                        </span>
+                        {calc.configured ? <>
+                          {calc.trailingLabel}线:{' '}
+                          <span className="font-mono text-secondary">{fmtPrice(calc.trailingStopPrice)}</span>
+                          <span className="text-[9px] text-muted ml-0.5">
+                            ({calc.isProfitLock ? '锁定利润' : '运行时防守线'})
+                          </span>
+                        </> : '请关联策略后查看防守线'}
                       </span>
                     </div>
                   </div>

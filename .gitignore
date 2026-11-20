@@ -94,6 +94,8 @@ backend._recheck*.py
 backend/_verify*.py
 backend/_desktop_run.log
 reports/tickflow_pro_probe/
+# 本地回测报告包含私有结果与交易明细。
+reports/*backtest*
 .cursor/debug-*.log
 
 # ===== 打包产物 (本地构建的安装包,不入库) =====
