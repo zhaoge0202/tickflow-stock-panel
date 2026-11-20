@@ -267,6 +267,34 @@ def _resolve_required_features(meta: dict, mod, filter_history_fn, path: Path) -
     return inferred
 
 
+def _live_bar_progress(current: pl.DataFrame) -> float | None:
+    """实时矩阵最后一根 bar 的当日成交进度 (0~1); 非盘中返回 None。
+
+    盘中矩阵最后一行是未完成的当日 bar, volume 只是累计部分量。把这个进度
+    交给矩阵, 量比类特征才能折算到全天量级, 与历史行可比。
+    优先用行情真实时间 (current.quote_ts), 缺失时退回服务端北京时间。
+    """
+    from app.market_time import (
+        trading_minutes_elapsed,
+        trading_minutes_elapsed_from_ts,
+    )
+
+    minutes: float | None = None
+    if "quote_ts" in current.columns:
+        try:
+            quote_ts = current["quote_ts"].max()
+        except Exception:  # noqa: BLE001
+            quote_ts = None
+        if quote_ts is not None:
+            minutes = trading_minutes_elapsed_from_ts(quote_ts)
+    if minutes is None:
+        minutes = trading_minutes_elapsed()
+    progress = float(minutes) / 240.0
+    if not (0.0 < progress < 1.0):
+        return None
+    return progress
+
+
 class StrategyEngine:
     """策略引擎 — 策略加载 + 执行 + 评分"""
 
@@ -840,6 +868,7 @@ class StrategyEngine:
             raise ValueError("realtime matrix context requires current data")
         if current.is_empty() or not strategy_ids:
             return None
+        live_progress = _live_bar_progress(current)
         params_map = params_map or {}
         overrides_map = overrides_map or {}
         field_columns: set[str] = set()
@@ -899,7 +928,7 @@ class StrategyEngine:
             if entry is not None and entry.fingerprint == fingerprint:
                 try:
                     entry.buffer.update(current)
-                    return entry.buffer.snapshot()
+                    return entry.buffer.snapshot(live_bar_progress=live_progress)
                 except ValueError as exc:
                     logger.info("realtime matrix %s invalidated: %s", cache_key, exc)
 
@@ -923,7 +952,7 @@ class StrategyEngine:
                 fingerprint=fingerprint,
                 buffer=buffer,
             )
-            return buffer.snapshot()
+            return buffer.snapshot(live_bar_progress=live_progress)
 
     def realtime_matrix_stats(self, cache_key: str) -> dict[str, int]:
         with self._realtime_matrix_lock:

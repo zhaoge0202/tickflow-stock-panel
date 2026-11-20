@@ -463,6 +463,11 @@ class MarketDataMatrix:
     cache_lease: Any | None = field(default=None, compare=False, repr=False)
     vector_fields: frozenset[str] = field(default_factory=frozenset)
     cache_timing_ms: Mapping[str, float] = field(default_factory=dict)
+    # 最后一根 bar 的当日成交进度 (0~1, 已交易分钟/240)。仅实时矩阵在盘中设值:
+    # 此时最后一行 volume 是累计部分量, 量比类特征需折算到全天量级才能与历史行
+    # 可比 (与 indicators/pipeline.py 的 time_factor 同一口径)。None = 最后一根
+    # 已是完整日线, 不折算。
+    live_bar_progress: float | None = None
     _valid_bars: ValidBarIndex | None = field(
         default=None,
         compare=False,
@@ -2745,8 +2750,9 @@ class RealtimeMarketDataMatrix:
         self.generation += 1
         self.update_count += 1
 
-    def snapshot(self) -> MarketDataMatrix:
-        return _readonly_market_view(self.market)
+    def snapshot(self, live_bar_progress: float | None = None) -> MarketDataMatrix:
+        """只读视图; live_bar_progress 让量比类特征知道最后一行是未完成 bar。"""
+        return _readonly_market_view(self.market, live_bar_progress=live_bar_progress)
 
 
 def _live_target_asset_ids(
@@ -2792,6 +2798,7 @@ def _writable_market_copy(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_up_locked=np.array(market.limit_up_locked, copy=True),
         limit_down_locked=np.array(market.limit_down_locked, copy=True),
         fields=MappingProxyType(fields),
+        live_bar_progress=market.live_bar_progress,
     )
 
 
@@ -2801,8 +2808,14 @@ def _readonly_view(values: np.ndarray) -> np.ndarray:
     return view
 
 
-def _readonly_market_view(market: MarketDataMatrix) -> MarketDataMatrix:
+def _readonly_market_view(
+    market: MarketDataMatrix,
+    *,
+    live_bar_progress: float | None = None,
+) -> MarketDataMatrix:
     fields = {name: _readonly_view(values) for name, values in market.fields.items()}
+    # 未显式覆盖时沿用缓冲自身的进度 (调用方只在实时快照上更新它)。
+    progress = market.live_bar_progress if live_bar_progress is None else live_bar_progress
     return MarketDataMatrix(
         timestamps=_readonly_view(market.timestamps),
         timestamp_labels=market.timestamp_labels,
@@ -2818,6 +2831,7 @@ def _readonly_market_view(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_up_locked=_readonly_view(market.limit_up_locked),
         limit_down_locked=_readonly_view(market.limit_down_locked),
         fields=MappingProxyType(fields),
+        live_bar_progress=progress,
     )
 
 
@@ -2880,6 +2894,7 @@ def _append_market_row(
         symbols=market.symbols,
         names=market.names,
         fields=MappingProxyType(fields),
+        live_bar_progress=market.live_bar_progress,
         **arrays,
     )
 
@@ -3978,7 +3993,7 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         return _cached_matrix_operation(
             "matrix_feature",
             (market.close,),
-            {"name": name},
+            {"name": name, "live_bar_progress": market.live_bar_progress},
             lambda: _compute_matrix_feature(market, name),
         )
 
@@ -4039,7 +4054,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             np.isfinite(previous_volume),
             window,
         )
-        return _matrix_ratio(market.volume, previous_mean)
+        return _matrix_ratio(_effective_volume(market), previous_mean)
     if name in {"vol_ma5", "vol_ma10"}:
         window = 5 if name == "vol_ma5" else 10
         volume_valid = close_valid & np.isfinite(market.volume)
@@ -4338,6 +4353,24 @@ def _matrix_macd(values: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.
     dif = dif.astype(np.float32, copy=False)
     dea = valid_ewm_adjust_false(dif, np.isfinite(dif), alpha=2.0 / 10.0)
     return dif, dea
+
+
+def _effective_volume(market: MarketDataMatrix) -> np.ndarray:
+    """量比类特征用的成交量: 盘中把最后一行累计量折算到全天量级。
+
+    实时矩阵的最后一行是当日未完成 bar, volume 是累计部分量。不折算会让量比
+    被低估约 1/progress 倍 —— 09:46 时只有全天的 ~12%, 策略的
+    `vol_ratio >= 1.55` 要等到午后甚至尾盘才可能成立, 出票时点被系统性推到
+    日内高位。折算口径与 indicators/pipeline.py 的 time_factor 一致。
+    历史行本就是完整日成交量, 不受影响。
+    """
+    progress = market.live_bar_progress
+    volume = market.volume
+    if progress is None or not (0.0 < progress < 1.0):
+        return volume
+    scaled = np.array(volume, copy=True)
+    scaled[-1] = scaled[-1] / np.asarray(progress, dtype=scaled.dtype)
+    return scaled
 
 
 def _matrix_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
