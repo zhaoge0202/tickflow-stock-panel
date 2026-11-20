@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 WINDOWS = {"5m": 5 * 60_000, "15m": 15 * 60_000, "30m": 30 * 60_000, "60m": 60 * 60_000}
 CN_TZ = ZoneInfo("Asia/Shanghai")
 _lock = threading.Lock()
+# 触发后 24h, 当日的 5m/15m/30m/60m/close 窗口已不可能再补齐, 次日首个
+# 逐笔也已到齐。已算过的这类告警不必再重读一遍 parquet —— 实测生产上 763 条
+# outcome 的 next_day/60m 全是 None (状态永远停在 tracking), 旧实现每 30s 把
+# 最近 7 天的告警全部重算, 常驻吃满 4~5 个核 (polars 扫描 + 读逐笔分区)。
+_FREEZE_AFTER_MS = 24 * 60 * 60 * 1000
 
 
 class AlertOutcomeTracker:
@@ -65,17 +70,32 @@ def track_pending(data_dir: Path, *, days: int = 7) -> list[dict]:
     alerts = alert_store.list_recent(data_dir, days=days, limit=5000)
     outcomes = {row["alert_key"]: row for row in read_all(data_dir)}
     updated = []
+    now_ms = int(time.time() * 1000)
     for ev in alerts:
         symbol = str(ev.get("symbol") or "").strip().upper()
         if not symbol or not ev.get("ts"):
             continue
         key = alert_key(ev)
-        current = outcomes.get(key, _base_outcome(ev, key))
+        previous = outcomes.get(key)
+        current = previous if previous is not None else _base_outcome(ev, key)
+        # 已算过且触发日早已过: 结果不会再变, 留着原值即可。
+        if previous is not None and _frozen(current, ev, now_ms):
+            continue
         row = _compute(data_dir, ev, current)
         outcomes[key] = row
         updated.append(row)
-    _write_all(data_dir, list(outcomes.values()))
+    # 没有任何进展时不重写文件 (每次重写要走全局锁 + 全量落盘)。
+    if updated:
+        _write_all(data_dir, list(outcomes.values()))
     return updated
+
+
+def _frozen(current: dict, ev: dict, now_ms: int) -> bool:
+    """该条告警的后验结果是否已经定版 (无需再重算)。"""
+    if current.get("status") == "closed":
+        return True
+    trigger_ts = int(ev.get("ts") or 0)
+    return bool(trigger_ts) and now_ms - trigger_ts > _FREEZE_AFTER_MS
 
 
 def list_recent(data_dir: Path, *, days: int = 7, strategy_id: str | None = None) -> list[dict]:
