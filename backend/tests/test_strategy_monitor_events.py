@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +14,21 @@ from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine, StrategyResult
 from app.strategy.monitor import MonitorRuleEngine
+
+
+@pytest.fixture(autouse=True)
+def _after_close_confirmation(monkeypatch):
+    """本文件的用例断言「收盘确认后」的推送语义。
+
+    14:50 前的盘中买入信号门控单独由
+    test_intraday_buy_signal_waits_for_close_confirmation 覆盖。
+    """
+    from app.market_time import CN_TZ
+
+    monkeypatch.setattr(
+        "app.strategy.monitor.cn_now",
+        lambda: datetime(2026, 11, 17, 14, 55, tzinfo=CN_TZ),
+    )
 
 
 def _rule(*events: str, **overrides) -> dict:
@@ -497,3 +512,79 @@ def test_system_notifications_delivered_off_calling_thread(monkeypatch):
     assert thread_name != threading.current_thread().name
     assert title == "TickFlow · 价格"
     assert "000001.SZ" in body
+
+
+def test_intraday_buy_signal_pushed_with_pending_note(monkeypatch):
+    """盘中买入信号照样推送 (监控中心要实时可见), 但文案标记待收盘确认。
+
+    日线策略的入场条件含「收盘价贴住全天最高」这类只有收盘才成立的确认项,
+    盘中运行时退化成「现价正好在日内高点」。推送保留, 标记负责防止被当成
+    即时买点去追高。
+    """
+    from app.market_time import CN_TZ
+    from app.strategy.monitor import _INTRADAY_CANDIDATE_NOTE
+
+    day = date(2026, 11, 17)
+    prev_day = date(2026, 11, 14)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(prev_day, pool=("A",)),                 # 上一交易日基线
+        _result(day, pool=("A", "B"), buys=("A",)),     # 今日盘中 10:05
+    ]))
+    engine.set_rules([_rule("buy_signal", "pool_entry")])
+
+    monkeypatch.setattr(
+        "app.strategy.monitor.cn_now",
+        lambda: datetime(2026, 11, 17, 10, 5, tzinfo=CN_TZ),
+    )
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 201]):
+        assert engine.evaluate(_quotes()) == []
+        intraday = engine.evaluate(_quotes())
+
+    by_type = {event["type"]: event for event in intraday}
+    assert by_type["pool_entry"]["symbol"] == "B"
+    buy = by_type["buy_signal"]
+    assert buy["symbol"] == "A"
+    assert buy["message"].endswith(_INTRADAY_CANDIDATE_NOTE)
+
+
+def test_after_close_confirmation_buy_signal_has_no_note(monkeypatch):
+    """过了 14:50 的买入信号不再加待确认标记。"""
+    from app.market_time import CN_TZ
+    from app.strategy.monitor import _INTRADAY_CANDIDATE_NOTE
+
+    day = date(2026, 11, 17)
+    prev_day = date(2026, 11, 14)
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(prev_day, pool=("A",)),
+        _result(day, pool=("A", "B"), buys=("A",)),
+    ]))
+    engine.set_rules([_rule("buy_signal")])
+
+    monkeypatch.setattr(
+        "app.strategy.monitor.cn_now",
+        lambda: datetime(2026, 11, 17, 14, 55, tzinfo=CN_TZ),
+    )
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 201]):
+        assert engine.evaluate(_quotes()) == []
+        confirmed = engine.evaluate(_quotes())
+
+    assert [(event["type"], event["symbol"]) for event in confirmed] == [("buy_signal", "A")]
+    assert _INTRADAY_CANDIDATE_NOTE not in confirmed[0]["message"]
+
+
+def test_entry_signal_confirmed_boundary():
+    """门控分界 = INTRADAY_PREVIEW_READY_TIME (14:50), 与盘中草稿版放行同一时刻。"""
+    from app.market_time import CN_TZ
+    from app.strategy.monitor import _entry_signal_confirmed
+
+    def at(hour: int, minute: int) -> bool:
+        return _entry_signal_confirmed(datetime(2026, 11, 17, hour, minute, tzinfo=CN_TZ))
+
+    assert at(9, 30) is False
+    assert at(14, 49) is False
+    assert at(14, 50) is True
+    assert at(15, 0) is True
+    # 周末没有盘中口径, 不让门控把结果永久卡住
+    assert _entry_signal_confirmed(datetime(2026, 11, 21, 10, 0, tzinfo=CN_TZ)) is True

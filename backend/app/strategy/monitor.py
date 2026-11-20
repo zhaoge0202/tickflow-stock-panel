@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import polars as pl
 
-from app.market_time import cn_today
+from app.market_time import INTRADAY_PREVIEW_READY_TIME, cn_now, cn_today
 from app.strategy import config as _strategy_config
 from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用运算符构造器
 from app.strategy.custom_signals import signal_names as _custom_signal_names
@@ -30,6 +30,11 @@ from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_
 from app.strategy.monitor_rules import date_rule_in_window
 
 logger = logging.getLogger(__name__)
+
+# 盘中买入信号照常推送 (监控中心需要实时可见), 但文案要标明它还没过收盘确认:
+# 日线策略的入场条件含「收盘价贴住全天最高」这类只有收盘才成立的确认项, 盘中
+# 运行时退化成「现价正好在日内高点」, 不标注就会被当成即时买点去追高。
+_INTRADAY_CANDIDATE_NOTE = "〔盘中触发·待收盘确认〕"
 
 # 字段中文名映射 — 与前端 lib/signals.ts 对齐, 用于告警 message / 推送文案。
 # 信号布尔列 (csg_/csgi_/迁移的 signal_*) 的中文名由 _signal_label 查用户定义,
@@ -242,6 +247,20 @@ _group_cache_lock = threading.Lock()
 _group_cache: dict[str, Any] = {}
 # 已告警过的「分组已删除」(rule_id, group_id), 防止每轮评估刷日志
 _warned_missing_groups: set[tuple[str, str]] = set()
+
+
+def _entry_signal_confirmed(now: Any | None = None) -> bool:
+    """盘中买入信号是否已进入可推送窗口 (尾盘初选之后)。
+
+    日线策略的入场条件依赖收盘价 (例如「收盘 >= 全天最高 * 0.98」), 盘中运行时
+    这些条件退化成「现价正好处于日内高点」, 推出去就是追高提示。因此 14:50
+    (`INTRADAY_PREVIEW_READY_TIME`, 与盘中草稿版放行的分界线同一个) 之前不推送
+    买入信号, 只保留策略结果回显; 收盘定版后走正式口径出票。
+    """
+    now = now or cn_now()
+    if now.weekday() >= 5:
+        return True
+    return now.time() >= INTRADAY_PREVIEW_READY_TIME
 
 
 def _watchlist_groups_snapshot() -> dict[str, frozenset[str]]:
@@ -1575,6 +1594,11 @@ class MonitorRuleEngine:
                 hit for hit in entry_signal_hits
                 if str(hit.get("symbol", "")) in eligible_symbols
             ]
+        # 盘中买入信号照常推送, 但打上「待收盘确认」标记: 日线策略的入场条件里
+        # 含「收盘价贴住全天最高」「阳线」这类只有收盘才成立的确认项, 盘中运行时
+        # 它们退化成「现价正好在日内高点」。推送保留是为了监控中心实时可见, 标记
+        # 是为了不让它被当成即时买点 (实测追高后隔夜均值 -2.2%, 胜率 11%)。
+        intraday_candidate = not _entry_signal_confirmed()
         changes: dict[str, set[str]] = {
             "buy_signal": self._new_strategy_signals(
                 pool_key, "buy_signal", result.as_of, entry_signal_hits,
@@ -1619,6 +1643,8 @@ class MonitorRuleEngine:
                     f"策略「{sname}」{action_labels[event_type]} {len(symbol_list)} 只: "
                     f"{'、'.join(names)}"
                 )
+                if event_type == "buy_signal" and intraday_candidate:
+                    message = f"{message} {_INTRADAY_CANDIDATE_NOTE}"
                 hit_signals = sorted({
                     signal
                     for symbol in symbol_list
@@ -1989,7 +2015,10 @@ class MonitorRuleEngine:
                 if pct is not None:
                     sign = "+" if pct >= 0 else ""
                     pct_text = f" {sign}{pct * 100:.1f}%"
-                return f"策略「{sname}」{action} {name}{pct_text}"
+                text = f"策略「{sname}」{action} {name}{pct_text}"
+                if ev_type == "buy_signal" and not _entry_signal_confirmed():
+                    text = f"{text} {_INTRADAY_CANDIDATE_NOTE}"
+                return text
             return f"策略「{sname}」事件"
 
         # signal / price / market: 命中信号 + 现价 + 涨跌幅
