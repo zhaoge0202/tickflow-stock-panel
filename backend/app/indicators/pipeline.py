@@ -1378,11 +1378,14 @@ def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
         lf = scan_daily_parquet(
             index_glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float")
         )
-        df_idx = (
+        # 走 polars_guard 并发闸: 冷启动预热线程与主线程并发 collect 会触发
+        # polars 共享执行器死锁 (0 CPU 永久挂起), 详见 polars_guard 模块注释。
+        from app.polars_guard import guarded_collect
+        df_idx = guarded_collect(
             lf.filter(pl.col("symbol").is_in(wanted))
             .select(["symbol", "date", "close"])
-            .sort(["symbol", "date"])
-            .collect()
+            .sort(["symbol", "date"]),
+            priority="background",
         )
         if not df_idx.is_empty():
             available = set(df_idx["symbol"].to_list())

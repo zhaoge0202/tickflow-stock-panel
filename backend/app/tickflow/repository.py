@@ -724,7 +724,18 @@ class KlineRepository:
                                          "auction_result_volume", "auction_result_amount",
                                          "quote_ts", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
-                lf = scan_enriched_parquet(self._enriched_glob).filter(
+                # 只扫描 150 天窗口内的日期分区。历史 enriched 分区逐年累积
+                # (当前已 2881 个, 自 2015 年起), 用 **/*.parquet 全量 glob 会
+                # 逐批枚举全部历史文件且无 hive 分区裁剪, 冷启动预热因此卡死。
+                # 这里按窗口逐日拼出存在的分区文件列表, 把扫描范围压到 ~102 个分区。
+                window_files: list[str] = []
+                cursor = start_full
+                while cursor <= latest:
+                    part = enriched_dir / f"date={cursor.isoformat()}" / "part.parquet"
+                    if part.exists():
+                        window_files.append(str(part))
+                    cursor += timedelta(days=1)
+                lf = scan_enriched_parquet(window_files).filter(
                     pl.col("date") >= start_full
                 )
 
@@ -3084,7 +3095,15 @@ class KlineRepository:
         names = set(lf.collect_schema().names())
         if {"symbol", "date"}.issubset(names):
             lf = lf.unique(subset=["symbol", "date"], keep="last")
-        return lf.sort(["symbol", "date"]).collect(engine="streaming")
+        # 必须走 polars_guard 并发闸: 冷启动时预热线程与主线程(策略加载)会
+        # 并发 collect, 绕过闸直接 streaming collect 会触发 polars 共享执行器
+        # 死锁(0 CPU 永久挂起), 表现为 collect history 卡死、strategy engine
+        # loaded 不出现、/health 永久 503。
+        return guarded_collect(
+            lf.sort(["symbol", "date"]),
+            priority="background",
+            engine="streaming",
+        )
 
     @classmethod
     def _collect_unique_symbol_date_batched(
