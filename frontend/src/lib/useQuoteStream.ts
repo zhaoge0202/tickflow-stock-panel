@@ -11,6 +11,20 @@ import { createRevisionTracker, retryDelay } from './refreshPolicy'
 import type { KlineDailyResponse, StrategyAlertEvent } from './api'
 import { useDataVersions } from './useDataVersions'
 
+// 竞价确认只在开盘 09:25–09:35 有意义。此后 strategy_results_updated 不得再让
+// 该查询失效: 每轮策略完成都会触发一次重拉, 而接口本身要跑一遍策略 (实测 5s+),
+// 会形成「策略完成 → 重拉确认 → 又跑策略」的反馈循环, 与行情轮抢 CPU。
+const AUCTION_CONFIRM_WINDOW_END_MINUTES = 9 * 60 + 35
+
+function inAuctionConfirmWindow(now = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now)
+  const hour = Number(parts.find(p => p.type === 'hour')?.value ?? '0')
+  const minute = Number(parts.find(p => p.type === 'minute')?.value ?? '0')
+  return hour * 60 + minute < AUCTION_CONFIRM_WINDOW_END_MINUTES
+}
+
 // ===== 全局 SSE 连接状态 (模块级 store, 仿 AlertToast.tsx 模式) =====
 // 实时行情 SSE 断开时 UI 无感知 → 会漏掉策略告警。这里暴露连接状态,
 // 供 Layout 顶部渲染徽标、连续失败 N 次后弹一次 toast。
@@ -191,8 +205,11 @@ export function useQuoteStream(
         refreshStrategies()
         void qc.invalidateQueries({ queryKey: QK.dataVersions })
         // 断线期间同样会漏掉非行情推送 (告警/决策/竞价确认), 一并补拉。
-        for (const key of ['alerts', 'alerts-total', 'decision', 'alert-outcomes', 'screener-auction-confirmation']) {
+        for (const key of ['alerts', 'alerts-total', 'decision', 'alert-outcomes']) {
           void qc.invalidateQueries({ queryKey: [key] })
+        }
+        if (inAuctionConfirmWindow()) {
+          void qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
         }
       }
 
@@ -228,9 +245,12 @@ export function useQuoteStream(
 
       es.addEventListener('strategy_results_updated', (e: MessageEvent) => {
         if (!revisions.accept('strategy', e.data)) return
-        // 策略结果和竞价确认共用候选池，确认查询也要随策略结果更新失效。
         refreshStrategies()
-        void qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+        // 竞价确认与策略结果共用候选池, 但接口自身会跑策略 (5s+): 只在 09:25–09:35
+        // 的竞价窗内让它跟随失效, 其余时段由页面自身的轮询/用户操作触发。
+        if (inAuctionConfirmWindow()) {
+          void qc.invalidateQueries({ queryKey: ['screener-auction-confirmation'] })
+        }
       })
 
       es.addEventListener('daily_integrity_updated', () => {
