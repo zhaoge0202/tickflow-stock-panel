@@ -511,7 +511,7 @@ class TDXAPIProvider:
         for item in data or []:
             if not isinstance(item, dict):
                 continue
-            ms = _server_time_ms(item.get("ServerTime"))
+            ms = _quote_server_time_ms(item)
             if ms:
                 stamps.append(int(ms))
         return stamps
@@ -1038,7 +1038,7 @@ class TDXAPIProvider:
             "change_amount": change_amount,
             "amplitude": amplitude,
             "turnover_rate": None,
-            "timestamp": _server_time_ms(item.get("ServerTime")),
+            "timestamp": _quote_server_time_ms(item),
         }
         row.update(_level_fields(item, last_price=last_price, prev_close=prev_close))
         row.update(_activity_fields(item))
@@ -1809,7 +1809,25 @@ def _auction_result_from_trade_tick(row: dict, target_date: date) -> dict | None
     }
 
 
-def _server_time_ms(value) -> int | None:
+def _quote_server_time_ms(item: dict) -> int | None:
+    """在 TDX 原始报价边界还原时间差分, 不修改已解码的 sidecar 时间。
+
+    当前 sidecar 把协议字段 ReversedBytes0 原样复制为 ServerTime; 该字段与
+    OHLC/盘口一样相对当前价编码, 需加回分值 K.Close/10。两个字段不相等时
+    ServerTime 已由 sidecar 处理, 沿用其明确时间格式, 不能再次加价。
+    """
+    value = item.get("ServerTime")
+    raw = _int_or_none(value)
+    delta = _int_or_none(item.get("ReversedBytes0"))
+    if raw is None or raw >= 946_684_800 or delta is None or raw != delta:
+        return _server_time_ms(value)
+    close = _int_or_none((item.get("K") or {}).get("Close"))
+    if close is None or close < 0:
+        return None
+    return _server_time_ms(value, price_delta=close // 10)
+
+
+def _server_time_ms(value, *, price_delta: int | None = None) -> int | None:
     try:
         raw = int(value)
     except (TypeError, ValueError):
@@ -1823,6 +1841,20 @@ def _server_time_ms(value) -> int | None:
         return raw
     if 946_684_800 <= raw <= max_future_ms // 1000:
         return raw * 1000
+
+    if price_delta is not None:
+        # 原始协议明确使用小时*1e6 + 分钟小数*1e4; 每个单位等于 6ms。
+        # 禁止再枚举 HHMMSS/分钟溢出并按当前时钟猜解释, 否则高价股/指数会
+        # 显示为旧行情或未来时间, 也会让同一历史快照随回放时间改变。
+        restored = raw + price_delta
+        hour, minute_units = divmod(restored, 1_000_000)
+        if not (0 <= hour <= 23 and 0 <= minute_units < 600_000):
+            return None
+        decoded = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+            hours=hour, milliseconds=minute_units * 6,
+        )
+        decoded = _normalize_compact_server_time(decoded, now=now)
+        return int(decoded.timestamp() * 1000)
 
     return _tdx_compact_time_ms(raw, now=now)
 

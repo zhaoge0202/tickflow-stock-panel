@@ -1050,6 +1050,118 @@ def test_quote_row_maps_sh_index_close_as_last_price():
     assert abs(row["change_pct"] - ((3991.33 - 4041.24) / 4041.24)) < 1e-12
 
 
+@pytest.mark.parametrize(
+    ("code", "exchange", "raw_time", "raw_close", "expected_clock"),
+    [
+        ("600519", 1, 11138619, 1433820, (11, 28, 12, 6000)),
+        ("600000", 1, 11281035, 10660, (11, 28, 12, 606000)),
+        ("002371", 0, 11225112, 569890, (11, 28, 12, 606000)),
+        ("000001", 1, 10929606, 3524950, (11, 28, 12, 606000)),
+        ("399001", 0, 10243770, 10380310, (11, 28, 10, 806000)),
+        ("399006", 0, 11056760, 2250410, (11, 28, 10, 806000)),
+    ],
+)
+def test_quote_timestamp_restores_tdx_price_delta(
+    monkeypatch, code, exchange, raw_time, raw_close, expected_clock,
+):
+    """真实高价股/指数样本的时间字段仍是相对当前价的差值。"""
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, 20, 11, 28, 23, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+    row = TDXAPIProvider._quote_row({
+        "Exchange": exchange,
+        "Code": code,
+        "K": {"Close": raw_close},
+        "ServerTime": str(raw_time),
+        "ReversedBytes0": raw_time,
+    }, {})
+
+    decoded = dt.datetime.fromtimestamp(row["timestamp"] / 1000, tz=tp._CN_TZ)
+    assert decoded.date() == dt.date(2026, 11, 20)
+    assert (decoded.hour, decoded.minute, decoded.second, decoded.microsecond) == expected_clock
+
+
+def test_raw_quote_timestamp_does_not_depend_on_replay_clock(monkeypatch):
+    clock = [dt.datetime(2026, 11, 20, 11, 28, 23, tzinfo=tp._CN_TZ)]
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz or tp._CN_TZ)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+    item = {"Code": "600519", "Exchange": 1, "K": {"Close": 1433820},
+            "ServerTime": "11138619", "ReversedBytes0": 11138619}
+    before = TDXAPIProvider._quote_row(item, {})["timestamp"]
+    clock[0] = clock[0].replace(hour=15, minute=30)
+    after = TDXAPIProvider._quote_row(item, {})["timestamp"]
+    assert before == after
+
+
+def test_quote_timestamp_preserves_already_decoded_fields(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, 20, 15, 40, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+    item = {"Code": "600519", "Exchange": 1, "K": {"Close": 1433820},
+            "ReversedBytes0": 11138619}
+    expected = int(dt.datetime(2026, 11, 20, 14, 35, 23, 199000, tzinfo=tp._CN_TZ).timestamp() * 1000)
+    assert TDXAPIProvider._quote_row({**item, "ServerTime": "143523199"}, {})["timestamp"] == expected
+    assert TDXAPIProvider._quote_row({**item, "ServerTime": str(expected)}, {})["timestamp"] == expected
+    assert TDXAPIProvider._quote_row({**item, "ServerTime": str(expected // 1000)}, {})["timestamp"] == expected // 1000 * 1000
+
+
+def test_trading_day_probe_uses_same_restored_quote_time(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, 20, 11, 28, 23, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+    item = {"Code": "600519", "Exchange": 1, "K": {"Close": 1433820},
+            "ServerTime": "11138619", "ReversedBytes0": 11138619}
+    _patch_request(monkeypatch, {("POST", "/api/batch-quote"): [item]})
+    provider = TDXAPIProvider()
+    try:
+        stamps = provider.probe_quote_timestamps(["600519.SH"])
+    finally:
+        provider.close()
+    expected = int(dt.datetime(2026, 11, 20, 11, 28, 12, 6000, tzinfo=tp._CN_TZ).timestamp() * 1000)
+    assert stamps == [expected]
+
+
+@pytest.mark.parametrize("checked_day", [21, 23])
+def test_raw_quote_timestamp_retains_previous_trading_weekday(monkeypatch, checked_day):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, checked_day, 0, 20, tzinfo=tz)
+
+    monkeypatch.setattr(tp, "datetime", FixedDateTime)
+    raw_time = 15_000_000 - 143_382
+    item = {"Code": "600519", "Exchange": 1, "K": {"Close": 1_433_820},
+            "ServerTime": str(raw_time), "ReversedBytes0": raw_time}
+    decoded = dt.datetime.fromtimestamp(TDXAPIProvider._quote_row(item, {})["timestamp"] / 1000, tz=tp._CN_TZ)
+    assert decoded == dt.datetime(2026, 11, 20, 15, 0, tzinfo=tp._CN_TZ)
+
+
+def test_quote_timestamp_keeps_unix_fields_without_price():
+    for value in (1730617200, 1730617200000):
+        assert tp._quote_server_time_ms({"ServerTime": str(value), "ReversedBytes0": value}) == 1730617200000
+
+
+def test_raw_quote_timestamp_rejects_invalid_clock_instead_of_guessing():
+    assert tp._quote_server_time_ms({"ServerTime": "11600000", "ReversedBytes0": 11600000,
+                                    "K": {"Close": 0}}) is None
+    assert tp._quote_server_time_ms({"ServerTime": "11138619", "ReversedBytes0": 11138619,
+                                    "K": {"Close": -1}}) is None
+
+
 def test_server_time_decodes_tdx_compact_time(monkeypatch):
     class FixedDateTime(dt.datetime):
         @classmethod

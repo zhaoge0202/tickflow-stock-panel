@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import polars as pl
+from datetime import date, datetime
 
+import polars as pl
+import pytest
+
+from app.market_time import CN_TZ
 from app.services.quote_service import QuoteService
 
 
@@ -46,6 +50,139 @@ class FakeProvider:
             "timestamp": 1783485000000,
             "source": "tdxapi",
         }]
+
+
+def _trade_quote(symbol="600839.SH", *, price=5.45):
+    return {
+        "symbol": symbol,
+        "last_price": price,
+        "prev_close": 5.76,
+        "open": 5.51,
+        "high": 5.74,
+        "low": 5.28,
+        "volume": 1_763_445,
+        "amount": 968_454_016,
+        "timestamp": int(datetime(2026, 11, 20, 11, 29, tzinfo=CN_TZ).timestamp() * 1000),
+        "price_type": "trade",
+        "source": "tdxapi",
+    }
+
+
+def _empty_quote(symbol="600839.SH"):
+    return {**_trade_quote(symbol), "last_price": 0, "open": 0, "high": 0,
+            "low": 0, "volume": 0, "amount": 5.877471754111438e-39}
+
+
+def _daily_service(monkeypatch, tmp_path, provider, *, supplement=()):
+    """使用真实行情处理与日K构建，仅隔离外部写入和指标重计算。"""
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+    from app.services import quote_service as module
+
+    class Repo(_Repo):
+        daily = None
+
+        def flush_live_daily(self, frame):
+            self.daily = frame.clone()
+
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tdxapi")
+    monkeypatch.setattr(custom_sources, "provider_has_dataset", lambda name, dataset: True)
+    monkeypatch.setattr(custom_sources, "get_provider", lambda name: provider)
+    monkeypatch.setattr(module, "cn_today", lambda: date(2026, 11, 20))
+    monkeypatch.setattr(module, "is_trading_weekday", lambda: True)
+    monkeypatch.setattr(module, "_persist_last_fetch", lambda _: None)
+    service = QuoteService()
+    service.set_repo(Repo(tmp_path))
+    monkeypatch.setattr(service, "_custom_realtime_supplement_symbols", lambda: list(supplement))
+    monkeypatch.setattr(service, "_wanted_quotes", lambda: {
+        "stock": set(supplement), "etf": set(), "index": set(),
+    })
+    monkeypatch.setattr(service, "_append_quote_ticks_if_tdxapi", lambda _: None)
+    monkeypatch.setattr(service, "_update_volume_delta", lambda *_: None)
+    monkeypatch.setattr(service, "_broadcast_quote_updated", lambda: None)
+    monkeypatch.setattr(service, "_flush_live_enriched", lambda *_args, **_kwargs: None)
+    return service
+
+
+def test_targeted_supplement_does_not_erase_valid_market_daily(monkeypatch, tmp_path):
+    class Provider:
+        def __init__(self):
+            self.calls = []
+
+        def get_realtime(self, symbols=None):
+            self.calls.append(symbols)
+            if symbols is None:
+                return [_trade_quote()]
+            # 实际故障：定向补拉返回全零，不能覆盖全市场已取得的有效成交。
+            return [_empty_quote(symbol) if symbol == "600839.SH" else _trade_quote(symbol)
+                    for symbol in symbols]
+
+    provider = Provider()
+    service = _daily_service(monkeypatch, tmp_path, provider,
+                             supplement=("600839.SH", "000001.SZ"))
+
+    service._fetch_full_market_quotes()
+
+    assert service._repo.daily["symbol"].to_list() == ["000001.SZ", "600839.SH"]
+    assert service._repo.daily.filter(pl.col("symbol") == "600839.SH")["close"].item() == 5.45
+    assert provider.calls == [None, ["600839.SH", "000001.SZ"]]
+
+
+def test_market_duplicate_placeholders_keep_valid_daily_and_filter_halted(monkeypatch, tmp_path):
+    class Provider:
+        def get_realtime(self, symbols=None):
+            assert symbols is None
+            # 大批次响应中，16 条错误占位行复用了四川长虹的代码。
+            return [_trade_quote(), *[_empty_quote() for _ in range(16)], _empty_quote("002122.SZ")]
+
+    service = _daily_service(monkeypatch, tmp_path, Provider())
+    enriched_inputs = []
+    monkeypatch.setattr(service, "_flush_live_enriched",
+                        lambda frame, extra, **kwargs: enriched_inputs.append(frame.clone()))
+
+    service._fetch_full_market_quotes()
+
+    assert service._repo.daily["symbol"].to_list() == ["600839.SH"]
+    assert service._repo.daily["close"].item() == 5.45
+    assert service._repo.daily["volume"].item() == 1_763_445
+    assert len(enriched_inputs) == 1
+    assert enriched_inputs[0]["symbol"].to_list() == ["600839.SH"]
+
+
+@pytest.mark.parametrize("invalid_price", [0, -1, float("nan"), float("inf")])
+def test_duplicate_invalid_quote_does_not_remove_valid_daily(monkeypatch, tmp_path, invalid_price):
+    class Provider:
+        def get_realtime(self, symbols=None):
+            return [_trade_quote(), {**_empty_quote(), "last_price": invalid_price}]
+
+    service = _daily_service(monkeypatch, tmp_path, Provider())
+
+    service._fetch_full_market_quotes()
+
+    assert service._repo.daily["symbol"].to_list() == ["600839.SH"]
+    assert service._repo.daily["close"].item() == 5.45
+
+
+def test_duplicate_later_valid_quote_updates_daily(monkeypatch, tmp_path):
+    class Provider:
+        def get_realtime(self, symbols=None):
+            return [_trade_quote(), _trade_quote(price=5.46)]
+
+    service = _daily_service(monkeypatch, tmp_path, Provider())
+
+    service._fetch_full_market_quotes()
+
+    assert service._repo.daily["close"].item() == 5.46
+
+
+def test_auction_reference_survives_empty_duplicate_without_becoming_daily():
+    reference = {**_empty_quote(), "price_type": "auction_reference", "last_price": 5.45,
+                 "auction_price": 5.45, "auction_matched_volume": 100}
+
+    records = QuoteService._dedupe_quote_records([reference, _empty_quote()])
+
+    assert records == [reference]
+    assert QuoteService._build_daily(records).is_empty()
 
 
 def test_realtime_mode_tdxapi_bypasses_tickflow_none_tier(monkeypatch):

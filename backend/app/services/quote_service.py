@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -41,8 +42,8 @@ import polars as pl
 from app.market_time import CN_TZ, cn_now, cn_today, is_trading_weekday
 from app.parquet import scan_daily_parquet
 from app.polars_guard import guarded_collect
-from app.services.index_const import CORE_INDEX_SYMBOLS as DEFAULT_CORE_INDEX_SYMBOLS
 from app.services.index_const import CORE_INDEX_SYMBOLS
+from app.services.index_const import CORE_INDEX_SYMBOLS as DEFAULT_CORE_INDEX_SYMBOLS
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.strategy.monitor import format_alert_quote
 
@@ -152,6 +153,15 @@ def _is_trade_price_record(record: dict) -> bool:
         return float(record.get("last_price") or record.get("close") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _has_usable_quote_price(record: dict) -> bool:
+    """同轮快照是否含可用价格；竞价参考价仍可用于展示。"""
+    try:
+        price = float(record.get("last_price") or record.get("close") or 0)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(price) and price > 0
 
 
 def _realtime_records_frame(records: list[dict]) -> pl.DataFrame:
@@ -1900,6 +1910,14 @@ class QuoteService:
             symbol = str(record.get("symbol") or "").strip()
             if not symbol:
                 unkeyed.append(record)
+                continue
+            previous = keyed.get(symbol)
+            # 同批次可能夹带复用股票代码的空占位，不能覆盖已取得的有效行情。
+            if (
+                previous is not None
+                and _has_usable_quote_price(previous)
+                and not _has_usable_quote_price(record)
+            ):
                 continue
             keyed[symbol] = record
         return [*unkeyed, *keyed.values()]
