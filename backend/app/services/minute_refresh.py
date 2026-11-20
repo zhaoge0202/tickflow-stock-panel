@@ -437,16 +437,11 @@ class MinuteRefreshService:
             .select(["symbol", "datetime", "close", "volume", "amount"])
             .sort("symbol")
         )
-        latest_ticks = quote_tick_store.latest(
-            self._repo.store.data_dir,
-            symbols=symbols,
-            target_date=cn_today(),
-        )
-        latest_ingest = max(
-            (int(row.get("ingest_ts") or 0) for row in latest_ticks),
-            default=0,
-        )
-        fingerprint = hash((latest_ingest, tuple(latest_rows.iter_rows())))
+        # 指纹只由「最后一根分钟 bar」决定。
+        # 旧实现为此调用了 quote_tick_store.latest(): MySQL 快照行本来就不带
+        # ingest_ts (恒为 0), 却要物化百万行 tick 并逐行转 dict, 长时间占住 GIL,
+        # 把策略评估从 1s 拖到 16s。这里直接去掉这次调用, 判定语义不变。
+        fingerprint = hash(tuple(latest_rows.iter_rows()))
         if (
             latest_minute == self._last_quote_snapshot_minute
             and fingerprint == self._last_quote_snapshot_fingerprint
